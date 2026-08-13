@@ -5,6 +5,7 @@ package tenancy_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -23,12 +24,14 @@ import (
 type fakeIdP struct {
 	orgs   map[string]string
 	groups []string
+	nextID int
 }
 
 func newFakeIdP() *fakeIdP { return &fakeIdP{orgs: map[string]string{}} }
 
 func (f *fakeIdP) CreateOrganization(_ context.Context, alias, _ string) (string, error) {
-	id := "kc-" + alias
+	f.nextID++
+	id := fmt.Sprintf("kc-%s-%d", alias, f.nextID)
 	f.orgs[id] = alias
 	return id, nil
 }

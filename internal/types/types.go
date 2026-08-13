@@ -26,11 +26,11 @@ func (r Role) Valid() bool {
 }
 
 type Organization struct {
-	ID           string    `json:"id"`
-	Slug         string    `json:"slug"`
-	DisplayName  string    `json:"displayName"`
-	KeycloakOrgID string   `json:"keycloakOrgId"`
-	CreatedAt    time.Time `json:"createdAt"`
+	ID            string    `json:"id"`
+	Slug          string    `json:"slug"`
+	DisplayName   string    `json:"displayName"`
+	KeycloakOrgID string    `json:"keycloakOrgId"`
+	CreatedAt     time.Time `json:"createdAt"`
 }
 
 type Team struct {

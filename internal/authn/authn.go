@@ -17,10 +17,10 @@ import (
 
 // Identity is the authenticated caller extracted from the JWT.
 type Identity struct {
-	Subject      string
-	Email        string
+	Subject       string
+	Email         string
 	Organizations []string
-	Groups       []string
+	Groups        []string
 }
 
 // MemberOf reports whether the identity belongs to the given org (slug/alias).

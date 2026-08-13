@@ -35,12 +35,20 @@ func newTestServer(t *testing.T, v authn.Validator, ready ReadinessChecker) *htt
 		Method:      http.MethodGet,
 		Path:        "/api/v1/whoami",
 		Security:    SecurityRequirement(),
-	}, func(ctx context.Context, _ *struct{}) (*struct{ Body struct{ Sub string `json:"sub"` } }, error) {
+	}, func(ctx context.Context, _ *struct{}) (*struct {
+		Body struct {
+			Sub string `json:"sub"`
+		}
+	}, error) {
 		id := IdentityFromContext(ctx)
 		if id == nil {
 			return nil, huma.Error401Unauthorized("unauthenticated")
 		}
-		out := &struct{ Body struct{ Sub string `json:"sub"` } }{}
+		out := &struct {
+			Body struct {
+				Sub string `json:"sub"`
+			}
+		}{}
 		out.Body.Sub = id.Subject
 		return out, nil
 	})

@@ -44,11 +44,13 @@ CREATE TABLE audit_events (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- +goose StatementBegin
 CREATE OR REPLACE FUNCTION reject_audit_mutation() RETURNS trigger AS $$
 BEGIN
     RAISE EXCEPTION 'audit_events is append-only';
 END;
 $$ LANGUAGE plpgsql;
+-- +goose StatementEnd
 
 CREATE TRIGGER audit_events_no_update BEFORE UPDATE OR DELETE ON audit_events
     FOR EACH ROW EXECUTE FUNCTION reject_audit_mutation();

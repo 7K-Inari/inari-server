@@ -1,0 +1,94 @@
+package authz
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"github.com/7K-Inari/inari-server/internal/types"
+)
+
+// RoleRelation maps a tenancy role to an OpenFGA organization relation.
+func RoleRelation(r types.Role) (string, error) {
+	switch r {
+	case types.RoleOrgAdmin:
+		return RelationAdmin, nil
+	case types.RolePlatformEngineer:
+		return RelationPlatformEngineer, nil
+	case types.RoleDeveloper:
+		return RelationDeveloper, nil
+	case types.RoleViewer:
+		return RelationViewer, nil
+	}
+	return "", fmt.Errorf("authz: unknown role %q", r)
+}
+
+// TupleWriter consumes outbox events and syncs OpenFGA tuples.
+type TupleWriter struct {
+	store Store
+}
+
+func NewTupleWriter(s Store) *TupleWriter { return &TupleWriter{store: s} }
+
+func (w *TupleWriter) EventTypes() []string {
+	return []string{
+		types.EventTenantCreated,
+		types.EventTeamCreated,
+		types.EventMembershipAdded,
+		types.EventMembershipRemoved,
+	}
+}
+
+func (w *TupleWriter) Handle(ctx context.Context, ev *types.OutboxEvent) error {
+	switch ev.EventType {
+	case types.EventTenantCreated:
+		var p types.TenantCreatedPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		return w.writeOrgRoleTuples(ctx, p.OrgID, p.Teams, false)
+	case types.EventTeamCreated:
+		var p types.TeamCreatedPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		return w.writeOrgRoleTuples(ctx, p.OrgID, []types.TeamSeed{{TeamID: p.TeamID, Name: p.Name, Role: p.Role}}, false)
+	case types.EventMembershipAdded:
+		var p types.MembershipPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		return w.store.WriteTuples(ctx, []Tuple{{
+			User: UserObject(p.UserID), Relation: RelationMember, Object: TeamObject(p.TeamID),
+		}})
+	case types.EventMembershipRemoved:
+		var p types.MembershipPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		return w.store.DeleteTuples(ctx, []Tuple{{
+			User: UserObject(p.UserID), Relation: RelationMember, Object: TeamObject(p.TeamID),
+		}})
+	}
+	return nil
+}
+
+// writeOrgRoleTuples seeds org role tuples: each team grants its role on the org.
+func (w *TupleWriter) writeOrgRoleTuples(ctx context.Context, orgID string, teams []types.TeamSeed, del bool) error {
+	var tuples []Tuple
+	for _, t := range teams {
+		rel, err := RoleRelation(t.Role)
+		if err != nil {
+			return err
+		}
+		tuples = append(tuples, Tuple{
+			User:     TeamMemberUserset(t.TeamID),
+			Relation: rel,
+			Object:   OrgObject(orgID),
+		})
+	}
+	if del {
+		return w.store.DeleteTuples(ctx, tuples)
+	}
+	return w.store.WriteTuples(ctx, tuples)
+}

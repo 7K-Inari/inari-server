@@ -1,0 +1,15 @@
+model
+  schema 1.1
+
+type user
+
+type team
+  relations
+    define member: [user]
+
+type organization
+  relations
+    define admin: [team#member]
+    define platform_engineer: [team#member] or admin
+    define developer: [team#member] or platform_engineer
+    define viewer: [team#member] or developer

@@ -1,0 +1,26 @@
+{
+  "realm": "inari",
+  "enabled": true,
+  "organizationsEnabled": true,
+  "clients": [
+    {
+      "clientId": "inari-server",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "redirectUris": ["http://localhost:8080/*"],
+      "webOrigins": ["http://localhost:8080"],
+      "defaultClientScopes": ["openid", "profile", "email", "organization"],
+      "optionalClientScopes": []
+    }
+  ],
+  "users": [
+    {
+      "username": "dev-admin",
+      "enabled": true,
+      "email": "dev-admin@inari.local",
+      "credentials": [{"type": "password", "value": "dev-admin", "temporary": false}]
+    }
+  ]
+}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -40,6 +41,9 @@ func NewRouter(log *slog.Logger, v authn.Validator, ready ReadinessChecker) (chi
 	})
 
 	api := humachi.New(r, huma.DefaultConfig("inari-server", "0.1.0"))
+	if api.OpenAPI().Components.SecuritySchemes == nil {
+		api.OpenAPI().Components.SecuritySchemes = map[string]*huma.SecurityScheme{}
+	}
 	api.OpenAPI().Components.SecuritySchemes["bearer"] = &huma.SecurityScheme{
 		Type: "http", Scheme: "bearer", BearerFormat: "JWT",
 	}
@@ -57,7 +61,7 @@ func authMiddleware(v authn.Validator) func(huma.Context, func(huma.Context)) {
 		}
 		raw := ctx.Header("Authorization")
 		const prefix = "Bearer "
-		if len(raw) <= len(prefix) {
+		if len(raw) <= len(prefix) || !strings.EqualFold(raw[:len(prefix)], prefix) {
 			writeError(ctx, http.StatusUnauthorized, "missing or malformed authorization header")
 			return
 		}

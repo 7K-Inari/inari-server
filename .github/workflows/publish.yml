@@ -1,8 +1,12 @@
-name: release
+name: publish
 
 on:
-  push:
-    tags: ['v*.*.*']
+  workflow_call:
+    inputs:
+      version:
+        description: Semver version to publish (e.g. 0.2.1), without leading v
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -16,8 +20,6 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    outputs:
-      digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
 
@@ -29,15 +31,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: image metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+      - name: image tags
+        id: tags
+        run: |
+          major_minor="${VERSION%.*}"
+          {
+            echo "tags<<EOF"
+            echo "${IMAGE}:${VERSION}"
+            echo "${IMAGE}:${major_minor}"
+            echo "${IMAGE}:latest"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+        env:
+          IMAGE: ${{ env.IMAGE }}
+          VERSION: ${{ inputs.version }}
 
       - name: build and push
         id: push
@@ -47,8 +54,7 @@ jobs:
           file: deploy/docker/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.tags.outputs.tags }}
 
       - name: SBOM
         uses: anchore/sbom-action@v0

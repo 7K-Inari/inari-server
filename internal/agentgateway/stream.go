@@ -51,8 +51,8 @@ func (g *Gateway) Connect(ctx context.Context, stream *connect.BidiStream[agentv
 }
 
 type session struct {
-	gw       *Gateway
-	cluster  *types.Cluster
+	gw          *Gateway
+	cluster     *types.Cluster
 	expectedSeq int64
 	resyncSent  bool
 	pingSeq     int64
@@ -154,9 +154,9 @@ func (s *session) handleEvent(ctx context.Context, ev *agentv1.Event) ([]*agentv
 			resync := hs.LastSeenStateChecksum != "" && s.cluster.CapabilityChecksum != "" &&
 				hs.LastSeenStateChecksum != s.cluster.CapabilityChecksum
 			resp, err := newEvent("inari.agent.handshake.v1", &agentv1.HandshakeResponse{
-				SessionId:               uuid.NewString(),
-				ServerContractVersions:  "inari.agent.v1",
-				ResyncRequired:          resync,
+				SessionId:              uuid.NewString(),
+				ServerContractVersions: "inari.agent.v1",
+				ResyncRequired:         resync,
 			})
 			if err != nil {
 				return nil, err

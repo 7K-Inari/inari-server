@@ -126,7 +126,8 @@ type orgPathInput struct {
 	Org string `path:"org" doc:"Tenant slug"`
 }
 
-type listClustersOutput struct {	Body struct {
+type listClustersOutput struct {
+	Body struct {
 		Clusters []types.Cluster `json:"clusters"`
 	}
 }

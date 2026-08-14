@@ -22,17 +22,17 @@ import (
 
 // Config tunes the gateway runtime behavior.
 type Config struct {
-	PingInterval       time.Duration
+	PingInterval        time.Duration
 	CommandPollInterval time.Duration
-	CommandRetryAfter  time.Duration
+	CommandRetryAfter   time.Duration
 	// OIDCIssuerURL is advertised to agents at registration.
 	OIDCIssuerURL string
 	// ESO delivery reference for the OIDC client secret (plan §5.3) — the
 	// secret value itself never transits this API.
-	ESOSecretStore    string
-	ESOSecretName     string
+	ESOSecretStore     string
+	ESOSecretName      string
 	ESOSecretNamespace string
-	ESOSecretKey      string
+	ESOSecretKey       string
 }
 
 func (c *Config) withDefaults() Config {

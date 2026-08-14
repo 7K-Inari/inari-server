@@ -217,10 +217,10 @@ func ModelV1() client.ClientWriteAuthorizationModelRequest {
 }
 
 // Helpers to build fully-qualified FGA object/user strings.
-func OrgObject(orgID string) string    { return TypeOrganization + ":" + orgID }
-func TeamObject(teamID string) string  { return TypeTeam + ":" + teamID }
+func OrgObject(orgID string) string         { return TypeOrganization + ":" + orgID }
+func TeamObject(teamID string) string       { return TypeTeam + ":" + teamID }
 func ClusterObject(clusterID string) string { return TypeCluster + ":" + clusterID }
-func UserObject(subject string) string { return "user:" + subject }
+func UserObject(subject string) string      { return "user:" + subject }
 func TeamMemberUserset(teamID string) string {
 	return TeamObject(teamID) + "#" + RelationMember
 }

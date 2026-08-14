@@ -54,9 +54,9 @@ func (g *Gateway) RegisterCluster(ctx context.Context, req *connect.Request[agen
 	}
 
 	res := connect.NewResponse(&agentv1.RegisterClusterResponse{
-		ClusterId:      cluster.ID,
-		OidcIssuerUrl:  g.cfg.OIDCIssuerURL,
-		ClientId:       clientID,
+		ClusterId:     cluster.ID,
+		OidcIssuerUrl: g.cfg.OIDCIssuerURL,
+		ClientId:      clientID,
 		ClientSecretDelivery: &agentv1.SecretDeliveryReference{
 			EsoSecretStore:  g.cfg.ESOSecretStore,
 			SecretName:      g.cfg.ESOSecretName,

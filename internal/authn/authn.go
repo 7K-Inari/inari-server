@@ -21,6 +21,9 @@ type Identity struct {
 	Email         string
 	Organizations []string
 	Groups        []string
+	// ClusterID is the hardcoded `cluster_id` claim on per-cluster agent
+	// client-credentials tokens (plan §5.3). Empty for user tokens.
+	ClusterID string
 }
 
 // MemberOf reports whether the identity belongs to the given org (slug/alias).
@@ -60,6 +63,7 @@ type Claims struct {
 	Email        string          `json:"email"`
 	Organization json.RawMessage `json:"organization"`
 	Groups       []string        `json:"groups"`
+	ClusterID    string          `json:"cluster_id"`
 }
 
 // ParseOrganizations accepts the Keycloak organization claim as a JSON array
@@ -105,6 +109,7 @@ func (v *OIDCValidator) Validate(ctx context.Context, rawToken string) (*Identit
 		Email:         claims.Email,
 		Organizations: orgs,
 		Groups:        claims.Groups,
+		ClusterID:     claims.ClusterID,
 	}, nil
 }
 

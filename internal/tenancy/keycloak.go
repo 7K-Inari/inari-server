@@ -225,3 +225,99 @@ func (k *KeycloakAdmin) ListOrganizations(ctx context.Context, userID string) ([
 	}
 	return out, nil
 }
+
+// CreateClusterClient provisions the per-cluster OIDC client cluster-<id>:
+// confidential, client-credentials grant only, with a hardcoded cluster_id
+// claim mapper so the agent's identity always comes from the token, never
+// self-asserted (plan §5.3, §5.10). Returns the clientID.
+func (k *KeycloakAdmin) CreateClusterClient(ctx context.Context, clusterID string) (string, error) {
+	clientID := "cluster-" + clusterID
+	resp, err := k.do(ctx, http.MethodPost, "/clients", map[string]any{
+		"clientId":                  clientID,
+		"enabled":                   true,
+		"publicClient":              false,
+		"standardFlowEnabled":       false,
+		"serviceAccountsEnabled":    true,
+		"directAccessGrantsEnabled": false,
+		"protocolMappers": []map[string]any{{
+			"name":           "cluster_id",
+			"protocol":       "openid-connect",
+			"protocolMapper": "oidc-hardcoded-claim-mapper",
+			"config": map[string]string{
+				"claim.name":                 "cluster_id",
+				"claim.value":                clusterID,
+				"jsonType.label":             "String",
+				"access.token.claim":         "true",
+				"id.token.claim":             "true",
+				"userinfo.token.claim":       "false",
+				"access.tokenResponse.claim": "false",
+			},
+		}},
+	})
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusConflict {
+		// Idempotent: client already exists for this cluster id.
+		return clientID, nil
+	}
+	if resp.StatusCode != http.StatusCreated {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("keycloak: create client: status %d: %s", resp.StatusCode, b)
+	}
+	return clientID, nil
+}
+
+// DisableClient revokes a cluster's identity by disabling its client (plan
+// §5.3 revocation path); in-flight tokens expire on their short TTL.
+func (k *KeycloakAdmin) DisableClient(ctx context.Context, clientID string) error {
+	uuid, err := k.findClientUUID(ctx, clientID)
+	if err != nil {
+		return err
+	}
+	if uuid == "" {
+		return nil // already gone
+	}
+	resp, err := k.do(ctx, http.MethodGet, "/clients/"+uuid, nil)
+	if err != nil {
+		return err
+	}
+	var rep map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&rep); err != nil {
+		_ = resp.Body.Close()
+		return err
+	}
+	_ = resp.Body.Close()
+	rep["enabled"] = false
+	put, err := k.do(ctx, http.MethodPut, "/clients/"+uuid, rep)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = put.Body.Close() }()
+	if put.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("keycloak: disable client: status %d", put.StatusCode)
+	}
+	return nil
+}
+
+func (k *KeycloakAdmin) findClientUUID(ctx context.Context, clientID string) (string, error) {
+	resp, err := k.do(ctx, http.MethodGet, "/clients?clientId="+url.QueryEscape(clientID), nil)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("keycloak: find client: status %d", resp.StatusCode)
+	}
+	var clients []struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&clients); err != nil {
+		return "", err
+	}
+	if len(clients) == 0 {
+		return "", nil
+	}
+	return clients[0].ID, nil
+}

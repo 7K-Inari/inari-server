@@ -28,7 +28,6 @@ jobs:
           else
             echo "is-release=false" >> "$GITHUB_OUTPUT"
           fi
-    if: "startsWith(github.event.head_commit.message, 'chore(main): release')"
 
   tag-and-release:
     needs: detect

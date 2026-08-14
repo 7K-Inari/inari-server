@@ -36,6 +36,8 @@ func (w *TupleWriter) EventTypes() []string {
 		types.EventTeamCreated,
 		types.EventMembershipAdded,
 		types.EventMembershipRemoved,
+		types.EventClusterCreated,
+		types.EventClusterRevoked,
 	}
 }
 
@@ -68,6 +70,22 @@ func (w *TupleWriter) Handle(ctx context.Context, ev *types.OutboxEvent) error {
 		}
 		return w.store.DeleteTuples(ctx, []Tuple{{
 			User: UserObject(p.UserID), Relation: RelationMember, Object: TeamObject(p.TeamID),
+		}})
+	case types.EventClusterCreated:
+		var p types.ClusterPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		return w.store.WriteTuples(ctx, []Tuple{{
+			User: OrgObject(p.OrgID), Relation: RelationParent, Object: ClusterObject(p.ClusterID),
+		}})
+	case types.EventClusterRevoked:
+		var p types.ClusterPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		return w.store.DeleteTuples(ctx, []Tuple{{
+			User: OrgObject(p.OrgID), Relation: RelationParent, Object: ClusterObject(p.ClusterID),
 		}})
 	}
 	return nil

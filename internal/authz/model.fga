@@ -13,3 +13,9 @@ type organization
     define platform_engineer: [team#member] or admin
     define developer: [team#member] or platform_engineer
     define viewer: [team#member] or developer
+
+type cluster
+  relations
+    define parent: [organization]
+    define operator: platform_engineer from parent
+    define viewer: viewer from parent

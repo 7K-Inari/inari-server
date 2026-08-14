@@ -12,14 +12,20 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/7K-Inari/inari-server/internal/agentgateway"
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/authz"
+	"github.com/7K-Inari/inari-server/internal/capabilities"
+	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/config"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/logging"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
+
+	"connectrpc.com/connect"
+	agentv1connect "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1/agentv1connect"
 )
 
 func main() {
@@ -68,10 +74,43 @@ func run() error {
 	svc := tenancy.NewService(database, idp, tenancy.NewStore(), auditStore)
 	handler := tenancy.NewHandler(svc, authorizer)
 
+	registry := clusterregistry.NewService(database, idp, clusterregistry.NewStore(), auditStore,
+		cfg.RegistrationTokenTTL, cfg.EnrollmentApprovalRequired)
+	registryHandler := clusterregistry.NewHandler(registry, svc, authorizer, clusterregistry.ManifestParams{
+		AgentImageRepo: cfg.AgentImageRepo,
+		AgentImageTag:  cfg.AgentImageTag,
+		GatewayAddress: cfg.AgentGatewayAddress,
+	})
+	caps := capabilities.NewService(database, capabilities.NewStore(), auditStore)
+	gateway := agentgateway.NewGateway(database, registry, idp, caps, auditStore, agentgateway.Config{
+		OIDCIssuerURL:  cfg.OIDCIssuerURL,
+		ESOSecretStore: cfg.ESOSecretStore,
+	})
+
 	router, api := httpserver.NewRouter(log, validator, database)
 	handler.RegisterRoutes(api)
+	registryHandler.RegisterRoutes(api)
 
-	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: router, ReadHeaderTimeout: 10 * time.Second}
+	// Agent-facing Connect-RPC services mount on chi directly, outside the
+	// huma bearer middleware: registration is token-authenticated, the event
+	// stream authenticates via its own interceptor (cluster_id claim).
+	regPath, regHandler := agentv1connect.NewRegistrationServiceHandler(gateway)
+	streamPath, streamHandler := agentv1connect.NewEventStreamServiceHandler(gateway,
+		connect.WithInterceptors(agentgateway.AuthInterceptor(validator)))
+	router.Handle(regPath+"*", regHandler)
+	router.Handle(streamPath+"*", streamHandler)
+
+	// Unencrypted HTTP/2 (h2c) so Connect-RPC streaming works without TLS
+	// termination in front (agents may dial directly in dev).
+	protocols := new(http.Protocols)
+	protocols.SetUnencryptedHTTP2(true)
+
+	srv := &http.Server{
+		Addr:              cfg.HTTPAddr,
+		Handler:           router,
+		ReadHeaderTimeout: 10 * time.Second,
+		Protocols:         protocols,
+	}
 	errCh := make(chan error, 1)
 	go func() {
 		log.Info("listening", "addr", cfg.HTTPAddr)

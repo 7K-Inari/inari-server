@@ -18,12 +18,15 @@ const (
 	RelationDeveloper        = "developer"
 	RelationViewer           = "viewer"
 	RelationMember           = "member"
+	RelationParent           = "parent"
+	RelationOperator         = "operator"
 )
 
 // Object types.
 const (
 	TypeOrganization = "organization"
 	TypeTeam         = "team"
+	TypeCluster      = "cluster"
 )
 
 // Tuple is one relationship fact.
@@ -187,20 +190,37 @@ func ModelV1() client.ClientWriteAuthorizationModelRequest {
 	teamMeta := map[string]openfga.RelationMetadata{
 		RelationMember: {DirectlyRelatedUserTypes: &userRef},
 	}
+	orgRef := []openfga.RelationReference{{Type: TypeOrganization}}
+	fromParent := func(rel string) openfga.Userset {
+		return openfga.Userset{TupleToUserset: &openfga.TupleToUserset{
+			Tupleset:        openfga.ObjectRelation{Relation: openfga.PtrString(RelationParent)},
+			ComputedUserset: openfga.ObjectRelation{Relation: openfga.PtrString(rel)},
+		}}
+	}
+	clusterRelations := map[string]openfga.Userset{
+		RelationParent:   direct(),
+		RelationOperator: fromParent(RelationPlatformEngineer),
+		RelationViewer:   fromParent(RelationViewer),
+	}
+	clusterMeta := map[string]openfga.RelationMetadata{
+		RelationParent: {DirectlyRelatedUserTypes: &orgRef},
+	}
 	return client.ClientWriteAuthorizationModelRequest{
 		SchemaVersion: "1.1",
 		TypeDefinitions: []openfga.TypeDefinition{
 			{Type: "user"},
 			{Type: TypeTeam, Relations: &teamRelations, Metadata: &openfga.Metadata{Relations: &teamMeta}},
 			{Type: TypeOrganization, Relations: &orgRelations, Metadata: &openfga.Metadata{Relations: &orgMeta}},
+			{Type: TypeCluster, Relations: &clusterRelations, Metadata: &openfga.Metadata{Relations: &clusterMeta}},
 		},
 	}
 }
 
 // Helpers to build fully-qualified FGA object/user strings.
-func OrgObject(orgID string) string    { return TypeOrganization + ":" + orgID }
-func TeamObject(teamID string) string  { return TypeTeam + ":" + teamID }
-func UserObject(subject string) string { return "user:" + subject }
+func OrgObject(orgID string) string         { return TypeOrganization + ":" + orgID }
+func TeamObject(teamID string) string       { return TypeTeam + ":" + teamID }
+func ClusterObject(clusterID string) string { return TypeCluster + ":" + clusterID }
+func UserObject(subject string) string      { return "user:" + subject }
 func TeamMemberUserset(teamID string) string {
 	return TeamObject(teamID) + "#" + RelationMember
 }

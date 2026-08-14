@@ -23,6 +23,13 @@ type Config struct {
 	OpenFGAStoreName   string
 	OutboxPollInterval time.Duration
 	ShutdownTimeout    time.Duration
+
+	RegistrationTokenTTL       time.Duration
+	EnrollmentApprovalRequired bool
+	AgentImageRepo             string
+	AgentImageTag              string
+	AgentGatewayAddress        string
+	ESOSecretStore             string
 }
 
 func Load() (*Config, error) {
@@ -41,6 +48,13 @@ func Load() (*Config, error) {
 		OpenFGAStoreName:   env("INARI_OPENFGA_STORE_NAME", "inari"),
 		OutboxPollInterval: durEnv("INARI_OUTBOX_POLL_INTERVAL", time.Second),
 		ShutdownTimeout:    durEnv("INARI_SHUTDOWN_TIMEOUT", 10*time.Second),
+
+		RegistrationTokenTTL:       durEnv("INARI_REGISTRATION_TOKEN_TTL", time.Hour),
+		EnrollmentApprovalRequired: boolEnv("INARI_ENROLLMENT_APPROVAL_REQUIRED", false),
+		AgentImageRepo:             env("INARI_AGENT_IMAGE_REPO", "ghcr.io/7k-inari/inari-agent"),
+		AgentImageTag:              env("INARI_AGENT_IMAGE_TAG", "edge"),
+		AgentGatewayAddress:        env("INARI_AGENT_GATEWAY_ADDRESS", "https://inari-server.example.com"),
+		ESOSecretStore:             env("INARI_ESO_SECRET_STORE", "inari-platform"),
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("config: INARI_DATABASE_URL must not be empty")
@@ -70,4 +84,16 @@ func durEnv(key string, def time.Duration) time.Duration {
 		return time.Duration(n) * time.Second
 	}
 	return def
+}
+
+func boolEnv(key string, def bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return def
+	}
+	return b
 }

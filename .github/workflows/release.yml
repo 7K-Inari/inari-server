@@ -1,0 +1,67 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      is-release: ${{ steps.check.outputs.is-release }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: detect release merge
+        id: check
+        run: |
+          if git diff --name-only HEAD~1 HEAD -- .release-please-manifest.json | grep -q .; then
+            version="$(jq -r '.["."]' .release-please-manifest.json)"
+            echo "is-release=true" >> "$GITHUB_OUTPUT"
+            echo "version=${version}" >> "$GITHUB_OUTPUT"
+          else
+            echo "is-release=false" >> "$GITHUB_OUTPUT"
+          fi
+    if: "startsWith(github.event.head_commit.message, 'chore(main): release')"
+
+  tag-and-release:
+    needs: detect
+    if: needs.detect.outputs.is-release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: extract changelog section
+        run: |
+          awk -v version="${{ needs.detect.outputs.version }}" \
+            '$0 ~ "^## \\[" version "\\]" {found=1; print; next} found && /^## / {exit} found {print}' \
+            CHANGELOG.md > release-notes.md
+
+      - name: create and push tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "v${{ needs.detect.outputs.version }}"
+          git push origin "v${{ needs.detect.outputs.version }}"
+
+      - name: create GitHub Release
+        run: gh release create "v${{ needs.detect.outputs.version }}" --title "v${{ needs.detect.outputs.version }}" --notes-file release-notes.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish:
+    needs: [detect, tag-and-release]
+    uses: ./.github/workflows/publish.yml
+    with:
+      version: ${{ needs.detect.outputs.version }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write

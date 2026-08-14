@@ -21,7 +21,7 @@ func TestRenderInstallManifest(t *testing.T) {
 	s := string(out)
 	for _, want := range []string{
 		"registration-token: tok-xyz",
-		"image: ghcr.io/7k-inari/inari-agent:v0.1.0",
+		`image: "ghcr.io/7k-inari/inari-agent:v0.1.0"`,
 		`value: "https://inari.example.com"`,
 		`value: "cluster:abc-123"`,
 		"namespace: inari-system",

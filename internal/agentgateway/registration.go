@@ -11,7 +11,6 @@ import (
 	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
 
 	"github.com/7K-Inari/inari-server/internal/clusterregistry"
-	"github.com/7K-Inari/inari-server/internal/types"
 )
 
 // RegistrationService implements inari.agent.v1.RegistrationService: the
@@ -29,15 +28,12 @@ func (g *Gateway) RegisterCluster(ctx context.Context, req *connect.Request[agen
 		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
 	case errors.Is(err, clusterregistry.ErrTokenExpired):
 		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+	case errors.Is(err, clusterregistry.ErrClusterRevoked):
+		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("cluster is revoked"))
+	case errors.Is(err, clusterregistry.ErrClusterNotPending):
+		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("cluster enrollment pending approval"))
 	case err != nil:
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("consume token: %w", err))
-	}
-
-	switch cluster.State {
-	case types.ClusterStateRevoked:
-		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("cluster is revoked"))
-	case types.ClusterStatePendingApproval:
-		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("cluster enrollment pending approval"))
 	}
 
 	clientID, err := g.clients.CreateClusterClient(ctx, cluster.ID)

@@ -376,6 +376,8 @@ func (s *Service) RevokeCluster(ctx context.Context, actor, clusterID string) er
 
 // ConsumeRegistrationToken validates and burns a bootstrap token, returning
 // the cluster it was issued for. Used by the registration exchange only.
+// Revoked or still-pending-approval clusters are rejected inside the TX so
+// the token is NOT burned — the exchange can be retried after approval.
 func (s *Service) ConsumeRegistrationToken(ctx context.Context, plaintext string) (*types.Cluster, error) {
 	var cluster *types.Cluster
 	err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
@@ -386,6 +388,12 @@ func (s *Service) ConsumeRegistrationToken(ctx context.Context, plaintext string
 		c, err := s.store.GetCluster(ctx, tx, t.ClusterID)
 		if err != nil {
 			return err
+		}
+		switch c.State {
+		case types.ClusterStateRevoked:
+			return ErrClusterRevoked
+		case types.ClusterStatePendingApproval:
+			return ErrClusterNotPending
 		}
 		cluster = c
 		return nil

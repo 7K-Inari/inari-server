@@ -61,7 +61,7 @@ spec:
       serviceAccountName: inari-agent
       containers:
         - name: agent
-          image: {{ .Image }}
+          image: {{ .Image | quote }}
           imagePullPolicy: IfNotPresent
           resources:
             requests:

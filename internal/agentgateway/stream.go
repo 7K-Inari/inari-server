@@ -115,12 +115,10 @@ func (s *session) handleEvent(ctx context.Context, ev *agentv1.Event) ([]*agentv
 			slog.Warn("agentgateway: bad capability-update payload", "cluster", s.cluster.ID, "error", err)
 			return out, nil // drop-and-log per compatibility contract
 		}
-		if !upd.FullSync && s.cluster.CapabilityChecksum != "" &&
-			upd.StateChecksum != "" && upd.StateChecksum != s.cluster.CapabilityChecksum && !s.resyncSent {
-			out = append(out, resyncEvent("checksum mismatch"))
-			s.resyncSent = true
-			return out, nil
-		}
+		// StateChecksum on an update is the agent's state AFTER applying the
+		// delta, so it advances on every change — it must not be compared
+		// against the stored checksum here (stale-state detection happens at
+		// handshake via LastSeenStateChecksum).
 		if err := s.gw.caps.Ingest(ctx, s.cluster.OrgID, s.cluster.ID, mapCapabilityUpdate(&upd)); err != nil {
 			return nil, fmt.Errorf("ingest capabilities: %w", err)
 		}

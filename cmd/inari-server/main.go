@@ -26,8 +26,6 @@ import (
 
 	"connectrpc.com/connect"
 	agentv1connect "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1/agentv1connect"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 )
 
 func main() {
@@ -102,10 +100,16 @@ func run() error {
 	router.Handle(regPath+"*", regHandler)
 	router.Handle(streamPath+"*", streamHandler)
 
+	// Unencrypted HTTP/2 (h2c) so Connect-RPC streaming works without TLS
+	// termination in front (agents may dial directly in dev).
+	protocols := new(http.Protocols)
+	protocols.SetUnencryptedHTTP2(true)
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           h2c.NewHandler(router, &http2.Server{}),
+		Handler:           router,
 		ReadHeaderTimeout: 10 * time.Second,
+		Protocols:         protocols,
 	}
 	errCh := make(chan error, 1)
 	go func() {

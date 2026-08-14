@@ -12,14 +12,22 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/7K-Inari/inari-server/internal/agentgateway"
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/authz"
+	"github.com/7K-Inari/inari-server/internal/capabilities"
+	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/config"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/logging"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
+
+	"connectrpc.com/connect"
+	agentv1connect "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1/agentv1connect"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 )
 
 func main() {
@@ -68,10 +76,37 @@ func run() error {
 	svc := tenancy.NewService(database, idp, tenancy.NewStore(), auditStore)
 	handler := tenancy.NewHandler(svc, authorizer)
 
+	registry := clusterregistry.NewService(database, idp, clusterregistry.NewStore(), auditStore,
+		cfg.RegistrationTokenTTL, cfg.EnrollmentApprovalRequired)
+	registryHandler := clusterregistry.NewHandler(registry, svc, authorizer, clusterregistry.ManifestParams{
+		AgentImageRepo: cfg.AgentImageRepo,
+		AgentImageTag:  cfg.AgentImageTag,
+		GatewayAddress: cfg.AgentGatewayAddress,
+	})
+	caps := capabilities.NewService(database, capabilities.NewStore(), auditStore)
+	gateway := agentgateway.NewGateway(database, registry, idp, caps, auditStore, agentgateway.Config{
+		OIDCIssuerURL:  cfg.OIDCIssuerURL,
+		ESOSecretStore: cfg.ESOSecretStore,
+	})
+
 	router, api := httpserver.NewRouter(log, validator, database)
 	handler.RegisterRoutes(api)
+	registryHandler.RegisterRoutes(api)
 
-	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: router, ReadHeaderTimeout: 10 * time.Second}
+	// Agent-facing Connect-RPC services mount on chi directly, outside the
+	// huma bearer middleware: registration is token-authenticated, the event
+	// stream authenticates via its own interceptor (cluster_id claim).
+	regPath, regHandler := agentv1connect.NewRegistrationServiceHandler(gateway)
+	streamPath, streamHandler := agentv1connect.NewEventStreamServiceHandler(gateway,
+		connect.WithInterceptors(agentgateway.AuthInterceptor(validator)))
+	router.Handle(regPath+"*", regHandler)
+	router.Handle(streamPath+"*", streamHandler)
+
+	srv := &http.Server{
+		Addr:              cfg.HTTPAddr,
+		Handler:           h2c.NewHandler(router, &http2.Server{}),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 	errCh := make(chan error, 1)
 	go func() {
 		log.Info("listening", "addr", cfg.HTTPAddr)

@@ -35,19 +35,28 @@ func (g *Gateway) Connect(ctx context.Context, stream *connect.BidiStream[agentv
 	if id == nil {
 		return connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("unauthenticated"))
 	}
-	cluster, err := g.registry.GetCluster(ctx, id.ClusterID)
+	cluster, err := g.AuthorizeCluster(ctx, id.ClusterID)
 	if err != nil {
-		return connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("unknown cluster"))
+		return err
+	}
+	return g.newSession(cluster).run(ctx, stream)
+}
+
+// AuthorizeCluster gates stream admission on the claimed cluster identity: a
+// revoked cluster can never reconnect (plan §5.3, §5.10).
+func (g *Gateway) AuthorizeCluster(ctx context.Context, clusterID string) (*types.Cluster, error) {
+	cluster, err := g.registry.GetCluster(ctx, clusterID)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("unknown cluster"))
 	}
 	switch cluster.State {
 	case types.ClusterStateActive, types.ClusterStateDegraded:
-		// connected
+		return cluster, nil
 	case types.ClusterStateRevoked:
-		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("cluster is revoked"))
+		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("cluster is revoked"))
 	default:
-		return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("cluster not registered"))
+		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("cluster not registered"))
 	}
-	return g.newSession(cluster).run(ctx, stream)
 }
 
 type session struct {

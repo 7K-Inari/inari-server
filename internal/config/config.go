@@ -30,6 +30,16 @@ type Config struct {
 	AgentImageTag              string
 	AgentGatewayAddress        string
 	ESOSecretStore             string
+
+	// CatalogOCIPath points at the curated package source: a local fixture
+	// OCI layout directory at M2 (a registry client slots in later).
+	CatalogOCIPath string
+	// GitProvider selects the git backend: "fake" (default, local dev/tests)
+	// or "github" (GitHub App credentials, §12.1/2 — never PATs).
+	GitProvider             string
+	GitHubAppID             int64
+	GitHubInstallationID    int64
+	GitHubAppPrivateKeyFile string
 }
 
 func Load() (*Config, error) {
@@ -55,6 +65,12 @@ func Load() (*Config, error) {
 		AgentImageTag:              env("INARI_AGENT_IMAGE_TAG", "edge"),
 		AgentGatewayAddress:        env("INARI_AGENT_GATEWAY_ADDRESS", "https://inari-server.example.com"),
 		ESOSecretStore:             env("INARI_ESO_SECRET_STORE", "inari-platform"),
+
+		CatalogOCIPath:          env("INARI_CATALOG_OCI_PATH", ""),
+		GitProvider:             env("INARI_GIT_PROVIDER", "fake"),
+		GitHubAppID:             intEnv("INARI_GITHUB_APP_ID", 0),
+		GitHubInstallationID:    intEnv("INARI_GITHUB_APP_INSTALLATION_ID", 0),
+		GitHubAppPrivateKeyFile: env("INARI_GITHUB_APP_PRIVATE_KEY_FILE", ""),
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("config: INARI_DATABASE_URL must not be empty")
@@ -96,4 +112,16 @@ func boolEnv(key string, def bool) bool {
 		return def
 	}
 	return b
+}
+
+func intEnv(key string, def int64) int64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return def
+	}
+	return n
 }

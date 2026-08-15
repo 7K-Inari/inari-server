@@ -60,13 +60,14 @@ func (c *Config) withDefaults() Config {
 
 // Gateway bundles the Agent Gateway dependencies.
 type Gateway struct {
-	registry *clusterregistry.Service
-	clients  clusterregistry.ClientManager
-	caps     *capabilities.Service
-	queue    *Queue
-	audit    *audit.Store
-	db       *db.DB
-	cfg      Config
+	registry   *clusterregistry.Service
+	clients    clusterregistry.ClientManager
+	caps       *capabilities.Service
+	queue      *Queue
+	audit      *audit.Store
+	db         *db.DB
+	cfg        Config
+	statusSink StatusSink
 }
 
 func NewGateway(d *db.DB, registry *clusterregistry.Service, clients clusterregistry.ClientManager,
@@ -85,6 +86,15 @@ func NewGateway(d *db.DB, registry *clusterregistry.Service, clients clusterregi
 
 // Queue exposes the durable command queue for future modules (Orchestrator).
 func (g *Gateway) Queue() *Queue { return g.queue }
+
+// StatusSink consumes agent status-update events (Resources Inventory).
+type StatusSink interface {
+	ApplyStatus(ctx context.Context, clusterID string, upd StatusUpdate) (bool, error)
+}
+
+// SetStatusSink wires the inventory module post-construction (nil-safe:
+// status updates are drop-and-log until wired).
+func (g *Gateway) SetStatusSink(s StatusSink) { g.statusSink = s }
 
 type agentIdentityKey struct{}
 

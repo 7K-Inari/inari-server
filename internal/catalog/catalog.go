@@ -127,6 +127,11 @@ func (s *Service) GetItem(ctx context.Context, orgID, clusterID, itemID string) 
 	return &ItemView{CatalogItem: *it, Versions: versions, PinnedVersion: pin}, nil
 }
 
+// GetItemByID returns an item without visibility checks (approvals seam).
+func (s *Service) GetItemByID(ctx context.Context, itemID string) (*types.CatalogItem, error) {
+	return s.store.GetItem(ctx, s.db.Pool, itemID)
+}
+
 // EffectiveVersion resolves the version a tenant deploys: pin wins,
 // otherwise the latest in the channel (default "stable").
 func (s *Service) EffectiveVersion(ctx context.Context, orgID, itemID, channel string) (string, error) {

@@ -112,16 +112,16 @@ type RoleResolver interface {
 
 // ItemResolver loads a catalog item (catalog.Service seam).
 type ItemResolver interface {
-	GetItem(ctx context.Context, itemID string) (*types.CatalogItem, error)
+	GetItemByID(ctx context.Context, itemID string) (*types.CatalogItem, error)
 }
 
 // Service gates deploy requests on the item's approval policy.
 type Service struct {
-	db     *db.DB
-	store  *Store
-	audit  *audit.Store
-	roles  RoleResolver
-	items  ItemResolver
+	db    *db.DB
+	store *Store
+	audit *audit.Store
+	roles RoleResolver
+	items ItemResolver
 }
 
 func NewService(d *db.DB, store *Store, auditStore *audit.Store, roles RoleResolver, items ItemResolver) *Service {
@@ -188,7 +188,7 @@ func (s *Service) Decide(ctx context.Context, approvalID, approver string, appro
 	if req.State != types.ApprovalStatePending {
 		return nil, ErrAlreadyDecided
 	}
-	item, err := s.items.GetItem(ctx, req.ItemID)
+	item, err := s.items.GetItemByID(ctx, req.ItemID)
 	if err != nil {
 		return nil, err
 	}

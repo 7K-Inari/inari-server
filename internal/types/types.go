@@ -425,6 +425,7 @@ type InstancePayload struct {
 	Version    string `json:"version,omitempty"`
 	Health     string `json:"health,omitempty"`
 }
+
 // TeamSeed is one default team to create with a tenant and the org role it grants.
 type TeamSeed struct {
 	TeamID string `json:"teamId"`

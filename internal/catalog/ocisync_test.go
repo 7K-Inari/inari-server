@@ -2,8 +2,16 @@ package catalog
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
+
+func TestSyncWithoutPuller(t *testing.T) {
+	s := &Service{}
+	if _, err := s.Sync(context.Background()); !errors.Is(err, ErrSyncNotConfigured) {
+		t.Fatalf("err = %v, want ErrSyncNotConfigured", err)
+	}
+}
 
 func TestFixturePuller(t *testing.T) {
 	p := &FixturePuller{Root: "testdata/oci"}

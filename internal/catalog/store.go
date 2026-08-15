@@ -14,6 +14,9 @@ import (
 // ErrItemNotFound is returned when a catalog item does not exist.
 var ErrItemNotFound = errors.New("catalog: item not found")
 
+// ErrVersionNotFound is returned when a catalog item version does not exist.
+var ErrVersionNotFound = errors.New("catalog: version not found")
+
 // Store is the PostgreSQL projection of curated/platform catalog items,
 // versions, visibility rules, and tenant pins.
 type Store struct{}

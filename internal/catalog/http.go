@@ -247,6 +247,9 @@ func (h *Handler) syncCatalog(ctx context.Context, _ *struct{}) (*syncOutput, er
 		return nil, err
 	}
 	n, err := h.svc.Sync(ctx)
+	if errors.Is(err, ErrSyncNotConfigured) {
+		return nil, huma.Error409Conflict(err.Error())
+	}
 	if err != nil {
 		return nil, err
 	}

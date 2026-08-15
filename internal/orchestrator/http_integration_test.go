@@ -287,8 +287,8 @@ func TestDeployToHealthVisible(t *testing.T) {
 	if got.Health != "healthy" || got.State != types.InstanceStateRunning {
 		t.Errorf("health=%q state=%q", got.Health, got.State)
 	}
-	if got.LatestVersion != "1.1.0" || !got.NewVersionAvailable {
-		t.Errorf("badge: latest=%q new=%v (deployed 1.1.0 expected latest 1.1.0)", got.LatestVersion, got.NewVersionAvailable)
+	if got.LatestVersion != "1.1.0" || got.NewVersionAvailable {
+		t.Errorf("badge: latest=%q new=%v (deployed 1.1.0 = latest, so no badge)", got.LatestVersion, got.NewVersionAvailable)
 	}
 
 	// Diff preview data for the upgrade.

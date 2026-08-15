@@ -107,9 +107,16 @@ func readPackageDir(dir string) (*Package, error) {
 	return &pkg, nil
 }
 
+// ErrSyncNotConfigured is returned when no OCI puller is wired (no
+// INARI_CATALOG_OCI_PATH / registry client configured).
+var ErrSyncNotConfigured = fmt.Errorf("catalog: sync not configured (no OCI puller)")
+
 // Sync pulls curated packages and upserts them as catalog items (one item
 // per package name, one version row per package version). Idempotent.
 func (s *Service) Sync(ctx context.Context) (int, error) {
+	if s.puller == nil {
+		return 0, ErrSyncNotConfigured
+	}
 	pkgs, err := s.puller.Pull(ctx)
 	if err != nil {
 		return 0, err

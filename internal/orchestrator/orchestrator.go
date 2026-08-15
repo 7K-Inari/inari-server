@@ -308,6 +308,13 @@ func (s *Service) Upgrade(ctx context.Context, orgID, instanceID, toVersion, req
 	if existing.OrgID != orgID {
 		return nil, inventory.ErrInstanceNotFound
 	}
+	cluster, err := s.clusters.GetCluster(ctx, existing.ClusterID)
+	if err != nil {
+		return nil, err
+	}
+	if cluster.State != types.ClusterStateActive && cluster.State != types.ClusterStateDegraded {
+		return nil, ErrClusterNotActive
+	}
 	item, err := s.catalog.GetItemByID(ctx, existing.CatalogItemID)
 	if err != nil {
 		return nil, err

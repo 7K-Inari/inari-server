@@ -194,7 +194,7 @@ func (s *Service) GetVersion(ctx context.Context, itemID, version string) (*type
 			return &versions[i], nil
 		}
 	}
-	return nil, fmt.Errorf("catalog: version %s of %s not found", version, itemID)
+	return nil, ErrVersionNotFound
 }
 
 // SetPin pins a tenant to a version. The version must exist.

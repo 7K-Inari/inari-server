@@ -109,8 +109,8 @@ type deployInput struct {
 		ClusterID string          `json:"clusterId" minLength:"1"`
 		Version   string          `json:"version,omitempty"`
 		Channel   string          `json:"channel,omitempty"`
-		Name      string          `json:"name,omitempty"`
-		Namespace string          `json:"namespace,omitempty"`
+		Name      string          `json:"name,omitempty" pattern:"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" maxLength:"63" doc:"Instance name (DNS-1123 label); becomes the instance ID and repo path segment"`
+		Namespace string          `json:"namespace,omitempty" pattern:"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" maxLength:"63"`
 		OwnerTeam string          `json:"ownerTeam,omitempty"`
 		Spec      json.RawMessage `json:"spec"`
 	}
@@ -142,6 +142,9 @@ func (h *Handler) deploy(ctx context.Context, in *deployInput) (*deployOutput, e
 	if errors.Is(err, catalog.ErrItemNotFound) {
 		return nil, huma.Error404NotFound("catalog item not found")
 	}
+	if errors.Is(err, catalog.ErrVersionNotFound) {
+		return nil, huma.Error404NotFound("catalog item version not found")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -172,6 +175,12 @@ func (h *Handler) upgrade(ctx context.Context, in *upgradeInput) (*deployOutput,
 	if errors.Is(err, inventory.ErrInstanceNotFound) {
 		return nil, huma.Error404NotFound("instance not found")
 	}
+	if errors.Is(err, ErrClusterNotActive) {
+		return nil, huma.Error409Conflict(err.Error())
+	}
+	if errors.Is(err, catalog.ErrVersionNotFound) {
+		return nil, huma.Error404NotFound("catalog item version not found")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -200,6 +209,9 @@ func (h *Handler) diff(ctx context.Context, in *diffInput) (*diffOutput, error) 
 	d, err := h.svc.DiffPreview(ctx, org.ID, in.ID, in.ToVersion)
 	if errors.Is(err, inventory.ErrInstanceNotFound) {
 		return nil, huma.Error404NotFound("instance not found")
+	}
+	if errors.Is(err, catalog.ErrVersionNotFound) {
+		return nil, huma.Error404NotFound("catalog item version not found")
 	}
 	if err != nil {
 		return nil, err

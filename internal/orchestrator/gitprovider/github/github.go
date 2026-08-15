@@ -103,7 +103,7 @@ func (p *Provider) installationToken(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
 		return "", fmt.Errorf("gitprovider github: mint installation token: %s: %s", resp.Status, body)
@@ -146,7 +146,7 @@ func (p *Provider) do(ctx context.Context, method, path string, body, out any) (
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return 0, err

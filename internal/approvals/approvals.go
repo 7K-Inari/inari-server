@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -42,7 +43,9 @@ func policyFor(item *types.CatalogItem) types.ApprovalPolicy {
 func checkApprover(item *types.CatalogItem, req *types.ApprovalRequest, approver string, role types.Role) error {
 	switch policyFor(item) {
 	case types.ApprovalPolicyPeer:
-		if approver == req.Requester {
+		// The requester is stored with the actor prefix ("user:<subject>")
+		// while approvers arrive as bare subjects — normalize both sides.
+		if sameActor(req.Requester, approver) {
 			return ErrSelfApproval
 		}
 	case types.ApprovalPolicyPlatformAdmin:
@@ -51,6 +54,12 @@ func checkApprover(item *types.CatalogItem, req *types.ApprovalRequest, approver
 		}
 	}
 	return nil
+}
+
+// sameActor reports whether two actor strings name the same subject,
+// tolerating an optional "user:" prefix on either side.
+func sameActor(a, b string) bool {
+	return strings.TrimPrefix(a, "user:") == strings.TrimPrefix(b, "user:")
 }
 
 // Store persists approval requests.

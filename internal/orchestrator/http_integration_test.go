@@ -433,9 +433,15 @@ func TestUpgradeFlow(t *testing.T) {
 	if len(queue.cmds) != 2 {
 		t.Errorf("queued commands = %d, want 2 (deploy + upgrade)", len(queue.cmds))
 	}
+	// The instance manifest carries the user spec; the new 1.1.0 field shows
+	// up in the version's schema served by the catalog.
 	inst := git.Files("inari-dev/acme-inari-state", "main")["clusters/cluster-1/postgres-aws/db1/instance.yaml"]
-	if !strings.Contains(inst, "multiAZ") {
-		t.Errorf("upgraded manifest missing 1.1.0 field:\n%s", inst)
+	if !strings.Contains(inst, "storageGB: 20") {
+		t.Errorf("upgraded manifest lost user spec:\n%s", inst)
+	}
+	code, body = itReq(t, srv, "GET", "/api/v1/tenants/acme/catalog/curated:postgres-aws", "good", "")
+	if code != http.StatusOK || !strings.Contains(body, "multiAZ") {
+		t.Errorf("1.1.0 schema with multiAZ not served: %d", code)
 	}
 	var v string
 	if err := database.Pool.QueryRow(context.Background(),

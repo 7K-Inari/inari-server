@@ -77,19 +77,26 @@ func (s *Service) ListVisible(ctx context.Context, orgID, clusterID string) ([]I
 		return nil, err
 	}
 	var out []ItemView
+	visible := make([]types.CatalogItem, 0, len(items))
 	for _, it := range items {
-		if !visibleTo(visMap[it.ID], orgID, clusterID) {
-			continue
+		if visibleTo(visMap[it.ID], orgID, clusterID) {
+			visible = append(visible, it)
 		}
-		versions, err := s.store.ListVersions(ctx, s.db.Pool, it.ID)
-		if err != nil {
-			return nil, err
-		}
-		pin, err := s.store.GetPin(ctx, s.db.Pool, orgID, it.ID)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, ItemView{CatalogItem: it, Versions: versions, PinnedVersion: pin})
+	}
+	ids := make([]string, 0, len(visible))
+	for _, it := range visible {
+		ids = append(ids, it.ID)
+	}
+	versionsByItem, err := s.store.ListVersionsForItems(ctx, s.db.Pool, ids)
+	if err != nil {
+		return nil, err
+	}
+	pins, err := s.store.PinsForOrg(ctx, s.db.Pool, orgID)
+	if err != nil {
+		return nil, err
+	}
+	for _, it := range visible {
+		out = append(out, ItemView{CatalogItem: it, Versions: versionsByItem[it.ID], PinnedVersion: pins[it.ID]})
 	}
 	if clusterID != "" && s.caps != nil {
 		caps, err := s.caps.List(ctx, s.db.Pool, clusterID)
@@ -181,6 +188,22 @@ func (s *Service) LatestVersion(ctx context.Context, itemID, channel string) (st
 		channel = "stable"
 	}
 	return latestInChannel(versions, channel), nil
+}
+
+// LatestVersions returns item_id → newest stable version for many items in
+// one query (inventory badge fan-out).
+func (s *Service) LatestVersions(ctx context.Context, itemIDs []string) (map[string]string, error) {
+	byItem, err := s.store.ListVersionsForItems(ctx, s.db.Pool, itemIDs)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for id, versions := range byItem {
+		if latest := latestInChannel(versions, "stable"); latest != "" {
+			out[id] = latest
+		}
+	}
+	return out, nil
 }
 
 // GetVersion returns one version row.

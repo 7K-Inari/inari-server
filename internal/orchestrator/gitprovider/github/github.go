@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -194,12 +195,19 @@ func (p *Provider) CommitFiles(ctx context.Context, repo, branch string, files [
 	return &gitprovider.Result{CommitSHA: sha}, nil
 }
 
+// headSuffix derives a stable, branch-safe PR head name from the title
+// (works for short titles; avoids collisions between different deploys).
+func headSuffix(title string) string {
+	sum := sha256.Sum256([]byte(title))
+	return base64.RawURLEncoding.EncodeToString(sum[:])[:24]
+}
+
 func (p *Provider) OpenPR(ctx context.Context, repo, base, title, body string, files []gitprovider.File) (*gitprovider.Result, error) {
 	owner, name, err := splitRepo(repo)
 	if err != nil {
 		return nil, err
 	}
-	head := "inari/" + base64.RawURLEncoding.EncodeToString([]byte(title))[:24]
+	head := "inari/" + headSuffix(title)
 	sha, err := p.commitTree(ctx, owner, name, head, files, title)
 	if err != nil {
 		return nil, err

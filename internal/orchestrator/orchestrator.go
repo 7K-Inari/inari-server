@@ -9,6 +9,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -57,6 +58,24 @@ var ErrNoGitConfig = fmt.Errorf("orchestrator: tenant has no git config (provisi
 
 // ErrClusterNotActive blocks deploys to non-active clusters (§5.11 cordon).
 var ErrClusterNotActive = fmt.Errorf("orchestrator: cluster is not active")
+
+// ErrClusterMismatch is returned when the cluster belongs to another tenant
+// (reads as not-found to the caller).
+var ErrClusterMismatch = fmt.Errorf("orchestrator: cluster does not belong to tenant")
+
+// ErrInstanceExists is returned when a deploy reuses an existing instance name.
+var ErrInstanceExists = fmt.Errorf("orchestrator: instance already exists")
+
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	var pgErr interface{ SQLState() string }
+	if errors.As(err, &pgErr) {
+		return pgErr.SQLState() == "23505"
+	}
+	return false
+}
 
 // DeployRequest is one catalog deploy/update intent.
 type DeployRequest struct {
@@ -112,7 +131,7 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 		return nil, err
 	}
 	if cluster.OrgID != req.OrgID {
-		return nil, fmt.Errorf("orchestrator: cluster does not belong to tenant")
+		return nil, ErrClusterMismatch
 	}
 	if cluster.State != types.ClusterStateActive && cluster.State != types.ClusterStateDegraded {
 		return nil, ErrClusterNotActive
@@ -236,6 +255,9 @@ func (s *Service) apply(ctx context.Context, req DeployRequest, item *types.Cata
 				CommitSHA: gitResult.CommitSHA, PRURL: gitResult.PRURL, Generation: 1,
 			}
 			if err := s.instances.Create(ctx, tx, inst); err != nil {
+				if isUniqueViolation(err) {
+					return ErrInstanceExists
+				}
 				return err
 			}
 		} else if err := s.instances.MarkDeployed(ctx, tx, instanceID, version, gitResult.CommitSHA, gitResult.PRURL, state, true); err != nil {

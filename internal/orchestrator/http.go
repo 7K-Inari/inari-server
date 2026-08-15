@@ -12,6 +12,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/catalog"
+	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
@@ -139,6 +140,12 @@ func (h *Handler) deploy(ctx context.Context, in *deployInput) (*deployOutput, e
 	if errors.Is(err, ErrClusterNotActive) {
 		return nil, huma.Error409Conflict(err.Error())
 	}
+	if errors.Is(err, ErrInstanceExists) {
+		return nil, huma.Error409Conflict(err.Error())
+	}
+	if errors.Is(err, clusterregistry.ErrClusterNotFound) || errors.Is(err, ErrClusterMismatch) {
+		return nil, huma.Error404NotFound("cluster not found")
+	}
 	if errors.Is(err, catalog.ErrItemNotFound) {
 		return nil, huma.Error404NotFound("catalog item not found")
 	}
@@ -177,6 +184,9 @@ func (h *Handler) upgrade(ctx context.Context, in *upgradeInput) (*deployOutput,
 	}
 	if errors.Is(err, ErrClusterNotActive) {
 		return nil, huma.Error409Conflict(err.Error())
+	}
+	if errors.Is(err, clusterregistry.ErrClusterNotFound) || errors.Is(err, ErrClusterMismatch) {
+		return nil, huma.Error404NotFound("cluster not found")
 	}
 	if errors.Is(err, catalog.ErrVersionNotFound) {
 		return nil, huma.Error404NotFound("catalog item version not found")

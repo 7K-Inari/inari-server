@@ -26,6 +26,7 @@ type StatusUpdate struct {
 // seam) — used for the "new version available" badge.
 type VersionResolver interface {
 	LatestVersion(ctx context.Context, itemID, channel string) (string, error)
+	LatestVersions(ctx context.Context, itemIDs []string) (map[string]string, error)
 }
 
 // Service applies status updates and serves instance queries.
@@ -103,17 +104,34 @@ func (s *Service) Get(ctx context.Context, orgID, id string) (*InstanceView, err
 	return s.withBadge(ctx, inst)
 }
 
-// List returns instances for an org with badges computed.
+// List returns instances for an org with badges computed (one batch query
+// for latest versions, no per-instance fan-out).
 func (s *Service) List(ctx context.Context, orgID string, f ListFilters) ([]InstanceView, error) {
 	instances, err := s.store.List(ctx, s.db.Pool, orgID, f)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]InstanceView, 0, len(instances))
-	for i := range instances {
-		v, err := s.withBadge(ctx, &instances[i])
+	var latest map[string]string
+	if s.catalog != nil {
+		seen := map[string]bool{}
+		var ids []string
+		for i := range instances {
+			if id := instances[i].CatalogItemID; !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+		latest, err = s.catalog.LatestVersions(ctx, ids)
 		if err != nil {
 			return nil, err
+		}
+	}
+	out := make([]InstanceView, 0, len(instances))
+	for i := range instances {
+		v := &InstanceView{ResourceInstance: instances[i]}
+		if l := latest[instances[i].CatalogItemID]; l != "" {
+			v.LatestVersion = l
+			v.NewVersionAvailable = l != instances[i].Version
 		}
 		out = append(out, *v)
 	}

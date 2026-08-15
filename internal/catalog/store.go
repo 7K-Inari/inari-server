@@ -128,7 +128,56 @@ func (s *Store) ListVersions(ctx context.Context, q db.Querier, itemID string) (
 	return out, rows.Err()
 }
 
+// ListVersionsForItems returns versions grouped by item ID in one query.
+func (s *Store) ListVersionsForItems(ctx context.Context, q db.Querier, itemIDs []string) (map[string][]types.CatalogItemVersion, error) {
+	const sql = `SELECT item_id, version, channel, schema, ui_hints, payload
+	             FROM catalog_item_versions WHERE item_id = ANY($1) ORDER BY version`
+	rows, err := q.Query(ctx, sql, itemIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]types.CatalogItemVersion{}
+	for rows.Next() {
+		var v types.CatalogItemVersion
+		if err := rows.Scan(&v.ItemID, &v.Version, &v.Channel, &v.Schema, &v.UIHints, &v.Payload); err != nil {
+			return nil, err
+		}
+		out[v.ItemID] = append(out[v.ItemID], v)
+	}
+	return out, rows.Err()
+}
+
+// PinsForOrg returns item_id → pinned version for a tenant in one query.
+func (s *Store) PinsForOrg(ctx context.Context, q db.Querier, orgID string) (map[string]string, error) {
+	rows, err := q.Query(ctx, `SELECT item_id, version FROM catalog_pins WHERE org_id = $1`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var id, v string
+		if err := rows.Scan(&id, &v); err != nil {
+			return nil, err
+		}
+		out[id] = v
+	}
+	return out, rows.Err()
+}
+
+// SetVisibility replaces all visibility rules for the affected items.
 func (s *Store) SetVisibility(ctx context.Context, q db.Querier, rules []types.VisibilityRule) error {
+	seen := map[string]bool{}
+	for _, r := range rules {
+		if seen[r.ItemID] {
+			continue
+		}
+		seen[r.ItemID] = true
+		if _, err := q.Exec(ctx, `DELETE FROM catalog_visibility WHERE item_id = $1`, r.ItemID); err != nil {
+			return err
+		}
+	}
 	for _, r := range rules {
 		cluster := r.ClusterID
 		if cluster == "" {

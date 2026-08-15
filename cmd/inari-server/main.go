@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -13,15 +14,21 @@ import (
 	"time"
 
 	"github.com/7K-Inari/inari-server/internal/agentgateway"
+	"github.com/7K-Inari/inari-server/internal/approvals"
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/capabilities"
+	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/config"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
+	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/logging"
+	"github.com/7K-Inari/inari-server/internal/orchestrator"
+	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
+	gitgithub "github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider/github"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 
 	"connectrpc.com/connect"
@@ -33,6 +40,28 @@ func main() {
 		slog.Error("fatal", "error", err)
 		os.Exit(1)
 	}
+}
+
+// agentgatewayStatusSink adapts inventory.Service to the gateway StatusSink.
+type agentgatewayStatusSink struct{ inv *inventory.Service }
+
+func (s agentgatewayStatusSink) ApplyStatus(ctx context.Context, clusterID string, upd agentgateway.StatusUpdate) (bool, error) {
+	return s.inv.ApplyStatus(ctx, clusterID, inventory.StatusUpdate{
+		Resource: upd.Resource, Health: upd.Health, Sync: upd.Sync, Message: upd.Message,
+	})
+}
+
+// buildGitProvider selects the git backend (fake for dev/tests; GitHub App
+// credentials in production, §12.1/2).
+func buildGitProvider(cfg *config.Config) (gitprovider.Provider, error) {
+	if cfg.GitProvider == "github" {
+		return gitgithub.New(gitgithub.Config{
+			AppID:          cfg.GitHubAppID,
+			InstallationID: cfg.GitHubInstallationID,
+			PrivateKeyFile: cfg.GitHubAppPrivateKeyFile,
+		})
+	}
+	return gitprovider.NewFake(), nil
 }
 
 func run() error {
@@ -87,9 +116,43 @@ func run() error {
 		ESOSecretStore: cfg.ESOSecretStore,
 	})
 
+	var puller catalog.OCIPuller
+	if cfg.CatalogOCIPath != "" {
+		puller = &catalog.FixturePuller{Root: cfg.CatalogOCIPath}
+	}
+	catalogSvc := catalog.NewService(database, catalog.NewStore(), capabilities.NewStore(), auditStore, puller)
+	catalogHandler := catalog.NewHandler(catalogSvc, svc, authorizer)
+	if err := catalogSvc.SeedPlatformApps(ctx); err != nil {
+		return err
+	}
+	if puller != nil {
+		if _, err := catalogSvc.Sync(ctx); err != nil {
+			return fmt.Errorf("catalog sync: %w", err)
+		}
+	}
+
+	approvalsSvc := approvals.NewService(database, approvals.NewStore(database), auditStore, svc, catalogSvc)
+	approvalsHandler := approvals.NewHandler(approvalsSvc, svc, authorizer)
+
+	inventorySvc := inventory.NewService(database, inventory.NewStore(), auditStore, catalogSvc)
+	inventoryHandler := inventory.NewHandler(inventorySvc, svc, authorizer)
+	gateway.SetStatusSink(agentgatewayStatusSink{inventorySvc})
+
+	git, err := buildGitProvider(cfg)
+	if err != nil {
+		return err
+	}
+	orchestratorSvc := orchestrator.NewService(database, inventory.NewStore(), catalogSvc, registry,
+		approvalsSvc, gateway.Queue(), git, auditStore)
+	orchestratorHandler := orchestrator.NewHandler(orchestratorSvc, svc, authorizer)
+
 	router, api := httpserver.NewRouter(log, validator, database)
 	handler.RegisterRoutes(api)
 	registryHandler.RegisterRoutes(api)
+	catalogHandler.RegisterRoutes(api)
+	approvalsHandler.RegisterRoutes(api)
+	inventoryHandler.RegisterRoutes(api)
+	orchestratorHandler.RegisterRoutes(api)
 
 	// Agent-facing Connect-RPC services mount on chi directly, outside the
 	// huma bearer middleware: registration is token-authenticated, the event

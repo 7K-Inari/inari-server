@@ -126,6 +126,18 @@ func (s *session) handleEvent(ctx context.Context, ev *agentv1.Event) ([]*agentv
 			s.cluster.CapabilityChecksum = upd.StateChecksum
 		}
 
+	case agentv1.EventType_EVENT_TYPE_STATUS_UPDATE:
+		var upd agentv1.StatusUpdate
+		if err := ev.Payload.UnmarshalTo(&upd); err != nil {
+			slog.Warn("agentgateway: bad status-update payload", "cluster", s.cluster.ID, "error", err)
+			return out, nil
+		}
+		if s.gw.statusSink != nil {
+			if _, err := s.gw.statusSink.ApplyStatus(ctx, s.cluster.ID, mapStatusUpdate(&upd)); err != nil {
+				return nil, fmt.Errorf("apply status update: %w", err)
+			}
+		}
+
 	case agentv1.EventType_EVENT_TYPE_COMMAND_ACK, agentv1.EventType_EVENT_TYPE_COMMAND_NACK:
 		var ack agentv1.CommandAck
 		if err := ev.Payload.UnmarshalTo(&ack); err != nil {

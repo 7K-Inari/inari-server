@@ -1,0 +1,1 @@
+{"name": "postgres-aws", "displayName": "PostgreSQL on AWS", "description": "RDS-backed PostgreSQL via KRO + Crossplane", "channel": "stable"}

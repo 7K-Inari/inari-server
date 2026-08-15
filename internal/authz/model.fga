@@ -19,3 +19,15 @@ type cluster
     define parent: [organization]
     define operator: platform_engineer from parent
     define viewer: viewer from parent
+
+type catalog_item
+  relations
+    define parent: [organization]
+    define deployer: developer from parent
+    define viewer: viewer from parent
+
+type resource_instance
+  relations
+    define parent: [cluster]
+    define editor: operator from parent
+    define viewer: viewer from parent

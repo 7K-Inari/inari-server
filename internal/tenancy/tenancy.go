@@ -130,6 +130,32 @@ func GroupPath(slug, team string) string {
 	return fmt.Sprintf("tenant-%s/%s", slug, team)
 }
 
+// HighestRole returns the highest role a user holds in an org
+// (org-admin > platform-engineer > developer > viewer). Returns false when
+// the user is not a member.
+func (s *Store) HighestRole(ctx context.Context, q db.Querier, orgID, userID string) (types.Role, bool, error) {
+	const sql = `SELECT role FROM memberships WHERE org_id = $1 AND user_id = $2`
+	rows, err := q.Query(ctx, sql, orgID, userID)
+	if err != nil {
+		return "", false, err
+	}
+	defer rows.Close()
+	best := types.Role("")
+	rank := map[types.Role]int{
+		types.RoleViewer: 1, types.RoleDeveloper: 2, types.RolePlatformEngineer: 3, types.RoleOrgAdmin: 4,
+	}
+	for rows.Next() {
+		var r types.Role
+		if err := rows.Scan(&r); err != nil {
+			return "", false, err
+		}
+		if rank[r] > rank[best] {
+			best = r
+		}
+	}
+	return best, best != "", rows.Err()
+}
+
 // Service orchestrates tenant creation across Keycloak and PostgreSQL,
 // emitting audit + outbox events in the same DB transaction.
 type Service struct {
@@ -216,6 +242,13 @@ func (s *Service) GetTenant(ctx context.Context, slug string) (*types.Organizati
 
 func (s *Service) ListTeams(ctx context.Context, orgID string) ([]types.Team, error) {
 	return s.store.ListTeams(ctx, s.db.Pool, orgID)
+}
+
+// RoleOf resolves a user's highest org role (approvals.RoleResolver seam).
+// Non-members get the empty role with no error.
+func (s *Service) RoleOf(ctx context.Context, orgID, userID string) (types.Role, error) {
+	role, _, err := s.store.HighestRole(ctx, s.db.Pool, orgID, userID)
+	return role, err
 }
 
 func isUniqueViolation(err error) bool {

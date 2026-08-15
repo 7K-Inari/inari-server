@@ -38,6 +38,9 @@ func (w *TupleWriter) EventTypes() []string {
 		types.EventMembershipRemoved,
 		types.EventClusterCreated,
 		types.EventClusterRevoked,
+		types.EventCatalogItemUpserted,
+		types.EventDeployRequested,
+		types.EventInstanceCreated,
 	}
 }
 
@@ -86,6 +89,25 @@ func (w *TupleWriter) Handle(ctx context.Context, ev *types.OutboxEvent) error {
 		}
 		return w.store.DeleteTuples(ctx, []Tuple{{
 			User: OrgObject(p.OrgID), Relation: RelationParent, Object: ClusterObject(p.ClusterID),
+		}})
+	case types.EventCatalogItemUpserted:
+		var p types.CatalogItemPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		if p.OrgID == "" {
+			return nil // global curated/platform items are public to all orgs
+		}
+		return w.store.WriteTuples(ctx, []Tuple{{
+			User: OrgObject(p.OrgID), Relation: RelationParent, Object: CatalogItemObject(p.ItemID),
+		}})
+	case types.EventDeployRequested, types.EventInstanceCreated:
+		var p types.DeployRequestedPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		return w.store.WriteTuples(ctx, []Tuple{{
+			User: ClusterObject(p.ClusterID), Relation: RelationParent, Object: ResourceInstanceObject(p.InstanceID),
 		}})
 	}
 	return nil

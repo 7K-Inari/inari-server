@@ -59,6 +59,62 @@ func structJSON(s *structpb.Struct) []byte {
 	return raw
 }
 
+// StatusUpdate is the internal form of an agent status-update event
+// (inventory seam — defined here to keep the gateway decoupled).
+type StatusUpdate struct {
+	Resource types.ResourceRef
+	Health   string
+	Sync     string
+	Message  string
+}
+
+func mapHealth(h agentv1.HealthStatus) string {
+	switch h {
+	case agentv1.HealthStatus_HEALTH_STATUS_HEALTHY:
+		return "healthy"
+	case agentv1.HealthStatus_HEALTH_STATUS_PROGRESSING:
+		return "progressing"
+	case agentv1.HealthStatus_HEALTH_STATUS_DEGRADED:
+		return "degraded"
+	case agentv1.HealthStatus_HEALTH_STATUS_SUSPENDED:
+		return "suspended"
+	case agentv1.HealthStatus_HEALTH_STATUS_MISSING:
+		return "missing"
+	default:
+		return "unknown"
+	}
+}
+
+func mapSync(s agentv1.SyncState) string {
+	switch s {
+	case agentv1.SyncState_SYNC_STATE_SYNCED:
+		return "synced"
+	case agentv1.SyncState_SYNC_STATE_OUT_OF_SYNC:
+		return "out_of_sync"
+	case agentv1.SyncState_SYNC_STATE_ERROR:
+		return "error"
+	default:
+		return ""
+	}
+}
+
+// mapStatusUpdate converts the contract message to the internal form.
+func mapStatusUpdate(upd *agentv1.StatusUpdate) StatusUpdate {
+	out := StatusUpdate{
+		Health:  mapHealth(upd.Health),
+		Sync:    mapSync(upd.Sync),
+		Message: upd.Message,
+	}
+	if upd.Resource != nil {
+		out.Resource = types.ResourceRef{
+			Kind:      upd.Resource.Kind,
+			Name:      upd.Resource.Name,
+			Namespace: upd.Resource.Namespace,
+		}
+	}
+	return out
+}
+
 // mapCapabilityUpdate converts the contract message to the internal ingest
 // type. Unknown capability kinds are dropped (compatibility contract: an N-1
 // agent may send types we do not know — drop-and-log, never fatal).

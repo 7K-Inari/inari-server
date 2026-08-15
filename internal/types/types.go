@@ -85,6 +85,14 @@ const (
 	EventClusterRegistered    = "cluster.registered"
 	EventClusterRevoked       = "cluster.revoked"
 	EventCapabilitiesIngested = "capabilities.ingested"
+
+	EventCatalogItemUpserted = "catalog.item_upserted"
+	EventApprovalRequested   = "approval.requested"
+	EventApprovalDecided     = "approval.decided"
+	EventDeployRequested     = "deploy.requested"
+	EventInstanceCreated     = "instance.created"
+	EventInstanceStatus      = "instance.status"
+	EventInstanceUpgraded    = "instance.upgraded"
 )
 
 // ClusterState is the cluster lifecycle state (plan §5.11).
@@ -231,6 +239,191 @@ type CapabilitiesIngestedPayload struct {
 	Deleted       int    `json:"deleted"`
 	FullSync      bool   `json:"fullSync"`
 	StateChecksum string `json:"stateChecksum"`
+}
+
+// CatalogSource identifies which of the three catalog sources an item came
+// from (plan §5.5).
+type CatalogSource string
+
+const (
+	CatalogSourceDiscovered CatalogSource = "discovered"
+	CatalogSourceCurated    CatalogSource = "curated"
+	CatalogSourcePlatform   CatalogSource = "platform"
+)
+
+// ApprovalPolicy gates deploy requests per catalog item (plan §5.2).
+type ApprovalPolicy string
+
+const (
+	ApprovalPolicyAuto          ApprovalPolicy = "auto"
+	ApprovalPolicyPeer          ApprovalPolicy = "peer"
+	ApprovalPolicyPlatformAdmin ApprovalPolicy = "platform-admin"
+)
+
+// CapabilityRef points a discovered-source catalog item at its capability.
+type CapabilityRef struct {
+	Kind  CapabilityKind `json:"kind"`
+	Group string         `json:"group,omitempty"`
+	Name  string         `json:"name"`
+}
+
+// CatalogItem is the normalized catalog entry (plan §5.9).
+type CatalogItem struct {
+	ID             string         `json:"id"`
+	Source         CatalogSource  `json:"source"`
+	Name           string         `json:"name"`
+	DisplayName    string         `json:"displayName"`
+	Description    string         `json:"description"`
+	CapabilityRef  *CapabilityRef `json:"capabilityRef,omitempty"`
+	OCIRef         string         `json:"ociRef,omitempty"`
+	ApprovalPolicy ApprovalPolicy `json:"approvalPolicy"`
+	CreatedAt      time.Time      `json:"createdAt"`
+}
+
+// CatalogItemVersion is one versioned revision of an item with its OpenAPI
+// v3 schema, UI hints, and payload (RGD YAML / platform app ref).
+type CatalogItemVersion struct {
+	ID      string          `json:"id"`
+	ItemID  string          `json:"itemId"`
+	Version string          `json:"version"`
+	Channel string          `json:"channel"`
+	Schema  json.RawMessage `json:"schema,omitempty"`
+	UIHints json.RawMessage `json:"uiHints,omitempty"`
+	Payload json.RawMessage `json:"payload,omitempty"`
+}
+
+// VisibilityRule scopes a catalog item to tenants/clusters ("*" = all).
+type VisibilityRule struct {
+	ItemID    string `json:"itemId"`
+	OrgID     string `json:"orgId"`
+	ClusterID string `json:"clusterId"`
+}
+
+// VersionPin pins a tenant to a specific catalog item version.
+type VersionPin struct {
+	OrgID   string `json:"orgId"`
+	ItemID  string `json:"itemId"`
+	Version string `json:"version"`
+}
+
+// Approval states.
+const (
+	ApprovalStatePending  = "pending"
+	ApprovalStateApproved = "approved"
+	ApprovalStateRejected = "rejected"
+)
+
+// ApprovalRequest gates one deploy request (plan §5.2 basic approvals).
+type ApprovalRequest struct {
+	ID        string          `json:"id"`
+	OrgID     string          `json:"orgId"`
+	ItemID    string          `json:"itemId"`
+	Version   string          `json:"version"`
+	ClusterID string          `json:"clusterId"`
+	Spec      json.RawMessage `json:"spec"`
+	Requester string          `json:"requester"`
+	Approver  string          `json:"approver,omitempty"`
+	State     string          `json:"state"`
+	Reason    string          `json:"reason,omitempty"`
+	CreatedAt time.Time       `json:"createdAt"`
+	DecidedAt *time.Time      `json:"decidedAt,omitempty"`
+}
+
+// InstanceState is the resource instance lifecycle (plan §5.11).
+type InstanceState string
+
+const (
+	InstanceStatePending   InstanceState = "pending"
+	InstanceStateDeploying InstanceState = "deploying"
+	InstanceStateRunning   InstanceState = "running"
+	InstanceStateUpgrading InstanceState = "upgrading"
+	InstanceStateDegraded  InstanceState = "degraded"
+	InstanceStateFailed    InstanceState = "failed"
+	InstanceStateDeleting  InstanceState = "deleting"
+)
+
+// ResourceRef identifies the cluster resource backing an instance, as
+// reported by the agent in status-update events.
+type ResourceRef struct {
+	Group     string `json:"group,omitempty"`
+	Kind      string `json:"kind"`
+	Name      string `json:"name"`
+	Namespace string `json:"namespace,omitempty"`
+}
+
+// ResourceInstance is one deployed catalog item on a cluster (plan §5.9).
+type ResourceInstance struct {
+	ID             string          `json:"id"`
+	OrgID          string          `json:"orgId"`
+	ClusterID      string          `json:"clusterId"`
+	CatalogItemID  string          `json:"catalogItemId"`
+	Version        string          `json:"version"`
+	OwnerTeam      string          `json:"ownerTeam"`
+	Spec           json.RawMessage `json:"spec"`
+	ResourceRef    ResourceRef     `json:"resourceRef"`
+	Health         string          `json:"health"`
+	SyncState      string          `json:"syncState,omitempty"`
+	StatusMessage  string          `json:"statusMessage,omitempty"`
+	State          InstanceState   `json:"state"`
+	ManagementMode ManagementMode  `json:"managementMode"`
+	CommitSHA      string          `json:"commitSha,omitempty"`
+	PRURL          string          `json:"prUrl,omitempty"`
+	Generation     int             `json:"generation"`
+	CreatedAt      time.Time       `json:"createdAt"`
+	UpdatedAt      time.Time       `json:"updatedAt"`
+}
+
+// CommitPolicy selects direct commit vs pull request (plan §11.2).
+type CommitPolicy string
+
+const (
+	CommitPolicyDirect      CommitPolicy = "direct"
+	CommitPolicyPullRequest CommitPolicy = "pull_request"
+)
+
+// TenantGitConfig is the per-tenant git target + policy for the
+// platform-owned <tenant>-inari-state repository.
+type TenantGitConfig struct {
+	OrgID        string       `json:"orgId"`
+	Repo         string       `json:"repo"`
+	CommitPolicy CommitPolicy `json:"commitPolicy"`
+	BaseBranch   string       `json:"baseBranch"`
+}
+
+// CatalogItemPayload is the outbox payload for EventCatalogItemUpserted.
+type CatalogItemPayload struct {
+	OrgID  string `json:"orgId"` // owning org; empty for global curated/platform items
+	ItemID string `json:"itemId"`
+	Source string `json:"source"`
+}
+
+// ApprovalPayload is the outbox payload for approval events.
+type ApprovalPayload struct {
+	OrgID      string `json:"orgId"`
+	ApprovalID string `json:"approvalId"`
+	ItemID     string `json:"itemId"`
+	State      string `json:"state"`
+}
+
+// DeployRequestedPayload is the outbox payload for EventDeployRequested.
+type DeployRequestedPayload struct {
+	OrgID      string `json:"orgId"`
+	InstanceID string `json:"instanceId"`
+	ItemID     string `json:"itemId"`
+	ClusterID  string `json:"clusterId"`
+	Version    string `json:"version"`
+	CommitSHA  string `json:"commitSha,omitempty"`
+	PRURL      string `json:"prUrl,omitempty"`
+}
+
+// InstancePayload is the outbox payload for instance lifecycle events.
+type InstancePayload struct {
+	OrgID      string `json:"orgId"`
+	InstanceID string `json:"instanceId"`
+	ItemID     string `json:"itemId"`
+	ClusterID  string `json:"clusterId"`
+	Version    string `json:"version,omitempty"`
+	Health     string `json:"health,omitempty"`
 }
 
 // TeamSeed is one default team to create with a tenant and the org role it grants.

@@ -20,13 +20,17 @@ const (
 	RelationMember           = "member"
 	RelationParent           = "parent"
 	RelationOperator         = "operator"
+	RelationDeployer         = "deployer"
+	RelationEditor           = "editor"
 )
 
 // Object types.
 const (
-	TypeOrganization = "organization"
-	TypeTeam         = "team"
-	TypeCluster      = "cluster"
+	TypeOrganization     = "organization"
+	TypeTeam             = "team"
+	TypeCluster          = "cluster"
+	TypeCatalogItem      = "catalog_item"
+	TypeResourceInstance = "resource_instance"
 )
 
 // Tuple is one relationship fact.
@@ -205,6 +209,23 @@ func ModelV1() client.ClientWriteAuthorizationModelRequest {
 	clusterMeta := map[string]openfga.RelationMetadata{
 		RelationParent: {DirectlyRelatedUserTypes: &orgRef},
 	}
+	catalogRelations := map[string]openfga.Userset{
+		RelationParent:   direct(),
+		RelationDeployer: fromParent(RelationDeveloper),
+		RelationViewer:   fromParent(RelationViewer),
+	}
+	catalogMeta := map[string]openfga.RelationMetadata{
+		RelationParent: {DirectlyRelatedUserTypes: &orgRef},
+	}
+	clusterRef := []openfga.RelationReference{{Type: TypeCluster}}
+	instanceRelations := map[string]openfga.Userset{
+		RelationParent: direct(),
+		RelationEditor: fromParent(RelationOperator),
+		RelationViewer: fromParent(RelationViewer),
+	}
+	instanceMeta := map[string]openfga.RelationMetadata{
+		RelationParent: {DirectlyRelatedUserTypes: &clusterRef},
+	}
 	return client.ClientWriteAuthorizationModelRequest{
 		SchemaVersion: "1.1",
 		TypeDefinitions: []openfga.TypeDefinition{
@@ -212,6 +233,8 @@ func ModelV1() client.ClientWriteAuthorizationModelRequest {
 			{Type: TypeTeam, Relations: &teamRelations, Metadata: &openfga.Metadata{Relations: &teamMeta}},
 			{Type: TypeOrganization, Relations: &orgRelations, Metadata: &openfga.Metadata{Relations: &orgMeta}},
 			{Type: TypeCluster, Relations: &clusterRelations, Metadata: &openfga.Metadata{Relations: &clusterMeta}},
+			{Type: TypeCatalogItem, Relations: &catalogRelations, Metadata: &openfga.Metadata{Relations: &catalogMeta}},
+			{Type: TypeResourceInstance, Relations: &instanceRelations, Metadata: &openfga.Metadata{Relations: &instanceMeta}},
 		},
 	}
 }
@@ -221,6 +244,12 @@ func OrgObject(orgID string) string         { return TypeOrganization + ":" + or
 func TeamObject(teamID string) string       { return TypeTeam + ":" + teamID }
 func ClusterObject(clusterID string) string { return TypeCluster + ":" + clusterID }
 func UserObject(subject string) string      { return "user:" + subject }
+func CatalogItemObject(itemID string) string {
+	return TypeCatalogItem + ":" + itemID
+}
+func ResourceInstanceObject(instanceID string) string {
+	return TypeResourceInstance + ":" + instanceID
+}
 func TeamMemberUserset(teamID string) string {
 	return TeamObject(teamID) + "#" + RelationMember
 }

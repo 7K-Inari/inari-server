@@ -1,0 +1,12 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: postgres-aws
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: PostgresAWS
+    spec:
+      engineVersion: "16"
+      storageGB: 20
+  resources: []

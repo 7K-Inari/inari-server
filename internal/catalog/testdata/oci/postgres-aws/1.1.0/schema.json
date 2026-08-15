@@ -1,0 +1,1 @@
+{"type": "object", "properties": {"engineVersion": {"type": "string", "default": "16"}, "storageGB": {"type": "integer", "default": 20, "minimum": 20}, "multiAZ": {"type": "boolean", "default": false}}}

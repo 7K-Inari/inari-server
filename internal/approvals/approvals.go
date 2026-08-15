@@ -179,11 +179,15 @@ func (s *Service) List(ctx context.Context, orgID, state string) ([]types.Approv
 }
 
 // Decide approves or rejects a pending request, enforcing the item's policy
-// on the approver. Emits audit + outbox.
-func (s *Service) Decide(ctx context.Context, approvalID, approver string, approve bool, reason string) (*types.ApprovalRequest, error) {
+// on the approver. orgID scopes the request to the caller's tenant. Emits
+// audit + outbox.
+func (s *Service) Decide(ctx context.Context, orgID, approvalID, approver string, approve bool, reason string) (*types.ApprovalRequest, error) {
 	req, err := s.store.get(ctx, s.db.Pool, approvalID)
 	if err != nil {
 		return nil, err
+	}
+	if req.OrgID != orgID {
+		return nil, ErrNotFound
 	}
 	if req.State != types.ApprovalStatePending {
 		return nil, ErrAlreadyDecided
@@ -204,9 +208,14 @@ func (s *Service) Decide(ctx context.Context, approvalID, approver string, appro
 		state = types.ApprovalStateApproved
 	}
 	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
-		const sql = `UPDATE approval_requests SET state = $2, approver = $3, reason = $4, decided_at = $5 WHERE id = $1`
-		if _, err := tx.Exec(ctx, sql, approvalID, state, approver, reason, time.Now()); err != nil {
+		const sql = `UPDATE approval_requests SET state = $2, approver = $3, reason = $4, decided_at = $5
+		             WHERE id = $1 AND state = $6`
+		tag, err := tx.Exec(ctx, sql, approvalID, state, approver, reason, time.Now(), types.ApprovalStatePending)
+		if err != nil {
 			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrAlreadyDecided
 		}
 		req.State = state
 		req.Approver = approver

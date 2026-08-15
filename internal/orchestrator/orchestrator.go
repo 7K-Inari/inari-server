@@ -32,6 +32,9 @@ type CatalogResolver interface {
 	GetItemByID(ctx context.Context, itemID string) (*types.CatalogItem, error)
 	EffectiveVersion(ctx context.Context, orgID, itemID, channel string) (string, error)
 	GetVersion(ctx context.Context, itemID, version string) (*types.CatalogItemVersion, error)
+	// EnsureVisible enforces per-tenant/cluster catalog visibility policies
+	// (an item hidden from the tenant reads as not-found).
+	EnsureVisible(ctx context.Context, orgID, clusterID, itemID string) error
 }
 
 // ClusterResolver is the cluster registry seam.
@@ -113,6 +116,9 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 	}
 	if cluster.State != types.ClusterStateActive && cluster.State != types.ClusterStateDegraded {
 		return nil, ErrClusterNotActive
+	}
+	if err := s.catalog.EnsureVisible(ctx, req.OrgID, req.ClusterID, req.ItemID); err != nil {
+		return nil, err
 	}
 	item, err := s.catalog.GetItemByID(ctx, req.ItemID)
 	if err != nil {

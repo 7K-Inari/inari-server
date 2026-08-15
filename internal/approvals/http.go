@@ -120,7 +120,7 @@ func (h *Handler) decide(ctx context.Context, in *decideInput) (*decideOutput, e
 	if err != nil {
 		return nil, err
 	}
-	req, err := h.svc.Decide(ctx, in.ID, id.Subject, in.Body.Approve, in.Body.Reason)
+	req, err := h.svc.Decide(ctx, org.ID, in.ID, id.Subject, in.Body.Approve, in.Body.Reason)
 	if errors.Is(err, ErrNotFound) {
 		return nil, huma.Error404NotFound("approval request not found")
 	}
@@ -132,9 +132,6 @@ func (h *Handler) decide(ctx context.Context, in *decideInput) (*decideOutput, e
 	}
 	if err != nil {
 		return nil, err
-	}
-	if req.OrgID != org.ID {
-		return nil, huma.Error404NotFound("approval request not found")
 	}
 	out := &decideOutput{}
 	out.Body.Approval = *req

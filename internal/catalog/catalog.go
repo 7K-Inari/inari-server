@@ -132,6 +132,23 @@ func (s *Service) GetItemByID(ctx context.Context, itemID string) (*types.Catalo
 	return s.store.GetItem(ctx, s.db.Pool, itemID)
 }
 
+// EnsureVisible enforces per-tenant/cluster visibility policies for flows
+// that load items by ID directly (orchestrator deploy). Hidden items read
+// as not-found.
+func (s *Service) EnsureVisible(ctx context.Context, orgID, clusterID, itemID string) error {
+	if _, err := s.store.GetItem(ctx, s.db.Pool, itemID); err != nil {
+		return err
+	}
+	visMap, err := s.store.VisibilityMap(ctx, s.db.Pool)
+	if err != nil {
+		return err
+	}
+	if !visibleTo(visMap[itemID], orgID, clusterID) {
+		return ErrItemNotFound
+	}
+	return nil
+}
+
 // EffectiveVersion resolves the version a tenant deploys: pin wins,
 // otherwise the latest in the channel (default "stable").
 func (s *Service) EffectiveVersion(ctx context.Context, orgID, itemID, channel string) (string, error) {

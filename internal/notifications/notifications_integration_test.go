@@ -106,6 +106,13 @@ func TestEndpointCRUD(t *testing.T) {
 		t.Fatalf("update: %+v", up)
 	}
 
+	if err := svc.DeleteEndpoint(ctx, "user-1", "org:1", ep.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.GetEndpoint(ctx, "org:1", ep.ID); err == nil {
+		t.Fatal("expected not-found after delete")
+	}
+
 	var actions []string
 	rows, err := database.Pool.Query(ctx, `SELECT action FROM audit_events WHERE org_id='org:1' ORDER BY created_at`)
 	if err != nil {
@@ -117,15 +124,8 @@ func TestEndpointCRUD(t *testing.T) {
 		actions = append(actions, a)
 	}
 	rows.Close()
-	if len(actions) != 3 || actions[0] != "notification_endpoint.created" || actions[1] != "notification_endpoint.updated" {
+	if len(actions) != 3 || actions[0] != "notification_endpoint.created" || actions[1] != "notification_endpoint.updated" || actions[2] != "notification_endpoint.deleted" {
 		t.Fatalf("audit actions: %v", actions)
-	}
-
-	if err := svc.DeleteEndpoint(ctx, "user-1", "org:1", ep.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := svc.GetEndpoint(ctx, "org:1", ep.ID); err == nil {
-		t.Fatal("expected not-found after delete")
 	}
 }
 

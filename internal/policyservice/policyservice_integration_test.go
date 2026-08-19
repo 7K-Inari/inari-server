@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -56,7 +57,7 @@ deny contains {"rule": "disallowed-registry", "reason": "image not from approved
 }
 `
 
-func itService(t *testing.T) (*policyservice.Service, *itQueue) {
+func itService(t *testing.T) (*policyservice.Service, *itQueue, *db.DB) {
 	t.Helper()
 	ctx := context.Background()
 	pg, err := postgres.Run(ctx, "postgres:16-alpine",
@@ -96,11 +97,11 @@ func itService(t *testing.T) (*policyservice.Service, *itQueue) {
 	}}
 	svc := policyservice.NewService(database, policyservice.NewStore(),
 		policyservice.NewOPAEvaluator(), clusters, queue, audit.NewStore())
-	return svc, queue
+	return svc, queue, database
 }
 
 func TestPolicyCRUD(t *testing.T) {
-	svc, _ := itService(t)
+	svc, _, _ := itService(t)
 	ctx := context.Background()
 
 	p, err := svc.CreatePolicy(ctx, "user-1", "org:1", "registry", types.PolicyTargetRequest, types.PolicyEngineRego, itDenyRego)
@@ -144,7 +145,7 @@ func TestPolicyCRUD(t *testing.T) {
 }
 
 func TestPolicyCreateRejectsBrokenRego(t *testing.T) {
-	svc, _ := itService(t)
+	svc, _, _ := itService(t)
 	_, err := svc.CreatePolicy(context.Background(), "user-1", "org:1", "broken",
 		types.PolicyTargetRequest, types.PolicyEngineRego, "package inari.policy\n\ndeny if {")
 	if !errors.Is(err, policyservice.ErrInvalidInput) {
@@ -153,7 +154,7 @@ func TestPolicyCreateRejectsBrokenRego(t *testing.T) {
 }
 
 func TestPreFlightBlocksAndExemptionAllows(t *testing.T) {
-	svc, _ := itService(t)
+	svc, _, _ := itService(t)
 	ctx := context.Background()
 
 	p, err := svc.CreatePolicy(ctx, "user-1", "org:1", "registry", types.PolicyTargetRequest, types.PolicyEngineRego, itDenyRego)
@@ -210,8 +211,13 @@ func TestPreFlightBlocksAndExemptionAllows(t *testing.T) {
 }
 
 func TestAssignDistributesApplyBundle(t *testing.T) {
-	svc, queue := itService(t)
+	svc, queue, database := itService(t)
 	ctx := context.Background()
+
+	// Distribution is outbox-driven: Assign commits the assignment + event,
+	// the dispatcher fan-out enqueues ApplyBundle commands.
+	dispatcher := audit.NewDispatcher(database, time.Millisecond,
+		policyservice.NewDistributeHandler(svc, slog.Default()))
 
 	manifests := json.RawMessage(`[{"apiVersion":"kyverno.io/v1","kind":"ClusterPolicy","metadata":{"name":"require-labels"}}]`)
 	pack, err := svc.CreatePolicyPack(ctx, "user-1", "org:1", "baseline", types.PolicyPackEngineKyverno, "", "1.0.0", nil, manifests)
@@ -225,6 +231,9 @@ func TestAssignDistributesApplyBundle(t *testing.T) {
 	}
 	if a.State != "active" {
 		t.Fatalf("assignment = %+v", a)
+	}
+	if err := dispatcher.DispatchOnce(ctx); err != nil {
+		t.Fatal(err)
 	}
 
 	if len(queue.cmds) != 1 {
@@ -250,6 +259,9 @@ func TestAssignDistributesApplyBundle(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := svc.Assign(ctx, "user-1", "org:1", pack.ID, types.PolicyTargetClusterSet, cs.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatcher.DispatchOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if len(queue.cmds) != 2 {

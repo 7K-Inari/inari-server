@@ -401,6 +401,10 @@ func (s *Service) CreateEndpoint(ctx context.Context, actor, orgID string, in En
 	if in.Enabled != nil {
 		enabled = *in.Enabled
 	}
+	events := in.Events
+	if events == nil {
+		events = []string{} // events column is NOT NULL DEFAULT '{}'
+	}
 	ep := &types.NotificationEndpoint{
 		ID:      "nep:" + newUUID(),
 		OrgID:   orgID,
@@ -408,7 +412,7 @@ func (s *Service) CreateEndpoint(ctx context.Context, actor, orgID string, in En
 		Kind:    in.Kind,
 		URL:     in.URL,
 		Secret:  in.Secret,
-		Events:  in.Events,
+		Events:  events,
 		Enabled: enabled,
 	}
 	err := s.db.WithTx(ctx, func(tx pgx.Tx) error {

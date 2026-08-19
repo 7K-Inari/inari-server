@@ -86,22 +86,23 @@ func (h *ResumeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) error
 		return fmt.Errorf("orchestrator: resume: preflight: %w", err)
 	}
 	var res *DeployResult
+	var applyErr error
 	if req.InstanceID != "" {
 		existing, err := h.svc.instances.Get(ctx, h.svc.db.Pool, req.InstanceID)
 		if err != nil {
 			return fmt.Errorf("orchestrator: resume: instance %s: %w", req.InstanceID, err)
 		}
-		res, err = h.svc.apply(ctx, deploy, item, req.Version, existing)
+		res, applyErr = h.svc.apply(ctx, deploy, item, req.Version, existing)
 	} else {
-		res, err = h.svc.apply(ctx, deploy, item, req.Version, nil)
+		res, applyErr = h.svc.apply(ctx, deploy, item, req.Version, nil)
 	}
-	if err != nil {
-		if errors.Is(err, ErrInstanceExists) {
+	if applyErr != nil {
+		if errors.Is(applyErr, ErrInstanceExists) {
 			// Deployed meanwhile (e.g. duplicate delivery) — idempotent no-op.
 			h.log.Info("orchestrator: resume skipped, instance exists", "approval", p.ApprovalID)
 			return nil
 		}
-		return fmt.Errorf("orchestrator: resume approval %s: %w", p.ApprovalID, err)
+		return fmt.Errorf("orchestrator: resume approval %s: %w", p.ApprovalID, applyErr)
 	}
 	h.log.Info("orchestrator: approval-gated deploy resumed",
 		"approval", p.ApprovalID, "instance", res.InstanceID, "status", res.Status)

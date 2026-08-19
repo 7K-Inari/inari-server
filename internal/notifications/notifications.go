@@ -359,11 +359,18 @@ func validateEndpoint(in *EndpointInput, kind string) error {
 	return nil
 }
 
+// AllowPrivateEndpoints disables the SSRF private-address check on endpoint
+// URLs. TESTS ONLY — httptest servers listen on loopback.
+var AllowPrivateEndpoints = false
+
 // rejectPrivateHost blocks endpoints pointing at loopback, private,
 // link-local, or otherwise non-public addresses (SSRF guard). Literal IPs
 // are checked directly; hostnames are resolved and every returned address
 // must be public.
 func rejectPrivateHost(host string) error {
+	if AllowPrivateEndpoints {
+		return nil
+	}
 	if host == "" {
 		return ErrInvalidURL
 	}

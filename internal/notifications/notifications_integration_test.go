@@ -54,6 +54,7 @@ func itDB(t *testing.T) *db.DB {
 }
 
 func newService(database *db.DB, slack *notifications.SlackSender, webhook *notifications.WebhookSender) *notifications.Service {
+	notifications.AllowPrivateEndpoints = true // httptest servers listen on loopback
 	return notifications.NewService(database, notifications.NewStore(), audit.NewStore(), slack, webhook)
 }
 

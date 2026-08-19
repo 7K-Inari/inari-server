@@ -69,7 +69,7 @@ func (s *SlackSender) Send(ctx context.Context, ep *types.NotificationEndpoint, 
 	if err != nil {
 		return fmt.Errorf("notifications: slack post: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return fmt.Errorf("notifications: slack post: unexpected status %d", resp.StatusCode)
@@ -112,7 +112,7 @@ func (s *WebhookSender) Send(ctx context.Context, ep *types.NotificationEndpoint
 	if err != nil {
 		return fmt.Errorf("notifications: webhook post: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return fmt.Errorf("notifications: webhook post: unexpected status %d", resp.StatusCode)

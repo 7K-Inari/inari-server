@@ -119,7 +119,7 @@ func TestApprovalGateResume(t *testing.T) {
 	}
 
 	code, body := itReq(t, srv, "POST", "/api/v1/tenants/acme/deploys", "good",
-		`{"itemId":"curated:web-service","clusterId":"cluster-1","name":"web","namespace":"apps","spec":{"hostname":"app.example.com"}}`)
+		`{"itemId":"curated:web-service","version":"0.1.0","clusterId":"cluster-1","name":"web","namespace":"apps","spec":{"hostname":"app.example.com"}}`)
 	if code != http.StatusOK {
 		t.Fatalf("deploy: %d %s", code, body)
 	}
@@ -192,7 +192,7 @@ func TestApprovalCancelAndExpiry(t *testing.T) {
 	gateDeploy := func(t *testing.T, name string) string {
 		t.Helper()
 		code, body := itReq(t, srv, "POST", "/api/v1/tenants/acme/deploys", "good",
-			`{"itemId":"curated:web-service","clusterId":"cluster-1","name":"`+name+`","spec":{"hostname":"x.example.com"}}`)
+			`{"itemId":"curated:web-service","version":"0.1.0","clusterId":"cluster-1","name":"`+name+`","spec":{"hostname":"x.example.com"}}`)
 		if code != http.StatusOK {
 			t.Fatalf("deploy: %d %s", code, body)
 		}

@@ -61,23 +61,24 @@ func TestCreateClusterClientIncludesAudienceMapper(t *testing.T) {
 		t.Errorf("clientId = %q", body.ClientID)
 	}
 
-	var aud *map[string]string
+	var aud map[string]string
+	found := false
 	for _, m := range body.ProtocolMappers {
 		if m.ProtocolMapper == "oidc-audience-mapper" {
-			cfg := m.Config
-			aud = &cfg
+			aud = m.Config
+			found = true
 		}
 	}
-	if aud == nil {
+	if !found {
 		t.Fatalf("no oidc-audience-mapper in protocolMappers: %s", bodies["createClient"])
 	}
-	if got := (*aud)["included.client.audience"]; got != "inari-server" {
+	if got := aud["included.client.audience"]; got != "inari-server" {
 		t.Errorf("included.client.audience = %q, want inari-server", got)
 	}
-	if (*aud)["access.token.claim"] != "true" {
-		t.Errorf("access.token.claim = %q", (*aud)["access.token.claim"])
+	if aud["access.token.claim"] != "true" {
+		t.Errorf("access.token.claim = %q", aud["access.token.claim"])
 	}
-	if (*aud)["id.token.claim"] != "false" {
-		t.Errorf("id.token.claim = %q", (*aud)["id.token.claim"])
+	if aud["id.token.claim"] != "false" {
+		t.Errorf("id.token.claim = %q", aud["id.token.claim"])
 	}
 }

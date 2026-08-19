@@ -69,13 +69,13 @@ type Store struct{}
 
 func NewStore() *Store { return &Store{} }
 
-const clusterCols = `id, org_id, name, kubernetes_version, labels, keycloak_client_id, state,
+const clusterCols = `id, org_id, name, kubernetes_version, distribution, oidc_issuer_url, labels, keycloak_client_id, state,
 	capability_checksum, connected_at, last_seen_at, created_at`
 
 func scanCluster(row interface{ Scan(...any) error }) (*types.Cluster, error) {
 	var c types.Cluster
 	var labels []byte
-	err := row.Scan(&c.ID, &c.OrgID, &c.Name, &c.KubernetesVersion, &labels, &c.KeycloakClientID,
+	err := row.Scan(&c.ID, &c.OrgID, &c.Name, &c.KubernetesVersion, &c.Distribution, &c.OIDCIssuerURL, &labels, &c.KeycloakClientID,
 		&c.State, &c.CapabilityChecksum, &c.ConnectedAt, &c.LastSeenAt, &c.CreatedAt)
 	if err != nil {
 		return nil, err
@@ -157,6 +157,20 @@ func (s *Store) MarkRegistered(ctx context.Context, q db.Querier, id, clientID, 
 	const sql = `UPDATE clusters SET keycloak_client_id = $2, kubernetes_version = $3, labels = $4,
 	             state = 'active', connected_at = now(), last_seen_at = now() WHERE id = $1`
 	tag, err := q.Exec(ctx, sql, id, clientID, k8sVersion, raw)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrClusterNotFound
+	}
+	return nil
+}
+
+// SetMetadata records agent-reported cluster metadata (k8s distribution and
+// OIDC issuer URL) used for IRSA-vs-web-identity decisions (plan §5.7).
+func (s *Store) SetMetadata(ctx context.Context, q db.Querier, id, distribution, oidcIssuerURL string) error {
+	const sql = `UPDATE clusters SET distribution = $2, oidc_issuer_url = $3 WHERE id = $1`
+	tag, err := q.Exec(ctx, sql, id, distribution, oidcIssuerURL)
 	if err != nil {
 		return err
 	}
@@ -429,6 +443,11 @@ func (s *Service) MarkRegistered(ctx context.Context, actor, clusterID, clientID
 // RecordHeartbeat refreshes connection health for a connected agent.
 func (s *Service) RecordHeartbeat(ctx context.Context, clusterID string) error {
 	return s.store.TouchLastSeen(ctx, s.db.Pool, clusterID)
+}
+
+// SetMetadata records agent-reported distribution and OIDC issuer metadata.
+func (s *Service) SetMetadata(ctx context.Context, clusterID, distribution, oidcIssuerURL string) error {
+	return s.store.SetMetadata(ctx, s.db.Pool, clusterID, distribution, oidcIssuerURL)
 }
 
 // SetCapabilityChecksum stores the last acknowledged capability checksum

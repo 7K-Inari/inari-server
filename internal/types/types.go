@@ -89,10 +89,22 @@ const (
 	EventCatalogItemUpserted = "catalog.item_upserted"
 	EventApprovalRequested   = "approval.requested"
 	EventApprovalDecided     = "approval.decided"
+	EventApprovalCancelled   = "approval.cancelled"
+	EventApprovalExpired     = "approval.expired"
 	EventDeployRequested     = "deploy.requested"
 	EventInstanceCreated     = "instance.created"
 	EventInstanceStatus      = "instance.status"
 	EventInstanceUpgraded    = "instance.upgraded"
+
+	EventCloudAccountRegistered   = "cloud_account.registered"
+	EventCloudAccountValidated    = "cloud_account.validated"
+	EventCloudAccountDeregistered = "cloud_account.deregistered"
+
+	EventPolicyPackAssigned = "policy_pack.assigned"
+	EventClusterSetCreated  = "cluster_set.created"
+	EventClusterSetDeleted  = "cluster_set.deleted"
+	EventExemptionRequested = "exemption.requested"
+	EventExemptionDecided   = "exemption.decided"
 )
 
 // ClusterState is the cluster lifecycle state (plan §5.11).
@@ -113,6 +125,8 @@ type Cluster struct {
 	OrgID              string            `json:"orgId"`
 	Name               string            `json:"name"`
 	KubernetesVersion  string            `json:"kubernetesVersion,omitempty"`
+	Distribution       string            `json:"distribution,omitempty"` // e.g. "eks", "kind" (agent-reported)
+	OIDCIssuerURL      string            `json:"oidcIssuerUrl,omitempty"`
 	Labels             map[string]string `json:"labels,omitempty"`
 	KeycloakClientID   string            `json:"keycloakClientId,omitempty"`
 	State              ClusterState      `json:"state"`
@@ -308,25 +322,37 @@ type VersionPin struct {
 
 // Approval states.
 const (
-	ApprovalStatePending  = "pending"
-	ApprovalStateApproved = "approved"
-	ApprovalStateRejected = "rejected"
+	ApprovalStatePending   = "pending"
+	ApprovalStateApproved  = "approved"
+	ApprovalStateRejected  = "rejected"
+	ApprovalStateCancelled = "cancelled"
+	ApprovalStateExpired   = "expired"
 )
 
-// ApprovalRequest gates one deploy request (plan §5.2 basic approvals).
+// ApprovalRequest gates one deploy request (plan §5.2). Name, Namespace,
+// OwnerTeam, Channel and InstanceID carry the deploy context so an approved
+// request can be resumed by the orchestrator without the caller re-issuing
+// the deploy (M3); InstanceID is set for upgrade approvals.
 type ApprovalRequest struct {
-	ID        string          `json:"id"`
-	OrgID     string          `json:"orgId"`
-	ItemID    string          `json:"itemId"`
-	Version   string          `json:"version"`
-	ClusterID string          `json:"clusterId"`
-	Spec      json.RawMessage `json:"spec"`
-	Requester string          `json:"requester"`
-	Approver  string          `json:"approver,omitempty"`
-	State     string          `json:"state"`
-	Reason    string          `json:"reason,omitempty"`
-	CreatedAt time.Time       `json:"createdAt"`
-	DecidedAt *time.Time      `json:"decidedAt,omitempty"`
+	ID          string          `json:"id"`
+	OrgID       string          `json:"orgId"`
+	ItemID      string          `json:"itemId"`
+	Version     string          `json:"version"`
+	ClusterID   string          `json:"clusterId"`
+	Spec        json.RawMessage `json:"spec"`
+	Requester   string          `json:"requester"`
+	Approver    string          `json:"approver,omitempty"`
+	State       string          `json:"state"`
+	Reason      string          `json:"reason,omitempty"`
+	Name        string          `json:"name,omitempty"`
+	Namespace   string          `json:"namespace,omitempty"`
+	OwnerTeam   string          `json:"ownerTeam,omitempty"`
+	Channel     string          `json:"channel,omitempty"`
+	InstanceID  string          `json:"instanceId,omitempty"`
+	CreatedAt   time.Time       `json:"createdAt"`
+	DecidedAt   *time.Time      `json:"decidedAt,omitempty"`
+	ExpiresAt   *time.Time      `json:"expiresAt,omitempty"`
+	CancelledBy string          `json:"cancelledBy,omitempty"`
 }
 
 // InstanceState is the resource instance lifecycle (plan §5.11).
@@ -454,4 +480,219 @@ type MembershipPayload struct {
 	TeamID string `json:"teamId"`
 	UserID string `json:"userId"`
 	Role   Role   `json:"role"`
+}
+
+// Cloud account states (plan §5.7).
+const (
+	CloudAccountStatePendingValidation = "pending_validation"
+	CloudAccountStateActive            = "active"
+	CloudAccountStateInvalid           = "invalid"
+	CloudAccountStateRevoked           = "revoked"
+)
+
+// Cloud account run contexts (§5.7): where Crossplane materializes the
+// per-account ProviderConfig.
+const (
+	CloudAccountRunContextTenant   = "tenant"
+	CloudAccountRunContextPlatform = "platform"
+)
+
+// CloudAccount is a registered cloud account (AWS first, plan §5.7). It
+// stores ONLY account ID, role ARN, external ID and issuer metadata — never
+// keys. Revocation is tenant-side: the tenant deletes the IAM role.
+//
+// This entity is a public contract: the Tenant Zone Factory (M3-W2) builds
+// on it (management-scope accounts, trust bootstrap). Keep the API stable.
+type CloudAccount struct {
+	ID            string     `json:"id"`
+	OrgID         string     `json:"orgId"`
+	Provider      string     `json:"provider"` // "aws"
+	AccountID     string     `json:"accountId"`
+	RoleARN       string     `json:"roleArn"`
+	ExternalID    string     `json:"externalId,omitempty"`
+	IssuerURL     string     `json:"issuerUrl,omitempty"`
+	RunContext    string     `json:"runContext"` // tenant | platform
+	State         string     `json:"state"`
+	ValidatedAt   *time.Time `json:"validatedAt,omitempty"`
+	ValidationErr string     `json:"validationError,omitempty"`
+	CreatedBy     string     `json:"createdBy,omitempty"`
+	CreatedAt     time.Time  `json:"createdAt"`
+}
+
+// CloudAccountPayload is the outbox payload for cloud account events.
+type CloudAccountPayload struct {
+	OrgID     string `json:"orgId"`
+	AccountID string `json:"accountId"` // cloud_accounts.id
+	AWSAcct   string `json:"awsAccountId,omitempty"`
+	State     string `json:"state,omitempty"`
+}
+
+// Policy targets / engines (plan §5.11).
+const (
+	PolicyTargetRequest = "request"
+	PolicyTargetRender  = "render"
+	PolicyEngineRego    = "rego"
+)
+
+// Policy is one versioned policy document evaluated at request-time
+// (pre-flight) or render-time (manifest checks).
+type Policy struct {
+	ID        string    `json:"id"`
+	OrgID     string    `json:"orgId,omitempty"` // empty = platform-global
+	Name      string    `json:"name"`
+	Target    string    `json:"target"`
+	Engine    string    `json:"engine"`
+	Source    string    `json:"source"`
+	Enabled   bool      `json:"enabled"`
+	Version   int       `json:"version"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// PolicyViolation is one failed rule with reason + remediation (§5.11:
+// developers see why and what to change, not just a denial).
+type PolicyViolation struct {
+	Rule        string `json:"rule"`
+	Reason      string `json:"reason"`
+	Remediation string `json:"remediation"`
+	Exempted    bool   `json:"exempted,omitempty"`
+}
+
+// PolicyDecision is the outcome of a policy evaluation.
+type PolicyDecision struct {
+	Allow      bool              `json:"allow"`
+	Warnings   []PolicyViolation `json:"warnings,omitempty"`
+	Violations []PolicyViolation `json:"violations,omitempty"`
+}
+
+// ClusterSet is a label-selector grouping of clusters — the targeting unit
+// for fleet-wide operations (§5.11).
+type ClusterSet struct {
+	ID            string            `json:"id"`
+	OrgID         string            `json:"orgId"`
+	Name          string            `json:"name"`
+	LabelSelector map[string]string `json:"labelSelector"`
+	CreatedAt     time.Time         `json:"createdAt"`
+}
+
+// Policy pack engines (§5.11).
+const (
+	PolicyPackEngineKyverno = "kyverno"
+	PolicyPackEngineCELVAP  = "cel-vap"
+)
+
+// PolicyPack is a versioned bundle of in-cluster admission policies
+// (Kyverno or CEL ValidatingAdmissionPolicies) distributed to ClusterSets.
+type PolicyPack struct {
+	ID         string          `json:"id"`
+	OrgID      string          `json:"orgId,omitempty"` // empty = platform-global
+	Name       string          `json:"name"`
+	Engine     string          `json:"engine"`
+	OCIRef     string          `json:"ociRef,omitempty"`
+	Version    string          `json:"version"`
+	Parameters json.RawMessage `json:"parameters,omitempty"`
+	Manifests  json.RawMessage `json:"manifests"` // array of YAML/JSON documents
+	CreatedAt  time.Time       `json:"createdAt"`
+}
+
+// Policy assignment targets.
+const (
+	PolicyTargetClusterSet = "clusterset"
+	PolicyTargetTenant     = "tenant"
+	PolicyTargetCluster    = "cluster"
+)
+
+// PolicyAssignment binds a pack to a ClusterSet / tenant / cluster.
+type PolicyAssignment struct {
+	ID         string    `json:"id"`
+	PackID     string    `json:"packId"`
+	TargetType string    `json:"targetType"`
+	TargetID   string    `json:"targetId"`
+	State      string    `json:"state"`
+	CreatedAt  time.Time `json:"createdAt"`
+}
+
+// PolicyPackAssignedPayload is the outbox payload for pack assignment.
+type PolicyPackAssignedPayload struct {
+	OrgID        string `json:"orgId"`
+	PackID       string `json:"packId"`
+	AssignmentID string `json:"assignmentId"`
+	TargetType   string `json:"targetType"`
+	TargetID     string `json:"targetId"`
+}
+
+// ClusterSetPayload is the outbox payload for cluster set lifecycle events.
+type ClusterSetPayload struct {
+	OrgID        string `json:"orgId"`
+	ClusterSetID string `json:"clusterSetId"`
+}
+
+// Exemption states.
+const (
+	ExemptionStatePending  = "pending"
+	ExemptionStateApproved = "approved"
+	ExemptionStateRejected = "rejected"
+	ExemptionStateExpired  = "expired"
+)
+
+// Exemption is a time-boxed, approval-gated policy waiver (§5.11).
+type Exemption struct {
+	ID         string          `json:"id"`
+	OrgID      string          `json:"orgId"`
+	PolicyID   string          `json:"policyId"`
+	Scope      json.RawMessage `json:"scope"`
+	Reason     string          `json:"reason"`
+	State      string          `json:"state"`
+	ExpiresAt  time.Time       `json:"expiresAt"`
+	ApprovedBy string          `json:"approvedBy,omitempty"`
+	CreatedBy  string          `json:"createdBy,omitempty"`
+	CreatedAt  time.Time       `json:"createdAt"`
+}
+
+// ExemptionPayload is the outbox payload for exemption events.
+type ExemptionPayload struct {
+	OrgID       string `json:"orgId"`
+	ExemptionID string `json:"exemptionId"`
+	PolicyID    string `json:"policyId"`
+	State       string `json:"state"`
+}
+
+// Notification endpoint kinds (§5.2 v1: Slack + generic webhook).
+const (
+	NotificationKindSlack   = "slack"
+	NotificationKindWebhook = "webhook"
+)
+
+// NotificationEndpoint is a tenant-configured delivery target. The Secret
+// holds an HMAC signing key for webhook kind (never returned by the API).
+type NotificationEndpoint struct {
+	ID        string    `json:"id"`
+	OrgID     string    `json:"orgId"`
+	Name      string    `json:"name"`
+	Kind      string    `json:"kind"`
+	URL       string    `json:"url"`
+	Secret    string    `json:"-"`
+	Events    []string  `json:"events"`
+	Enabled   bool      `json:"enabled"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// Notification delivery states.
+const (
+	DeliveryStatusPending   = "pending"
+	DeliveryStatusDelivered = "delivered"
+	DeliveryStatusFailed    = "failed"
+)
+
+// NotificationDelivery records one attempted delivery for retry/audit.
+type NotificationDelivery struct {
+	ID          string          `json:"id"`
+	EndpointID  string          `json:"endpointId"`
+	EventType   string          `json:"eventType"`
+	Payload     json.RawMessage `json:"payload"`
+	Status      string          `json:"status"`
+	Attempts    int             `json:"attempts"`
+	LastError   string          `json:"lastError,omitempty"`
+	CreatedAt   time.Time       `json:"createdAt"`
+	DeliveredAt *time.Time      `json:"deliveredAt,omitempty"`
 }

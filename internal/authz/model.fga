@@ -31,3 +31,21 @@ type resource_instance
     define parent: [cluster]
     define editor: operator from parent
     define viewer: viewer from parent
+
+type cloud_account
+  relations
+    define parent: [organization]
+    define operator: platform_engineer from parent
+    define viewer: viewer from parent
+
+type policy_pack
+  relations
+    define parent: [organization]
+    define operator: platform_engineer from parent
+    define viewer: viewer from parent
+
+type cluster_set
+  relations
+    define parent: [organization]
+    define operator: platform_engineer from parent
+    define viewer: viewer from parent

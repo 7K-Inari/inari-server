@@ -134,6 +134,10 @@ func (h *Handler) deploy(ctx context.Context, in *deployInput) (*deployOutput, e
 		Namespace: in.Body.Namespace, OwnerTeam: in.Body.OwnerTeam,
 		Spec: in.Body.Spec, Requester: "user:" + id.Subject,
 	})
+	var pve *PolicyViolationError
+	if errors.As(err, &pve) {
+		return nil, huma.Error422UnprocessableEntity(pve.Error())
+	}
 	if errors.Is(err, ErrNoGitConfig) {
 		return nil, huma.Error409Conflict(err.Error())
 	}
@@ -179,6 +183,10 @@ func (h *Handler) upgrade(ctx context.Context, in *upgradeInput) (*deployOutput,
 		return nil, err
 	}
 	res, err := h.svc.Upgrade(ctx, org.ID, in.ID, in.Body.ToVersion, "user:"+id.Subject)
+	var pve *PolicyViolationError
+	if errors.As(err, &pve) {
+		return nil, huma.Error422UnprocessableEntity(pve.Error())
+	}
 	if errors.Is(err, inventory.ErrInstanceNotFound) {
 		return nil, huma.Error404NotFound("instance not found")
 	}

@@ -42,7 +42,7 @@ jobs:
         run: docker build -f deploy/docker/Dockerfile -t inari/server:e2e .
 
       - name: Build agent image
-        run: docker build -f Dockerfile -t inari/agent:e2e ./inari-agent
+        run: docker build -f inari-agent/Dockerfile -t inari/agent:e2e ./inari-agent
 
       - name: Create kind cluster
         uses: helm/kind-action@v1.12.0

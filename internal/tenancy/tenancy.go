@@ -22,6 +22,11 @@ type IdentityProvider interface {
 	CreateGroup(ctx context.Context, path string) (groupID string, err error)
 	// ListOrganizations returns the aliases of orgs the user is a member of.
 	ListOrganizations(ctx context.Context, userID string) ([]string, error)
+	AddOrganizationMember(ctx context.Context, kcOrgID, userID string) error
+	RemoveOrganizationMember(ctx context.Context, kcOrgID, userID string) error
+	AddGroupMember(ctx context.Context, groupPath, userID string) error
+	RemoveGroupMember(ctx context.Context, groupPath, userID string) error
+	GetUser(ctx context.Context, userID string) (*types.User, error)
 }
 
 // DefaultTeams are created with every tenant; each grants its org role.
@@ -35,9 +40,14 @@ var DefaultTeams = []struct {
 }
 
 var (
-	ErrSlugTaken   = errors.New("tenant slug already exists")
-	ErrOrgNotFound = errors.New("organization not found")
+	ErrSlugTaken    = errors.New("tenant slug already exists")
+	ErrOrgNotFound  = errors.New("organization not found")
+	ErrUserNotFound = errors.New("user not found")
+	ErrTeamNotFound = errors.New("team not found")
 )
+
+// PlatformTeamName is the default team that receives the tenant creator.
+const PlatformTeamName = "platform-team"
 
 // Store is the PostgreSQL projection of tenancy state.
 type Store struct{}
@@ -123,6 +133,56 @@ func (s *Store) AddMembership(ctx context.Context, q db.Querier, m *types.Member
 	}
 	_, err := q.Exec(ctx, sql, m.UserID, m.OrgID, teamID, m.Role)
 	return err
+}
+
+// RemoveMembership deletes a user's team membership row.
+func (s *Store) RemoveMembership(ctx context.Context, q db.Querier, m *types.Membership) error {
+	const sql = `DELETE FROM memberships WHERE user_id = $1 AND org_id = $2 AND team_id = $3`
+	_, err := q.Exec(ctx, sql, m.UserID, m.OrgID, m.TeamID)
+	return err
+}
+
+// GetTeamByName resolves a team within an org.
+func (s *Store) GetTeamByName(ctx context.Context, q db.Querier, orgID, name string) (*types.Team, error) {
+	const sql = `SELECT id, org_id, name, keycloak_group_path, created_at FROM teams WHERE org_id = $1 AND name = $2`
+	var t types.Team
+	err := q.QueryRow(ctx, sql, orgID, name).Scan(&t.ID, &t.OrgID, &t.Name, &t.KeycloakGroupPath, &t.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrTeamNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+// MemberView is a membership row joined with the user profile (console view).
+type MemberView struct {
+	UserID      string `json:"userId"`
+	Email       string `json:"email"`
+	DisplayName string `json:"displayName"`
+	Role        string `json:"role"`
+}
+
+// ListMembers returns team members with their user profiles.
+func (s *Store) ListMembers(ctx context.Context, q db.Querier, orgID, teamID string) ([]MemberView, error) {
+	const sql = `SELECT m.user_id, COALESCE(u.email,''), COALESCE(u.display_name,''), m.role
+	             FROM memberships m LEFT JOIN users u ON u.id = m.user_id
+	             WHERE m.org_id = $1 AND m.team_id = $2 ORDER BY m.user_id`
+	rows, err := q.Query(ctx, sql, orgID, teamID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []MemberView
+	for rows.Next() {
+		var mv MemberView
+		if err := rows.Scan(&mv.UserID, &mv.Email, &mv.DisplayName, &mv.Role); err != nil {
+			return nil, err
+		}
+		out = append(out, mv)
+	}
+	return out, rows.Err()
 }
 
 // GroupPath builds the Keycloak group path tenant-<slug>/<team>.
@@ -226,6 +286,47 @@ func (s *Service) CreateTenant(ctx context.Context, actor, slug, displayName str
 	for _, tm := range teams {
 		if _, err := s.idp.CreateGroup(ctx, tm.KeycloakGroupPath); err != nil {
 			return nil, nil, fmt.Errorf("tenancy: create group %s: %w", tm.KeycloakGroupPath, err)
+		}
+	}
+	// Creator auto-membership: the creating user joins the Keycloak
+	// Organization (drives the org token claim) and the platform-team group;
+	// the DB row + outbox event seed OpenFGA via the tuple writer.
+	if actor != "" {
+		if err := s.idp.AddOrganizationMember(ctx, kcOrgID, actor); err != nil {
+			return nil, nil, fmt.Errorf("tenancy: add creator to org: %w", err)
+		}
+		if err := s.idp.AddGroupMember(ctx, GroupPath(slug, PlatformTeamName), actor); err != nil {
+			return nil, nil, fmt.Errorf("tenancy: add creator to %s: %w", PlatformTeamName, err)
+		}
+		var platformTeam *types.Team
+		for i := range teams {
+			if teams[i].Name == PlatformTeamName {
+				platformTeam = &teams[i]
+			}
+		}
+		if platformTeam == nil {
+			return nil, nil, fmt.Errorf("tenancy: %s not among default teams", PlatformTeamName)
+		}
+		err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
+			if err := s.store.UpsertUser(ctx, tx, &types.User{ID: actor}); err != nil {
+				return err
+			}
+			if err := s.store.AddMembership(ctx, tx, &types.Membership{
+				UserID: actor, OrgID: org.ID, TeamID: platformTeam.ID, Role: types.RolePlatformEngineer,
+			}); err != nil {
+				return err
+			}
+			if err := s.audit.Record(ctx, tx, &types.AuditEvent{
+				OrgID: org.ID, Actor: actor, Action: "membership.added", ObjectType: "user", ObjectID: actor,
+			}); err != nil {
+				return err
+			}
+			return audit.AppendOutbox(ctx, tx, org.ID, types.EventMembershipAdded, types.MembershipPayload{
+				OrgID: org.ID, TeamID: platformTeam.ID, UserID: actor, Role: types.RolePlatformEngineer,
+			})
+		})
+		if err != nil {
+			return nil, nil, err
 		}
 	}
 	return org, teams, nil

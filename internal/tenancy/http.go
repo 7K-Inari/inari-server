@@ -57,6 +57,30 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Summary:     "List teams of a tenant",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.listTeams)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "listMembers",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/tenants/{org}/teams/{team}/members",
+		Summary:     "List members of a team",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.listMembers)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "addMember",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/tenants/{org}/teams/{team}/members",
+		Summary:     "Add a user to a team (platform-engineer/admin only)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.addMember)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "removeMember",
+		Method:      http.MethodDelete,
+		Path:        "/api/v1/tenants/{org}/teams/{team}/members/{subject}",
+		Summary:     "Remove a user from a team (platform-engineer/admin only)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.removeMember)
 }
 
 type createTenantInput struct {
@@ -162,6 +186,88 @@ func (h *Handler) listTeams(ctx context.Context, in *orgPathInput) (*listTeamsOu
 	out := &listTeamsOutput{}
 	out.Body.Teams = teams
 	return out, nil
+}
+
+type teamPathInput struct {
+	Org  string `path:"org" doc:"Tenant slug"`
+	Team string `path:"team" doc:"Team name"`
+}
+
+type listMembersOutput struct {
+	Body struct {
+		Members []MemberView `json:"members"`
+	}
+}
+
+func (h *Handler) listMembers(ctx context.Context, in *teamPathInput) (*listMembersOutput, error) {
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	if err != nil {
+		return nil, err
+	}
+	team, err := h.svc.store.GetTeamByName(ctx, h.svc.db.Pool, org.ID, in.Team)
+	if errors.Is(err, ErrTeamNotFound) {
+		return nil, huma.Error404NotFound("team not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+	members, err := h.svc.ListMembers(ctx, org.ID, team.ID)
+	if err != nil {
+		return nil, err
+	}
+	out := &listMembersOutput{}
+	out.Body.Members = members
+	return out, nil
+}
+
+type addMemberInput struct {
+	Org  string `path:"org"`
+	Team string `path:"team"`
+	Body struct {
+		Subject string `json:"subject" minLength:"1" doc:"Keycloak user id"`
+	}
+}
+
+func (h *Handler) addMember(ctx context.Context, in *addMemberInput) (*struct{}, error) {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer); err != nil {
+		return nil, err
+	}
+	id := identity(ctx)
+	err := h.svc.AddMember(ctx, id.Subject, in.Org, in.Team, in.Body.Subject)
+	switch {
+	case errors.Is(err, ErrUserNotFound):
+		return nil, huma.Error404NotFound("user not found")
+	case errors.Is(err, ErrTeamNotFound):
+		return nil, huma.Error404NotFound("team not found")
+	case errors.Is(err, ErrOrgNotFound):
+		return nil, huma.Error404NotFound("organization not found")
+	case err != nil:
+		return nil, err
+	}
+	return nil, nil
+}
+
+type removeMemberInput struct {
+	Org     string `path:"org"`
+	Team    string `path:"team"`
+	Subject string `path:"subject"`
+}
+
+func (h *Handler) removeMember(ctx context.Context, in *removeMemberInput) (*struct{}, error) {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer); err != nil {
+		return nil, err
+	}
+	id := identity(ctx)
+	err := h.svc.RemoveMember(ctx, id.Subject, in.Org, in.Team, in.Subject)
+	switch {
+	case errors.Is(err, ErrTeamNotFound):
+		return nil, huma.Error404NotFound("team not found")
+	case errors.Is(err, ErrOrgNotFound):
+		return nil, huma.Error404NotFound("organization not found")
+	case err != nil:
+		return nil, err
+	}
+	return nil, nil
 }
 
 // authorizeOrg performs coarse PEP (org claim) + fine PEP (OpenFGA Check).

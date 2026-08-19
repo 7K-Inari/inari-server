@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/7K-Inari/inari-server/internal/types"
 )
 
 // KeycloakAdmin implements IdentityProvider against the Keycloak Admin REST
@@ -323,4 +325,113 @@ func (k *KeycloakAdmin) findClientUUID(ctx context.Context, clientID string) (st
 		return "", nil
 	}
 	return clients[0].ID, nil
+}
+
+// AddOrganizationMember adds a user to a Keycloak Organization (drives the
+// organization token claim). Idempotent: 409 means already a member.
+func (k *KeycloakAdmin) AddOrganizationMember(ctx context.Context, kcOrgID, userID string) error {
+	resp, err := k.do(ctx, http.MethodPost, "/organizations/"+kcOrgID+"/members", userID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusConflict {
+		return nil
+	}
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("keycloak: add org member: status %d: %s", resp.StatusCode, b)
+	}
+	return nil
+}
+
+func (k *KeycloakAdmin) RemoveOrganizationMember(ctx context.Context, kcOrgID, userID string) error {
+	resp, err := k.do(ctx, http.MethodDelete, "/organizations/"+kcOrgID+"/members/"+userID, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("keycloak: remove org member: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// AddGroupMember joins a user to the group at path a/b/c.
+func (k *KeycloakAdmin) AddGroupMember(ctx context.Context, groupPath, userID string) error {
+	gid, err := k.resolveGroupID(ctx, groupPath)
+	if err != nil {
+		return err
+	}
+	resp, err := k.do(ctx, http.MethodPut, "/users/"+userID+"/groups/"+gid, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("keycloak: add group member: status %d: %s", resp.StatusCode, b)
+	}
+	return nil
+}
+
+func (k *KeycloakAdmin) RemoveGroupMember(ctx context.Context, groupPath, userID string) error {
+	gid, err := k.resolveGroupID(ctx, groupPath)
+	if err != nil {
+		return err
+	}
+	resp, err := k.do(ctx, http.MethodDelete, "/users/"+userID+"/groups/"+gid, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("keycloak: remove group member: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// resolveGroupID walks a/b/c one level at a time to the leaf group id.
+func (k *KeycloakAdmin) resolveGroupID(ctx context.Context, path string) (string, error) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	parentID := ""
+	id := ""
+	for _, name := range parts {
+		var err error
+		id, err = k.findChildGroup(ctx, parentID, name)
+		if err != nil {
+			return "", fmt.Errorf("keycloak: resolve group %s: %w", path, err)
+		}
+		parentID = id
+	}
+	return id, nil
+}
+
+// GetUser validates a subject exists and returns its profile.
+func (k *KeycloakAdmin) GetUser(ctx context.Context, userID string) (*types.User, error) {
+	resp, err := k.do(ctx, http.MethodGet, "/users/"+userID, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, ErrUserNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("keycloak: get user: status %d", resp.StatusCode)
+	}
+	var rep struct {
+		ID        string `json:"id"`
+		Email     string `json:"email"`
+		FirstName string `json:"firstName"`
+		LastName  string `json:"lastName"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rep); err != nil {
+		return nil, err
+	}
+	return &types.User{
+		ID:          rep.ID,
+		Email:       rep.Email,
+		DisplayName: strings.TrimSpace(rep.FirstName + " " + rep.LastName),
+	}, nil
 }

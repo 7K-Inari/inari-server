@@ -5,9 +5,8 @@
 # Mirrors the manually validated flow. All HTTP calls run through a toolbox
 # pod in the cluster (kubectl exec) so the script is immune to
 # port-forward fragility. It intentionally performs a few Keycloak
-# provisioning steps imperatively (audience mapper, org membership, client
-# secret delivery) that are not yet automated in inari-server — each is
-# marked GAP(n) and maps to a tracked upstream fix; the script must keep
+# provisioning steps imperatively (audience mapper, client secret delivery)
+# that are not yet automated in inari-server — each is marked GAP(n) and maps to a tracked upstream fix; the script must keep
 # passing once those land.
 #
 # Prereqs: docker, kind, kubectl, helm, jq. Configurable via env:
@@ -168,19 +167,12 @@ done
 jq -e '.organization.keycloakOrgId' <<<"$TENANT_RESP" >/dev/null \
   || die "tenant creation failed after retries: $TENANT_RESP"
 ORG_KC_ID=$(jq -r '.organization.keycloakOrgId' <<<"$TENANT_RESP")
-TEAM_ID=$(jq -r '.teams[] | select(.name=="platform-team") | .id' <<<"$TENANT_RESP")
 
-log "GAP(org-membership): adding dev-admin to the Keycloak organization"
-xcurl -X POST -H "Authorization: Bearer $AT" -H "Content-Type: application/json" \
-  -d "\"$KC_UID\"" -o /dev/null \
-  "http://keycloak-service:8080/admin/realms/inari/organizations/$ORG_KC_ID/members"
-
-log "GAP(fga-membership): seeding platform-team membership tuple in OpenFGA"
+log "verifying creator auto-membership seeded OpenFGA (outbox → tuple writer)"
+# CreateTenant adds the creator to the Keycloak org + platform-team group and
+# emits membership.added; the outbox dispatcher seeds the team membership and
+# team→org role tuples asynchronously — poll instead of racing it.
 FGA_STORE=$(xcurl "http://openfga:8080/stores" | jq -r '.stores[0].id')
-xcurl -X POST "http://openfga:8080/stores/$FGA_STORE/write" -H "Content-Type: application/json" \
-  -d "{\"writes\":{\"tuple_keys\":[{\"user\":\"user:$KC_UID\",\"relation\":\"member\",\"object\":\"team:$TEAM_ID\"}]}}" -o /dev/null
-# The outbox dispatcher seeds the team→org role tuples asynchronously on the
-# TenantCreated event — poll instead of racing it.
 ALLOWED=false
 for i in $(seq 1 18); do
   ALLOWED=$(xcurl -X POST "http://openfga:8080/stores/$FGA_STORE/check" -H "Content-Type: application/json" \
@@ -188,7 +180,7 @@ for i in $(seq 1 18); do
   [ "$ALLOWED" = "true" ] && break
   sleep 5
 done
-[ "$ALLOWED" = "true" ] || die "OpenFGA check failed after seeding tuples (dispatcher never seeded team→org roles)"
+[ "$ALLOWED" = "true" ] || die "OpenFGA check failed (creator auto-membership did not propagate via outbox)"
 
 log "registering cluster + issuing token"
 TOKEN="$(user_token)"

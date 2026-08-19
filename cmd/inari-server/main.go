@@ -11,7 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
+
 
 	"github.com/7K-Inari/inari-server/internal/agentgateway"
 	"github.com/7K-Inari/inari-server/internal/approvals"
@@ -30,6 +30,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
 	gitgithub "github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider/github"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
+	"github.com/7K-Inari/inari-server/internal/types"
 
 	"connectrpc.com/connect"
 	agentv1connect "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1/agentv1connect"
@@ -105,12 +106,15 @@ func run() error {
 
 	registry := clusterregistry.NewService(database, idp, clusterregistry.NewStore(), auditStore,
 		cfg.RegistrationTokenTTL, cfg.EnrollmentApprovalRequired)
+	capsStore := capabilities.NewStore()
 	registryHandler := clusterregistry.NewHandler(registry, svc, authorizer, clusterregistry.ManifestParams{
 		AgentImageRepo: cfg.AgentImageRepo,
 		AgentImageTag:  cfg.AgentImageTag,
 		GatewayAddress: cfg.AgentGatewayAddress,
-	})
-	caps := capabilities.NewService(database, capabilities.NewStore(), auditStore)
+	}, clusterregistry.CapabilitiesListerFunc(func(ctx context.Context, clusterID string) ([]types.Capability, error) {
+		return capsStore.List(ctx, database.Pool, clusterID)
+	}))
+	caps := capabilities.NewService(database, capsStore, auditStore)
 	gateway := agentgateway.NewGateway(database, registry, idp, caps, auditStore, agentgateway.Config{
 		OIDCIssuerURL:  cfg.OIDCIssuerURL,
 		ESOSecretStore: cfg.ESOSecretStore,
@@ -164,15 +168,19 @@ func run() error {
 	router.Handle(streamPath+"*", streamHandler)
 
 	// Unencrypted HTTP/2 (h2c) so Connect-RPC streaming works without TLS
-	// termination in front (agents may dial directly in dev).
+	// termination in front (agents may dial directly in dev). HTTP/1.1 stays
+	// enabled for REST clients, browsers and health checks.
 	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)
 
 	srv := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           router,
-		ReadHeaderTimeout: 10 * time.Second,
-		Protocols:         protocols,
+		Addr:    cfg.HTTPAddr,
+		Handler: router,
+		// No ReadHeaderTimeout: with h2c bidi streams (agent EventStream) a
+		// header deadline propagates to the stream and kills long-lived
+		// connections at the timeout. Timeouts belong at the LB/proxy layer.
+		Protocols: protocols,
 	}
 	errCh := make(chan error, 1)
 	go func() {

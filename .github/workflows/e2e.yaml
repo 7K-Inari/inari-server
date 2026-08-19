@@ -1,0 +1,62 @@
+name: e2e
+
+# Golden-path gate: full platform stack on kind, tenant → cluster
+# registration → agent stream → capabilities. This is the end-to-end check
+# that guards the hub-and-spoke flow (plan §9 M1/M2 exit criteria).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  golden-path:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout inari-helm-charts
+        uses: actions/checkout@v4
+        with:
+          repository: 7K-Inari/inari-helm-charts
+          path: inari-helm-charts
+
+      - name: Checkout inari-agent
+        uses: actions/checkout@v4
+        with:
+          repository: 7K-Inari/inari-agent
+          path: inari-agent
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build server image
+        run: docker build -f deploy/docker/Dockerfile -t inari/server:e2e .
+
+      - name: Build agent image
+        run: docker build -f Dockerfile -t inari/agent:e2e ./inari-agent
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: inari-e2e
+          wait: 60s
+
+      - name: Run golden path
+        run: CHART_DIR=inari-helm-charts/charts/inari-platform KEEP_CLUSTER=false bash e2e/golden-path.sh
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          kubectl config use-context kind-inari-e2e || true
+          kubectl -n inari get pods || true
+          kubectl -n inari logs deployment/inari-inari-platform-server --tail=100 || true
+          kubectl -n inari-system logs deployment/inari-agent --tail=100 || true

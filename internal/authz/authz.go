@@ -6,6 +6,7 @@ package authz
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	openfga "github.com/openfga/go-sdk"
 	"github.com/openfga/go-sdk/client"
@@ -239,8 +240,13 @@ func ModelV1() client.ClientWriteAuthorizationModelRequest {
 	}
 }
 
-// Helpers to build fully-qualified FGA object/user strings.
-func OrgObject(orgID string) string         { return TypeOrganization + ":" + orgID }
+// Helpers to build fully-qualified FGA object/user strings. OpenFGA object
+// IDs may not contain ':' or '#', so the "org:" prefix used by Inari tenant
+// IDs (plan §5.2) is stripped here — the mapping must stay consistent for
+// both tuple writes and checks.
+func OrgObject(orgID string) string {
+	return TypeOrganization + ":" + strings.TrimPrefix(orgID, "org:")
+}
 func TeamObject(teamID string) string       { return TypeTeam + ":" + teamID }
 func ClusterObject(clusterID string) string { return TypeCluster + ":" + clusterID }
 func UserObject(subject string) string      { return "user:" + subject }

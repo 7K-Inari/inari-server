@@ -244,15 +244,6 @@ func (s *Service) Gate(ctx context.Context, in GateInput) (*GateResult, error) {
 	return &GateResult{Approved: false, ApprovalID: req.ID}, nil
 }
 
-// IsApproved reports whether the given approval request is approved.
-func (s *Service) IsApproved(ctx context.Context, approvalID string) (bool, error) {
-	req, err := s.store.get(ctx, s.db.Pool, approvalID)
-	if err != nil {
-		return false, err
-	}
-	return req.State == types.ApprovalStateApproved, nil
-}
-
 // Get returns one approval request scoped to the org (404 on mismatch).
 func (s *Service) Get(ctx context.Context, orgID, approvalID string) (*types.ApprovalRequest, error) {
 	req, err := s.store.get(ctx, s.db.Pool, approvalID)

@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -65,6 +66,12 @@ func validateRegisterInput(in *RegisterInput) error {
 	}
 	if arnAcct := in.RoleARN[len("arn:aws:iam::") : len("arn:aws:iam::")+12]; arnAcct != in.AccountID {
 		return fmt.Errorf("%w: account ID %q does not match role ARN account %q", ErrInvalidInput, in.AccountID, arnAcct)
+	}
+	if len(in.ExternalID) > 1224 { // AWS STS ExternalId maximum
+		return fmt.Errorf("%w: external ID exceeds 1224 characters", ErrInvalidInput)
+	}
+	if in.IssuerURL != "" && !strings.HasPrefix(in.IssuerURL, "https://") {
+		return fmt.Errorf("%w: issuer URL must be an https:// URL, got %q", ErrInvalidInput, in.IssuerURL)
 	}
 	if in.RunContext == "" {
 		in.RunContext = types.CloudAccountRunContextTenant

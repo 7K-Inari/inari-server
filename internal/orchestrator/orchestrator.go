@@ -354,11 +354,15 @@ func (s *Service) apply(ctx context.Context, req DeployRequest, item *types.Cata
 		} else if err := s.instances.MarkDeployed(ctx, tx, instanceID, version, gitResult.CommitSHA, gitResult.PRURL, state, true); err != nil {
 			return err
 		}
-		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
+		ev := &types.AuditEvent{
 			OrgID: req.OrgID, Actor: req.Requester, Impersonator: impersonation.FromContext(ctx), Action: "deploy.requested",
 			ObjectType: "resource_instance", ObjectID: instanceID,
 			Payload: json.RawMessage(fmt.Sprintf(`{"item":%q,"version":%q,"cluster":%q}`, req.ItemID, version, req.ClusterID)),
-		}); err != nil {
+		}
+		if err := impersonation.Stamp(ctx, ev); err != nil {
+			return err
+		}
+		if err := s.audit.Record(ctx, tx, ev); err != nil {
 			return err
 		}
 		eventType := types.EventDeployRequested

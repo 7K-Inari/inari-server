@@ -44,10 +44,16 @@ func FromContext(ctx context.Context) string {
 
 // Stamp fills ev.Impersonator from the context (if not already set) and
 // validates that real and impersonated identities differ, so impersonated
-// actions are double-audited (plan §5.4).
+// actions are double-audited (plan §5.4). When the actor is a control-plane
+// system identity ("system:" prefix), an impersonated identity is REQUIRED:
+// automation must always act via a tenant-scoped virtual user, never
+// unaudited as itself.
 func Stamp(ctx context.Context, ev *types.AuditEvent) error {
 	if ev.Impersonator == "" {
 		ev.Impersonator = FromContext(ctx)
+	}
+	if strings.HasPrefix(ev.Actor, "system:") && ev.Impersonator == "" {
+		return fmt.Errorf("impersonation: system actor %q requires an impersonated virtual user in context", ev.Actor)
 	}
 	if ev.Impersonator != "" && ev.Impersonator == ev.Actor {
 		return fmt.Errorf("impersonation: actor and impersonator must differ")

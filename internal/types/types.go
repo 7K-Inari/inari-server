@@ -102,6 +102,7 @@ const (
 
 	EventPolicyPackAssigned = "policy_pack.assigned"
 	EventClusterSetCreated  = "cluster_set.created"
+	EventClusterSetDeleted  = "cluster_set.deleted"
 	EventExemptionRequested = "exemption.requested"
 	EventExemptionDecided   = "exemption.decided"
 )

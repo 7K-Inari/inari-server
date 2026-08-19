@@ -62,3 +62,17 @@ func TestStampRejectsSameActor(t *testing.T) {
 		t.Fatal("expected error when actor == impersonator")
 	}
 }
+
+func TestStampRequiresImpersonatorForSystemActor(t *testing.T) {
+	ev := &types.AuditEvent{Actor: SystemActor("approvals")}
+	if err := Stamp(context.Background(), ev); err == nil {
+		t.Fatal("system actor without impersonator must fail")
+	}
+	ctx := WithImpersonator(context.Background(), VirtualUser("org:acme"))
+	if err := Stamp(ctx, ev); err != nil {
+		t.Fatalf("system actor with virtual user should stamp: %v", err)
+	}
+	if ev.Impersonator == "" {
+		t.Fatal("impersonator not stamped")
+	}
+}

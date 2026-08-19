@@ -65,6 +65,26 @@ func (h *ResumeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) error
 	if err != nil {
 		return fmt.Errorf("orchestrator: resume: item %s: %w", req.ItemID, err)
 	}
+	// Re-run request-time policy: a policy created or tightened between the
+	// approval request and the decision must still gate the resumed deploy.
+	cluster, err := h.svc.clusters.GetCluster(ctx, req.ClusterID)
+	if err != nil {
+		return fmt.Errorf("orchestrator: resume: cluster %s: %w", req.ClusterID, err)
+	}
+	if err := h.svc.preFlight(ctx, PolicyInput{
+		OrgID: req.OrgID, ItemID: req.ItemID, Version: req.Version,
+		ClusterID: req.ClusterID, Spec: req.Spec, Requester: deploy.Requester,
+		ClusterLabels: cluster.Labels, ClusterDistribution: cluster.Distribution,
+	}); err != nil {
+		var pv *PolicyViolationError
+		if errors.As(err, &pv) {
+			// Terminal block: do not retry the outbox event forever.
+			h.log.Warn("orchestrator: resumed deploy blocked by policy",
+				"approval", p.ApprovalID, "violations", pv.Decision.Violations)
+			return nil
+		}
+		return fmt.Errorf("orchestrator: resume: preflight: %w", err)
+	}
 	var res *DeployResult
 	if req.InstanceID != "" {
 		existing, err := h.svc.instances.Get(ctx, h.svc.db.Pool, req.InstanceID)

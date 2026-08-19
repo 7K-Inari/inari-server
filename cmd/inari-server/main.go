@@ -187,6 +187,7 @@ func run() error {
 		authz.NewTupleWriter(fgaStore),
 		notificationsSvc,
 		orchestrator.NewResumeHandler(orchestratorSvc, approvalsSvc, log),
+		policyservice.NewDistributeHandler(policySvc, log),
 	)
 	go dispatcher.Run(ctx)
 

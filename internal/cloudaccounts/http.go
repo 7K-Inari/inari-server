@@ -4,6 +4,7 @@ package cloudaccounts
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -266,6 +267,10 @@ func (h *Handler) providerConfig(ctx context.Context, in *providerConfigInput) (
 	}
 	if err != nil {
 		return nil, err
+	}
+	if a.State != types.CloudAccountStateActive {
+		return nil, huma.Error422UnprocessableEntity(
+			fmt.Sprintf("cloud account is %s; validate the trust before materializing a ProviderConfig", a.State))
 	}
 	if h.clusters == nil {
 		return nil, huma.Error501NotImplemented("cluster resolver not configured")

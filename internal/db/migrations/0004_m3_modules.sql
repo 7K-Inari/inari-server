@@ -123,6 +123,11 @@ CREATE TABLE notification_deliveries (
 );
 
 CREATE INDEX notification_deliveries_status_idx ON notification_deliveries (status, created_at);
+CREATE INDEX policies_org_idx ON policies (org_id);
+CREATE INDEX cluster_sets_org_idx ON cluster_sets (org_id);
+CREATE INDEX policy_assignments_pack_idx ON policy_assignments (pack_id);
+CREATE INDEX exemptions_lookup_idx ON exemptions (org_id, policy_id, state, expires_at);
+CREATE INDEX notification_endpoints_org_idx ON notification_endpoints (org_id);
 
 -- +goose Down
 DROP TABLE IF EXISTS notification_deliveries;

@@ -91,3 +91,18 @@ func TestValidateEndpoint(t *testing.T) {
 		t.Fatal("expected name error")
 	}
 }
+
+func TestValidateEndpointRejectsPrivateTargets(t *testing.T) {
+	for _, u := range []string{
+		"http://169.254.169.254/latest/meta-data",
+		"https://127.0.0.1/hook",
+		"https://10.0.0.5/hook",
+		"https://192.168.1.1/hook",
+		"https://[::1]/hook",
+		"https://user:pass@example.com/hook",
+	} {
+		if err := validateEndpoint(&EndpointInput{Name: "x", Kind: "webhook", URL: u}, ""); err == nil {
+			t.Errorf("expected rejection for %s", u)
+		}
+	}
+}

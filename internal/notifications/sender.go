@@ -31,9 +31,19 @@ type Sender interface {
 
 func defaultHTTPClient(c *http.Client) *http.Client {
 	if c != nil {
+		if c.Timeout == 0 {
+			copy := *c
+			copy.Timeout = 10 * time.Second
+			return &copy
+		}
 		return c
 	}
-	return &http.Client{Timeout: 10 * time.Second}
+	return &http.Client{
+		Timeout: 10 * time.Second,
+		// Never follow redirects: a public URL must not bounce the control
+		// plane into an internal address (SSRF).
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 }
 
 // SlackSender POSTs {"text": ...} to a Slack incoming-webhook URL.

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"strings"
 	"time"
@@ -197,28 +198,6 @@ func (s *Store) ListFailed(ctx context.Context, q db.Querier, limit int) ([]type
 	return out, rows.Err()
 }
 
-func (s *Store) ListDeliveries(ctx context.Context, q db.Querier, endpointID string, limit int) ([]types.NotificationDelivery, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
-	}
-	const sql = `SELECT ` + deliveryCols + ` FROM notification_deliveries
-	             WHERE endpoint_id = $1 ORDER BY created_at DESC LIMIT $2`
-	rows, err := q.Query(ctx, sql, endpointID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []types.NotificationDelivery
-	for rows.Next() {
-		d, err := scanDelivery(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, *d)
-	}
-	return out, rows.Err()
-}
-
 // MarkRetry updates a delivery row after a retry attempt.
 func (s *Store) MarkRetry(ctx context.Context, q db.Querier, d *types.NotificationDelivery) error {
 	const sql = `UPDATE notification_deliveries SET status=$2, attempts=$3, last_error=$4, delivered_at=$5 WHERE id=$1`
@@ -369,9 +348,38 @@ func validateEndpoint(in *EndpointInput, kind string) error {
 	if u.User != nil {
 		return fmt.Errorf("%w: credentials in URL are not allowed", ErrInvalidURL)
 	}
+	if err := rejectPrivateHost(u.Hostname()); err != nil {
+		return err
+	}
 	for _, e := range in.Events {
 		if !knownEvent(e) {
 			return fmt.Errorf("%w: %s", ErrInvalidEvent, e)
+		}
+	}
+	return nil
+}
+
+// rejectPrivateHost blocks endpoints pointing at loopback, private,
+// link-local, or otherwise non-public addresses (SSRF guard). Literal IPs
+// are checked directly; hostnames are resolved and every returned address
+// must be public.
+func rejectPrivateHost(host string) error {
+	if host == "" {
+		return ErrInvalidURL
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+			return fmt.Errorf("%w: endpoint must not target a private/reserved address", ErrInvalidURL)
+		}
+		return nil
+	}
+	ips, err := net.DefaultResolver.LookupIP(context.Background(), "ip", host)
+	if err != nil {
+		return fmt.Errorf("%w: cannot resolve endpoint host %q", ErrInvalidURL, host)
+	}
+	for _, ip := range ips {
+		if !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+			return fmt.Errorf("%w: endpoint host %q resolves to a private/reserved address", ErrInvalidURL, host)
 		}
 	}
 	return nil

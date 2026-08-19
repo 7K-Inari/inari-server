@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -35,6 +36,7 @@ import (
 	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
 
 	"github.com/7K-Inari/inari-server/internal/audit"
+	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -680,8 +682,13 @@ func (s *Service) DeleteClusterSet(ctx context.Context, actor, orgID, id string)
 		if err := s.store.DeleteClusterSet(ctx, tx, id); err != nil {
 			return err
 		}
-		return s.audit.Record(ctx, tx, &types.AuditEvent{
+		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
 			OrgID: orgID, Actor: actor, Action: "cluster_set.deleted", ObjectType: "cluster_set", ObjectID: id,
+		}); err != nil {
+			return err
+		}
+		return audit.AppendOutbox(ctx, tx, orgID, types.EventClusterSetDeleted, types.ClusterSetPayload{
+			OrgID: orgID, ClusterSetID: id,
 		})
 	})
 }
@@ -741,22 +748,24 @@ func (s *Service) ListAssignments(ctx context.Context, orgID, packID string) ([]
 	return s.store.ListAssignments(ctx, s.db.Pool, packID)
 }
 
-// Assign binds a pack to a ClusterSet / tenant / cluster, records audit +
-// outbox (which drives the FGA tuple writer), then distributes the pack by
-// enqueuing one ApplyBundle command per target cluster.
+// Assign binds a pack to a ClusterSet / tenant / cluster and records audit +
+// outbox in one TX. Distribution is driven by the EventPolicyPackAssigned
+// outbox event (see DistributeHandler), so a failed/partial fan-out is
+// retried by the dispatcher instead of leaving clusters unserved after a
+// committed assignment.
 func (s *Service) Assign(ctx context.Context, actor, orgID, packID, targetType, targetID string) (*types.PolicyAssignment, error) {
-	pack, err := s.GetPolicyPack(ctx, orgID, packID)
-	if err != nil {
+	if _, err := s.GetPolicyPack(ctx, orgID, packID); err != nil {
 		return nil, err
 	}
-	clusters, err := s.targetClusters(ctx, orgID, targetType, targetID)
-	if err != nil {
+	// Validate the target eagerly so callers get a synchronous 422/404; the
+	// actual fan-out happens asynchronously via the outbox.
+	if _, err := s.targetClusters(ctx, orgID, targetType, targetID); err != nil {
 		return nil, err
 	}
 	a := &types.PolicyAssignment{
 		ID: "policyassignment:" + newUUID(), PackID: packID, TargetType: targetType, TargetID: targetID,
 	}
-	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
+	err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		if err := s.store.CreateAssignment(ctx, tx, a); err != nil {
 			return err
 		}
@@ -773,10 +782,55 @@ func (s *Service) Assign(ctx context.Context, actor, orgID, packID, targetType, 
 	if err != nil {
 		return nil, err
 	}
-	if err := s.distribute(ctx, pack, clusters); err != nil {
-		return nil, err
-	}
 	return a, nil
+}
+
+// DistributeHandler implements audit.Handler for EventPolicyPackAssigned:
+// it re-resolves the assignment's target clusters and enqueues one
+// ApplyBundle command per cluster. Command IDs are idempotency keys, so
+// dispatcher redelivery after a partial failure is safe.
+type DistributeHandler struct {
+	svc *Service
+	log *slog.Logger
+}
+
+func NewDistributeHandler(svc *Service, log *slog.Logger) *DistributeHandler {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &DistributeHandler{svc: svc, log: log}
+}
+
+func (h *DistributeHandler) EventTypes() []string { return []string{types.EventPolicyPackAssigned} }
+
+func (h *DistributeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) error {
+	var p types.PolicyPackAssignedPayload
+	if err := json.Unmarshal(ev.Payload, &p); err != nil {
+		return fmt.Errorf("policyservice: distribute: payload: %w", err)
+	}
+	pack, err := h.svc.GetPolicyPack(ctx, p.OrgID, p.PackID)
+	if errors.Is(err, ErrPackNotFound) {
+		h.log.Info("policyservice: distribute skipped, pack deleted", "pack", p.PackID)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("policyservice: distribute: pack %s: %w", p.PackID, err)
+	}
+	clusters, err := h.svc.targetClusters(ctx, p.OrgID, p.TargetType, p.TargetID)
+	if errors.Is(err, ErrClusterSetNotFound) || errors.Is(err, clusterregistry.ErrClusterNotFound) {
+		h.log.Info("policyservice: distribute skipped, target gone",
+			"pack", p.PackID, "targetType", p.TargetType, "target", p.TargetID)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("policyservice: distribute: resolve target %s: %w", p.TargetID, err)
+	}
+	if err := h.svc.distribute(ctx, pack, clusters); err != nil {
+		return fmt.Errorf("policyservice: distribute: %w", err)
+	}
+	h.log.Info("policyservice: pack distributed",
+		"pack", p.PackID, "assignment", p.AssignmentID, "clusters", len(clusters))
+	return nil
 }
 
 // Unassign removes one assignment. Reconciliation of already-applied pack

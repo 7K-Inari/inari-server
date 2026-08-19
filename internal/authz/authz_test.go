@@ -55,10 +55,10 @@ func TestTupleWriterTenantCreatedSeedsRoleTuples(t *testing.T) {
 	if len(fs.written) != 2 {
 		t.Fatalf("written = %v, want 2 tuples", fs.written)
 	}
-	if fs.written[0] != (Tuple{User: "team:t1#member", Relation: "platform_engineer", Object: "organization:org:1"}) {
+	if fs.written[0] != (Tuple{User: "team:t1#member", Relation: "platform_engineer", Object: "organization:1"}) {
 		t.Errorf("tuple[0] = %+v", fs.written[0])
 	}
-	if fs.written[1] != (Tuple{User: "team:t2#member", Relation: "developer", Object: "organization:org:1"}) {
+	if fs.written[1] != (Tuple{User: "team:t2#member", Relation: "developer", Object: "organization:1"}) {
 		t.Errorf("tuple[1] = %+v", fs.written[1])
 	}
 }

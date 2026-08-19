@@ -105,6 +105,9 @@ func (k *KeycloakAdmin) CreateOrganization(ctx context.Context, alias, displayNa
 		"alias":       alias,
 		"description": displayName,
 		"enabled":     true,
+		// Keycloak 26 requires at least one domain per organization; default
+		// to a placeholder under inari.local until real IdP domains are set.
+		"domains": []map[string]any{{"name": alias + ".inari.local", "verified": false}},
 	})
 	if err != nil {
 		return "", err

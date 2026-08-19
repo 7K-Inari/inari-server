@@ -26,10 +26,25 @@ type Handler struct {
 	tenants  TenantResolver
 	authz    authz.Authorizer
 	manifest ManifestParams
+	caps     CapabilitiesLister
 }
 
-func NewHandler(svc *Service, tenants TenantResolver, az authz.Authorizer, manifest ManifestParams) *Handler {
-	return &Handler{svc: svc, tenants: tenants, authz: az, manifest: manifest}
+// CapabilitiesLister reads the live capabilities of a cluster (implemented
+// by the capabilities module's store).
+type CapabilitiesLister interface {
+	List(ctx context.Context, clusterID string) ([]types.Capability, error)
+}
+
+// CapabilitiesListerFunc adapts a function to CapabilitiesLister.
+type CapabilitiesListerFunc func(ctx context.Context, clusterID string) ([]types.Capability, error)
+
+// List implements CapabilitiesLister.
+func (f CapabilitiesListerFunc) List(ctx context.Context, clusterID string) ([]types.Capability, error) {
+	return f(ctx, clusterID)
+}
+
+func NewHandler(svc *Service, tenants TenantResolver, az authz.Authorizer, manifest ManifestParams, caps CapabilitiesLister) *Handler {
+	return &Handler{svc: svc, tenants: tenants, authz: az, manifest: manifest, caps: caps}
 }
 
 // RegisterRoutes mounts the cluster API on the huma API instance.
@@ -89,6 +104,14 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Summary:     "Render the agent install manifest embedding a fresh registration token",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.renderManifest)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "listCapabilities",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/tenants/{org}/clusters/{id}/capabilities",
+		Summary:     "List the live discovered capabilities of a cluster",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.listCapabilities)
 }
 
 type createClusterInput struct {
@@ -261,6 +284,32 @@ func (h *Handler) renderManifest(ctx context.Context, in *clusterPathInput) (*ma
 		return nil, err
 	}
 	return &manifestOutput{ContentType: "application/yaml", Body: manifest}, nil
+}
+
+type listCapabilitiesOutput struct {
+	Body struct {
+		Capabilities []types.Capability `json:"capabilities"`
+	}
+}
+
+func (h *Handler) listCapabilities(ctx context.Context, in *clusterPathInput) (*listCapabilitiesOutput, error) {
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.requireOrgCluster(ctx, org.ID, in.ID); err != nil {
+		return nil, err
+	}
+	if h.caps == nil {
+		return nil, huma.Error501NotImplemented("capabilities store not configured")
+	}
+	caps, err := h.caps.List(ctx, in.ID)
+	if err != nil {
+		return nil, err
+	}
+	out := &listCapabilitiesOutput{}
+	out.Body.Capabilities = caps
+	return out, nil
 }
 
 // requireOrgCluster guards against cross-tenant object access by ID.

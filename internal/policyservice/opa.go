@@ -35,8 +35,14 @@ func (OPAEvaluator) query(source string) *rego.Rego {
 }
 
 func (e OPAEvaluator) Compile(source string) error {
-	_, err := e.query(source).PrepareForEval(context.Background())
+	mod, err := ast.ParseModuleWithOpts("policy.rego", source, ast.ParserOptions{RegoVersion: ast.RegoV1})
 	if err != nil {
+		return fmt.Errorf("policyservice: rego compile: %w", err)
+	}
+	if mod.Package.Path.String() != "data.inari.policy" {
+		return fmt.Errorf("policyservice: rego compile: policy must declare `package inari.policy`, got %q", mod.Package.Path.String())
+	}
+	if _, err := e.query(source).PrepareForEval(context.Background()); err != nil {
 		return fmt.Errorf("policyservice: rego compile: %w", err)
 	}
 	return nil
@@ -74,6 +80,10 @@ func violationsFrom(v any) []types.PolicyViolation {
 	}
 	var out []types.PolicyViolation
 	for _, item := range set {
+		if s, ok := item.(string); ok {
+			out = append(out, types.PolicyViolation{Reason: s})
+			continue
+		}
 		m, ok := item.(map[string]any)
 		if !ok {
 			continue

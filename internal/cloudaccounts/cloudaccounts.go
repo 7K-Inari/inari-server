@@ -63,6 +63,9 @@ func validateRegisterInput(in *RegisterInput) error {
 	if !roleARNRe.MatchString(in.RoleARN) {
 		return fmt.Errorf("%w: role ARN must match arn:aws:iam::<account>:role/<name>, got %q", ErrInvalidInput, in.RoleARN)
 	}
+	if arnAcct := in.RoleARN[len("arn:aws:iam::") : len("arn:aws:iam::")+12]; arnAcct != in.AccountID {
+		return fmt.Errorf("%w: account ID %q does not match role ARN account %q", ErrInvalidInput, in.AccountID, arnAcct)
+	}
 	if in.RunContext == "" {
 		in.RunContext = types.CloudAccountRunContextTenant
 	}

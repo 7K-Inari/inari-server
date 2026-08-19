@@ -42,13 +42,16 @@ jobs:
         run: docker build -f deploy/docker/Dockerfile -t inari/server:e2e .
 
       - name: Build agent image
-        run: docker build -f Dockerfile -t inari/agent:e2e ./inari-agent
+        run: docker build -f inari-agent/Dockerfile -t inari/agent:e2e ./inari-agent
 
       - name: Create kind cluster
         uses: helm/kind-action@v1.12.0
         with:
           cluster_name: inari-e2e
           wait: 60s
+
+      - name: Fetch chart dependencies
+        run: helm dependency build inari-helm-charts/charts/inari-platform
 
       - name: Run golden path
         run: CHART_DIR=inari-helm-charts/charts/inari-platform KEEP_CLUSTER=false bash e2e/golden-path.sh

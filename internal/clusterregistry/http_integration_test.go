@@ -101,7 +101,7 @@ func itServer(t *testing.T, az itAuthorizer) (*httptest.Server, *Service) {
 	h := NewHandler(svc, itTenants{
 		"acme":  {ID: "org:1", Slug: "acme"},
 		"acme2": {ID: "org:2", Slug: "acme2"},
-	}, az, ManifestParams{AgentImageRepo: "ghcr.io/7k-inari/inari-agent", AgentImageTag: "v0.1.0", GatewayAddress: "https://gw.example.com"})
+	}, az, ManifestParams{AgentImageRepo: "ghcr.io/7k-inari/inari-agent", AgentImageTag: "v0.1.0", GatewayAddress: "https://gw.example.com"}, nil)
 	router, api := httpserver.NewRouter(slog.Default(), itValidator{}, database)
 	h.RegisterRoutes(api)
 	return httptest.NewServer(router), svc

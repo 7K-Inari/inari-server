@@ -358,3 +358,58 @@ func TestMembershipLifecycle(t *testing.T) {
 		t.Errorf("audit membership.added=%v membership.removed=%v", added, removed)
 	}
 }
+
+// Repeated add/remove must not emit duplicate outbox events — OpenFGA rejects
+// duplicate writes and deletes of absent tuples, which would stall the
+// dispatcher on a poisoned event.
+func TestMembershipIdempotent(t *testing.T) {
+	database := setupDB(t)
+	ctx := context.Background()
+	idp := newFakeIdP()
+	idp.users["user-2"] = true
+	svc := tenancy.NewService(database, idp, tenancy.NewStore(), audit.NewStore())
+	_, teams, err := svc.CreateTenant(ctx, "user-1", "acme", "Acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	devTeam := teams[1] // developers
+
+	for i := 0; i < 2; i++ {
+		if err := svc.AddMember(ctx, "user-1", "acme", "developers", "user-2"); err != nil {
+			t.Fatalf("AddMember #%d: %v", i, err)
+		}
+	}
+	rec := &recordingStore{}
+	disp := audit.NewDispatcher(database, 50*time.Millisecond, authz.NewTupleWriter(rec))
+	if err := disp.DispatchOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	want := authz.Tuple{User: "user:user-2", Relation: "member", Object: "team:" + devTeam.ID}
+	writes := 0
+	for _, tp := range rec.written {
+		if tp == want {
+			writes++
+		}
+	}
+	if writes != 1 {
+		t.Errorf("membership tuple written %d times, want 1", writes)
+	}
+
+	for i := 0; i < 2; i++ {
+		if err := svc.RemoveMember(ctx, "user-1", "acme", "developers", "user-2"); err != nil {
+			t.Fatalf("RemoveMember #%d: %v", i, err)
+		}
+	}
+	if err := disp.DispatchOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	deletes := 0
+	for _, tp := range rec.deleted {
+		if tp == want {
+			deletes++
+		}
+	}
+	if deletes != 1 {
+		t.Errorf("membership tuple deleted %d times, want 1", deletes)
+	}
+}

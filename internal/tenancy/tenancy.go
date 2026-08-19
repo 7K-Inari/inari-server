@@ -135,6 +135,17 @@ func (s *Store) AddMembership(ctx context.Context, q db.Querier, m *types.Member
 	return err
 }
 
+// MembershipExists reports whether the user already has a membership row for
+// the team. Used to keep AddMember/RemoveMember idempotent so duplicate calls
+// don't emit outbox events the tuple writer cannot apply (OpenFGA rejects
+// duplicate writes and deletes of absent tuples).
+func (s *Store) MembershipExists(ctx context.Context, q db.Querier, userID, orgID, teamID string) (bool, error) {
+	const sql = `SELECT EXISTS(SELECT 1 FROM memberships WHERE user_id = $1 AND org_id = $2 AND team_id = $3)`
+	var exists bool
+	err := q.QueryRow(ctx, sql, userID, orgID, teamID).Scan(&exists)
+	return exists, err
+}
+
 // RemoveMembership deletes a user's team membership row.
 func (s *Store) RemoveMembership(ctx context.Context, q db.Querier, m *types.Membership) error {
 	const sql = `DELETE FROM memberships WHERE user_id = $1 AND org_id = $2 AND team_id = $3`

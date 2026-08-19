@@ -41,6 +41,13 @@ func (s *Service) AddMember(ctx context.Context, actor, slug, teamName, userID s
 	if err != nil {
 		return err
 	}
+	exists, err := s.store.MembershipExists(ctx, s.db.Pool, userID, org.ID, team.ID)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
 	if err := s.idp.AddOrganizationMember(ctx, org.KeycloakOrgID, userID); err != nil {
 		return fmt.Errorf("tenancy: add org member: %w", err)
 	}
@@ -79,8 +86,18 @@ func (s *Service) RemoveMember(ctx context.Context, actor, slug, teamName, userI
 	if err != nil {
 		return err
 	}
+	exists, err := s.store.MembershipExists(ctx, s.db.Pool, userID, org.ID, team.ID)
+	if err != nil {
+		return err
+	}
+	// Keycloak removal is idempotent; skip the DB row + outbox event when no
+	// membership was recorded so a repeated DELETE can't emit a removal event
+	// for an OpenFGA tuple that no longer exists.
 	if err := s.idp.RemoveGroupMember(ctx, team.KeycloakGroupPath, userID); err != nil {
 		return fmt.Errorf("tenancy: remove group member: %w", err)
+	}
+	if !exists {
+		return nil
 	}
 	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		if err := s.store.RemoveMembership(ctx, tx, &types.Membership{

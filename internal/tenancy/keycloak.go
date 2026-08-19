@@ -257,6 +257,19 @@ func (k *KeycloakAdmin) CreateClusterClient(ctx context.Context, clusterID strin
 				"userinfo.token.claim":       "false",
 				"access.tokenResponse.claim": "false",
 			},
+		}, {
+			// The server's JWT verifier requires aud=inari-server; without this
+			// mapper the agent's client-credentials token is rejected at the
+			// EventStream handshake.
+			"name":           "audience-inari-server",
+			"protocol":       "openid-connect",
+			"protocolMapper": "oidc-audience-mapper",
+			"config": map[string]string{
+				"included.client.audience": "inari-server",
+				"id.token.claim":           "false",
+				"access.token.claim":       "true",
+				"userinfo.token.claim":     "false",
+			},
 		}},
 	})
 	if err != nil {

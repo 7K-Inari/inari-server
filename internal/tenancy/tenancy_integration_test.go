@@ -209,7 +209,7 @@ func TestCreateTenantEndToEnd(t *testing.T) {
 	if len(rec.written) != 4 { // 3 team→org role tuples + 1 creator membership
 		t.Fatalf("tuples written = %v", rec.written)
 	}
-	if rec.written[0].Object != "organization:"+org.ID {
+	if rec.written[0].Object != authz.OrgObject(org.ID) {
 		t.Errorf("tuple object = %q", rec.written[0].Object)
 	}
 	var memberTuple *authz.Tuple

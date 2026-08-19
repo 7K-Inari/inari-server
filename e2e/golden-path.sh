@@ -6,7 +6,8 @@
 # pod in the cluster (kubectl exec) so the script is immune to
 # port-forward fragility. It intentionally performs a few Keycloak
 # provisioning steps imperatively (audience mapper, client secret delivery)
-# that are not yet automated in inari-server — each is marked GAP(n) and maps to a tracked upstream fix; the script must keep
+# that are not yet automated in inari-server — each is marked GAP(n) and maps
+# to a tracked upstream fix; the script must keep
 # passing once those land.
 #
 # Prereqs: docker, kind, kubectl, helm, jq. Configurable via env:
@@ -187,113 +188,13 @@ TOKEN="$(user_token)"
 CLUSTER_RESP=$(xcurl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"name":"e2e-self","labels":{"e2e":"true"}}' "$API/tenants/$TENANT/clusters")
 CLUSTER_ID=$(jq -r '.cluster.id' <<<"$CLUSTER_RESP")
-REG_TOKEN=$(xcurl -X POST -H "Authorization: Bearer $TOKEN" "$API/tenants/$TENANT/clusters/$CLUSTER_ID/tokens" | jq -r .token)
 
-log "installing agent in-cluster (gateway: in-cluster server service)"
-kubectl apply -f - <<EOF
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: inari-system
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: inari-agent-bootstrap
-  namespace: inari-system
-type: Opaque
-stringData:
-  registration-token: $REG_TOKEN
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: inari-agent
-  namespace: inari-system
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: inari-agent-discovery
-rules:
-  - apiGroups: ["apiextensions.k8s.io"]
-    resources: ["customresourcedefinitions"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: [""]
-    resources: ["namespaces", "nodes"]
-    verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: inari-agent-discovery
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: inari-agent-discovery
-subjects:
-  - kind: ServiceAccount
-    name: inari-agent
-    namespace: inari-system
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: inari-agent-managed
-  namespace: inari-system
-rules:
-  - apiGroups: [""]
-    resources: ["secrets", "configmaps"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: inari-agent-managed
-  namespace: inari-system
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: inari-agent-managed
-subjects:
-  - kind: ServiceAccount
-    name: inari-agent
-    namespace: inari-system
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: inari-agent
-  namespace: inari-system
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: inari-agent
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: inari-agent
-    spec:
-      serviceAccountName: inari-agent
-      containers:
-        - name: agent
-          image: $AGENT_IMAGE
-          imagePullPolicy: IfNotPresent
-          resources:
-            requests: { cpu: 50m, memory: 64Mi }
-            limits: { cpu: 100m, memory: 128Mi }
-          env:
-            - name: INARI_CONTROL_PLANE
-              value: "http://$SERVER_SVC.${NAMESPACE}.svc:8080"
-            - name: INARI_TENANT_ID
-              value: "org:$ORG_KC_ID"
-            - name: INARI_REGISTRATION_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: inari-agent-bootstrap
-                  key: registration-token
-EOF
+log "installing agent via the server-rendered manifest"
+MANIFEST=$(mktemp)
+trap 'rm -f "$MANIFEST"; cleanup' EXIT
+xcurl -X POST -H "Authorization: Bearer $(user_token)" \
+  "$API/tenants/$TENANT/clusters/$CLUSTER_ID/install-manifest" >"$MANIFEST"
+kubectl apply -f "$MANIFEST"
 kubectl -n inari-system rollout status deployment/inari-agent --timeout=180s
 
 log "GAP(eso-secret): waiting for registration, then delivering the client secret"
@@ -306,10 +207,6 @@ done
 KC_CLIENT_ID=$(xcurl -H "Authorization: Bearer $(user_token)" "$API/tenants/$TENANT/clusters/$CLUSTER_ID" | jq -r '.cluster.keycloakClientId')
 AT="$(admin_token)"
 KCID=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/clients?clientId=$KC_CLIENT_ID" | jq -r '.[0].id')
-# GAP(aud-mapper-agent): cluster clients need the audience mapper too.
-xcurl -X POST -H "Authorization: Bearer $AT" -H "Content-Type: application/json" \
-  -d '{"name":"audience-inari-server","protocol":"openid-connect","protocolMapper":"oidc-audience-mapper","config":{"included.client.audience":"inari-server","id.token.claim":"false","access.token.claim":"true","userinfo.token.claim":"false"}}' \
-  -o /dev/null "http://keycloak-service:8080/admin/realms/inari/clients/$KCID/protocol-mappers/models" || true
 CLIENT_SECRET=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/clients/$KCID/client-secret" | jq -r .value)
 kubectl -n inari-system create secret generic inari-agent-oidc-client \
   --from-literal=client-secret="$CLIENT_SECRET" --dry-run=client -o yaml | kubectl apply -f -

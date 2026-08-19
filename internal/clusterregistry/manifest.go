@@ -3,7 +3,9 @@ package clusterregistry
 import (
 	"bytes"
 	"fmt"
+	"sort"
 	"strconv"
+	"strings"
 	"text/template"
 
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -41,6 +43,55 @@ metadata:
   name: inari-agent
   namespace: inari-system
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: inari-agent-discovery
+rules:
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["namespaces", "nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: inari-agent-discovery
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: inari-agent-discovery
+subjects:
+  - kind: ServiceAccount
+    name: inari-agent
+    namespace: inari-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: inari-agent-managed
+  namespace: inari-system
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: inari-agent-managed
+  namespace: inari-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: inari-agent-managed
+subjects:
+  - kind: ServiceAccount
+    name: inari-agent
+    namespace: inari-system
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -71,10 +122,14 @@ spec:
               cpu: 100m
               memory: 128Mi
           env:
-            - name: INARI_GATEWAY_ADDRESS
+            - name: INARI_CONTROL_PLANE
               value: {{ .GatewayAddress | quote }}
-            - name: INARI_CLUSTER_ID
-              value: {{ .ClusterID | quote }}
+            - name: INARI_TENANT_ID
+              value: {{ .TenantID | quote }}
+{{- if .Labels }}
+            - name: INARI_CLUSTER_LABELS
+              value: {{ .Labels | quote }}
+{{- end }}
             - name: INARI_REGISTRATION_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -96,10 +151,23 @@ func RenderInstallManifest(cluster *types.Cluster, token string, p ManifestParam
 		"Token":          token,
 		"Image":          p.AgentImageRepo + ":" + p.AgentImageTag,
 		"GatewayAddress": p.GatewayAddress,
-		"ClusterID":      cluster.ID,
+		"TenantID":       cluster.OrgID,
+		"Labels":         encodeLabels(cluster.Labels),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("clusterregistry: render manifest: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// encodeLabels renders cluster labels as a sorted, comma-separated k=v list
+// (the format the agent's INARI_CLUSTER_LABELS parser reads); empty when the
+// cluster carries no labels.
+func encodeLabels(labels map[string]string) string {
+	pairs := make([]string, 0, len(labels))
+	for k, v := range labels {
+		pairs = append(pairs, k+"="+v)
+	}
+	sort.Strings(pairs)
+	return strings.Join(pairs, ",")
 }

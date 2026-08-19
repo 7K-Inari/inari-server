@@ -5,7 +5,7 @@
 # Mirrors the manually validated flow. All HTTP calls run through a toolbox
 # pod in the cluster (kubectl exec) so the script is immune to
 # port-forward fragility. It intentionally performs a few Keycloak
-# provisioning steps imperatively (audience mapper, org membership, client
+# provisioning steps imperatively (org membership, client
 # secret delivery) that are not yet automated in inari-server — each is
 # marked GAP(n) and maps to a tracked upstream fix; the script must keep
 # passing once those land.

@@ -124,33 +124,32 @@ func (s *Store) UpsertUser(ctx context.Context, q db.Querier, u *types.User) err
 	return err
 }
 
-func (s *Store) AddMembership(ctx context.Context, q db.Querier, m *types.Membership) error {
+// AddMembership inserts a membership row, reporting whether a row was
+// actually inserted (false on conflict). Callers use the flag to emit
+// outbox events exactly once even under concurrent adds.
+func (s *Store) AddMembership(ctx context.Context, q db.Querier, m *types.Membership) (bool, error) {
 	const sql = `INSERT INTO memberships (user_id, org_id, team_id, role) VALUES ($1,$2,$3,$4)
 	             ON CONFLICT (user_id, org_id, role) DO NOTHING`
 	var teamID *string
 	if m.TeamID != "" {
 		teamID = &m.TeamID
 	}
-	_, err := q.Exec(ctx, sql, m.UserID, m.OrgID, teamID, m.Role)
-	return err
+	tag, err := q.Exec(ctx, sql, m.UserID, m.OrgID, teamID, m.Role)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
-// MembershipExists reports whether the user already has a membership row for
-// the team. Used to keep AddMember/RemoveMember idempotent so duplicate calls
-// don't emit outbox events the tuple writer cannot apply (OpenFGA rejects
-// duplicate writes and deletes of absent tuples).
-func (s *Store) MembershipExists(ctx context.Context, q db.Querier, userID, orgID, teamID string) (bool, error) {
-	const sql = `SELECT EXISTS(SELECT 1 FROM memberships WHERE user_id = $1 AND org_id = $2 AND team_id = $3)`
-	var exists bool
-	err := q.QueryRow(ctx, sql, userID, orgID, teamID).Scan(&exists)
-	return exists, err
-}
-
-// RemoveMembership deletes a user's team membership row.
-func (s *Store) RemoveMembership(ctx context.Context, q db.Querier, m *types.Membership) error {
+// RemoveMembership deletes a user's team membership row, reporting whether
+// a row was actually deleted (drives exactly-once outbox emission).
+func (s *Store) RemoveMembership(ctx context.Context, q db.Querier, m *types.Membership) (bool, error) {
 	const sql = `DELETE FROM memberships WHERE user_id = $1 AND org_id = $2 AND team_id = $3`
-	_, err := q.Exec(ctx, sql, m.UserID, m.OrgID, m.TeamID)
-	return err
+	tag, err := q.Exec(ctx, sql, m.UserID, m.OrgID, m.TeamID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // GetTeamByName resolves a team within an org.
@@ -322,7 +321,7 @@ func (s *Service) CreateTenant(ctx context.Context, actor, slug, displayName str
 			if err := s.store.UpsertUser(ctx, tx, &types.User{ID: actor}); err != nil {
 				return err
 			}
-			if err := s.store.AddMembership(ctx, tx, &types.Membership{
+			if _, err := s.store.AddMembership(ctx, tx, &types.Membership{
 				UserID: actor, OrgID: org.ID, TeamID: platformTeam.ID, Role: types.RolePlatformEngineer,
 			}); err != nil {
 				return err

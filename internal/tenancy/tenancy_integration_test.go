@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 )
 
 type fakeIdP struct {
+	mu         sync.Mutex
 	orgs       map[string]string
 	groups     []string
 	orgMembers map[string][]string
@@ -40,33 +42,47 @@ func newFakeIdP() *fakeIdP {
 }
 
 func (f *fakeIdP) CreateOrganization(_ context.Context, alias, _ string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.nextID++
 	id := fmt.Sprintf("kc-%s-%d", alias, f.nextID)
 	f.orgs[id] = alias
 	return id, nil
 }
 func (f *fakeIdP) DeleteOrganization(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	delete(f.orgs, id)
 	return nil
 }
 func (f *fakeIdP) CreateGroup(_ context.Context, path string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.groups = append(f.groups, path)
 	return "grp-" + path, nil
 }
 func (f *fakeIdP) ListOrganizations(context.Context, string) ([]string, error) { return nil, nil }
 func (f *fakeIdP) AddOrganizationMember(_ context.Context, kcOrgID, userID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.orgMembers[kcOrgID] = append(f.orgMembers[kcOrgID], userID)
 	return nil
 }
 func (f *fakeIdP) RemoveOrganizationMember(_ context.Context, kcOrgID, userID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.orgMembers[kcOrgID] = removeStr(f.orgMembers[kcOrgID], userID)
 	return nil
 }
 func (f *fakeIdP) AddGroupMember(_ context.Context, groupPath, userID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.grpMembers[groupPath] = append(f.grpMembers[groupPath], userID)
 	return nil
 }
 func (f *fakeIdP) RemoveGroupMember(_ context.Context, groupPath, userID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.grpMembers[groupPath] = removeStr(f.grpMembers[groupPath], userID)
 	return nil
 }
@@ -374,9 +390,27 @@ func TestMembershipIdempotent(t *testing.T) {
 	}
 	devTeam := teams[1] // developers
 
+	// Sequential duplicates plus concurrent adds racing on the unique PK:
+	// exactly one outbox event must result in all cases.
 	for i := 0; i < 2; i++ {
 		if err := svc.AddMember(ctx, "user-1", "acme", "developers", "user-2"); err != nil {
 			t.Fatalf("AddMember #%d: %v", i, err)
+		}
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- svc.AddMember(ctx, "user-1", "acme", "developers", "user-2")
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent AddMember: %v", err)
 		}
 	}
 	rec := &recordingStore{}
@@ -398,6 +432,22 @@ func TestMembershipIdempotent(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		if err := svc.RemoveMember(ctx, "user-1", "acme", "developers", "user-2"); err != nil {
 			t.Fatalf("RemoveMember #%d: %v", i, err)
+		}
+	}
+	wg = sync.WaitGroup{}
+	errs = make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- svc.RemoveMember(ctx, "user-1", "acme", "developers", "user-2")
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent RemoveMember: %v", err)
 		}
 	}
 	if err := disp.DispatchOnce(ctx); err != nil {

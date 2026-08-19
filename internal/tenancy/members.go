@@ -41,13 +41,6 @@ func (s *Service) AddMember(ctx context.Context, actor, slug, teamName, userID s
 	if err != nil {
 		return err
 	}
-	exists, err := s.store.MembershipExists(ctx, s.db.Pool, userID, org.ID, team.ID)
-	if err != nil {
-		return err
-	}
-	if exists {
-		return nil
-	}
 	if err := s.idp.AddOrganizationMember(ctx, org.KeycloakOrgID, userID); err != nil {
 		return fmt.Errorf("tenancy: add org member: %w", err)
 	}
@@ -58,10 +51,17 @@ func (s *Service) AddMember(ctx context.Context, actor, slug, teamName, userID s
 		if err := s.store.UpsertUser(ctx, tx, user); err != nil {
 			return err
 		}
-		if err := s.store.AddMembership(ctx, tx, &types.Membership{
+		// The unique PK serializes concurrent adds: exactly one tx inserts the
+		// row, and only that tx emits audit + outbox. This keeps OpenFGA safe
+		// from duplicate membership tuples (which would stall the dispatcher).
+		inserted, err := s.store.AddMembership(ctx, tx, &types.Membership{
 			UserID: userID, OrgID: org.ID, TeamID: team.ID, Role: role,
-		}); err != nil {
+		})
+		if err != nil {
 			return err
+		}
+		if !inserted {
+			return nil
 		}
 		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
 			OrgID: org.ID, Actor: actor, Action: "membership.added", ObjectType: "user", ObjectID: userID,
@@ -86,24 +86,23 @@ func (s *Service) RemoveMember(ctx context.Context, actor, slug, teamName, userI
 	if err != nil {
 		return err
 	}
-	exists, err := s.store.MembershipExists(ctx, s.db.Pool, userID, org.ID, team.ID)
-	if err != nil {
-		return err
-	}
-	// Keycloak removal is idempotent; skip the DB row + outbox event when no
-	// membership was recorded so a repeated DELETE can't emit a removal event
-	// for an OpenFGA tuple that no longer exists.
+	// Keycloak removal is idempotent; run it even when no DB row exists (the
+	// group join may have landed while the recording tx crashed).
 	if err := s.idp.RemoveGroupMember(ctx, team.KeycloakGroupPath, userID); err != nil {
 		return fmt.Errorf("tenancy: remove group member: %w", err)
 	}
-	if !exists {
-		return nil
-	}
 	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
-		if err := s.store.RemoveMembership(ctx, tx, &types.Membership{
+		// RowsAffected serializes concurrent removes: exactly one tx deletes
+		// the row and emits audit + outbox, so OpenFGA never sees a delete for
+		// an already-absent tuple.
+		removed, err := s.store.RemoveMembership(ctx, tx, &types.Membership{
 			UserID: userID, OrgID: org.ID, TeamID: team.ID,
-		}); err != nil {
+		})
+		if err != nil {
 			return err
+		}
+		if !removed {
+			return nil
 		}
 		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
 			OrgID: org.ID, Actor: actor, Action: "membership.removed", ObjectType: "user", ObjectID: userID,

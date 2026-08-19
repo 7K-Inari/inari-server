@@ -41,6 +41,10 @@ func (w *TupleWriter) EventTypes() []string {
 		types.EventCatalogItemUpserted,
 		types.EventDeployRequested,
 		types.EventInstanceCreated,
+		types.EventCloudAccountRegistered,
+		types.EventCloudAccountDeregistered,
+		types.EventClusterSetCreated,
+		types.EventPolicyPackAssigned,
 	}
 }
 
@@ -108,6 +112,38 @@ func (w *TupleWriter) Handle(ctx context.Context, ev *types.OutboxEvent) error {
 		}
 		return w.store.WriteTuples(ctx, []Tuple{{
 			User: ClusterObject(p.ClusterID), Relation: RelationParent, Object: ResourceInstanceObject(p.InstanceID),
+		}})
+	case types.EventCloudAccountRegistered:
+		var p types.CloudAccountPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		return w.store.WriteTuples(ctx, []Tuple{{
+			User: OrgObject(p.OrgID), Relation: RelationParent, Object: CloudAccountObject(p.AccountID),
+		}})
+	case types.EventCloudAccountDeregistered:
+		var p types.CloudAccountPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		return w.store.DeleteTuples(ctx, []Tuple{{
+			User: OrgObject(p.OrgID), Relation: RelationParent, Object: CloudAccountObject(p.AccountID),
+		}})
+	case types.EventClusterSetCreated:
+		var p types.ClusterSetPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		return w.store.WriteTuples(ctx, []Tuple{{
+			User: OrgObject(p.OrgID), Relation: RelationParent, Object: ClusterSetObject(p.ClusterSetID),
+		}})
+	case types.EventPolicyPackAssigned:
+		var p types.PolicyPackAssignedPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		return w.store.WriteTuples(ctx, []Tuple{{
+			User: OrgObject(p.OrgID), Relation: RelationParent, Object: PolicyPackObject(p.PackID),
 		}})
 	}
 	return nil

@@ -32,6 +32,9 @@ const (
 	TypeCluster          = "cluster"
 	TypeCatalogItem      = "catalog_item"
 	TypeResourceInstance = "resource_instance"
+	TypeCloudAccount     = "cloud_account"
+	TypePolicyPack       = "policy_pack"
+	TypeClusterSet       = "cluster_set"
 )
 
 // Tuple is one relationship fact.
@@ -227,6 +230,16 @@ func ModelV1() client.ClientWriteAuthorizationModelRequest {
 	instanceMeta := map[string]openfga.RelationMetadata{
 		RelationParent: {DirectlyRelatedUserTypes: &clusterRef},
 	}
+	orgScopedRelations := func() map[string]openfga.Userset {
+		return map[string]openfga.Userset{
+			RelationParent:   direct(),
+			RelationOperator: fromParent(RelationPlatformEngineer),
+			RelationViewer:   fromParent(RelationViewer),
+		}
+	}
+	orgScopedMeta := map[string]openfga.RelationMetadata{
+		RelationParent: {DirectlyRelatedUserTypes: &orgRef},
+	}
 	return client.ClientWriteAuthorizationModelRequest{
 		SchemaVersion: "1.1",
 		TypeDefinitions: []openfga.TypeDefinition{
@@ -236,9 +249,14 @@ func ModelV1() client.ClientWriteAuthorizationModelRequest {
 			{Type: TypeCluster, Relations: &clusterRelations, Metadata: &openfga.Metadata{Relations: &clusterMeta}},
 			{Type: TypeCatalogItem, Relations: &catalogRelations, Metadata: &openfga.Metadata{Relations: &catalogMeta}},
 			{Type: TypeResourceInstance, Relations: &instanceRelations, Metadata: &openfga.Metadata{Relations: &instanceMeta}},
+			{Type: TypeCloudAccount, Relations: ptr(orgScopedRelations()), Metadata: &openfga.Metadata{Relations: &orgScopedMeta}},
+			{Type: TypePolicyPack, Relations: ptr(orgScopedRelations()), Metadata: &openfga.Metadata{Relations: &orgScopedMeta}},
+			{Type: TypeClusterSet, Relations: ptr(orgScopedRelations()), Metadata: &openfga.Metadata{Relations: &orgScopedMeta}},
 		},
 	}
 }
+
+func ptr[T any](v T) *T { return &v }
 
 // Helpers to build fully-qualified FGA object/user strings. OpenFGA object
 // IDs may not contain ':' or '#', so the "org:" prefix used by Inari tenant
@@ -256,6 +274,9 @@ func CatalogItemObject(itemID string) string {
 func ResourceInstanceObject(instanceID string) string {
 	return TypeResourceInstance + ":" + instanceID
 }
+func CloudAccountObject(id string) string { return TypeCloudAccount + ":" + id }
+func PolicyPackObject(id string) string   { return TypePolicyPack + ":" + id }
+func ClusterSetObject(id string) string   { return TypeClusterSet + ":" + id }
 func TeamMemberUserset(teamID string) string {
 	return TeamObject(teamID) + "#" + RelationMember
 }

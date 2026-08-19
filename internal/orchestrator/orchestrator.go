@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -23,6 +24,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/approvals"
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/impersonation"
 	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -45,7 +47,45 @@ type ClusterResolver interface {
 
 // Gate is the approvals seam.
 type Gate interface {
-	Gate(ctx context.Context, orgID string, item *types.CatalogItem, version, clusterID string, spec []byte, requester string) (*approvals.GateResult, error)
+	Gate(ctx context.Context, in approvals.GateInput) (*approvals.GateResult, error)
+}
+
+// PolicyChecker is the Policy Service seam (plan §5.11): PreFlight runs
+// request-time OPA checks before the approval gate; RenderCheck runs
+// render-time manifest checks before anything reaches tenant Git.
+type PolicyChecker interface {
+	PreFlight(ctx context.Context, in PolicyInput) (*types.PolicyDecision, error)
+	RenderCheck(ctx context.Context, orgID string, manifests ...[]byte) (*types.PolicyDecision, error)
+}
+
+// PolicyInput is the orchestrator-side pre-flight input (mapped onto the
+// Policy Service's own input type at the wiring seam).
+type PolicyInput struct {
+	OrgID               string
+	ItemID              string
+	Version             string
+	ClusterID           string
+	Spec                json.RawMessage
+	Requester           string
+	ClusterLabels       map[string]string
+	ClusterDistribution string
+}
+
+// PolicyViolationError carries the blocking decision (reason + remediation)
+// to the HTTP layer, which answers 422 with the full decision payload.
+type PolicyViolationError struct {
+	Decision *types.PolicyDecision
+}
+
+func (e *PolicyViolationError) Error() string {
+	if e.Decision == nil || len(e.Decision.Violations) == 0 {
+		return "orchestrator: policy violation"
+	}
+	parts := make([]string, 0, len(e.Decision.Violations))
+	for _, v := range e.Decision.Violations {
+		parts = append(parts, fmt.Sprintf("%s: %s (remediation: %s)", v.Rule, v.Reason, v.Remediation))
+	}
+	return "orchestrator: policy violation: " + strings.Join(parts, "; ")
 }
 
 // Queue is the agent command queue seam (agentgateway.Queue).
@@ -109,6 +149,7 @@ type Service struct {
 	catalog   CatalogResolver
 	clusters  ClusterResolver
 	gate      Gate
+	policy    PolicyChecker // nil = no policy enforcement
 	queue     Queue
 	git       gitprovider.Provider
 	audit     *audit.Store
@@ -122,9 +163,44 @@ func NewService(d *db.DB, instances *inventory.Store, catalog CatalogResolver, c
 	}
 }
 
-// Deploy turns a deploy request into desired state. When the item's
-// approval policy requires review, only an approval request is created and
-// the caller must re-issue Deploy after approval (M2 basic flow).
+// WithPolicyChecker attaches the Policy Service seam (main wiring).
+func (s *Service) WithPolicyChecker(p PolicyChecker) *Service { s.policy = p; return s }
+
+// preFlight runs request-time policy checks; a blocking decision yields a
+// *PolicyViolationError.
+func (s *Service) preFlight(ctx context.Context, in PolicyInput) error {
+	if s.policy == nil {
+		return nil
+	}
+	decision, err := s.policy.PreFlight(ctx, in)
+	if err != nil {
+		return err
+	}
+	if decision != nil && !decision.Allow {
+		return &PolicyViolationError{Decision: decision}
+	}
+	return nil
+}
+
+// renderCheck runs render-time policy checks on rendered manifests.
+func (s *Service) renderCheck(ctx context.Context, orgID string, manifests ...[]byte) error {
+	if s.policy == nil {
+		return nil
+	}
+	decision, err := s.policy.RenderCheck(ctx, orgID, manifests...)
+	if err != nil {
+		return err
+	}
+	if decision != nil && !decision.Allow {
+		return &PolicyViolationError{Decision: decision}
+	}
+	return nil
+}
+
+// Deploy turns a deploy request into desired state. Request-time policy
+// (PreFlight) runs before the approval gate; when the item's approval
+// policy requires review, an approval request is created and the deploy
+// resumes automatically on approval (see ResumeHandler).
 func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult, error) {
 	cluster, err := s.clusters.GetCluster(ctx, req.ClusterID)
 	if err != nil {
@@ -155,7 +231,19 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 		}
 	}
 
-	gate, err := s.gate.Gate(ctx, req.OrgID, item, version, req.ClusterID, req.Spec, req.Requester)
+	if err := s.preFlight(ctx, PolicyInput{
+		OrgID: req.OrgID, ItemID: req.ItemID, Version: version,
+		ClusterID: req.ClusterID, Spec: req.Spec, Requester: req.Requester,
+		ClusterLabels: cluster.Labels, ClusterDistribution: cluster.Distribution,
+	}); err != nil {
+		return nil, err
+	}
+
+	gate, err := s.gate.Gate(ctx, approvals.GateInput{
+		OrgID: req.OrgID, Item: item, Version: version, ClusterID: req.ClusterID,
+		Spec: req.Spec, Requester: req.Requester, Name: req.Name, Namespace: req.Namespace,
+		OwnerTeam: req.OwnerTeam, Channel: req.Channel,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -205,6 +293,9 @@ func (s *Service) apply(ctx context.Context, req DeployRequest, item *types.Cata
 
 	manifest, err := RenderInstanceManifest(ver, name, namespace, req.Spec)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.renderCheck(ctx, req.OrgID, manifest); err != nil {
 		return nil, err
 	}
 	path := RepoPath(req.ClusterID, req.ItemID, instanceID)
@@ -264,7 +355,7 @@ func (s *Service) apply(ctx context.Context, req DeployRequest, item *types.Cata
 			return err
 		}
 		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
-			OrgID: req.OrgID, Actor: req.Requester, Action: "deploy.requested",
+			OrgID: req.OrgID, Actor: req.Requester, Impersonator: impersonation.FromContext(ctx), Action: "deploy.requested",
 			ObjectType: "resource_instance", ObjectID: instanceID,
 			Payload: json.RawMessage(fmt.Sprintf(`{"item":%q,"version":%q,"cluster":%q}`, req.ItemID, version, req.ClusterID)),
 		}); err != nil {
@@ -341,7 +432,18 @@ func (s *Service) Upgrade(ctx context.Context, orgID, instanceID, toVersion, req
 	if err != nil {
 		return nil, err
 	}
-	gate, err := s.gate.Gate(ctx, orgID, item, toVersion, existing.ClusterID, existing.Spec, requester)
+	if err := s.preFlight(ctx, PolicyInput{
+		OrgID: orgID, ItemID: existing.CatalogItemID, Version: toVersion,
+		ClusterID: existing.ClusterID, Spec: existing.Spec, Requester: requester,
+		ClusterLabels: cluster.Labels, ClusterDistribution: cluster.Distribution,
+	}); err != nil {
+		return nil, err
+	}
+	gate, err := s.gate.Gate(ctx, approvals.GateInput{
+		OrgID: orgID, Item: item, Version: toVersion, ClusterID: existing.ClusterID,
+		Spec: existing.Spec, Requester: requester, OwnerTeam: existing.OwnerTeam,
+		InstanceID: instanceID,
+	})
 	if err != nil {
 		return nil, err
 	}

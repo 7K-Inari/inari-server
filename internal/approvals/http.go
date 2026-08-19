@@ -42,12 +42,28 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 	}, h.list)
 
 	huma.Register(api, huma.Operation{
+		OperationID: "getApproval",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/tenants/{org}/approvals/{id}",
+		Summary:     "Get one approval request",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.get)
+
+	huma.Register(api, huma.Operation{
 		OperationID: "decideApproval",
 		Method:      http.MethodPost,
 		Path:        "/api/v1/tenants/{org}/approvals/{id}/decide",
 		Summary:     "Approve or reject a pending approval request",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.decide)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "cancelApproval",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/tenants/{org}/approvals/{id}/cancel",
+		Summary:     "Withdraw a pending approval request (requester only)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.cancel)
 }
 
 func (h *Handler) authorizeOrg(ctx context.Context, slug, relation string) (*types.Organization, *authn.Identity, error) {
@@ -76,8 +92,9 @@ func (h *Handler) authorizeOrg(ctx context.Context, slug, relation string) (*typ
 }
 
 type listInput struct {
-	Org   string `path:"org"`
-	State string `query:"state" doc:"Filter by state (pending|approved|rejected)"`
+	Org       string `path:"org"`
+	State     string `query:"state" doc:"Filter by state (pending|approved|rejected|cancelled|expired)"`
+	Requester string `query:"requester" doc:"Pass 'me' for the caller's own requests (inbox filter)"`
 }
 
 type listOutput struct {
@@ -87,16 +104,71 @@ type listOutput struct {
 }
 
 func (h *Handler) list(ctx context.Context, in *listInput) (*listOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
 	if err != nil {
 		return nil, err
 	}
-	reqs, err := h.svc.List(ctx, org.ID, in.State)
+	requester := in.Requester
+	if requester == "me" {
+		requester = "user:" + id.Subject
+	}
+	reqs, err := h.svc.List(ctx, org.ID, in.State, requester)
 	if err != nil {
 		return nil, err
 	}
 	out := &listOutput{}
 	out.Body.Approvals = reqs
+	return out, nil
+}
+
+type approvalPathInput struct {
+	Org string `path:"org"`
+	ID  string `path:"id"`
+}
+
+type approvalOutput struct {
+	Body struct {
+		Approval types.ApprovalRequest `json:"approval"`
+	}
+}
+
+func (h *Handler) get(ctx context.Context, in *approvalPathInput) (*approvalOutput, error) {
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	if err != nil {
+		return nil, err
+	}
+	req, err := h.svc.Get(ctx, org.ID, in.ID)
+	if errors.Is(err, ErrNotFound) {
+		return nil, huma.Error404NotFound("approval request not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := &approvalOutput{}
+	out.Body.Approval = *req
+	return out, nil
+}
+
+func (h *Handler) cancel(ctx context.Context, in *approvalPathInput) (*approvalOutput, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	if err != nil {
+		return nil, err
+	}
+	req, err := h.svc.Cancel(ctx, org.ID, in.ID, "user:"+id.Subject)
+	if errors.Is(err, ErrNotFound) {
+		return nil, huma.Error404NotFound("approval request not found")
+	}
+	if errors.Is(err, ErrAlreadyDecided) {
+		return nil, huma.Error409Conflict("approval request already decided")
+	}
+	if errors.Is(err, ErrNotRequester) {
+		return nil, huma.Error403Forbidden(err.Error())
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := &approvalOutput{}
+	out.Body.Approval = *req
 	return out, nil
 }
 

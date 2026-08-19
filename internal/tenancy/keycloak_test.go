@@ -46,7 +46,7 @@ func TestCreateClusterClientIncludesAudienceMapper(t *testing.T) {
 	}
 
 	var body struct {
-		ClientID         string `json:"clientId"`
+		ClientID        string `json:"clientId"`
 		ProtocolMappers []struct {
 			Name           string            `json:"name"`
 			Protocol       string            `json:"protocol"`

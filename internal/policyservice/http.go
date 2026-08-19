@@ -12,6 +12,7 @@ import (
 
 	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/authz"
+	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -339,11 +340,14 @@ func (h *Handler) evaluate(ctx context.Context, in *evaluateInput) (*evaluateOut
 	}
 	pf := PreFlightInput{
 		OrgID: org.ID, ItemID: in.Body.ItemID, Version: in.Body.Version,
-		ClusterID: in.Body.ClusterID, Spec: in.Body.Spec, Requester: id.Subject,
+		ClusterID: in.Body.ClusterID, Spec: in.Body.Spec, Requester: "user:" + id.Subject,
 	}
 	if in.Body.ClusterID != "" {
 		cluster, err := h.svc.clusters.GetCluster(ctx, in.Body.ClusterID)
 		if err != nil {
+			if errors.Is(err, clusterregistry.ErrClusterNotFound) {
+				return nil, huma.Error404NotFound("cluster not found")
+			}
 			return nil, mapErr(err, nil)
 		}
 		if cluster.OrgID != org.ID {

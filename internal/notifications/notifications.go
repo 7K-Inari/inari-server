@@ -366,6 +366,9 @@ func validateEndpoint(in *EndpointInput, kind string) error {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return ErrInvalidURL
 	}
+	if u.User != nil {
+		return fmt.Errorf("%w: credentials in URL are not allowed", ErrInvalidURL)
+	}
 	for _, e := range in.Events {
 		if !knownEvent(e) {
 			return fmt.Errorf("%w: %s", ErrInvalidEvent, e)

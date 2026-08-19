@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -358,7 +359,9 @@ func (s *Service) RunExpiryLoop(ctx context.Context, interval time.Duration) {
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
 	for {
-		_, _ = s.ExpireSweep(ctx)
+		if _, err := s.ExpireSweep(ctx); err != nil && ctx.Err() == nil {
+			slog.Warn("approval expiry sweep failed", "error", err)
+		}
 		select {
 		case <-ctx.Done():
 			return

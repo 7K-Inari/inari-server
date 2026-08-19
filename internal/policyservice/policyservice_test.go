@@ -56,20 +56,6 @@ func TestResolveClusters(t *testing.T) {
 	}
 }
 
-func TestExemptionValid(t *testing.T) {
-	now := time.Now()
-	valid := &types.Exemption{State: types.ExemptionStateApproved, ExpiresAt: now.Add(time.Hour)}
-	if !exemptionValid(valid, now) {
-		t.Fatal("approved unexpired exemption should be valid")
-	}
-	if exemptionValid(&types.Exemption{State: types.ExemptionStatePending, ExpiresAt: now.Add(time.Hour)}, now) {
-		t.Fatal("pending exemption is not valid")
-	}
-	if exemptionValid(&types.Exemption{State: types.ExemptionStateApproved, ExpiresAt: now.Add(-time.Hour)}, now) {
-		t.Fatal("expired exemption is not valid")
-	}
-}
-
 func TestValidateExemptionExpiry(t *testing.T) {
 	now := time.Now()
 	if err := validateExemptionExpiry(now, now.Add(24*time.Hour)); err != nil {

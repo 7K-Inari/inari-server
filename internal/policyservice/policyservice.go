@@ -395,13 +395,13 @@ func (s *Store) ListExemptions(ctx context.Context, q db.Querier, orgID string) 
 }
 
 func (s *Store) SetExemptionState(ctx context.Context, q db.Querier, id, state, approvedBy string) error {
-	const sql = `UPDATE exemptions SET state = $2, approved_by = $3 WHERE id = $1`
+	const sql = `UPDATE exemptions SET state = $2, approved_by = $3 WHERE id = $1 AND state = 'pending'`
 	tag, err := q.Exec(ctx, sql, id, state, approvedBy)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrExemptionNotFound
+		return ErrExemptionNotPending
 	}
 	return nil
 }
@@ -981,11 +981,6 @@ func validateExemptionExpiry(now, expiresAt time.Time) error {
 		return fmt.Errorf("%w: expiresAt must be at most 90 days out", ErrInvalidInput)
 	}
 	return nil
-}
-
-// exemptionValid reports whether an exemption currently waives violations.
-func exemptionValid(e *types.Exemption, now time.Time) bool {
-	return e.State == types.ExemptionStateApproved && now.Before(e.ExpiresAt)
 }
 
 func newUUID() string {

@@ -50,6 +50,9 @@ jobs:
           cluster_name: inari-e2e
           wait: 60s
 
+      - name: Fetch chart dependencies
+        run: helm dependency build inari-helm-charts/charts/inari-platform
+
       - name: Run golden path
         run: CHART_DIR=inari-helm-charts/charts/inari-platform KEEP_CLUSTER=false bash e2e/golden-path.sh
 

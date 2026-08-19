@@ -180,7 +180,8 @@ func (s *Store) SetMetadata(ctx context.Context, q db.Querier, id, distribution,
 	return nil
 }
 
-func (s *Store) TouchLastSeen(ctx context.Context, q db.Querier, id string) error {	const sql = `UPDATE clusters SET last_seen_at = now() WHERE id = $1`
+func (s *Store) TouchLastSeen(ctx context.Context, q db.Querier, id string) error {
+	const sql = `UPDATE clusters SET last_seen_at = now() WHERE id = $1`
 	_, err := q.Exec(ctx, sql, id)
 	return err
 }

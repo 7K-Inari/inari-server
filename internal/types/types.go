@@ -100,10 +100,10 @@ const (
 	EventCloudAccountValidated    = "cloud_account.validated"
 	EventCloudAccountDeregistered = "cloud_account.deregistered"
 
-	EventPolicyPackAssigned  = "policy_pack.assigned"
-	EventClusterSetCreated   = "cluster_set.created"
-	EventExemptionRequested  = "exemption.requested"
-	EventExemptionDecided    = "exemption.decided"
+	EventPolicyPackAssigned = "policy_pack.assigned"
+	EventClusterSetCreated  = "cluster_set.created"
+	EventExemptionRequested = "exemption.requested"
+	EventExemptionDecided   = "exemption.decided"
 )
 
 // ClusterState is the cluster lifecycle state (plan §5.11).
@@ -333,25 +333,25 @@ const (
 // request can be resumed by the orchestrator without the caller re-issuing
 // the deploy (M3); InstanceID is set for upgrade approvals.
 type ApprovalRequest struct {
-	ID         string          `json:"id"`
-	OrgID      string          `json:"orgId"`
-	ItemID     string          `json:"itemId"`
-	Version    string          `json:"version"`
-	ClusterID  string          `json:"clusterId"`
-	Spec       json.RawMessage `json:"spec"`
-	Requester  string          `json:"requester"`
-	Approver   string          `json:"approver,omitempty"`
-	State      string          `json:"state"`
-	Reason     string          `json:"reason,omitempty"`
-	Name       string          `json:"name,omitempty"`
-	Namespace  string          `json:"namespace,omitempty"`
-	OwnerTeam  string          `json:"ownerTeam,omitempty"`
-	Channel    string          `json:"channel,omitempty"`
-	InstanceID string          `json:"instanceId,omitempty"`
-	CreatedAt  time.Time       `json:"createdAt"`
-	DecidedAt  *time.Time      `json:"decidedAt,omitempty"`
-	ExpiresAt  *time.Time      `json:"expiresAt,omitempty"`
-	CancelledBy string         `json:"cancelledBy,omitempty"`
+	ID          string          `json:"id"`
+	OrgID       string          `json:"orgId"`
+	ItemID      string          `json:"itemId"`
+	Version     string          `json:"version"`
+	ClusterID   string          `json:"clusterId"`
+	Spec        json.RawMessage `json:"spec"`
+	Requester   string          `json:"requester"`
+	Approver    string          `json:"approver,omitempty"`
+	State       string          `json:"state"`
+	Reason      string          `json:"reason,omitempty"`
+	Name        string          `json:"name,omitempty"`
+	Namespace   string          `json:"namespace,omitempty"`
+	OwnerTeam   string          `json:"ownerTeam,omitempty"`
+	Channel     string          `json:"channel,omitempty"`
+	InstanceID  string          `json:"instanceId,omitempty"`
+	CreatedAt   time.Time       `json:"createdAt"`
+	DecidedAt   *time.Time      `json:"decidedAt,omitempty"`
+	ExpiresAt   *time.Time      `json:"expiresAt,omitempty"`
+	CancelledBy string          `json:"cancelledBy,omitempty"`
 }
 
 // InstanceState is the resource instance lifecycle (plan §5.11).
@@ -503,19 +503,19 @@ const (
 // This entity is a public contract: the Tenant Zone Factory (M3-W2) builds
 // on it (management-scope accounts, trust bootstrap). Keep the API stable.
 type CloudAccount struct {
-	ID             string     `json:"id"`
-	OrgID          string     `json:"orgId"`
-	Provider       string     `json:"provider"` // "aws"
-	AccountID      string     `json:"accountId"`
-	RoleARN        string     `json:"roleArn"`
-	ExternalID     string     `json:"externalId,omitempty"`
-	IssuerURL      string     `json:"issuerUrl,omitempty"`
-	RunContext     string     `json:"runContext"` // tenant | platform
-	State          string     `json:"state"`
-	ValidatedAt    *time.Time `json:"validatedAt,omitempty"`
-	ValidationErr  string     `json:"validationError,omitempty"`
-	CreatedBy      string     `json:"createdBy,omitempty"`
-	CreatedAt      time.Time  `json:"createdAt"`
+	ID            string     `json:"id"`
+	OrgID         string     `json:"orgId"`
+	Provider      string     `json:"provider"` // "aws"
+	AccountID     string     `json:"accountId"`
+	RoleARN       string     `json:"roleArn"`
+	ExternalID    string     `json:"externalId,omitempty"`
+	IssuerURL     string     `json:"issuerUrl,omitempty"`
+	RunContext    string     `json:"runContext"` // tenant | platform
+	State         string     `json:"state"`
+	ValidatedAt   *time.Time `json:"validatedAt,omitempty"`
+	ValidationErr string     `json:"validationError,omitempty"`
+	CreatedBy     string     `json:"createdBy,omitempty"`
+	CreatedAt     time.Time  `json:"createdAt"`
 }
 
 // CloudAccountPayload is the outbox payload for cloud account events.
@@ -622,7 +622,7 @@ type PolicyPackAssignedPayload struct {
 
 // ClusterSetPayload is the outbox payload for cluster set lifecycle events.
 type ClusterSetPayload struct {
-	OrgID       string `json:"orgId"`
+	OrgID        string `json:"orgId"`
 	ClusterSetID string `json:"clusterSetId"`
 }
 

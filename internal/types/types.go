@@ -710,3 +710,107 @@ type NotificationDelivery struct {
 	CreatedAt   time.Time       `json:"createdAt"`
 	DeliveredAt *time.Time      `json:"deliveredAt,omitempty"`
 }
+
+// Tenant Zone lifecycle (plan §5.12): the resumable, idempotent vending
+// state machine. Long-running AWS operations are tracked as step
+// sub-resources with status; failures route to manual_intervention (§10).
+type TenantZoneState string
+
+const (
+	ZoneStateRequested                   TenantZoneState = "requested"
+	ZoneStatePendingApproval             TenantZoneState = "pending_approval"
+	ZoneStateProvisioning                TenantZoneState = "provisioning"
+	ZoneStateWiring                      TenantZoneState = "wiring"
+	ZoneStateActive                      TenantZoneState = "active"
+	ZoneStateFailed                      TenantZoneState = "failed"
+	ZoneStateManualIntervention          TenantZoneState = "manual_intervention"
+	ZoneStateDecommissionPendingApproval TenantZoneState = "decommission_pending_approval"
+	ZoneStateCordoning                   TenantZoneState = "cordoning"
+	ZoneStateDraining                    TenantZoneState = "draining"
+	ZoneStateDecommissioning             TenantZoneState = "decommissioning"
+	ZoneStateClosed                      TenantZoneState = "closed"
+)
+
+// Provisioning step names (in order) and their decommission mirrors.
+const (
+	ZoneStepPreflight      = "preflight"
+	ZoneStepAccountVend    = "account_vend"
+	ZoneStepTrustBootstrap = "trust_bootstrap"
+	ZoneStepEKSProvision   = "eks_provision"
+	ZoneStepInariWiring    = "inari_wiring"
+
+	ZoneStepCordon         = "cordon"
+	ZoneStepDrain          = "drain"
+	ZoneStepEKSDelete      = "eks_delete"
+	ZoneStepAccountClose   = "account_close"
+	ZoneStepIdentityRevoke = "identity_revoke"
+	ZoneStepAuditArchive   = "audit_archive"
+)
+
+// TenantZone step statuses.
+const (
+	ZoneStepPending   = "pending"
+	ZoneStepRunning   = "running"
+	ZoneStepWaiting   = "waiting" // async AWS/MR operation in flight
+	ZoneStepSucceeded = "succeeded"
+	ZoneStepFailed    = "failed"
+	ZoneStepSkipped   = "skipped"
+)
+
+// TenantZone is one vended (or in-progress) tenant zone (plan §5.9, §5.12).
+type TenantZone struct {
+	ID                  string          `json:"id"`
+	Slug                string          `json:"slug"`
+	DisplayName         string          `json:"displayName"`
+	OrgID               string          `json:"orgId,omitempty"` // wired Keycloak org; empty until inari_wiring
+	OUID                string          `json:"ouId"`
+	Region              string          `json:"region"`
+	Tier                string          `json:"tier"`
+	State               TenantZoneState `json:"state"`
+	ManagementAccountID string          `json:"managementAccountId"` // cloud_accounts.id (scope: management)
+	AWSAccountID        string          `json:"awsAccountId,omitempty"`
+	ClusterID           string          `json:"clusterId,omitempty"`
+	CloudAccountID      string          `json:"cloudAccountId,omitempty"`
+	KeycloakOrgID       string          `json:"keycloakOrgId,omitempty"`
+	GitRepo             string          `json:"gitRepo,omitempty"`
+	Tags                map[string]string `json:"tags,omitempty"` // mandatory cost/allocation tags (§5.12)
+	Error               string          `json:"error,omitempty"`
+	CreatedBy           string          `json:"createdBy"`
+	CreatedAt           time.Time       `json:"createdAt"`
+	UpdatedAt           time.Time       `json:"updatedAt"`
+}
+
+// TenantZoneStep tracks one sub-resource of the vending/decommission flow
+// (plan §5.12 "long-running AWS operations tracked as sub-resources with
+// status"). ExternalRef persists the async operation handle (CreateAccount
+// request ID, MR ref) so restarts resume polling instead of re-creating.
+type TenantZoneStep struct {
+	ZoneID      string          `json:"zoneId"`
+	Step        string          `json:"step"`
+	Status      string          `json:"status"`
+	ExternalRef string          `json:"externalRef,omitempty"`
+	Detail      json.RawMessage `json:"detail,omitempty"`
+	Attempts    int             `json:"attempts"`
+	UpdatedAt   time.Time       `json:"updatedAt"`
+}
+
+// Tenant zone outbox events.
+const (
+	EventTenantZoneRequested             = "tenant_zone.requested"
+	EventTenantZoneProvisioning          = "tenant_zone.provisioning"
+	EventTenantZoneStepUpdated           = "tenant_zone.step_updated"
+	EventTenantZoneActive                = "tenant_zone.active"
+	EventTenantZoneFailed                = "tenant_zone.failed"
+	EventTenantZoneDecommissionRequested = "tenant_zone.decommission_requested"
+	EventTenantZoneClosed                = "tenant_zone.closed"
+)
+
+// TenantZonePayload is the outbox payload for tenant zone events.
+type TenantZonePayload struct {
+	OrgID      string `json:"orgId,omitempty"`
+	ZoneID     string `json:"zoneId"`
+	Slug       string `json:"slug"`
+	State      string `json:"state,omitempty"`
+	Step       string `json:"step,omitempty"`
+	StepStatus string `json:"stepStatus,omitempty"`
+}

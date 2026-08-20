@@ -6,17 +6,6 @@ import (
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
-func TestLifecyclePolicy(t *testing.T) {
-	deployReq := &types.ApprovalRequest{ItemID: "curated:x"}
-	if got := policyForRequest(deployReq, &types.CatalogItem{ApprovalPolicy: types.ApprovalPolicyPeer}); got != types.ApprovalPolicyPeer {
-		t.Errorf("deploy request policy = %q, want peer", got)
-	}
-	lcReq := &types.ApprovalRequest{Action: types.ApprovalActionTenantZoneVend}
-	if got := policyForRequest(lcReq, nil); got != types.ApprovalPolicyPlatformAdmin {
-		t.Errorf("lifecycle request policy = %q, want platform-admin", got)
-	}
-}
-
 func TestLifecycleDecisionGuards(t *testing.T) {
 	req := &types.ApprovalRequest{
 		Action:    types.ApprovalActionTenantZoneDecommission,

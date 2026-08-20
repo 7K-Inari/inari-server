@@ -203,9 +203,10 @@ func run() error {
 	// default (the M3 acceptance layer); the SDK impl requires
 	// INARI_TZF_AWS_MODE=aws plus ambient platform credentials.
 	tzfEnv := &tenantzonefactory.Env{
-		AWS:       tenantzonefactory.NewFakeOrganizations(),
-		Bootstrap: tenantzonefactory.NewFakeTrustBootstrap(),
-		Prov:      tenantzonefactory.NewFakeProvisioner(),
+		AWS:          tenantzonefactory.NewFakeOrganizations(),
+		Bootstrap:    tenantzonefactory.NewFakeTrustBootstrap(),
+		Prov:         tenantzonefactory.NewFakeProvisioner(),
+		MgmtAccounts: cloudAccountsSvc,
 		Config: tenantzonefactory.Config{
 			ApprovalRequired: cfg.TZFApprovalRequired,
 			AccountQuota:     int(cfg.TZFAccountQuota),

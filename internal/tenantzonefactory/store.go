@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -58,7 +59,7 @@ func (s *Store) CreateZone(ctx context.Context, q db.Querier, z *types.TenantZon
 	             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING ` + zoneCols
 	out, err := scanZone(q.QueryRow(ctx, sql, z.ID, z.Slug, z.DisplayName, z.OwnerOrgID, z.OUID,
 		z.Region, z.Tier, z.State, z.ManagementAccountID, tags, z.CreatedBy))
-	if isUniqueViolation(err) {
+	if isSlugUniqueViolation(err) {
 		return ErrSlugTaken
 	}
 	if err != nil {
@@ -169,13 +170,10 @@ func (s *Store) ListSteps(ctx context.Context, q db.Querier, zoneID string) (map
 	return out, rows.Err()
 }
 
-func isUniqueViolation(err error) bool {
-	if err == nil {
-		return false
-	}
-	var pgErr interface{ SQLState() string }
-	if errors.As(err, &pgErr) {
-		return pgErr.SQLState() == "23505"
-	}
-	return false
+// isSlugUniqueViolation reports whether err is the tenant_zones slug
+// unique-constraint violation specifically — a PK collision on id must
+// surface as-is, not be misreported as ErrSlugTaken.
+func isSlugUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "tenant_zones_slug_key"
 }

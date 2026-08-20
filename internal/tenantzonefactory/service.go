@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -42,6 +43,9 @@ type Service struct {
 	gate  LifecycleGate
 	log   *slog.Logger
 	newID func() string
+
+	locksMu sync.Mutex
+	locks   map[string]*sync.Mutex // per-zone runner serialization
 }
 
 // NewService builds the module service. env carries the backend seams
@@ -53,7 +57,20 @@ func NewService(d *db.DB, store *Store, auditStore *audit.Store, env *Env, gate 
 	if env.Config.MaxAttempts <= 0 {
 		env.Config.MaxAttempts = 5
 	}
-	return &Service{db: d, store: store, audit: auditStore, env: env, gate: gate, log: log, newID: newUUID}
+	return &Service{db: d, store: store, audit: auditStore, env: env, gate: gate, log: log, newID: newUUID, locks: map[string]*sync.Mutex{}}
+}
+
+// zoneLock serializes runners for one zone (reconcile loop, approval
+// resume, HTTP resume) so concurrent entries can't double-execute steps.
+func (s *Service) zoneLock(zoneID string) *sync.Mutex {
+	s.locksMu.Lock()
+	defer s.locksMu.Unlock()
+	m, ok := s.locks[zoneID]
+	if !ok {
+		m = &sync.Mutex{}
+		s.locks[zoneID] = m
+	}
+	return m
 }
 
 // RequestInput is the zone vending form (plan §5.12 step 1).
@@ -79,6 +96,15 @@ type RequestResult struct {
 func (s *Service) RequestZone(ctx context.Context, actor string, in RequestInput) (*RequestResult, error) {
 	if in.ManagementAccountID == "" || in.OwnerOrgID == "" {
 		return nil, fmt.Errorf("tzf: management cloud account and owner org are required (§5.12 prerequisite)")
+	}
+	if s.env.MgmtAccounts != nil {
+		mgmt, err := s.env.MgmtAccounts.Get(ctx, in.OwnerOrgID, in.ManagementAccountID)
+		if err != nil {
+			return nil, fmt.Errorf("tzf: management cloud account %s not usable by org %s: %w", in.ManagementAccountID, in.OwnerOrgID, err)
+		}
+		if mgmt.RunContext != types.CloudAccountRunContextPlatform {
+			return nil, fmt.Errorf("tzf: cloud account %s is not a management account (runContext=%s, want platform)", in.ManagementAccountID, mgmt.RunContext)
+		}
 	}
 	zone := &types.TenantZone{
 		ID: "zone:" + s.newID(), Slug: in.Slug, DisplayName: in.DisplayName,
@@ -115,9 +141,14 @@ func (s *Service) RequestZone(ctx context.Context, actor string, in RequestInput
 			Requester: actor, Context: reqCtx,
 		})
 		if err != nil {
+			// Don't orphan the zone in `requested` (no approval, no runner,
+			// not resumable) — park it in failed so it can be resumed.
+			_ = s.settle(ctx, zone, types.ZoneStateFailed, types.EventTenantZoneFailed, actor,
+				fmt.Errorf("approval gate: %w", err))
 			return nil, err
 		}
 		if err := s.setState(ctx, zone, types.ZoneStatePendingApproval, ""); err != nil {
+			_ = s.settle(ctx, zone, types.ZoneStateFailed, types.EventTenantZoneFailed, actor, err)
 			return nil, err
 		}
 		res.ApprovalID = req.ID
@@ -148,20 +179,47 @@ func (s *Service) StartProvisioning(ctx context.Context, zoneID, actor string) e
 	return s.run(ctx, zone, actor, ProvisionOrder, provisionSteps)
 }
 
-// ResumeZone re-enters the runner after manual intervention (§10).
+// ResumeZone re-enters the runner after manual intervention (§10). The
+// direction is inferred from the step records — a zone that failed
+// mid-decommission has decommission steps on file and must NOT re-run the
+// vend chain against a half-torn-down zone.
 func (s *Service) ResumeZone(ctx context.Context, zoneID, actor string) error {
 	zone, err := s.store.GetZone(ctx, s.db.Pool, zoneID)
 	if err != nil {
 		return err
 	}
+	decommissioning, err := s.hasDecommissionSteps(ctx, zoneID)
+	if err != nil {
+		return err
+	}
 	switch zone.State {
-	case types.ZoneStateProvisioning, types.ZoneStateWiring, types.ZoneStateManualIntervention, types.ZoneStateFailed:
+	case types.ZoneStateProvisioning, types.ZoneStateWiring:
 		return s.run(ctx, zone, actor, ProvisionOrder, provisionSteps)
 	case types.ZoneStateCordoning, types.ZoneStateDraining, types.ZoneStateDecommissioning:
 		return s.run(ctx, zone, actor, DecommissionOrder, decommissionSteps)
+	case types.ZoneStateManualIntervention, types.ZoneStateFailed:
+		if decommissioning {
+			return s.run(ctx, zone, actor, DecommissionOrder, decommissionSteps)
+		}
+		return s.run(ctx, zone, actor, ProvisionOrder, provisionSteps)
 	default:
 		return fmt.Errorf("%w: cannot resume from %s", ErrInvalidState, zone.State)
 	}
+}
+
+// hasDecommissionSteps reports whether any decommission step has been
+// started for the zone (i.e. the zone is on the teardown path).
+func (s *Service) hasDecommissionSteps(ctx context.Context, zoneID string) (bool, error) {
+	steps, err := s.store.ListSteps(ctx, s.db.Pool, zoneID)
+	if err != nil {
+		return false, err
+	}
+	for _, name := range DecommissionOrder {
+		if st := steps[name]; st != nil && st.Status != "" && st.Status != types.ZoneStepPending {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // RequestDecommission gates zone teardown on a platform-admin approval
@@ -180,7 +238,7 @@ func (s *Service) RequestDecommission(ctx context.Context, actor, zoneID string)
 		}
 		return "", nil
 	}
-	reqCtx, _ := json.Marshal(map[string]string{"zoneId": zone.ID, "slug": zone.Slug})
+	reqCtx, _ := json.Marshal(map[string]string{"zoneId": zone.ID, "slug": zone.Slug, "priorState": string(zone.State)})
 	req, err := s.gate.RequestLifecycleApproval(ctx, approvals.LifecycleApprovalInput{
 		OrgID: zone.OwnerOrgID, Action: types.ApprovalActionTenantZoneDecommission,
 		Requester: actor, Context: reqCtx,
@@ -241,6 +299,9 @@ var stepState = map[string]types.TenantZoneState{
 // run executes one step chain, persisting each transition in a TX with
 // audit + outbox, and settles the zone on completion/failure.
 func (s *Service) run(ctx context.Context, zone *types.TenantZone, actor string, order []string, funcs map[string]StepFunc) error {
+	lock := s.zoneLock(zone.ID)
+	lock.Lock()
+	defer lock.Unlock()
 	steps, err := s.store.ListSteps(ctx, s.db.Pool, zone.ID)
 	if err != nil {
 		return err

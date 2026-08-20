@@ -25,16 +25,6 @@ func ValidLifecycleAction(action string) bool {
 	return false
 }
 
-// policyForRequest resolves the effective approval policy: lifecycle
-// requests are always platform-admin gated; deploy requests use the item's
-// policy.
-func policyForRequest(req *types.ApprovalRequest, item *types.CatalogItem) types.ApprovalPolicy {
-	if req.Action != "" {
-		return types.ApprovalPolicyPlatformAdmin
-	}
-	return policyFor(item)
-}
-
 // checkLifecycleApprover enforces the platform-admin policy on lifecycle
 // decisions; the requester may never decide their own request.
 func checkLifecycleApprover(req *types.ApprovalRequest, approver string, role types.Role) error {

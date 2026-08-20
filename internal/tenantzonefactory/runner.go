@@ -52,6 +52,12 @@ type WiringResult struct {
 	GitRepo        string
 }
 
+// ManagementAccountLookup resolves the management CloudAccount for
+// request-time validation (cloudaccounts.Service seam).
+type ManagementAccountLookup interface {
+	Get(ctx context.Context, orgID, id string) (*types.CloudAccount, error)
+}
+
 // Env bundles the backend seams the steps run against.
 type Env struct {
 	AWS       Organizations
@@ -59,7 +65,10 @@ type Env struct {
 	Prov      Provisioner
 	Wiring    Wiring
 	Clusters  ClusterLifecycle
-	Config    Config
+	// MgmtAccounts, when set, enables request-time validation of the
+	// management CloudAccount (ownership + platform run context).
+	MgmtAccounts ManagementAccountLookup
+	Config       Config
 }
 
 // ProvisionOrder is the vending step sequence (plan §5.12 steps 1-5).

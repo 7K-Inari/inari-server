@@ -803,6 +803,7 @@ const (
 	EventTenantZoneActive                = "tenant_zone.active"
 	EventTenantZoneFailed                = "tenant_zone.failed"
 	EventTenantZoneDecommissionRequested = "tenant_zone.decommission_requested"
+	EventTenantZoneDecommissionDenied    = "tenant_zone.decommission_denied"
 	EventTenantZoneClosed                = "tenant_zone.closed"
 )
 

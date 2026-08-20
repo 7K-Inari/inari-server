@@ -164,6 +164,23 @@ func (s *Store) SetState(ctx context.Context, q db.Querier, id string, state typ
 	return nil
 }
 
+// SetStateIf is a compare-and-swap state update: it only applies when the
+// cluster is still in `from`, closing the TOCTOU window between validation
+// and write in concurrent lifecycle transitions. Zero rows means the state
+// changed underneath us (or the cluster is gone) — the caller maps that to
+// ErrInvalidTransition.
+func (s *Store) SetStateIf(ctx context.Context, q db.Querier, id string, from, to types.ClusterState) error {
+	const sql = `UPDATE clusters SET state = $3 WHERE id = $1 AND state = $2`
+	tag, err := q.Exec(ctx, sql, id, from, to)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: cluster no longer in state %s", ErrInvalidTransition, from)
+	}
+	return nil
+}
+
 func (s *Store) MarkRegistered(ctx context.Context, q db.Querier, id, clientID, k8sVersion string, labels map[string]string) error {
 	raw, err := json.Marshal(labels)
 	if err != nil {
@@ -387,6 +404,13 @@ func (s *Service) RevokeCluster(ctx context.Context, actor, clusterID string) er
 	if err != nil {
 		return err
 	}
+	// Disable the identity before the state flip (idempotent — retry-safe);
+	// a post-commit failure would strand a revoked cluster with a live client.
+	if c.KeycloakClientID != "" {
+		if err := s.clients.DisableClient(ctx, c.KeycloakClientID); err != nil {
+			return fmt.Errorf("clusterregistry: disable client: %w", err)
+		}
+	}
 	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		if err := s.store.SetState(ctx, tx, clusterID, types.ClusterStateRevoked); err != nil {
 			return err
@@ -400,15 +424,7 @@ func (s *Service) RevokeCluster(ctx context.Context, actor, clusterID string) er
 			OrgID: c.OrgID, ClusterID: clusterID,
 		})
 	})
-	if err != nil {
-		return err
-	}
-	if c.KeycloakClientID != "" {
-		if err := s.clients.DisableClient(ctx, c.KeycloakClientID); err != nil {
-			return fmt.Errorf("clusterregistry: disable client: %w", err)
-		}
-	}
-	return nil
+	return err
 }
 
 // CordonCluster blocks new deploys while existing workloads keep running
@@ -449,14 +465,18 @@ func (s *Service) DecommissionCluster(ctx context.Context, actor, clusterID stri
 		DrainedInstanceIDs []string `json:"drainedInstanceIds"`
 		Force              bool     `json:"force"`
 	}{DrainedInstanceIDs: drained, Force: force})
-	out, err := s.transition(ctx, actor, clusterID, types.ClusterStateDecommissioned, types.EventClusterDecommissioned, payload)
-	if err != nil {
-		return nil, nil, err
-	}
+	// Disable the identity BEFORE the terminal state flip: DisableClient is
+	// idempotent, so a failed transition can simply be retried — whereas a
+	// post-commit failure would strand a decommissioned cluster with a live
+	// client and no recovery path.
 	if c.KeycloakClientID != "" {
 		if err := s.clients.DisableClient(ctx, c.KeycloakClientID); err != nil {
 			return nil, nil, fmt.Errorf("clusterregistry: disable client: %w", err)
 		}
+	}
+	out, err := s.transition(ctx, actor, clusterID, types.ClusterStateDecommissioned, types.EventClusterDecommissioned, payload)
+	if err != nil {
+		return nil, nil, err
 	}
 	return out, drained, nil
 }
@@ -471,7 +491,7 @@ func (s *Service) transition(ctx context.Context, actor, clusterID string, to ty
 		return nil, fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, c.State, to)
 	}
 	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
-		if err := s.store.SetState(ctx, tx, clusterID, to); err != nil {
+		if err := s.store.SetStateIf(ctx, tx, clusterID, c.State, to); err != nil {
 			return err
 		}
 		if err := s.audit.Record(ctx, tx, &types.AuditEvent{

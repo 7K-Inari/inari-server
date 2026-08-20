@@ -38,6 +38,7 @@ CREATE TABLE tenant_zone_steps (
 );
 
 CREATE INDEX tenant_zones_state_idx ON tenant_zones (state);
+CREATE INDEX tenant_zones_owner_org_idx ON tenant_zones (owner_org_id);
 
 -- +goose Down
 DROP TABLE IF EXISTS tenant_zone_steps;

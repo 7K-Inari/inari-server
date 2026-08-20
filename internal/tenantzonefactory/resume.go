@@ -51,7 +51,8 @@ func (h *ResumeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) error
 		return nil // not ours (catalog deploy approvals resume elsewhere)
 	}
 	var lc struct {
-		ZoneID string `json:"zoneId"`
+		ZoneID     string `json:"zoneId"`
+		PriorState string `json:"priorState"`
 	}
 	if err := json.Unmarshal(req.Spec, &lc); err != nil || lc.ZoneID == "" {
 		return fmt.Errorf("tzf: resume: approval %s missing zone context", p.ApprovalID)
@@ -62,8 +63,15 @@ func (h *ResumeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) error
 			return err
 		}
 		if req.Action == types.ApprovalActionTenantZoneDecommission {
-			// Decommission denied: the zone returns to active service.
-			return h.svc.setState(ctx, zone, types.ZoneStateActive, "")
+			// Decommission denied: restore the zone's pre-request state
+			// (active, or failed if it was already broken) with an audit
+			// trail for the decision.
+			prior := types.TenantZoneState(lc.PriorState)
+			if prior != types.ZoneStateActive && prior != types.ZoneStateFailed {
+				prior = types.ZoneStateActive
+			}
+			return h.svc.settle(ctx, zone, prior, types.EventTenantZoneDecommissionDenied, "system:approvals",
+				fmt.Errorf("decommission approval %s %s", p.ApprovalID, p.State))
 		}
 		return h.svc.settle(ctx, zone, types.ZoneStateFailed, types.EventTenantZoneFailed, "system:approvals",
 			fmt.Errorf("approval %s %s", p.ApprovalID, p.State))

@@ -7,6 +7,7 @@ package tenantzonefactory
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -156,7 +157,9 @@ func NewAWSTrustBootstrap(ctx context.Context) (*AWSTrustBootstrap, error) {
 	return &AWSTrustBootstrap{sts: sts.NewFromConfig(cfg)}, nil
 }
 
-// EnsureOIDCRole implements TrustBootstrap (idempotent by role name).
+// EnsureOIDCRole implements TrustBootstrap (idempotent by role name). The
+// OIDC provider for the platform issuer is created first — without it the
+// role's federated trust can never be used.
 func (b *AWSTrustBootstrap) EnsureOIDCRole(ctx context.Context, accountID, issuerURL, roleName string) (string, error) {
 	if roleName == "" {
 		roleName = "inari-onboarding"
@@ -169,18 +172,36 @@ func (b *AWSTrustBootstrap) EnsureOIDCRole(ctx context.Context, accountID, issue
 	mgmtCfg.Credentials = aws.NewCredentialsCache(creds)
 	iamc := iam.NewFromConfig(mgmtCfg)
 	arn := fmt.Sprintf("arn:aws:iam::%s:role/%s", accountID, roleName)
+	issuer := trimScheme(issuerURL)
+	providerARN := fmt.Sprintf("arn:aws:iam::%s:oidc-provider/%s", accountID, issuer)
+	if _, err := iamc.GetOpenIDConnectProvider(ctx, &iam.GetOpenIDConnectProviderInput{
+		OpenIDConnectProviderArn: aws.String(providerARN),
+	}); err != nil {
+		if !isNoSuchEntity(err) {
+			return "", fmt.Errorf("tzf: get oidc provider in %s: %w", accountID, err)
+		}
+		if _, err := iamc.CreateOpenIDConnectProvider(ctx, &iam.CreateOpenIDConnectProviderInput{
+			Url:          aws.String(issuerURL),
+			ClientIDList: []string{"sts.amazonaws.com"},
+			Tags:         []iamtypes.Tag{{Key: aws.String("managed-by"), Value: aws.String("inari")}},
+		}); err != nil {
+			return "", fmt.Errorf("tzf: create oidc provider in %s: %w", accountID, err)
+		}
+	}
 	if _, err := iamc.GetRole(ctx, &iam.GetRoleInput{RoleName: aws.String(roleName)}); err == nil {
 		return arn, nil
+	} else if !isNoSuchEntity(err) {
+		return "", fmt.Errorf("tzf: get role %s in %s: %w", roleName, accountID, err)
 	}
 	trust := fmt.Sprintf(`{
   "Version": "2012-10-17",
   "Statement": [{
     "Effect": "Allow",
-    "Principal": {"Federated": "arn:aws:iam::%s:oidc-provider/%s"},
+    "Principal": {"Federated": "%s"},
     "Action": "sts:AssumeRoleWithWebIdentity",
     "Condition": {"StringEquals": {"%s:aud": "sts.amazonaws.com"}}
   }]
-}`, accountID, trimScheme(issuerURL), trimScheme(issuerURL))
+}`, providerARN, issuer)
 	if _, err := iamc.CreateRole(ctx, &iam.CreateRoleInput{
 		RoleName:                 aws.String(roleName),
 		AssumeRolePolicyDocument: aws.String(trust),
@@ -190,6 +211,13 @@ func (b *AWSTrustBootstrap) EnsureOIDCRole(ctx context.Context, accountID, issue
 		return "", fmt.Errorf("tzf: create oidc role in %s: %w", accountID, err)
 	}
 	return arn, nil
+}
+
+// isNoSuchEntity reports whether err is IAM's NoSuchEntity (as opposed to
+// throttling/access-denied, which must NOT be treated as "does not exist").
+func isNoSuchEntity(err error) bool {
+	var nse *iamtypes.NoSuchEntityException
+	return errors.As(err, &nse)
 }
 
 func trimScheme(u string) string {

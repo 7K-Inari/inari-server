@@ -123,6 +123,10 @@ func run() error {
 
 	registry := clusterregistry.NewService(database, idp, clusterregistry.NewStore(), auditStore,
 		cfg.RegistrationTokenTTL, cfg.EnrollmentApprovalRequired)
+	invStore := inventory.NewStore()
+	registry.WithInstanceLister(clusterregistry.InstanceListerFunc(func(ctx context.Context, orgID, clusterID string) ([]types.ResourceInstance, error) {
+		return invStore.List(ctx, database.Pool, orgID, inventory.ListFilters{ClusterID: clusterID})
+	}))
 	capsStore := capabilities.NewStore()
 	registryHandler := clusterregistry.NewHandler(registry, svc, authorizer, clusterregistry.ManifestParams{
 		AgentImageRepo: cfg.AgentImageRepo,

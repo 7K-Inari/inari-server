@@ -81,10 +81,13 @@ const (
 	EventMembershipAdded   = "membership.added"
 	EventMembershipRemoved = "membership.removed"
 
-	EventClusterCreated       = "cluster.created"
-	EventClusterRegistered    = "cluster.registered"
-	EventClusterRevoked       = "cluster.revoked"
-	EventCapabilitiesIngested = "capabilities.ingested"
+	EventClusterCreated        = "cluster.created"
+	EventClusterRegistered     = "cluster.registered"
+	EventClusterRevoked        = "cluster.revoked"
+	EventClusterCordoned       = "cluster.cordoned"
+	EventClusterUncordoned     = "cluster.uncordoned"
+	EventClusterDecommissioned = "cluster.decommissioned"
+	EventCapabilitiesIngested  = "capabilities.ingested"
 
 	EventCatalogItemUpserted = "catalog.item_upserted"
 	EventApprovalRequested   = "approval.requested"
@@ -115,6 +118,8 @@ const (
 	ClusterStatePendingRegistration ClusterState = "pending_registration"
 	ClusterStateActive              ClusterState = "active"
 	ClusterStateDegraded            ClusterState = "degraded"
+	ClusterStateCordoned            ClusterState = "cordoned"
+	ClusterStateDecommissioned      ClusterState = "decommissioned"
 	ClusterStateRevoked             ClusterState = "revoked"
 )
 

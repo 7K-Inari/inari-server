@@ -635,6 +635,11 @@ func (s *Service) Rollback(ctx context.Context, actor, orgID, id, toVersion stri
 	if r.State == types.RolloutStatePending || r.State == types.RolloutStateRolledBack {
 		return nil, fmt.Errorf("%w: %s → rolled_back", ErrInvalidTransition, r.State)
 	}
+	if toVersion == r.DesiredVersion {
+		// The rollback command IDs would collide with the original apply
+		// commands (idempotency keys) and be silently dropped by the queue.
+		return nil, fmt.Errorf("%w: toVersion must differ from the desired version", ErrInvalidInput)
+	}
 	for stage := len(r.Stages) - 1; stage >= 0; stage-- {
 		members, err := s.stageMembers(ctx, orgID, r.Stages[stage])
 		if err != nil {

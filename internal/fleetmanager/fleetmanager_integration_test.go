@@ -197,6 +197,12 @@ func TestStagedRolloutWithApprovalGate(t *testing.T) {
 		t.Fatalf("state = %q, want completed", r.State)
 	}
 
+	// Rollback to the current desired version is rejected: its command IDs
+	// would collide with the apply commands and be silently deduped.
+	if _, err := svc.Rollback(ctx, "user-1", "org:1", r.ID, "v1.6.0"); err == nil {
+		t.Fatal("expected rollback-to-desired-version rejection")
+	}
+
 	// Rollback to the previous version: reverse-order rollback commands.
 	before := len(queue.cmds)
 	r, err = svc.Rollback(ctx, "user-1", "org:1", r.ID, "v1.5.0")

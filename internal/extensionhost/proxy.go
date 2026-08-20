@@ -27,6 +27,11 @@ var strippedRequestHeaders = []string{
 	"Cookie",
 	"Set-Cookie",
 	"X-Api-Key",
+	// Inbound identity headers are stripped and re-set from the validated
+	// token — a caller must never inject them (X-Inari-Org is only re-set
+	// for org-scoped extensions).
+	"X-Inari-User",
+	"X-Inari-Org",
 }
 
 // Registry resolves extension names to registry records (Service seam).

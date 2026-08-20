@@ -214,6 +214,37 @@ func TestProxyServe(t *testing.T) {
 		}
 	})
 
+	t.Run("spoofed identity headers are overwritten", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/extensions/argocd/applications", nil)
+		req.Header.Set("Authorization", "Bearer good")
+		req.Header.Set("X-Inari-User", "attacker")
+		req.Header.Set("X-Inari-Org", "org:evil")
+		rec := httptest.NewRecorder()
+		newRouter(staticGetter{ext}, fakeAuthorizer{allow: true}).ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("code = %d", rec.Code)
+		}
+		if got.user != "user-1" || got.org != "org:1" {
+			t.Errorf("identity headers: user=%q org=%q", got.user, got.org)
+		}
+	})
+
+	t.Run("spoofed org header stripped for platform-global extension", func(t *testing.T) {
+		global := *ext
+		global.OrgID = ""
+		req := httptest.NewRequest(http.MethodGet, "/api/extensions/argocd/applications", nil)
+		req.Header.Set("Authorization", "Bearer good")
+		req.Header.Set("X-Inari-Org", "org:evil")
+		rec := httptest.NewRecorder()
+		newRouter(staticGetter{&global}, fakeAuthorizer{allow: true}).ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("code = %d", rec.Code)
+		}
+		if got.org != "" {
+			t.Errorf("org header = %q, want stripped", got.org)
+		}
+	})
+
 	t.Run("502 when not ready", func(t *testing.T) {
 		pending := *ext
 		pending.State = types.ExtensionStatePending

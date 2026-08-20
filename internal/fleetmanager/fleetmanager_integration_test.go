@@ -216,11 +216,55 @@ func TestStagedRolloutWithApprovalGate(t *testing.T) {
 		t.Fatalf("rollback commands = %d, want %d", len(queue.cmds)-before, 4)
 	}
 }
-
 type gateLoader struct{ req *types.ApprovalRequest }
 
 func (g gateLoader) Get(context.Context, string, string) (*types.ApprovalRequest, error) {
 	return g.req, nil
+}
+
+func TestGateRejectedWhilePaused(t *testing.T) {
+	svc, _, gates, _ := itSetup(t)
+	ctx := context.Background()
+
+	canary, err := svc.CreateClusterSet(ctx, "user-1", "org:1", "canary", map[string]string{"env": "canary"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := svc.CreateRollout(ctx, "user-1", "org:1", fleetmanager.CreateRolloutInput{
+		Name: "gated", Kind: types.RolloutKindPolicyPack, TargetRef: "policypack:1", DesiredVersion: "1.0.0",
+		Stages: []types.RolloutStage{{Name: "canary", ClusterSetIDs: []string{canary.ID}, MaxConcurrency: "2",
+			BeforeGate: &types.RolloutStageGate{Type: "approval"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err = svc.StartRollout(ctx, "user-1", "org:1", r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.State != types.RolloutStateWaitingGate {
+		t.Fatalf("state = %q, want waiting_gate", r.State)
+	}
+	if len(gates.requests) != 1 {
+		t.Fatalf("approval requests = %d, want 1", len(gates.requests))
+	}
+
+	// Pause while parked on the gate, then the approval is rejected: the
+	// rollout must fail, not resume into an already-decided gate forever.
+	if _, err := svc.StopRollout(ctx, "user-1", "org:1", r.ID); err != nil {
+		t.Fatal(err)
+	}
+	resume := fleetmanager.NewResumeHandler(svc, gateLoader{gates.requests[0]}, nil)
+	payload, _ := json.Marshal(types.ApprovalPayload{
+		OrgID: "org:1", ApprovalID: "approval:test", State: types.ApprovalStateRejected,
+	})
+	if err := resume.Handle(ctx, &types.OutboxEvent{EventType: types.EventApprovalDecided, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	r, _ = svc.GetRollout(ctx, "org:1", r.ID)
+	if r.State != types.RolloutStateFailed {
+		t.Fatalf("state = %q, want failed after gate rejection while paused", r.State)
+	}
 }
 
 func TestRolloutStopResumeAndFailure(t *testing.T) {

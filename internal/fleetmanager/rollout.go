@@ -33,7 +33,7 @@ var rolloutTransitions = map[string][]string{
 	types.RolloutStatePending:     {types.RolloutStateRunning, types.RolloutStateFailed},
 	types.RolloutStateRunning:     {types.RolloutStateWaitingGate, types.RolloutStatePaused, types.RolloutStateFailed, types.RolloutStateCompleted, types.RolloutStateRolledBack},
 	types.RolloutStateWaitingGate: {types.RolloutStateRunning, types.RolloutStatePaused, types.RolloutStateFailed, types.RolloutStateRolledBack},
-	types.RolloutStatePaused:      {types.RolloutStateRunning, types.RolloutStateWaitingGate, types.RolloutStateRolledBack},
+	types.RolloutStatePaused:      {types.RolloutStateRunning, types.RolloutStateWaitingGate, types.RolloutStateFailed, types.RolloutStateRolledBack},
 	types.RolloutStateFailed:      {types.RolloutStateRolledBack, types.RolloutStateRunning},
 	types.RolloutStateCompleted:   {types.RolloutStateRolledBack},
 }
@@ -311,26 +311,36 @@ func (s *Service) clearGate(ctx context.Context, r *types.Rollout) error {
 }
 
 // gateApproved resumes a rollout whose approval gate was granted (called by
-// the approval.decided resume handler).
+// the approval.decided resume handler). A rollout paused while parked on
+// the gate is resumed too: the approval is an explicit decision to proceed,
+// and ignoring it would park the rollout on an already-decided approval
+// forever.
 func (s *Service) gateApproved(ctx context.Context, rolloutID string, stage int, gate string) error {
 	r, err := s.store.getRollout(ctx, s.db.Pool, rolloutID)
 	if err != nil {
 		return err
 	}
-	if r.State != types.RolloutStateWaitingGate || r.CurrentStage != stage ||
-		r.GateContext == nil || r.GateContext.Gate != gate {
+	if r.CurrentStage != stage || r.GateContext == nil || r.GateContext.Gate != gate {
 		return nil // stale or already resumed — idempotent
+	}
+	if r.State != types.RolloutStateWaitingGate && r.State != types.RolloutStatePaused {
+		return nil
 	}
 	return s.clearGate(ctx, r)
 }
 
-// gateRejected fails a rollout whose approval gate was rejected.
+// gateRejected fails a rollout whose approval gate was rejected. A rollout
+// paused while parked on the gate is failed too — otherwise resuming would
+// re-enter waiting_gate on an already-decided approval and park forever.
 func (s *Service) gateRejected(ctx context.Context, rolloutID string, stage int) error {
 	r, err := s.store.getRollout(ctx, s.db.Pool, rolloutID)
 	if err != nil {
 		return err
 	}
-	if r.State != types.RolloutStateWaitingGate || r.CurrentStage != stage {
+	if r.CurrentStage != stage || r.GateContext == nil {
+		return nil
+	}
+	if r.State != types.RolloutStateWaitingGate && r.State != types.RolloutStatePaused {
 		return nil
 	}
 	return s.db.WithTx(ctx, func(tx pgx.Tx) error {

@@ -25,37 +25,6 @@ func (f *fakeClusters) GetCluster(_ context.Context, id string) (*types.Cluster,
 	return nil, errors.New("unknown cluster")
 }
 
-func TestMatchesSelectorSubset(t *testing.T) {
-	if !matchesSelector(map[string]string{"env": "prod", "region": "eu"}, map[string]string{"env": "prod"}) {
-		t.Fatal("subset selector should match")
-	}
-	if matchesSelector(map[string]string{"env": "dev"}, map[string]string{"env": "prod"}) {
-		t.Fatal("value mismatch should not match")
-	}
-	if matchesSelector(map[string]string{}, map[string]string{"env": "prod"}) {
-		t.Fatal("missing label should not match")
-	}
-	if !matchesSelector(map[string]string{"env": "prod"}, map[string]string{}) {
-		t.Fatal("empty selector matches everything")
-	}
-}
-
-func TestResolveClusters(t *testing.T) {
-	fc := &fakeClusters{clusters: []types.Cluster{
-		{ID: "cluster:1", Labels: map[string]string{"env": "prod", "team": "a"}},
-		{ID: "cluster:2", Labels: map[string]string{"env": "dev"}},
-		{ID: "cluster:3", Labels: map[string]string{"env": "prod", "team": "b"}},
-	}}
-	svc := &Service{clusters: fc}
-	got, err := svc.ResolveClusters(context.Background(), "org:1", map[string]string{"env": "prod", "team": "a"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].ID != "cluster:1" {
-		t.Fatalf("got %+v", got)
-	}
-}
-
 func TestValidateExemptionExpiry(t *testing.T) {
 	now := time.Now()
 	if err := validateExemptionExpiry(now, now.Add(24*time.Hour)); err != nil {

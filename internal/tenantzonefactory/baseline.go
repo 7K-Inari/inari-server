@@ -12,8 +12,10 @@ import (
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
-// RenderBaseline produces the tenant-zone baseline bundle files.
-func RenderBaseline(cluster *types.Cluster, registrationToken string, mp clusterregistry.ManifestParams) ([]gitprovider.File, error) {
+// RenderBaseline produces the tenant-zone baseline bundle files. The ESO
+// SecretStore targets Secrets Manager in the zone's own AWS account, so it
+// uses the zone's region.
+func RenderBaseline(cluster *types.Cluster, zone *types.TenantZone, registrationToken string, mp clusterregistry.ManifestParams) ([]gitprovider.File, error) {
 	manifest, err := clusterregistry.RenderInstallManifest(cluster, registrationToken, mp)
 	if err != nil {
 		return nil, fmt.Errorf("tzf: baseline agent manifest: %w", err)
@@ -37,7 +39,7 @@ spec:
       prune: true
       selfHeal: true
 `, cluster.Name)
-	eso := `apiVersion: external-secrets.io/v1beta1
+	eso := fmt.Sprintf(`apiVersion: external-secrets.io/v1beta1
 kind: SecretStore
 metadata:
   name: inari-tenant
@@ -46,8 +48,8 @@ spec:
   provider:
     aws:
       service: SecretsManager
-      region: ""
-`
+      region: %s
+`, zone.Region)
 	policy := `# Inari baseline policy packs
 # Distributed fleet-wide by the Policy Service (plan §5.11):
 #   - baseline-security

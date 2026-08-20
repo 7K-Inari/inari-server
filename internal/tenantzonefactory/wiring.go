@@ -128,7 +128,7 @@ func (w *ModuleWiring) WireZone(ctx context.Context, zone *types.TenantZone, rol
 	if err := w.Git.EnsureRepo(ctx, repo); err != nil {
 		return nil, fmt.Errorf("tzf: wiring git repo: %w", err)
 	}
-	files, err := RenderBaseline(cluster, token, w.Manifest)
+	files, err := RenderBaseline(cluster, zone, token, w.Manifest)
 	if err != nil {
 		return nil, err
 	}

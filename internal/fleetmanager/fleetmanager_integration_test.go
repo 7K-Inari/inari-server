@@ -216,6 +216,7 @@ func TestStagedRolloutWithApprovalGate(t *testing.T) {
 		t.Fatalf("rollback commands = %d, want %d", len(queue.cmds)-before, 4)
 	}
 }
+
 type gateLoader struct{ req *types.ApprovalRequest }
 
 func (g gateLoader) Get(context.Context, string, string) (*types.ApprovalRequest, error) {

@@ -77,13 +77,13 @@ type Store struct {
 func NewStore(d *db.DB) *Store { return &Store{db: d} }
 
 const approvalCols = `id, org_id, item_id, version, cluster_id, spec, requester, approver, state, reason,
-	name, namespace, owner_team, channel, instance_id, created_at, decided_at, expires_at, cancelled_by`
+	name, namespace, owner_team, channel, instance_id, action, created_at, decided_at, expires_at, cancelled_by`
 
 func scanApproval(row interface{ Scan(...any) error }) (*types.ApprovalRequest, error) {
 	var r types.ApprovalRequest
 	err := row.Scan(&r.ID, &r.OrgID, &r.ItemID, &r.Version, &r.ClusterID,
 		&r.Spec, &r.Requester, &r.Approver, &r.State, &r.Reason,
-		&r.Name, &r.Namespace, &r.OwnerTeam, &r.Channel, &r.InstanceID,
+		&r.Name, &r.Namespace, &r.OwnerTeam, &r.Channel, &r.InstanceID, &r.Action,
 		&r.CreatedAt, &r.DecidedAt, &r.ExpiresAt, &r.CancelledBy)
 	if err != nil {
 		return nil, err
@@ -97,6 +97,15 @@ func (s *Store) create(ctx context.Context, q db.Querier, req *types.ApprovalReq
 	             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id, state, created_at`
 	return q.QueryRow(ctx, sql, req.OrgID, req.ItemID, req.Version, req.ClusterID, req.Spec, req.Requester,
 		req.Name, req.Namespace, req.OwnerTeam, req.Channel, req.InstanceID, req.ExpiresAt).
+		Scan(&req.ID, &req.State, &req.CreatedAt)
+}
+
+// createLifecycle persists a lifecycle approval request (no catalog item).
+func (s *Store) createLifecycle(ctx context.Context, q db.Querier, req *types.ApprovalRequest) error {
+	const sql = `INSERT INTO approval_requests (org_id, item_id, version, cluster_id, spec, requester,
+	             action, expires_at)
+	             VALUES ($1,'','','',$2,$3,$4,$5) RETURNING id, state, created_at`
+	return q.QueryRow(ctx, sql, req.OrgID, req.Spec, req.Requester, req.Action, req.ExpiresAt).
 		Scan(&req.ID, &req.State, &req.CreatedAt)
 }
 
@@ -375,16 +384,23 @@ func (s *Service) Decide(ctx context.Context, orgID, approvalID, approver string
 	if req.State != types.ApprovalStatePending {
 		return nil, ErrAlreadyDecided
 	}
-	item, err := s.items.GetItemByID(ctx, req.ItemID)
-	if err != nil {
-		return nil, err
-	}
 	role, err := s.roles.RoleOf(ctx, req.OrgID, approver)
 	if err != nil {
 		return nil, err
 	}
-	if err := checkApprover(item, req, approver, role); err != nil {
-		return nil, err
+	if req.Action != "" {
+		// Lifecycle approval: platform-admin policy, no catalog item.
+		if err := checkLifecycleApprover(req, approver, role); err != nil {
+			return nil, err
+		}
+	} else {
+		item, err := s.items.GetItemByID(ctx, req.ItemID)
+		if err != nil {
+			return nil, err
+		}
+		if err := checkApprover(item, req, approver, role); err != nil {
+			return nil, err
+		}
 	}
 	state := types.ApprovalStateRejected
 	if approve {

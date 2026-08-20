@@ -334,10 +334,18 @@ const (
 	ApprovalStateExpired   = "expired"
 )
 
+// Lifecycle approval actions (plan §5.11/§5.12): generic approval-gated
+// control-plane operations that are not catalog deploys.
+const (
+	ApprovalActionTenantZoneVend         = "tenant_zone.vend"
+	ApprovalActionTenantZoneDecommission = "tenant_zone.decommission"
+)
+
 // ApprovalRequest gates one deploy request (plan §5.2). Name, Namespace,
 // OwnerTeam, Channel and InstanceID carry the deploy context so an approved
 // request can be resumed by the orchestrator without the caller re-issuing
-// the deploy (M3); InstanceID is set for upgrade approvals.
+// the deploy (M3); InstanceID is set for upgrade approvals. For lifecycle
+// approvals (Action set, ItemID empty), Spec carries the action context.
 type ApprovalRequest struct {
 	ID          string          `json:"id"`
 	OrgID       string          `json:"orgId"`
@@ -354,6 +362,7 @@ type ApprovalRequest struct {
 	OwnerTeam   string          `json:"ownerTeam,omitempty"`
 	Channel     string          `json:"channel,omitempty"`
 	InstanceID  string          `json:"instanceId,omitempty"`
+	Action      string          `json:"action,omitempty"`
 	CreatedAt   time.Time       `json:"createdAt"`
 	DecidedAt   *time.Time      `json:"decidedAt,omitempty"`
 	ExpiresAt   *time.Time      `json:"expiresAt,omitempty"`

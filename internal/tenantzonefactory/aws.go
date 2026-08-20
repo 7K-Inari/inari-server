@@ -19,8 +19,8 @@ type CreateAccountResult struct {
 
 // AccountStatus reports the async CreateAccount/CloseAccount state.
 type AccountStatus struct {
-	State       string // IN_PROGRESS | SUCCEEDED | FAILED
-	AccountID   string // set on SUCCEEDED (CreateAccount)
+	State         string // IN_PROGRESS | SUCCEEDED | FAILED
+	AccountID     string // set on SUCCEEDED (CreateAccount)
 	FailureReason string
 }
 

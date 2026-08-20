@@ -65,10 +65,10 @@ func (f *fakeWiring) UnwireZone(_ context.Context, z *types.TenantZone) error {
 }
 
 type fakeClusters struct {
-	cordoned       string
-	decommissioned string
-	drained        []string
-	cordonErr      error
+	cordoned        string
+	decommissioned  string
+	drained         []string
+	cordonErr       error
 	decommissionErr error
 }
 

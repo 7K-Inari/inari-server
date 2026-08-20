@@ -14,14 +14,14 @@ import (
 // Operations start InProgress and succeed after SucceedAfterPolls polls;
 // FailNext makes the next operation of that kind fail (retry testing).
 type FakeOrganizations struct {
-	mu               sync.Mutex
-	nextAcct         int
-	requests         map[string]*fakeRequest
-	accounts         map[string]int // ouID -> count
+	mu                sync.Mutex
+	nextAcct          int
+	requests          map[string]*fakeRequest
+	accounts          map[string]int // ouID -> count
 	SucceedAfterPolls int
-	FailCreate       bool
-	FailClose        bool
-	created          []string // account IDs, in creation order
+	FailCreate        bool
+	FailClose         bool
+	created           []string // account IDs, in creation order
 }
 
 type fakeRequest struct {

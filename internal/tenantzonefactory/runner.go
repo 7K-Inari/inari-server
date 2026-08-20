@@ -18,7 +18,7 @@ var ErrPreflightDenied = errors.New("tzf: pre-flight denied")
 // Config carries the TZF knobs (populated from internal/config INARI_TZF_*).
 type Config struct {
 	ApprovalRequired bool
-	AccountQuota     int      // max accounts per OU (§10 quota pre-check)
+	AccountQuota     int // max accounts per OU (§10 quota pre-check)
 	AllowedRegions   []string
 	AllowedTiers     []string
 	RequiredTags     []string // mandatory cost/allocation tag keys

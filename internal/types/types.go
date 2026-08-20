@@ -759,25 +759,25 @@ const (
 
 // TenantZone is one vended (or in-progress) tenant zone (plan §5.9, §5.12).
 type TenantZone struct {
-	ID                  string          `json:"id"`
-	Slug                string          `json:"slug"`
-	DisplayName         string          `json:"displayName"`
-	OrgID               string          `json:"orgId,omitempty"` // wired Keycloak org; empty until inari_wiring
-	OUID                string          `json:"ouId"`
-	Region              string          `json:"region"`
-	Tier                string          `json:"tier"`
-	State               TenantZoneState `json:"state"`
-	ManagementAccountID string          `json:"managementAccountId"` // cloud_accounts.id (scope: management)
-	AWSAccountID        string          `json:"awsAccountId,omitempty"`
-	ClusterID           string          `json:"clusterId,omitempty"`
-	CloudAccountID      string          `json:"cloudAccountId,omitempty"`
-	KeycloakOrgID       string          `json:"keycloakOrgId,omitempty"`
-	GitRepo             string          `json:"gitRepo,omitempty"`
+	ID                  string            `json:"id"`
+	Slug                string            `json:"slug"`
+	DisplayName         string            `json:"displayName"`
+	OrgID               string            `json:"orgId,omitempty"` // wired Keycloak org; empty until inari_wiring
+	OUID                string            `json:"ouId"`
+	Region              string            `json:"region"`
+	Tier                string            `json:"tier"`
+	State               TenantZoneState   `json:"state"`
+	ManagementAccountID string            `json:"managementAccountId"` // cloud_accounts.id (scope: management)
+	AWSAccountID        string            `json:"awsAccountId,omitempty"`
+	ClusterID           string            `json:"clusterId,omitempty"`
+	CloudAccountID      string            `json:"cloudAccountId,omitempty"`
+	KeycloakOrgID       string            `json:"keycloakOrgId,omitempty"`
+	GitRepo             string            `json:"gitRepo,omitempty"`
 	Tags                map[string]string `json:"tags,omitempty"` // mandatory cost/allocation tags (§5.12)
-	Error               string          `json:"error,omitempty"`
-	CreatedBy           string          `json:"createdBy"`
-	CreatedAt           time.Time       `json:"createdAt"`
-	UpdatedAt           time.Time       `json:"updatedAt"`
+	Error               string            `json:"error,omitempty"`
+	CreatedBy           string            `json:"createdBy"`
+	CreatedAt           time.Time         `json:"createdAt"`
+	UpdatedAt           time.Time         `json:"updatedAt"`
 }
 
 // TenantZoneStep tracks one sub-resource of the vending/decommission flow

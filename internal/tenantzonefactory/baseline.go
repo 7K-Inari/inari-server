@@ -14,8 +14,9 @@ import (
 
 // RenderBaseline produces the tenant-zone baseline bundle files. The ESO
 // SecretStore targets Secrets Manager in the zone's own AWS account, so it
-// uses the zone's region.
-func RenderBaseline(cluster *types.Cluster, zone *types.TenantZone, registrationToken string, mp clusterregistry.ManifestParams) ([]gitprovider.File, error) {
+// uses the zone's region; the ArgoCD root app points at the zone repo's
+// canonical clone URL from the git provider.
+func RenderBaseline(cluster *types.Cluster, zone *types.TenantZone, registrationToken string, mp clusterregistry.ManifestParams, repoURL string) ([]gitprovider.File, error) {
 	manifest, err := clusterregistry.RenderInstallManifest(cluster, registrationToken, mp)
 	if err != nil {
 		return nil, fmt.Errorf("tzf: baseline agent manifest: %w", err)
@@ -28,7 +29,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://example.invalid/%s-inari-state.git
+    repoURL: %s
     targetRevision: HEAD
     path: baseline
   destination:
@@ -38,7 +39,7 @@ spec:
     automated:
       prune: true
       selfHeal: true
-`, cluster.Name)
+`, repoURL)
 	eso := fmt.Sprintf(`apiVersion: external-secrets.io/v1beta1
 kind: SecretStore
 metadata:

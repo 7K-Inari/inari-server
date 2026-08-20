@@ -12,7 +12,7 @@ func TestFakeProviderFlow(t *testing.T) {
 	if _, err := f.CommitFiles(ctx, "org/repo", "main", []File{{Path: "a.yaml", Content: []byte("x")}}, "m"); err == nil {
 		t.Error("commit to unknown repo should fail")
 	}
-	if err := f.EnsureRepo(ctx, "org/repo"); err != nil {
+	if _, err := f.EnsureRepo(ctx, "org/repo"); err != nil {
 		t.Fatal(err)
 	}
 	res, err := f.CommitFiles(ctx, "org/repo", "main", []File{{Path: "a.yaml", Content: []byte("x")}}, "m")

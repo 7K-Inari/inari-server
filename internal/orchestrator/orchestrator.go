@@ -267,7 +267,7 @@ func (s *Service) apply(ctx context.Context, req DeployRequest, item *types.Cata
 	if gitCfg == nil {
 		return nil, ErrNoGitConfig
 	}
-	if err := s.git.EnsureRepo(ctx, gitCfg.Repo); err != nil {
+	if _, err := s.git.EnsureRepo(ctx, gitCfg.Repo); err != nil {
 		return nil, err
 	}
 

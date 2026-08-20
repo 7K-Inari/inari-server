@@ -71,7 +71,7 @@ func TestEnsureRepoNotFound(t *testing.T) {
 	p := testProvider(t, mux(t, nil, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
-	err := p.EnsureRepo(context.Background(), "acme/missing")
+	_, err := p.EnsureRepo(context.Background(), "acme/missing")
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("err = %v, want not-found", err)
 	}
@@ -81,7 +81,7 @@ func TestEnsureRepoBadName(t *testing.T) {
 	p := testProvider(t, mux(t, nil, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
-	if err := p.EnsureRepo(context.Background(), "no-slash"); err == nil {
+	if _, err := p.EnsureRepo(context.Background(), "no-slash"); err == nil {
 		t.Fatal("want error for repo without owner/name")
 	}
 }
@@ -165,8 +165,8 @@ func TestInstallationTokenCached(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	ctx := context.Background()
-	_ = p.EnsureRepo(ctx, "acme/state")
-	_ = p.EnsureRepo(ctx, "acme/state")
+	_, _ = p.EnsureRepo(ctx, "acme/state")
+	_, _ = p.EnsureRepo(ctx, "acme/state")
 	if n := atomic.LoadInt32(&tokenCalls); n != 1 {
 		t.Errorf("token minted %d times, want 1 (cached)", n)
 	}

@@ -125,10 +125,11 @@ func (w *ModuleWiring) WireZone(ctx context.Context, zone *types.TenantZone, rol
 		return nil, fmt.Errorf("tzf: wiring registration token: %w", err)
 	}
 	repo := zone.Slug + "-inari-state"
-	if err := w.Git.EnsureRepo(ctx, repo); err != nil {
+	repoURL, err := w.Git.EnsureRepo(ctx, repo)
+	if err != nil {
 		return nil, fmt.Errorf("tzf: wiring git repo: %w", err)
 	}
-	files, err := RenderBaseline(cluster, zone, token, w.Manifest)
+	files, err := RenderBaseline(cluster, zone, token, w.Manifest, repoURL)
 	if err != nil {
 		return nil, err
 	}

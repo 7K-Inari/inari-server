@@ -171,16 +171,28 @@ func splitRepo(repo string) (string, string, error) {
 	return parts[0], parts[1], nil
 }
 
-func (p *Provider) EnsureRepo(ctx context.Context, repo string) error {
+func (p *Provider) EnsureRepo(ctx context.Context, repo string) (string, error) {
 	owner, name, err := splitRepo(repo)
 	if err != nil {
-		return err
+		return "", err
 	}
 	status, err := p.do(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/%s", owner, name), nil, nil)
 	if status == http.StatusNotFound {
-		return fmt.Errorf("gitprovider github: repo %s not found; create %s-inari-state via the tenant zone flow", repo, owner)
+		return "", fmt.Errorf("gitprovider github: repo %s not found; create %s-inari-state via the tenant zone flow", repo, owner)
 	}
-	return err
+	if err != nil {
+		return "", err
+	}
+	return p.webBase() + "/" + owner + "/" + name + ".git", nil
+}
+
+// webBase derives the clone-URL host from the API base: api.github.com maps
+// to github.com; a GitHub Enterprise <host>/api/v3 maps to <host>.
+func (p *Provider) webBase() string {
+	if p.apiBase == "https://api.github.com" {
+		return "https://github.com"
+	}
+	return strings.TrimSuffix(p.apiBase, "/api/v3")
 }
 
 func (p *Provider) CommitFiles(ctx context.Context, repo, branch string, files []gitprovider.File, message string) (*gitprovider.Result, error) {

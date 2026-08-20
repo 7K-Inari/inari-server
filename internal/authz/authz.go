@@ -35,6 +35,7 @@ const (
 	TypeCloudAccount     = "cloud_account"
 	TypePolicyPack       = "policy_pack"
 	TypeClusterSet       = "cluster_set"
+	TypeTenantZone       = "tenant_zone"
 )
 
 // Tuple is one relationship fact.
@@ -252,6 +253,7 @@ func ModelV1() client.ClientWriteAuthorizationModelRequest {
 			{Type: TypeCloudAccount, Relations: ptr(orgScopedRelations()), Metadata: &openfga.Metadata{Relations: &orgScopedMeta}},
 			{Type: TypePolicyPack, Relations: ptr(orgScopedRelations()), Metadata: &openfga.Metadata{Relations: &orgScopedMeta}},
 			{Type: TypeClusterSet, Relations: ptr(orgScopedRelations()), Metadata: &openfga.Metadata{Relations: &orgScopedMeta}},
+			{Type: TypeTenantZone, Relations: ptr(orgScopedRelations()), Metadata: &openfga.Metadata{Relations: &orgScopedMeta}},
 		},
 	}
 }
@@ -277,6 +279,7 @@ func ResourceInstanceObject(instanceID string) string {
 func CloudAccountObject(id string) string { return TypeCloudAccount + ":" + id }
 func PolicyPackObject(id string) string   { return TypePolicyPack + ":" + id }
 func ClusterSetObject(id string) string   { return TypeClusterSet + ":" + id }
+func TenantZoneObject(id string) string   { return TypeTenantZone + ":" + id }
 func TeamMemberUserset(teamID string) string {
 	return TeamObject(teamID) + "#" + RelationMember
 }

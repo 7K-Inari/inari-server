@@ -49,3 +49,9 @@ type cluster_set
     define parent: [organization]
     define operator: platform_engineer from parent
     define viewer: viewer from parent
+
+type tenant_zone
+  relations
+    define parent: [organization]
+    define operator: platform_engineer from parent
+    define viewer: viewer from parent

@@ -98,6 +98,30 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 	}, h.revokeCluster)
 
 	huma.Register(api, huma.Operation{
+		OperationID: "cordonCluster",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/tenants/{org}/clusters/{id}/cordon",
+		Summary:     "Cordon a cluster (blocks new deploys; workloads keep running)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.cordonCluster)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "uncordonCluster",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/tenants/{org}/clusters/{id}/uncordon",
+		Summary:     "Uncordon a cluster (returns it to service)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.uncordonCluster)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "decommissionCluster",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/tenants/{org}/clusters/{id}/decommission",
+		Summary:     "Decommission a cluster (ownership-checked drain, identity revocation, archived audit)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.decommissionCluster)
+
+	huma.Register(api, huma.Operation{
 		OperationID: "renderInstallManifest",
 		Method:      http.MethodPost,
 		Path:        "/api/v1/tenants/{org}/clusters/{id}/install-manifest",
@@ -256,6 +280,74 @@ func (h *Handler) revokeCluster(ctx context.Context, in *clusterPathInput) (*str
 		return nil, err
 	}
 	return nil, nil
+}
+
+func (h *Handler) cordonCluster(ctx context.Context, in *clusterPathInput) (*clusterOutput, error) {
+	return h.lifecycle(ctx, in, h.svc.CordonCluster)
+}
+
+func (h *Handler) uncordonCluster(ctx context.Context, in *clusterPathInput) (*clusterOutput, error) {
+	return h.lifecycle(ctx, in, h.svc.UncordonCluster)
+}
+
+type decommissionInput struct {
+	Org  string `path:"org"`
+	ID   string `path:"id"`
+	Body struct {
+		Force bool `json:"force,omitempty" doc:"Drain even when non-Inari-managed resources exist (§10 override)"`
+	}
+}
+
+type decommissionOutput struct {
+	Body struct {
+		Cluster            types.Cluster `json:"cluster"`
+		DrainedInstanceIDs []string      `json:"drainedInstanceIds"`
+	}
+}
+
+func (h *Handler) decommissionCluster(ctx context.Context, in *decommissionInput) (*decommissionOutput, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.requireOrgCluster(ctx, org.ID, in.ID); err != nil {
+		return nil, err
+	}
+	c, drained, err := h.svc.DecommissionCluster(ctx, id.Subject, in.ID, in.Body.Force)
+	if errors.Is(err, ErrSharedResources) {
+		return nil, huma.Error409Conflict("cluster holds non-Inari-managed resources; re-run with force to override (§10)")
+	}
+	if errors.Is(err, ErrInvalidTransition) {
+		return nil, huma.Error409Conflict(err.Error())
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := &decommissionOutput{}
+	out.Body.Cluster = *c
+	out.Body.DrainedInstanceIDs = drained
+	return out, nil
+}
+
+// lifecycle runs a simple state-transition endpoint (cordon/uncordon).
+func (h *Handler) lifecycle(ctx context.Context, in *clusterPathInput, fn func(context.Context, string, string) (*types.Cluster, error)) (*clusterOutput, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.requireOrgCluster(ctx, org.ID, in.ID); err != nil {
+		return nil, err
+	}
+	c, err := fn(ctx, id.Subject, in.ID)
+	if errors.Is(err, ErrInvalidTransition) {
+		return nil, huma.Error409Conflict(err.Error())
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := &clusterOutput{}
+	out.Body.Cluster = *c
+	return out, nil
 }
 
 type manifestOutput struct {

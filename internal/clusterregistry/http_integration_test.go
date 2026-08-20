@@ -248,3 +248,77 @@ func TestClusterAPIAuthzDenied(t *testing.T) {
 		t.Errorf("authz denied: got %d, want 403", code)
 	}
 }
+
+// TestClusterLifecycleFlow covers cordon/uncordon and the decommission
+// ownership check (plan §5.11, §10).
+func TestClusterLifecycleFlow(t *testing.T) {
+	srv, svc := itServer(t, itAuthorizer{allow: true})
+	defer srv.Close()
+	ctx := context.Background()
+	cid := itCreate(t, srv, "acme", "lc1")
+	if err := svc.MarkRegistered(ctx, "user-1", cid, "cluster-x", "v1.30.0", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	base := "/api/v1/tenants/acme/clusters/" + cid
+	if code, body := itReq(t, srv, "POST", base+"/cordon", "good", ""); code != http.StatusOK {
+		t.Fatalf("cordon: %d %s", code, body)
+	}
+	c, err := svc.GetCluster(ctx, cid)
+	if err != nil || c.State != types.ClusterStateCordoned {
+		t.Fatalf("state = %v, %v; want cordoned", c.State, err)
+	}
+	if code, body := itReq(t, srv, "POST", base+"/uncordon", "good", ""); code != http.StatusOK {
+		t.Fatalf("uncordon: %d %s", code, body)
+	}
+	if code, _ := itReq(t, srv, "POST", base+"/uncordon", "good", ""); code != http.StatusConflict {
+		t.Errorf("uncordon from active: got %d, want 409", code)
+	}
+	if code, body := itReq(t, srv, "POST", base+"/decommission", "good", `{}`); code != http.StatusOK {
+		t.Fatalf("decommission: %d %s", code, body)
+	}
+	c, err = svc.GetCluster(ctx, cid)
+	if err != nil || c.State != types.ClusterStateDecommissioned {
+		t.Fatalf("state = %v, %v; want decommissioned", c.State, err)
+	}
+	if code, _ := itReq(t, srv, "POST", base+"/cordon", "good", ""); code != http.StatusConflict {
+		t.Errorf("cordon after decommission: got %d, want 409", code)
+	}
+}
+
+// TestClusterDecommissionOwnershipBlock verifies that non-Inari-managed
+// instances block the drain without force (§10).
+func TestClusterDecommissionOwnershipBlock(t *testing.T) {
+	srv, svc := itServer(t, itAuthorizer{allow: true})
+	defer srv.Close()
+	ctx := context.Background()
+	cid := itCreate(t, srv, "acme", "lc2")
+	if err := svc.MarkRegistered(ctx, "user-1", cid, "cluster-x", "v1.30.0", nil); err != nil {
+		t.Fatal(err)
+	}
+	// Seed instances directly: one adopted, one observe-only.
+	svc.WithInstanceLister(InstanceListerFunc(func(context.Context, string, string) ([]types.ResourceInstance, error) {
+		return []types.ResourceInstance{
+			{ID: "i1", ManagementMode: types.ManagementModeAdopt},
+			{ID: "i2", ManagementMode: types.ManagementModeObserveOnly},
+		}, nil
+	}))
+	base := "/api/v1/tenants/acme/clusters/" + cid
+	if code, body := itReq(t, srv, "POST", base+"/decommission", "good", `{}`); code != http.StatusConflict {
+		t.Fatalf("decommission with shared resources: got %d %s, want 409", code, body)
+	}
+	code, body := itReq(t, srv, "POST", base+"/decommission", "good", `{"force":true}`)
+	if code != http.StatusOK {
+		t.Fatalf("force decommission: %d %s", code, body)
+	}
+	var out struct {
+		DrainedInstanceIDs []string `json:"drainedInstanceIds"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.DrainedInstanceIDs) != 1 || out.DrainedInstanceIDs[0] != "i1" {
+		t.Errorf("drained = %v, want [i1]", out.DrainedInstanceIDs)
+	}
+	_ = ctx
+}

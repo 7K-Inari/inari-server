@@ -25,8 +25,10 @@ type Result struct {
 
 // Provider writes desired state to a git host.
 type Provider interface {
-	// EnsureRepo makes sure the state repository exists.
-	EnsureRepo(ctx context.Context, repo string) error
+	// EnsureRepo makes sure the state repository exists and returns its
+	// canonical clone URL (each provider owns its URL semantics — e.g.
+	// GitLab can return the create-repo API's http_url_to_repo).
+	EnsureRepo(ctx context.Context, repo string) (cloneURL string, err error)
 	// CommitFiles writes files directly to a branch.
 	CommitFiles(ctx context.Context, repo, branch string, files []File, message string) (*Result, error)
 	// OpenPR writes files on a fresh branch and opens a pull request against
@@ -59,13 +61,13 @@ func NewFake() *Fake {
 	return &Fake{repos: map[string]*fakeRepo{}}
 }
 
-func (f *Fake) EnsureRepo(_ context.Context, repo string) error {
+func (f *Fake) EnsureRepo(_ context.Context, repo string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if _, ok := f.repos[repo]; !ok {
 		f.repos[repo] = &fakeRepo{branches: map[string]map[string]string{}}
 	}
-	return nil
+	return fmt.Sprintf("https://fake.git/%s.git", repo), nil
 }
 
 func (f *Fake) CommitFiles(_ context.Context, repo, branch string, files []File, _ string) (*Result, error) {

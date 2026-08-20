@@ -33,6 +33,7 @@ import (
 	gitgithub "github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider/github"
 	"github.com/7K-Inari/inari-server/internal/policyservice"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
+	"github.com/7K-Inari/inari-server/internal/tenantzonefactory"
 	"github.com/7K-Inari/inari-server/internal/types"
 
 	"connectrpc.com/connect"
@@ -53,6 +54,20 @@ func (s agentgatewayStatusSink) ApplyStatus(ctx context.Context, clusterID strin
 	return s.inv.ApplyStatus(ctx, clusterID, inventory.StatusUpdate{
 		Resource: upd.Resource, Health: upd.Health, Sync: upd.Sync, Message: upd.Message,
 	})
+}
+
+// tzfClusterLifecycle adapts clusterregistry.Service to the TZF
+// ClusterLifecycle seam (cordon + ownership-checked drain).
+type tzfClusterLifecycle struct{ reg *clusterregistry.Service }
+
+func (a tzfClusterLifecycle) Cordon(ctx context.Context, actor, clusterID string) error {
+	_, err := a.reg.CordonCluster(ctx, actor, clusterID)
+	return err
+}
+
+func (a tzfClusterLifecycle) Decommission(ctx context.Context, actor, clusterID string, force bool) ([]string, error) {
+	_, drained, err := a.reg.DecommissionCluster(ctx, actor, clusterID, force)
+	return drained, err
 }
 
 // policyCheckerAdapter maps the orchestrator's policy seam onto the Policy
@@ -123,6 +138,10 @@ func run() error {
 
 	registry := clusterregistry.NewService(database, idp, clusterregistry.NewStore(), auditStore,
 		cfg.RegistrationTokenTTL, cfg.EnrollmentApprovalRequired)
+	invStore := inventory.NewStore()
+	registry.WithInstanceLister(clusterregistry.InstanceListerFunc(func(ctx context.Context, orgID, clusterID string) ([]types.ResourceInstance, error) {
+		return invStore.List(ctx, database.Pool, orgID, inventory.ListFilters{ClusterID: clusterID})
+	}))
 	capsStore := capabilities.NewStore()
 	registryHandler := clusterregistry.NewHandler(registry, svc, authorizer, clusterregistry.ManifestParams{
 		AgentImageRepo: cfg.AgentImageRepo,
@@ -180,6 +199,50 @@ func run() error {
 	policyHandler := policyservice.NewHandler(policySvc, svc, authorizer)
 	orchestratorSvc.WithPolicyChecker(policyCheckerAdapter{policySvc})
 
+	// Tenant Zone Factory (plan §5.12): fake AWS/Crossplane backends by
+	// default (the M3 acceptance layer); the SDK impl requires
+	// INARI_TZF_AWS_MODE=aws plus ambient platform credentials.
+	tzfEnv := &tenantzonefactory.Env{
+		AWS:          tenantzonefactory.NewFakeOrganizations(),
+		Bootstrap:    tenantzonefactory.NewFakeTrustBootstrap(),
+		Prov:         tenantzonefactory.NewFakeProvisioner(),
+		MgmtAccounts: cloudAccountsSvc,
+		Config: tenantzonefactory.Config{
+			ApprovalRequired: cfg.TZFApprovalRequired,
+			AccountQuota:     int(cfg.TZFAccountQuota),
+			AllowedRegions:   cfg.TZFAllowedRegions,
+			AllowedTiers:     cfg.TZFAllowedTiers,
+			RequiredTags:     cfg.TZFRequiredTags,
+			IssuerURL:        cfg.OIDCIssuerURL,
+			MaxAttempts:      int(cfg.TZFStepMaxAttempts),
+		},
+	}
+	if cfg.TZFAWSMode == "aws" {
+		org, err := tenantzonefactory.NewAWSOrganizations(ctx)
+		if err != nil {
+			return fmt.Errorf("tzf aws mode: %w", err)
+		}
+		boot, err := tenantzonefactory.NewAWSTrustBootstrap(ctx)
+		if err != nil {
+			return fmt.Errorf("tzf aws mode: %w", err)
+		}
+		tzfEnv.AWS = org
+		tzfEnv.Bootstrap = boot
+		log.Info("tenant zone factory using AWS SDK backends")
+	}
+	tzfEnv.Wiring = &tenantzonefactory.ModuleWiring{
+		Tenants: svc, IDP: idp, Clusters: registry, Accounts: cloudAccountsSvc,
+		Git: git, GitCfg: orchestratorSvc,
+		Manifest: clusterregistry.ManifestParams{
+			AgentImageRepo: cfg.AgentImageRepo, AgentImageTag: cfg.AgentImageTag,
+			GatewayAddress: cfg.AgentGatewayAddress,
+		},
+	}
+	tzfEnv.Clusters = tzfClusterLifecycle{registry}
+	tzfSvc := tenantzonefactory.NewService(database, tenantzonefactory.NewStore(), auditStore, tzfEnv, approvalsSvc, log)
+	tzfHandler := tenantzonefactory.NewHandler(tzfSvc, svc, authorizer)
+	go tzfSvc.RunReconcileLoop(ctx, cfg.TZFReconcileInterval)
+
 	// Outbox consumers: FGA tuple writer, notifications, approval-gated
 	// deploy resume (plan §5.2, §5.4). Constructed after every handler
 	// exists so the dispatch table is never mutated while Run polls.
@@ -188,6 +251,7 @@ func run() error {
 		notificationsSvc,
 		orchestrator.NewResumeHandler(orchestratorSvc, approvalsSvc, log),
 		policyservice.NewDistributeHandler(policySvc, log),
+		tenantzonefactory.NewResumeHandler(tzfSvc, approvalsSvc, log),
 	)
 	go dispatcher.Run(ctx)
 
@@ -201,6 +265,7 @@ func run() error {
 	cloudAccountsHandler.RegisterRoutes(api)
 	notificationsHandler.RegisterRoutes(api)
 	policyHandler.RegisterRoutes(api)
+	tzfHandler.RegisterRoutes(api)
 
 	// Agent-facing Connect-RPC services mount on chi directly, outside the
 	// huma bearer middleware: registration is token-authenticated, the event

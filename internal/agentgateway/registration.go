@@ -45,7 +45,7 @@ func (g *Gateway) RegisterCluster(ctx context.Context, req *connect.Request[agen
 		labels = req.Msg.ClusterLabels
 	}
 	if err := g.registry.MarkRegistered(ctx, "agent:"+cluster.ID, cluster.ID, clientID,
-		req.Msg.KubernetesVersion, labels); err != nil {
+		req.Msg.KubernetesVersion, req.Msg.AgentVersion, labels); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("mark registered: %w", err))
 	}
 

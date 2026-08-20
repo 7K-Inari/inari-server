@@ -17,6 +17,7 @@ import (
 	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
 	"github.com/google/uuid"
 
+	"github.com/7K-Inari/inari-server/internal/fleetmanager"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -169,6 +170,16 @@ func (s *session) handleEvent(ctx context.Context, ev *agentv1.Event) ([]*agentv
 			var hs agentv1.HandshakeRequest
 			if err := ev.Payload.UnmarshalTo(&hs); err != nil {
 				return out, nil
+			}
+			if hs.AgentVersion != "" && s.gw.registry != nil {
+				if err := s.gw.registry.SetAgentVersion(ctx, s.cluster.ID, hs.AgentVersion); err != nil {
+					slog.Warn("agentgateway: persist agent version", "cluster", s.cluster.ID, "error", err)
+				}
+				if cur := s.gw.cfg.CurrentAgentVersion; cur != "" &&
+					!fleetmanager.SupportedAgentVersion(cur, hs.AgentVersion) {
+					slog.Warn("agentgateway: unsupported agent version skew (supported: N, N-1)",
+						"cluster", s.cluster.ID, "agent", hs.AgentVersion, "server", cur)
+				}
 			}
 			resync := hs.LastSeenStateChecksum != "" && s.cluster.CapabilityChecksum != "" &&
 				hs.LastSeenStateChecksum != s.cluster.CapabilityChecksum

@@ -24,6 +24,8 @@ import (
 	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/config"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/extensionhost"
+	"github.com/7K-Inari/inari-server/internal/fleetmanager"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/logging"
@@ -152,8 +154,9 @@ func run() error {
 	}))
 	caps := capabilities.NewService(database, capsStore, auditStore)
 	gateway := agentgateway.NewGateway(database, registry, idp, caps, auditStore, agentgateway.Config{
-		OIDCIssuerURL:  cfg.OIDCIssuerURL,
-		ESOSecretStore: cfg.ESOSecretStore,
+		OIDCIssuerURL:       cfg.OIDCIssuerURL,
+		ESOSecretStore:      cfg.ESOSecretStore,
+		CurrentAgentVersion: cfg.CurrentAgentVersion,
 	})
 
 	var puller catalog.OCIPuller
@@ -198,6 +201,23 @@ func run() error {
 		policyservice.NewOPAEvaluator(), registry, gateway.Queue(), auditStore)
 	policyHandler := policyservice.NewHandler(policySvc, svc, authorizer)
 	orchestratorSvc.WithPolicyChecker(policyCheckerAdapter{policySvc})
+
+	// Fleet Manager (plan §5.11): owns ClusterSets (policy service consumes
+	// them via the SetResolver seam), staged rollouts, agent channels,
+	// drift detection and bulk ops.
+	fleetSvc := fleetmanager.NewService(database, fleetmanager.NewStore(), auditStore, registry, gateway.Queue()).
+		WithGateRequester(approvalsSvc).
+		WithBulkSeams(approvalsSvc, policySvc, catalogSvc)
+	fleetHandler := fleetmanager.NewHandler(fleetSvc, svc, authorizer)
+	policySvc.WithSetResolver(fleetSvc)
+	go fleetSvc.RunAdvanceLoop(ctx, cfg.FleetAdvanceInterval)
+	go fleetSvc.RunDriftLoop(ctx, cfg.DriftSweepInterval)
+
+	// Extension Host (plan §5.8): plugin registry + authenticated reverse
+	// proxy for verified sidecars.
+	extSvc := extensionhost.NewService(database, extensionhost.NewStore(), auditStore)
+	extHandler := extensionhost.NewHandler(extSvc, svc, authorizer)
+	extProxy := extensionhost.NewProxy(extSvc, validator, authorizer)
 
 	// Tenant Zone Factory (plan §5.12): fake AWS/Crossplane backends by
 	// default (the M3 acceptance layer); the SDK impl requires
@@ -252,6 +272,7 @@ func run() error {
 		orchestrator.NewResumeHandler(orchestratorSvc, approvalsSvc, log),
 		policyservice.NewDistributeHandler(policySvc, log),
 		tenantzonefactory.NewResumeHandler(tzfSvc, approvalsSvc, log),
+		fleetmanager.NewResumeHandler(fleetSvc, approvalsSvc, log),
 	)
 	go dispatcher.Run(ctx)
 
@@ -266,6 +287,8 @@ func run() error {
 	notificationsHandler.RegisterRoutes(api)
 	policyHandler.RegisterRoutes(api)
 	tzfHandler.RegisterRoutes(api)
+	fleetHandler.RegisterRoutes(api)
+	extHandler.RegisterRoutes(api)
 
 	// Agent-facing Connect-RPC services mount on chi directly, outside the
 	// huma bearer middleware: registration is token-authenticated, the event
@@ -275,6 +298,11 @@ func run() error {
 		connect.WithInterceptors(agentgateway.AuthInterceptor(validator)))
 	router.Handle(regPath+"*", regHandler)
 	router.Handle(streamPath+"*", streamHandler)
+
+	// Extension proxy: wildcard path mounted on chi directly; the proxy runs
+	// its own token validation + FGA invoke check before forwarding to the
+	// verified sidecar (plan §5.8).
+	extProxy.Mount(router)
 
 	// Unencrypted HTTP/2 (h2c) so Connect-RPC streaming works without TLS
 	// termination in front (agents may dial directly in dev). HTTP/1.1 stays

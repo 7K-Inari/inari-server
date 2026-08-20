@@ -82,35 +82,6 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 	}, h.deletePolicy)
 
 	huma.Register(api, huma.Operation{
-		OperationID: "createClusterSet",
-		Method:      http.MethodPost,
-		Path:        "/api/v1/tenants/{org}/cluster-sets",
-		Summary:     "Create a cluster set",
-		Security:    httpserver.SecurityRequirement(),
-	}, h.createClusterSet)
-	huma.Register(api, huma.Operation{
-		OperationID: "listClusterSets",
-		Method:      http.MethodGet,
-		Path:        "/api/v1/tenants/{org}/cluster-sets",
-		Summary:     "List cluster sets",
-		Security:    httpserver.SecurityRequirement(),
-	}, h.listClusterSets)
-	huma.Register(api, huma.Operation{
-		OperationID: "getClusterSet",
-		Method:      http.MethodGet,
-		Path:        "/api/v1/tenants/{org}/cluster-sets/{id}",
-		Summary:     "Get a cluster set",
-		Security:    httpserver.SecurityRequirement(),
-	}, h.getClusterSet)
-	huma.Register(api, huma.Operation{
-		OperationID: "deleteClusterSet",
-		Method:      http.MethodDelete,
-		Path:        "/api/v1/tenants/{org}/cluster-sets/{id}",
-		Summary:     "Delete a cluster set",
-		Security:    httpserver.SecurityRequirement(),
-	}, h.deleteClusterSet)
-
-	huma.Register(api, huma.Operation{
 		OperationID: "createPolicyPack",
 		Method:      http.MethodPost,
 		Path:        "/api/v1/tenants/{org}/policy-packs",
@@ -363,88 +334,6 @@ func (h *Handler) evaluate(ctx context.Context, in *evaluateInput) (*evaluateOut
 	out := &evaluateOutput{}
 	out.Body.Decision = *decision
 	return out, nil
-}
-
-type createClusterSetInput struct {
-	Org  string `path:"org"`
-	Body struct {
-		Name          string            `json:"name"`
-		LabelSelector map[string]string `json:"labelSelector"`
-	}
-}
-
-type clusterSetOutput struct {
-	Body struct {
-		ClusterSet types.ClusterSet `json:"clusterSet"`
-	}
-}
-
-func (h *Handler) createClusterSet(ctx context.Context, in *createClusterSetInput) (*clusterSetOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
-	if err != nil {
-		return nil, err
-	}
-	cs, err := h.svc.CreateClusterSet(ctx, id.Subject, org.ID, in.Body.Name, in.Body.LabelSelector)
-	if err != nil {
-		return nil, mapErr(err, nil)
-	}
-	out := &clusterSetOutput{}
-	out.Body.ClusterSet = *cs
-	return out, nil
-}
-
-type listClusterSetsInput struct {
-	Org string `path:"org"`
-}
-
-type listClusterSetsOutput struct {
-	Body struct {
-		ClusterSets []types.ClusterSet `json:"clusterSets"`
-	}
-}
-
-func (h *Handler) listClusterSets(ctx context.Context, in *listClusterSetsInput) (*listClusterSetsOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
-	if err != nil {
-		return nil, err
-	}
-	sets, err := h.svc.ListClusterSets(ctx, org.ID)
-	if err != nil {
-		return nil, err
-	}
-	out := &listClusterSetsOutput{}
-	out.Body.ClusterSets = sets
-	return out, nil
-}
-
-type clusterSetIDInput struct {
-	Org string `path:"org"`
-	ID  string `path:"id"`
-}
-
-func (h *Handler) getClusterSet(ctx context.Context, in *clusterSetIDInput) (*clusterSetOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
-	if err != nil {
-		return nil, err
-	}
-	cs, err := h.svc.GetClusterSet(ctx, org.ID, in.ID)
-	if err != nil {
-		return nil, mapErr(err, ErrClusterSetNotFound)
-	}
-	out := &clusterSetOutput{}
-	out.Body.ClusterSet = *cs
-	return out, nil
-}
-
-func (h *Handler) deleteClusterSet(ctx context.Context, in *clusterSetIDInput) (*struct{}, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
-	if err != nil {
-		return nil, err
-	}
-	if err := h.svc.DeleteClusterSet(ctx, id.Subject, org.ID, in.ID); err != nil {
-		return nil, mapErr(err, ErrClusterSetNotFound)
-	}
-	return nil, nil
 }
 
 type createPackInput struct {

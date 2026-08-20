@@ -53,6 +53,13 @@ type Config struct {
 	TZFRequiredTags      []string
 	TZFReconcileInterval time.Duration
 	TZFStepMaxAttempts   int64
+
+	// M4: Extension Host + Fleet Manager (plan §5.8, §5.11).
+	// CurrentAgentVersion is the supported agent version (N); agents at N
+	// and N−1 are admitted (§11/5).
+	CurrentAgentVersion  string
+	FleetAdvanceInterval time.Duration
+	DriftSweepInterval   time.Duration
 }
 
 func Load() (*Config, error) {
@@ -93,6 +100,10 @@ func Load() (*Config, error) {
 		TZFRequiredTags:      listEnv("INARI_TZF_REQUIRED_TAGS", nil),
 		TZFReconcileInterval: durEnv("INARI_TZF_RECONCILE_INTERVAL", 30*time.Second),
 		TZFStepMaxAttempts:   intEnv("INARI_TZF_STEP_MAX_ATTEMPTS", 5),
+
+		CurrentAgentVersion:  env("INARI_AGENT_VERSION", ""),
+		FleetAdvanceInterval: durEnv("INARI_FLEET_ADVANCE_INTERVAL", 10*time.Second),
+		DriftSweepInterval:   durEnv("INARI_DRIFT_SWEEP_INTERVAL", time.Minute),
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("config: INARI_DATABASE_URL must not be empty")

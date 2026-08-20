@@ -38,13 +38,16 @@ import (
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/fleetmanager"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
 var (
-	ErrPolicyNotFound      = errors.New("policy not found")
-	ErrPackNotFound        = errors.New("policy pack not found")
-	ErrClusterSetNotFound  = errors.New("cluster set not found")
+	ErrPolicyNotFound = errors.New("policy not found")
+	ErrPackNotFound   = errors.New("policy pack not found")
+	// ErrClusterSetNotFound is kept for API compatibility with pre-M4 callers;
+	// ClusterSets are owned by the Fleet Manager (fleetmanager.ErrNotFound).
+	ErrClusterSetNotFound  = fleetmanager.ErrNotFound
 	ErrExemptionNotFound   = errors.New("exemption not found")
 	ErrAssignmentNotFound  = errors.New("policy assignment not found")
 	ErrAssignmentExists    = errors.New("policy pack already assigned to target")
@@ -165,80 +168,6 @@ func (s *Store) DeletePolicy(ctx context.Context, q db.Querier, id string) error
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrPolicyNotFound
-	}
-	return nil
-}
-
-const clusterSetCols = `id, org_id, name, label_selector, created_at`
-
-func scanClusterSet(row interface{ Scan(...any) error }) (*types.ClusterSet, error) {
-	var cs types.ClusterSet
-	var selector []byte
-	err := row.Scan(&cs.ID, &cs.OrgID, &cs.Name, &selector, &cs.CreatedAt)
-	if err != nil {
-		return nil, err
-	}
-	if len(selector) > 0 {
-		if err := json.Unmarshal(selector, &cs.LabelSelector); err != nil {
-			return nil, fmt.Errorf("policyservice: cluster set selector: %w", err)
-		}
-	}
-	return &cs, nil
-}
-
-func (s *Store) CreateClusterSet(ctx context.Context, q db.Querier, cs *types.ClusterSet) error {
-	sel, err := json.Marshal(cs.LabelSelector)
-	if err != nil {
-		return err
-	}
-	const sql = `INSERT INTO cluster_sets (id, org_id, name, label_selector) VALUES ($1,$2,$3,$4)
-	             RETURNING ` + clusterSetCols
-	out, err := scanClusterSet(q.QueryRow(ctx, sql, cs.ID, cs.OrgID, cs.Name, sel))
-	if err != nil {
-		return err
-	}
-	*cs = *out
-	return nil
-}
-
-func (s *Store) GetClusterSet(ctx context.Context, q db.Querier, id string) (*types.ClusterSet, error) {
-	const sql = `SELECT ` + clusterSetCols + ` FROM cluster_sets WHERE id = $1`
-	cs, err := scanClusterSet(q.QueryRow(ctx, sql, id))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrClusterSetNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	return cs, nil
-}
-
-func (s *Store) ListClusterSets(ctx context.Context, q db.Querier, orgID string) ([]types.ClusterSet, error) {
-	const sql = `SELECT ` + clusterSetCols + ` FROM cluster_sets WHERE org_id = $1 ORDER BY created_at`
-	rows, err := q.Query(ctx, sql, orgID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []types.ClusterSet
-	for rows.Next() {
-		cs, err := scanClusterSet(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, *cs)
-	}
-	return out, rows.Err()
-}
-
-func (s *Store) DeleteClusterSet(ctx context.Context, q db.Querier, id string) error {
-	const sql = `DELETE FROM cluster_sets WHERE id = $1`
-	tag, err := q.Exec(ctx, sql, id)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrClusterSetNotFound
 	}
 	return nil
 }
@@ -438,8 +367,20 @@ type Service struct {
 	clusters ClusterLister
 	queue    Queue
 	audit    *audit.Store
+	sets     SetResolver
 	now      func() time.Time
 }
+
+// SetResolver resolves ClusterSets and their members for pack assignment
+// targets (fleetmanager.Service seam — ClusterSets moved to the Fleet
+// Manager at M4).
+type SetResolver interface {
+	GetClusterSet(ctx context.Context, orgID, id string) (*types.ClusterSet, error)
+	ResolveClusters(ctx context.Context, orgID string, selector map[string]string) ([]types.Cluster, error)
+}
+
+// WithSetResolver wires the Fleet Manager ClusterSet seam.
+func (s *Service) WithSetResolver(sets SetResolver) *Service { s.sets = sets; return s }
 
 func NewService(d *db.DB, store *Store, eval Evaluator, clusters ClusterLister, queue Queue, auditStore *audit.Store) *Service {
 	return &Service{
@@ -635,64 +576,6 @@ func (s *Service) evaluate(ctx context.Context, orgID, target string, input map[
 	return decision, nil
 }
 
-func (s *Service) CreateClusterSet(ctx context.Context, actor, orgID, name string, selector map[string]string) (*types.ClusterSet, error) {
-	if name == "" {
-		return nil, fmt.Errorf("%w: name is required", ErrInvalidInput)
-	}
-	cs := &types.ClusterSet{ID: "clusterset:" + newUUID(), OrgID: orgID, Name: name, LabelSelector: selector}
-	err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
-		if err := s.store.CreateClusterSet(ctx, tx, cs); err != nil {
-			return err
-		}
-		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
-			OrgID: orgID, Actor: actor, Action: "cluster_set.created", ObjectType: "cluster_set", ObjectID: cs.ID,
-		}); err != nil {
-			return err
-		}
-		return audit.AppendOutbox(ctx, tx, orgID, types.EventClusterSetCreated, types.ClusterSetPayload{
-			OrgID: orgID, ClusterSetID: cs.ID,
-		})
-	})
-	if err != nil {
-		return nil, err
-	}
-	return cs, nil
-}
-
-func (s *Service) GetClusterSet(ctx context.Context, orgID, id string) (*types.ClusterSet, error) {
-	cs, err := s.store.GetClusterSet(ctx, s.db.Pool, id)
-	if err != nil {
-		return nil, err
-	}
-	if cs.OrgID != orgID {
-		return nil, ErrClusterSetNotFound
-	}
-	return cs, nil
-}
-
-func (s *Service) ListClusterSets(ctx context.Context, orgID string) ([]types.ClusterSet, error) {
-	return s.store.ListClusterSets(ctx, s.db.Pool, orgID)
-}
-
-func (s *Service) DeleteClusterSet(ctx context.Context, actor, orgID, id string) error {
-	if _, err := s.GetClusterSet(ctx, orgID, id); err != nil {
-		return err
-	}
-	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
-		if err := s.store.DeleteClusterSet(ctx, tx, id); err != nil {
-			return err
-		}
-		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
-			OrgID: orgID, Actor: actor, Action: "cluster_set.deleted", ObjectType: "cluster_set", ObjectID: id,
-		}); err != nil {
-			return err
-		}
-		return audit.AppendOutbox(ctx, tx, orgID, types.EventClusterSetDeleted, types.ClusterSetPayload{
-			OrgID: orgID, ClusterSetID: id,
-		})
-	})
-}
-
 func (s *Service) CreatePolicyPack(ctx context.Context, actor, orgID, name, engine, ociRef, version string, parameters, manifests json.RawMessage) (*types.PolicyPack, error) {
 	if engine != types.PolicyPackEngineKyverno && engine != types.PolicyPackEngineCELVAP {
 		return nil, fmt.Errorf("%w: engine must be kyverno|cel-vap", ErrInvalidInput)
@@ -817,7 +700,7 @@ func (h *DistributeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) e
 		return fmt.Errorf("policyservice: distribute: pack %s: %w", p.PackID, err)
 	}
 	clusters, err := h.svc.targetClusters(ctx, p.OrgID, p.TargetType, p.TargetID)
-	if errors.Is(err, ErrClusterSetNotFound) || errors.Is(err, clusterregistry.ErrClusterNotFound) {
+	if errors.Is(err, fleetmanager.ErrNotFound) || errors.Is(err, clusterregistry.ErrClusterNotFound) {
 		h.log.Info("policyservice: distribute skipped, target gone",
 			"pack", p.PackID, "targetType", p.TargetType, "target", p.TargetID)
 		return nil
@@ -855,11 +738,14 @@ func (s *Service) Unassign(ctx context.Context, actor, orgID, packID, assignment
 func (s *Service) targetClusters(ctx context.Context, orgID, targetType, targetID string) ([]types.Cluster, error) {
 	switch targetType {
 	case types.PolicyTargetClusterSet:
-		cs, err := s.GetClusterSet(ctx, orgID, targetID)
+		if s.sets == nil {
+			return nil, fmt.Errorf("policyservice: cluster set resolver not wired")
+		}
+		cs, err := s.sets.GetClusterSet(ctx, orgID, targetID)
 		if err != nil {
 			return nil, err
 		}
-		return s.ResolveClusters(ctx, orgID, cs.LabelSelector)
+		return s.sets.ResolveClusters(ctx, orgID, cs.LabelSelector)
 	case types.PolicyTargetTenant:
 		if targetID != orgID {
 			return nil, fmt.Errorf("%w: tenant target must be the caller's org", ErrInvalidInput)
@@ -918,31 +804,6 @@ func (s *Service) distribute(ctx context.Context, pack *types.PolicyPack, cluste
 		}
 	}
 	return nil
-}
-
-// ResolveClusters returns the org's clusters whose labels contain every
-// selector pair (subset match).
-func (s *Service) ResolveClusters(ctx context.Context, orgID string, selector map[string]string) ([]types.Cluster, error) {
-	all, err := s.clusters.ListClusters(ctx, orgID)
-	if err != nil {
-		return nil, err
-	}
-	var out []types.Cluster
-	for _, c := range all {
-		if matchesSelector(c.Labels, selector) {
-			out = append(out, c)
-		}
-	}
-	return out, nil
-}
-
-func matchesSelector(labels, selector map[string]string) bool {
-	for k, v := range selector {
-		if labels[k] != v {
-			return false
-		}
-	}
-	return true
 }
 
 // RequestExemption files a time-boxed waiver request for a policy (state

@@ -118,3 +118,46 @@ func TestTupleWriterTenantZoneLifecycle(t *testing.T) {
 		t.Fatalf("deleted = %+v, want [%+v]", fs.deleted, want)
 	}
 }
+
+func TestTupleWriterM4Entities(t *testing.T) {
+	fs := &fakeStore{}
+	w := NewTupleWriter(fs)
+	ctx := context.Background()
+
+	reg := event(t, types.EventExtensionRegistered, types.ExtensionPayload{
+		OrgID: "org:1", ExtensionID: "ext-1", Name: "argocd",
+	})
+	if err := w.Handle(ctx, reg); err != nil {
+		t.Fatalf("Handle extension registered: %v", err)
+	}
+	want := Tuple{User: "organization:1", Relation: "parent", Object: "extension:ext-1"}
+	if len(fs.written) != 1 || fs.written[0] != want {
+		t.Fatalf("written = %+v, want %v", fs.written, want)
+	}
+
+	ro := event(t, types.EventRolloutCreated, types.RolloutPayload{OrgID: "org:1", RolloutID: "ro-1"})
+	if err := w.Handle(ctx, ro); err != nil {
+		t.Fatalf("Handle rollout created: %v", err)
+	}
+	if fs.written[1] != (Tuple{User: "organization:1", Relation: "parent", Object: "rollout:ro-1"}) {
+		t.Errorf("rollout tuple = %+v", fs.written[1])
+	}
+
+	drift := event(t, types.EventDriftDetected, types.DriftPayload{OrgID: "org:1", DriftID: "d-1", ClusterID: "c-1"})
+	if err := w.Handle(ctx, drift); err != nil {
+		t.Fatalf("Handle drift: %v", err)
+	}
+	if fs.written[2] != (Tuple{User: "organization:1", Relation: "parent", Object: "drift_event:d-1"}) {
+		t.Errorf("drift tuple = %+v", fs.written[2])
+	}
+
+	unreg := event(t, types.EventExtensionUnregistered, types.ExtensionPayload{
+		OrgID: "org:1", ExtensionID: "ext-1",
+	})
+	if err := w.Handle(ctx, unreg); err != nil {
+		t.Fatalf("Handle extension unregistered: %v", err)
+	}
+	if len(fs.deleted) != 1 || fs.deleted[0] != want {
+		t.Errorf("deleted = %+v", fs.deleted)
+	}
+}

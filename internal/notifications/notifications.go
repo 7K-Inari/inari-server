@@ -44,6 +44,12 @@ var subscribedEvents = []string{
 	types.EventInstanceStatus,
 	types.EventDeployRequested,
 	types.EventInstanceUpgraded,
+	types.EventDriftDetected,
+	types.EventDriftResolved,
+	types.EventRolloutFailed,
+	types.EventRolloutCompleted,
+	types.EventRolloutRolledBack,
+	types.EventExtensionStateChanged,
 }
 
 func knownEvent(t string) bool {

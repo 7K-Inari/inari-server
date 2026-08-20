@@ -48,6 +48,10 @@ func (w *TupleWriter) EventTypes() []string {
 		types.EventPolicyPackAssigned,
 		types.EventTenantZoneActive,
 		types.EventTenantZoneClosed,
+		types.EventExtensionRegistered,
+		types.EventExtensionUnregistered,
+		types.EventRolloutCreated,
+		types.EventDriftDetected,
 	}
 }
 
@@ -178,6 +182,44 @@ func (w *TupleWriter) Handle(ctx context.Context, ev *types.OutboxEvent) error {
 		}
 		return w.store.WriteTuples(ctx, []Tuple{{
 			User: OrgObject(p.OrgID), Relation: RelationParent, Object: PolicyPackObject(p.PackID),
+		}})
+	case types.EventExtensionRegistered:
+		var p types.ExtensionPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		if p.OrgID == "" {
+			return nil // platform-global extensions: invoke is granted per-org later
+		}
+		return w.store.WriteTuples(ctx, []Tuple{{
+			User: OrgObject(p.OrgID), Relation: RelationParent, Object: ExtensionObject(p.ExtensionID),
+		}})
+	case types.EventExtensionUnregistered:
+		var p types.ExtensionPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		if p.OrgID == "" {
+			return nil
+		}
+		return w.store.DeleteTuples(ctx, []Tuple{{
+			User: OrgObject(p.OrgID), Relation: RelationParent, Object: ExtensionObject(p.ExtensionID),
+		}})
+	case types.EventRolloutCreated:
+		var p types.RolloutPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		return w.store.WriteTuples(ctx, []Tuple{{
+			User: OrgObject(p.OrgID), Relation: RelationParent, Object: RolloutObject(p.RolloutID),
+		}})
+	case types.EventDriftDetected:
+		var p types.DriftPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		return w.store.WriteTuples(ctx, []Tuple{{
+			User: OrgObject(p.OrgID), Relation: RelationParent, Object: DriftEventObject(p.DriftID),
 		}})
 	}
 	return nil

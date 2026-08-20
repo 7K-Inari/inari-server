@@ -256,7 +256,7 @@ func TestClusterLifecycleFlow(t *testing.T) {
 	defer srv.Close()
 	ctx := context.Background()
 	cid := itCreate(t, srv, "acme", "lc1")
-	if err := svc.MarkRegistered(ctx, "user-1", cid, "cluster-x", "v1.30.0", nil); err != nil {
+	if err := svc.MarkRegistered(ctx, "user-1", cid, "cluster-x", "v1.30.0", "v1.5.0", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -293,7 +293,7 @@ func TestClusterDecommissionOwnershipBlock(t *testing.T) {
 	defer srv.Close()
 	ctx := context.Background()
 	cid := itCreate(t, srv, "acme", "lc2")
-	if err := svc.MarkRegistered(ctx, "user-1", cid, "cluster-x", "v1.30.0", nil); err != nil {
+	if err := svc.MarkRegistered(ctx, "user-1", cid, "cluster-x", "v1.30.0", "v1.5.0", nil); err != nil {
 		t.Fatal(err)
 	}
 	// Seed instances directly: one adopted, one observe-only.

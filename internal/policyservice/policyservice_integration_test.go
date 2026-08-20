@@ -16,6 +16,7 @@ import (
 
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/fleetmanager"
 	"github.com/7K-Inari/inari-server/internal/policyservice"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -97,6 +98,8 @@ func itService(t *testing.T) (*policyservice.Service, *itQueue, *db.DB) {
 	}}
 	svc := policyservice.NewService(database, policyservice.NewStore(),
 		policyservice.NewOPAEvaluator(), clusters, queue, audit.NewStore())
+	fleet := fleetmanager.NewService(database, fleetmanager.NewStore(), audit.NewStore(), clusters, queue)
+	svc.WithSetResolver(fleet)
 	return svc, queue, database
 }
 
@@ -253,8 +256,14 @@ func TestAssignDistributesApplyBundle(t *testing.T) {
 		t.Fatalf("expected ErrAssignmentExists, got %v", err)
 	}
 
-	// Cluster set target resolves member clusters by selector.
-	cs, err := svc.CreateClusterSet(ctx, "user-1", "org:1", "prod", map[string]string{"env": "prod"})
+	// Cluster set target resolves member clusters by selector (ClusterSets are
+	// owned by the Fleet Manager since M4; wired via the SetResolver seam).
+	fleet := fleetmanager.NewService(database, fleetmanager.NewStore(), audit.NewStore(),
+		&itClusters{clusters: []types.Cluster{
+			{ID: "cluster:1", OrgID: "org:1", Name: "prod-eu", Labels: map[string]string{"env": "prod"}},
+			{ID: "cluster:2", OrgID: "org:1", Name: "dev", Labels: map[string]string{"env": "dev"}},
+		}}, queue)
+	cs, err := fleet.CreateClusterSet(ctx, "user-1", "org:1", "prod", map[string]string{"env": "prod"})
 	if err != nil {
 		t.Fatal(err)
 	}

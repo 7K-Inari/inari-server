@@ -27,6 +27,10 @@ type Config struct {
 	CommandRetryAfter   time.Duration
 	// OIDCIssuerURL is advertised to agents at registration.
 	OIDCIssuerURL string
+	// CurrentAgentVersion is the control plane's supported agent version
+	// (N); agents at N and N−1 are supported (plan §11/5). Empty disables
+	// the skew check.
+	CurrentAgentVersion string
 	// ESO delivery reference for the OIDC client secret (plan §5.3) — the
 	// secret value itself never transits this API.
 	ESOSecretStore     string

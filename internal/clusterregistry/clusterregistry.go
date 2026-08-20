@@ -181,14 +181,14 @@ func (s *Store) SetStateIf(ctx context.Context, q db.Querier, id string, from, t
 	return nil
 }
 
-func (s *Store) MarkRegistered(ctx context.Context, q db.Querier, id, clientID, k8sVersion string, labels map[string]string) error {
+func (s *Store) MarkRegistered(ctx context.Context, q db.Querier, id, clientID, k8sVersion, agentVersion string, labels map[string]string) error {
 	raw, err := json.Marshal(labels)
 	if err != nil {
 		return err
 	}
-	const sql = `UPDATE clusters SET keycloak_client_id = $2, kubernetes_version = $3, labels = $4,
+	const sql = `UPDATE clusters SET keycloak_client_id = $2, kubernetes_version = $3, labels = $4, agent_version = $5,
 	             state = 'active', connected_at = now(), last_seen_at = now() WHERE id = $1`
-	tag, err := q.Exec(ctx, sql, id, clientID, k8sVersion, raw)
+	tag, err := q.Exec(ctx, sql, id, clientID, k8sVersion, raw, agentVersion)
 	if err != nil {
 		return err
 	}
@@ -543,13 +543,13 @@ func (s *Service) ConsumeRegistrationToken(ctx context.Context, plaintext string
 
 // MarkRegistered records the provisioned identity and reported metadata and
 // flips the cluster active (registration exchange, plan §5.3 step 1).
-func (s *Service) MarkRegistered(ctx context.Context, actor, clusterID, clientID, k8sVersion string, labels map[string]string) error {
+func (s *Service) MarkRegistered(ctx context.Context, actor, clusterID, clientID, k8sVersion, agentVersion string, labels map[string]string) error {
 	c, err := s.store.GetCluster(ctx, s.db.Pool, clusterID)
 	if err != nil {
 		return err
 	}
 	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
-		if err := s.store.MarkRegistered(ctx, tx, clusterID, clientID, k8sVersion, labels); err != nil {
+		if err := s.store.MarkRegistered(ctx, tx, clusterID, clientID, k8sVersion, agentVersion, labels); err != nil {
 			return err
 		}
 		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
@@ -561,6 +561,14 @@ func (s *Service) MarkRegistered(ctx context.Context, actor, clusterID, clientID
 			OrgID: c.OrgID, ClusterID: clusterID, Name: c.Name,
 		})
 	})
+}
+
+// SetAgentVersion persists the agent-reported version from stream
+// handshakes (fleet manager: upgrade channels + drift, plan §5.11).
+func (s *Service) SetAgentVersion(ctx context.Context, clusterID, version string) error {
+	const sql = `UPDATE clusters SET agent_version = $2 WHERE id = $1`
+	_, err := s.db.Pool.Exec(ctx, sql, clusterID, version)
+	return err
 }
 
 // RecordHeartbeat refreshes connection health for a connected agent.

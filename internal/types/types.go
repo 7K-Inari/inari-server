@@ -108,6 +108,23 @@ const (
 	EventClusterSetDeleted  = "cluster_set.deleted"
 	EventExemptionRequested = "exemption.requested"
 	EventExemptionDecided   = "exemption.decided"
+
+	EventExtensionRegistered   = "extension.registered"
+	EventExtensionUnregistered = "extension.unregistered"
+	EventExtensionStateChanged = "extension.state_changed"
+
+	EventRolloutCreated       = "rollout.created"
+	EventRolloutStarted       = "rollout.started"
+	EventRolloutPaused        = "rollout.paused"
+	EventRolloutResumed       = "rollout.resumed"
+	EventRolloutCompleted     = "rollout.completed"
+	EventRolloutFailed        = "rollout.failed"
+	EventRolloutRolledBack    = "rollout.rolled_back"
+	EventRolloutGateEntered   = "rollout.gate_entered"
+	EventRolloutStageAdvanced = "rollout.stage_advanced"
+
+	EventDriftDetected = "drift.detected"
+	EventDriftResolved = "drift.resolved"
 )
 
 // ClusterState is the cluster lifecycle state (plan §5.11).
@@ -339,6 +356,7 @@ const (
 const (
 	ApprovalActionTenantZoneVend         = "tenant_zone.vend"
 	ApprovalActionTenantZoneDecommission = "tenant_zone.decommission"
+	ApprovalActionRolloutStageGate       = "rollout.stage_gate"
 )
 
 // ApprovalRequest gates one deploy request (plan §5.2). Name, Namespace,
@@ -689,6 +707,190 @@ type NotificationEndpoint struct {
 	Events    []string  `json:"events"`
 	Enabled   bool      `json:"enabled"`
 	CreatedAt time.Time `json:"createdAt"`
+}
+
+// Extension states (plan §5.8/§5.9): lifecycle of a registered backend
+// plugin sidecar.
+const (
+	ExtensionStatePending  = "pending"
+	ExtensionStateReady    = "ready"
+	ExtensionStateDegraded = "degraded"
+	ExtensionStateStopped  = "stopped"
+)
+
+// Extension kinds (§5.8): v1 supports backend plugins only (UI/API
+// contribution kinds are platform backlog).
+const (
+	ExtensionKindBackend = "backend"
+)
+
+// Extension is a registered backend plugin (plan §5.9). The manifest is the
+// plugin-declared descriptor (capabilities, contributed routes); Endpoint is
+// the sidecar HTTP base URL the authenticated reverse proxy targets. Checksum
+// is the sha256 of the plugin binary/artifact verified at handshake.
+type Extension struct {
+	ID        string          `json:"id"`
+	OrgID     string          `json:"orgId,omitempty"` // empty = platform-global
+	Name      string          `json:"name"`
+	Version   string          `json:"version"`
+	Kind      string          `json:"kind"`
+	Manifest  json.RawMessage `json:"manifest,omitempty"`
+	Endpoint  string          `json:"endpoint"`
+	Checksum  string          `json:"checksum"`
+	State     string          `json:"state"`
+	CreatedAt time.Time       `json:"createdAt"`
+	UpdatedAt time.Time       `json:"updatedAt"`
+}
+
+// ExtensionPayload is the outbox payload for extension lifecycle events.
+type ExtensionPayload struct {
+	OrgID       string `json:"orgId"`
+	ExtensionID string `json:"extensionId"`
+	Name        string `json:"name"`
+	State       string `json:"state,omitempty"`
+}
+
+// Rollout kinds (plan §5.11): what a staged fleet rollout pushes.
+const (
+	RolloutKindCapability     = "capability"
+	RolloutKindPolicyPack     = "policy_pack"
+	RolloutKindAgentUpgrade   = "agent_upgrade"
+	RolloutKindCatalogVersion = "catalog_version"
+)
+
+// Rollout states.
+const (
+	RolloutStatePending     = "pending"
+	RolloutStateRunning     = "running"
+	RolloutStateWaitingGate = "waiting_gate"
+	RolloutStatePaused      = "paused"
+	RolloutStateFailed      = "failed"
+	RolloutStateCompleted   = "completed"
+	RolloutStateRolledBack  = "rolled_back"
+)
+
+// RolloutStageGate pauses progression between stages: either a timed wait
+// (WaitSeconds) or an approval gate via the Approvals module (§5.11).
+type RolloutStageGate struct {
+	Type        string `json:"type"` // "wait" | "approval"
+	WaitSeconds int    `json:"waitSeconds,omitempty"`
+}
+
+// RolloutStage selects ClusterSets and bounds fan-out concurrency.
+// MaxConcurrency is a count (e.g. "3") or a percentage of stage members
+// (e.g. "25%").
+type RolloutStage struct {
+	Name           string            `json:"name"`
+	ClusterSetIDs  []string          `json:"clusterSetIds"`
+	MaxConcurrency string            `json:"maxConcurrency"`
+	BeforeGate     *RolloutStageGate `json:"beforeGate,omitempty"`
+	AfterGate      *RolloutStageGate `json:"afterGate,omitempty"`
+}
+
+// RolloutGateContext records a pending before/after-stage gate while the
+// rollout sits in waiting_gate. For wait gates, EnteredAt + WaitSeconds
+// decide resumption; for approval gates, ApprovalID links the Approvals
+// request whose decision resumes the rollout.
+type RolloutGateContext struct {
+	Gate        string    `json:"gate"` // "before" | "after"
+	Type        string    `json:"type"` // "wait" | "approval"
+	WaitSeconds int       `json:"waitSeconds,omitempty"`
+	ApprovalID  string    `json:"approvalId,omitempty"`
+	EnteredAt   time.Time `json:"enteredAt"`
+}
+
+// Rollout is a staged, gated fleet operation (plan §5.9/§5.11). Desired
+// state is handed to agents via the command queue — execution stays
+// credential-free on the hub.
+type Rollout struct {
+	ID             string              `json:"id"`
+	OrgID          string              `json:"orgId"`
+	Name           string              `json:"name"`
+	Kind           string              `json:"kind"`
+	TargetRef      string              `json:"targetRef"` // pack ID / catalog item ID / capability name
+	DesiredVersion string              `json:"desiredVersion"`
+	Stages         []RolloutStage      `json:"stages"`
+	State          string              `json:"state"`
+	CurrentStage   int                 `json:"currentStage"`
+	GateContext    *RolloutGateContext `json:"gateContext,omitempty"`
+	CreatedBy      string              `json:"createdBy"`
+	CreatedAt      time.Time           `json:"createdAt"`
+	UpdatedAt      time.Time           `json:"updatedAt"`
+}
+
+// Rollout target statuses.
+const (
+	RolloutTargetPending   = "pending"
+	RolloutTargetDelivered = "delivered"
+	RolloutTargetHealthy   = "healthy"
+	RolloutTargetFailed    = "failed"
+)
+
+// RolloutTarget tracks one cluster's progress through a rollout stage.
+type RolloutTarget struct {
+	RolloutID      string    `json:"rolloutId"`
+	ClusterID      string    `json:"clusterId"`
+	Stage          int       `json:"stage"`
+	Status         string    `json:"status"`
+	CommandID      string    `json:"commandId,omitempty"`
+	ObservedHealth string    `json:"observedHealth,omitempty"`
+	UpdatedAt      time.Time `json:"updatedAt"`
+}
+
+// RolloutPayload is the outbox payload for rollout lifecycle events.
+type RolloutPayload struct {
+	OrgID     string `json:"orgId"`
+	RolloutID string `json:"rolloutId"`
+	State     string `json:"state,omitempty"`
+	Stage     int    `json:"stage,omitempty"`
+}
+
+// Agent channels (plan §5.11): desired agent version tracks.
+const (
+	AgentChannelStable = "stable"
+	AgentChannelCanary = "canary"
+)
+
+// AgentChannel pins a desired agent version to a ClusterSet channel.
+type AgentChannel struct {
+	ID                  string    `json:"id"`
+	OrgID               string    `json:"orgId"`
+	ClusterSetID        string    `json:"clusterSetId"`
+	Channel             string    `json:"channel"`
+	DesiredAgentVersion string    `json:"desiredAgentVersion"`
+	CreatedAt           time.Time `json:"createdAt"`
+	UpdatedAt           time.Time `json:"updatedAt"`
+}
+
+// Drift event kinds (plan §5.11): what diverged.
+const (
+	DriftKindInstanceSpec = "instance_spec"
+	DriftKindCapability   = "capability"
+	DriftKindAgentVersion = "agent_version"
+)
+
+// DriftEvent records one detected desired-vs-reported divergence (§5.9).
+// v1 is report-only: detection never triggers remediation.
+type DriftEvent struct {
+	ID           string    `json:"id"`
+	OrgID        string    `json:"orgId"`
+	ClusterID    string    `json:"clusterId"`
+	Kind         string    `json:"kind"`
+	ResourceRef  string    `json:"resourceRef,omitempty"`
+	DesiredHash  string    `json:"desiredHash,omitempty"`
+	ReportedHash string    `json:"reportedHash,omitempty"`
+	Detail       string    `json:"detail,omitempty"`
+	Status       string    `json:"status"` // "open" | "resolved"
+	DetectedAt   time.Time `json:"detectedAt"`
+}
+
+// DriftPayload is the outbox payload for EventDriftDetected.
+type DriftPayload struct {
+	OrgID       string `json:"orgId"`
+	DriftID     string `json:"driftId"`
+	ClusterID   string `json:"clusterId"`
+	Kind        string `json:"kind"`
+	ResourceRef string `json:"resourceRef,omitempty"`
 }
 
 // Notification delivery states.

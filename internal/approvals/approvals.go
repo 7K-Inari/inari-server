@@ -76,7 +76,7 @@ type Store struct {
 
 func NewStore(d *db.DB) *Store { return &Store{db: d} }
 
-const approvalCols = `id, org_id, item_id, version, cluster_id, spec, requester, approver, state, reason,
+const approvalCols = `id, org_id, COALESCE(item_id, ''), version, cluster_id, spec, requester, approver, state, reason,
 	name, namespace, owner_team, channel, instance_id, action, created_at, decided_at, expires_at, cancelled_by`
 
 func scanApproval(row interface{ Scan(...any) error }) (*types.ApprovalRequest, error) {
@@ -104,7 +104,7 @@ func (s *Store) create(ctx context.Context, q db.Querier, req *types.ApprovalReq
 func (s *Store) createLifecycle(ctx context.Context, q db.Querier, req *types.ApprovalRequest) error {
 	const sql = `INSERT INTO approval_requests (org_id, item_id, version, cluster_id, spec, requester,
 	             action, expires_at)
-	             VALUES ($1,'','','',$2,$3,$4,$5) RETURNING id, state, created_at`
+	             VALUES ($1,NULL,'','',$2,$3,$4,$5) RETURNING id, state, created_at`
 	return q.QueryRow(ctx, sql, req.OrgID, req.Spec, req.Requester, req.Action, req.ExpiresAt).
 		Scan(&req.ID, &req.State, &req.CreatedAt)
 }

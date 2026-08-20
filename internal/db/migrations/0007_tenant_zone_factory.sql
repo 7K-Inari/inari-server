@@ -7,6 +7,7 @@ CREATE TABLE tenant_zones (
     id                    TEXT PRIMARY KEY,
     slug                  TEXT NOT NULL UNIQUE,
     display_name          TEXT NOT NULL,
+    owner_org_id          TEXT NOT NULL, -- org owning the management account (platform org)
     org_id                TEXT NOT NULL DEFAULT '', -- wired Keycloak org; empty until inari_wiring
     ou_id                 TEXT NOT NULL,
     region                TEXT NOT NULL,

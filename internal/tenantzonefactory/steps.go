@@ -91,7 +91,15 @@ func stepEKSProvision(ctx context.Context, env *Env, rc *RunContext, step *types
 }
 
 func stepInariWiring(ctx context.Context, env *Env, rc *RunContext, step *types.TenantZoneStep) (bool, error) {
-	res, err := env.Wiring.WireZone(ctx, rc.Zone)
+	var roleARN string
+	if tb := rc.Steps[types.ZoneStepTrustBootstrap]; tb != nil {
+		var d struct {
+			RoleARN string `json:"roleArn"`
+		}
+		_ = json.Unmarshal(tb.Detail, &d)
+		roleARN = d.RoleARN
+	}
+	res, err := env.Wiring.WireZone(ctx, rc.Zone, roleARN)
 	if err != nil {
 		return false, fmt.Errorf("tzf: inari wiring: %w", err)
 	}

@@ -46,6 +46,8 @@ func (w *TupleWriter) EventTypes() []string {
 		types.EventClusterSetCreated,
 		types.EventClusterSetDeleted,
 		types.EventPolicyPackAssigned,
+		types.EventTenantZoneActive,
+		types.EventTenantZoneClosed,
 	}
 }
 
@@ -121,6 +123,29 @@ func (w *TupleWriter) Handle(ctx context.Context, ev *types.OutboxEvent) error {
 		}
 		return w.store.WriteTuples(ctx, []Tuple{{
 			User: OrgObject(p.OrgID), Relation: RelationParent, Object: CloudAccountObject(p.AccountID),
+		}})
+	case types.EventTenantZoneActive:
+		// The zone joins the hierarchy under its own (wired) organization.
+		var p types.TenantZonePayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		if p.ZoneOrgID == "" {
+			return nil
+		}
+		return w.store.WriteTuples(ctx, []Tuple{{
+			User: OrgObject(p.ZoneOrgID), Relation: RelationParent, Object: TenantZoneObject(p.ZoneID),
+		}})
+	case types.EventTenantZoneClosed:
+		var p types.TenantZonePayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		if p.ZoneOrgID == "" {
+			return nil
+		}
+		return w.store.DeleteTuples(ctx, []Tuple{{
+			User: OrgObject(p.ZoneOrgID), Relation: RelationParent, Object: TenantZoneObject(p.ZoneID),
 		}})
 	case types.EventCloudAccountDeregistered:
 		var p types.CloudAccountPayload

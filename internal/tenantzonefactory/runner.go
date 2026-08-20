@@ -36,9 +36,10 @@ type ClusterLifecycle interface {
 // Wiring is the Inari-wiring seam (plan §5.12 step 5): Keycloak
 // Organization + default groups/RBAC, Cluster + CloudAccount records,
 // registration token, and the tenant-zone baseline bundle rendered into
-// the zone's Git repo with the ArgoCD root app registered.
+// the zone's Git repo with the ArgoCD root app registered. roleARN is the
+// OIDC web-identity role created by the trust bootstrap step.
 type Wiring interface {
-	WireZone(ctx context.Context, zone *types.TenantZone) (*WiringResult, error)
+	WireZone(ctx context.Context, zone *types.TenantZone, roleARN string) (*WiringResult, error)
 	UnwireZone(ctx context.Context, zone *types.TenantZone) error
 }
 

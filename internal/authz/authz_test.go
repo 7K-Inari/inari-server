@@ -94,3 +94,27 @@ func TestAuthorizerDelegates(t *testing.T) {
 		t.Error("expected deny")
 	}
 }
+
+func TestTupleWriterTenantZoneLifecycle(t *testing.T) {
+	fs := &fakeStore{}
+	w := NewTupleWriter(fs)
+	act := event(t, types.EventTenantZoneActive, types.TenantZonePayload{
+		OrgID: "org:platform", ZoneOrgID: "org:z1", ZoneID: "zone:1", Slug: "acme-dev",
+	})
+	if err := w.Handle(context.Background(), act); err != nil {
+		t.Fatalf("Handle active: %v", err)
+	}
+	want := Tuple{User: "organization:z1", Relation: "parent", Object: "tenant_zone:zone:1"}
+	if len(fs.written) != 1 || fs.written[0] != want {
+		t.Fatalf("written = %+v, want [%+v]", fs.written, want)
+	}
+	cls := event(t, types.EventTenantZoneClosed, types.TenantZonePayload{
+		OrgID: "org:platform", ZoneOrgID: "org:z1", ZoneID: "zone:1",
+	})
+	if err := w.Handle(context.Background(), cls); err != nil {
+		t.Fatalf("Handle closed: %v", err)
+	}
+	if len(fs.deleted) != 1 || fs.deleted[0] != want {
+		t.Fatalf("deleted = %+v, want [%+v]", fs.deleted, want)
+	}
+}

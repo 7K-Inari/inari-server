@@ -762,6 +762,7 @@ type TenantZone struct {
 	ID                  string            `json:"id"`
 	Slug                string            `json:"slug"`
 	DisplayName         string            `json:"displayName"`
+	OwnerOrgID          string            `json:"ownerOrgId"`      // org owning the management account (platform org)
 	OrgID               string            `json:"orgId,omitempty"` // wired Keycloak org; empty until inari_wiring
 	OUID                string            `json:"ouId"`
 	Region              string            `json:"region"`
@@ -805,9 +806,12 @@ const (
 	EventTenantZoneClosed                = "tenant_zone.closed"
 )
 
-// TenantZonePayload is the outbox payload for tenant zone events.
+// TenantZonePayload is the outbox payload for tenant zone events. ZoneOrgID
+// is the zone's own (wired) organization, set once known; OrgID is the
+// owning platform org the event is scoped to.
 type TenantZonePayload struct {
 	OrgID      string `json:"orgId,omitempty"`
+	ZoneOrgID  string `json:"zoneOrgId,omitempty"`
 	ZoneID     string `json:"zoneId"`
 	Slug       string `json:"slug"`
 	State      string `json:"state,omitempty"`

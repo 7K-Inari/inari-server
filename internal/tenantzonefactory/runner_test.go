@@ -52,7 +52,7 @@ type fakeWiring struct {
 	err     error
 }
 
-func (f *fakeWiring) WireZone(_ context.Context, z *types.TenantZone) (*WiringResult, error) {
+func (f *fakeWiring) WireZone(_ context.Context, z *types.TenantZone, _ string) (*WiringResult, error) {
 	if f.err != nil {
 		return nil, f.err
 	}

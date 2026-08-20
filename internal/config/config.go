@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -40,6 +41,18 @@ type Config struct {
 	GitHubAppID             int64
 	GitHubInstallationID    int64
 	GitHubAppPrivateKeyFile string
+
+	// Tenant Zone Factory (plan §5.12). TZFAWSMode selects the AWS backend:
+	// "fake" (default; deterministic in-memory — the M3 acceptance layer)
+	// or "aws" (SDK against a real dev organization when credentials exist).
+	TZFAWSMode           string
+	TZFApprovalRequired  bool
+	TZFAccountQuota      int64
+	TZFAllowedRegions    []string
+	TZFAllowedTiers      []string
+	TZFRequiredTags      []string
+	TZFReconcileInterval time.Duration
+	TZFStepMaxAttempts   int64
 }
 
 func Load() (*Config, error) {
@@ -71,6 +84,15 @@ func Load() (*Config, error) {
 		GitHubAppID:             intEnv("INARI_GITHUB_APP_ID", 0),
 		GitHubInstallationID:    intEnv("INARI_GITHUB_APP_INSTALLATION_ID", 0),
 		GitHubAppPrivateKeyFile: env("INARI_GITHUB_APP_PRIVATE_KEY_FILE", ""),
+
+		TZFAWSMode:           env("INARI_TZF_AWS_MODE", "fake"),
+		TZFApprovalRequired:  boolEnv("INARI_TZF_APPROVAL_REQUIRED", true),
+		TZFAccountQuota:      intEnv("INARI_TZF_ACCOUNT_QUOTA", 10),
+		TZFAllowedRegions:    listEnv("INARI_TZF_ALLOWED_REGIONS", []string{"eu-west-1", "us-east-1"}),
+		TZFAllowedTiers:      listEnv("INARI_TZF_ALLOWED_TIERS", []string{"starter"}),
+		TZFRequiredTags:      listEnv("INARI_TZF_REQUIRED_TAGS", nil),
+		TZFReconcileInterval: durEnv("INARI_TZF_RECONCILE_INTERVAL", 30*time.Second),
+		TZFStepMaxAttempts:   intEnv("INARI_TZF_STEP_MAX_ATTEMPTS", 5),
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("config: INARI_DATABASE_URL must not be empty")
@@ -124,4 +146,20 @@ func intEnv(key string, def int64) int64 {
 		return def
 	}
 	return n
+}
+
+// listEnv reads a comma-separated list; empty means the default.
+func listEnv(key string, def []string) []string {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if s := strings.TrimSpace(p); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }

@@ -581,12 +581,35 @@ func (s *Service) advanceOnce(ctx context.Context, rolloutID string) (done bool,
 	if st.AfterGate != nil {
 		return true, s.enterGate(ctx, r, stage, "after", st.AfterGate)
 	}
-	if err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
-		return s.transition(ctx, tx, r, types.RolloutStateRunning, stage+1, nil, "system:fleetmanager")
-	}); err != nil {
+	if err := s.advanceStage(ctx, r, stage+1); err != nil {
 		return true, err
 	}
 	return false, nil
+}
+
+// advanceStage moves a running rollout to the next stage. The state itself
+// does not change, so this bypasses the state machine (running → running is
+// not a transition) but keeps the CAS guard + audit + outbox trail.
+func (s *Service) advanceStage(ctx context.Context, r *types.Rollout, next int) error {
+	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		ok, err := s.store.setRolloutState(ctx, tx, r.ID, r.State, r.State, next, nil)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("%w: rollout %s moved concurrently", ErrInvalidTransition, r.ID)
+		}
+		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
+			OrgID: r.OrgID, Actor: "system:fleetmanager", Action: "rollout.stage_advanced",
+			ObjectType: "rollout", ObjectID: r.ID,
+			Payload: json.RawMessage(fmt.Sprintf(`{"stage":%d}`, next)),
+		}); err != nil {
+			return err
+		}
+		return audit.AppendOutbox(ctx, tx, r.OrgID, types.EventRolloutStageAdvanced, types.RolloutPayload{
+			OrgID: r.OrgID, RolloutID: r.ID, State: r.State, Stage: next,
+		})
+	})
 }
 
 // deliverBatch enqueues desired-state commands for up to `slots` pending

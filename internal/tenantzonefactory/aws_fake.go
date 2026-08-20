@@ -51,7 +51,7 @@ func (f *FakeOrganizations) CreateAccount(_ context.Context, name, _, ouID strin
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for rid, r := range f.requests {
-		if r.kind == "create" && r.token == idempotencyToken && idempotencyToken != "" {
+		if r.kind == "create" && !r.fail && r.token == idempotencyToken && idempotencyToken != "" {
 			return &CreateAccountResult{RequestID: rid}, nil
 		}
 	}

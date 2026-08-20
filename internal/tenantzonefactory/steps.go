@@ -70,6 +70,9 @@ func stepAccountVend(ctx context.Context, env *Env, rc *RunContext, step *types.
 		step.Detail, _ = json.Marshal(d)
 		return true, nil
 	case "FAILED":
+		// Clear the dead request so the next attempt vends afresh instead of
+		// polling this failure forever (§10 manual-intervention resume).
+		step.ExternalRef = ""
 		return false, fmt.Errorf("tzf: account vend failed: %s", st.FailureReason)
 	default:
 		return false, nil

@@ -1,6 +1,10 @@
 BINARY := bin/inari-server
 
-.PHONY: build test test-integration lint run migrate docker
+.PHONY: build test test-integration lint run migrate docker export-openapi
+
+export-openapi:
+	mkdir -p dist
+	go run ./cmd/export-openapi dist/openapi.yaml
 
 build:
 	go build -o $(BINARY) ./cmd/inari-server

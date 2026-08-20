@@ -43,8 +43,8 @@ import (
 )
 
 var (
-	ErrPolicyNotFound      = errors.New("policy not found")
-	ErrPackNotFound        = errors.New("policy pack not found")
+	ErrPolicyNotFound = errors.New("policy not found")
+	ErrPackNotFound   = errors.New("policy pack not found")
 	// ErrClusterSetNotFound is kept for API compatibility with pre-M4 callers;
 	// ClusterSets are owned by the Fleet Manager (fleetmanager.ErrNotFound).
 	ErrClusterSetNotFound  = fleetmanager.ErrNotFound
@@ -171,7 +171,6 @@ func (s *Store) DeletePolicy(ctx context.Context, q db.Querier, id string) error
 	}
 	return nil
 }
-
 
 const packCols = `id, org_id, name, engine, oci_ref, version, parameters, manifests, created_at`
 
@@ -577,7 +576,6 @@ func (s *Service) evaluate(ctx context.Context, orgID, target string, input map[
 	return decision, nil
 }
 
-
 func (s *Service) CreatePolicyPack(ctx context.Context, actor, orgID, name, engine, ociRef, version string, parameters, manifests json.RawMessage) (*types.PolicyPack, error) {
 	if engine != types.PolicyPackEngineKyverno && engine != types.PolicyPackEngineCELVAP {
 		return nil, fmt.Errorf("%w: engine must be kyverno|cel-vap", ErrInvalidInput)
@@ -807,7 +805,6 @@ func (s *Service) distribute(ctx context.Context, pack *types.PolicyPack, cluste
 	}
 	return nil
 }
-
 
 // RequestExemption files a time-boxed waiver request for a policy (state
 // pending; expiresAt must be future and ≤ 90 days out).

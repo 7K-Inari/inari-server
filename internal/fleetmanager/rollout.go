@@ -16,8 +16,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/approvals"
+	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -389,13 +389,29 @@ func (s *Service) enterGate(ctx context.Context, q db.Querier, r *types.Rollout,
 	return s.transition(ctx, q, r, types.RolloutStateWaitingGate, stage, gc, "system:fleetmanager")
 }
 
-// advance drives one rollout step: gate waits, batch fan-out bounded by
-// maxConcurrency, health-gated stage progression. Idempotent; called by the
-// run loop, Start/Resume, and the approval resume handler.
+// advance drives the rollout until it parks (gate/pause/terminal) or makes
+// no more progress. Idempotent; called by the run loop, Start/Resume, and
+// the approval resume handler.
 func (s *Service) advance(ctx context.Context, rolloutID string) error {
+	// Bounded: each iteration either parks the rollout or advances a stage.
+	for range maxAdvanceSteps {
+		done, err := s.advanceOnce(ctx, rolloutID)
+		if err != nil || done {
+			return err
+		}
+	}
+	return nil
+}
+
+// maxAdvanceSteps bounds one advance call (stages + slack).
+const maxAdvanceSteps = 64
+
+// advanceOnce performs one state-machine step. done=true means the rollout
+// is parked (gated, waiting on agents, paused, or terminal).
+func (s *Service) advanceOnce(ctx context.Context, rolloutID string) (done bool, err error) {
 	r, err := s.store.getRollout(ctx, s.db.Pool, rolloutID)
 	if err != nil {
-		return err
+		return true, err
 	}
 	switch r.State {
 	case types.RolloutStateRunning:
@@ -403,37 +419,37 @@ func (s *Service) advance(ctx context.Context, rolloutID string) error {
 	case types.RolloutStateWaitingGate:
 		gc := r.GateContext
 		if gc == nil {
-			return s.clearGate(ctx, r)
+			return true, s.clearGate(ctx, r)
 		}
 		if gc.Type == "wait" && !s.now().Before(gc.EnteredAt.Add(time.Duration(gc.WaitSeconds)*time.Second)) {
-			return s.clearGate(ctx, r)
+			return true, s.clearGate(ctx, r)
 		}
-		return nil // still gated (approval pending or wait unexpired)
+		return true, nil // still gated (approval pending or wait unexpired)
 	default:
-		return nil // paused/failed/completed/rolled_back: nothing to do
+		return true, nil // paused/failed/completed/rolled_back: nothing to do
 	}
 
 	stage := r.CurrentStage
 	if stage >= len(r.Stages) {
-		return s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		return true, s.db.WithTx(ctx, func(tx pgx.Tx) error {
 			return s.transition(ctx, tx, r, types.RolloutStateCompleted, stage, nil, "system:fleetmanager")
 		})
 	}
 	st := r.Stages[stage]
 
-	// Freshly entered the stage (no gate pending and no targets yet):
-	// evaluate the before-gate first.
+	// Freshly entered the stage (no targets yet): seed targets, then gate or
+	// deliver.
 	targets, err := s.store.listTargets(ctx, s.db.Pool, r.ID, stage)
 	if err != nil {
-		return err
+		return true, err
 	}
 	if len(targets) == 0 {
 		members, err := s.stageMembers(ctx, r.OrgID, st)
 		if err != nil {
-			return err
+			return true, err
 		}
 		if len(members) == 0 {
-			return s.fail(ctx, r, "stage has no member clusters")
+			return true, s.fail(ctx, r, "stage has no member clusters")
 		}
 		// Seed all stage targets as pending first: a cleared before-gate
 		// resumes into existing pending targets instead of re-entering the
@@ -441,19 +457,19 @@ func (s *Service) advance(ctx context.Context, rolloutID string) error {
 		for _, c := range members {
 			t := &types.RolloutTarget{RolloutID: r.ID, ClusterID: c.ID, Stage: stage, Status: types.RolloutTargetPending}
 			if err := s.store.upsertTarget(ctx, s.db.Pool, t); err != nil {
-				return err
+				return true, err
 			}
 		}
 		if st.BeforeGate != nil {
-			return s.db.WithTx(ctx, func(tx pgx.Tx) error {
+			return true, s.db.WithTx(ctx, func(tx pgx.Tx) error {
 				return s.enterGate(ctx, tx, r, stage, "before", st.BeforeGate)
 			})
 		}
 		n, err := ParseMaxConcurrency(st.MaxConcurrency, len(members))
 		if err != nil {
-			return err
+			return true, err
 		}
-		return s.deliverBatch(ctx, r, stage, n)
+		return true, s.deliverBatch(ctx, r, stage, n)
 	}
 
 	// Reconcile target health from command acks.
@@ -465,7 +481,7 @@ func (s *Service) advance(ctx context.Context, rolloutID string) error {
 	}
 	statuses, err := s.store.commandStatuses(ctx, s.db.Pool, ids)
 	if err != nil {
-		return err
+		return true, err
 	}
 	pending, active, failed := 0, 0, 0
 	for i := range targets {
@@ -477,11 +493,11 @@ func (s *Service) advance(ctx context.Context, rolloutID string) error {
 			switch statuses[t.CommandID] {
 			case types.CommandStatusAcked:
 				if err := s.store.setTargetStatus(ctx, s.db.Pool, r.ID, t.ClusterID, stage, types.RolloutTargetHealthy, "healthy"); err != nil {
-					return err
+					return true, err
 				}
 			case types.CommandStatusNacked:
 				if err := s.store.setTargetStatus(ctx, s.db.Pool, r.ID, t.ClusterID, stage, types.RolloutTargetFailed, "unhealthy"); err != nil {
-					return err
+					return true, err
 				}
 				failed++
 			default:
@@ -492,30 +508,35 @@ func (s *Service) advance(ctx context.Context, rolloutID string) error {
 		}
 	}
 	if failed > 0 {
-		return s.fail(ctx, r, fmt.Sprintf("stage %d: %d target(s) failed", stage, failed))
+		return true, s.fail(ctx, r, fmt.Sprintf("stage %d: %d target(s) failed", stage, failed))
 	}
 	if pending+active > 0 {
-		// Top up the in-flight batch to the concurrency bound.
+		// Top up the in-flight batch to the concurrency bound, then park
+		// until the next sweep (agents report acks asynchronously).
 		members, err := s.stageMembers(ctx, r.OrgID, st)
 		if err != nil {
-			return err
+			return true, err
 		}
 		n, err := ParseMaxConcurrency(st.MaxConcurrency, len(members))
 		if err != nil {
-			return err
+			return true, err
 		}
-		return s.deliverBatch(ctx, r, stage, n-active)
+		return true, s.deliverBatch(ctx, r, stage, n-active)
 	}
 
-	// Stage fully healthy: after-gate, then next stage (or completion).
+	// Stage fully healthy: after-gate, then continue into the next stage in
+	// the same advance call.
 	if st.AfterGate != nil {
-		return s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		return true, s.db.WithTx(ctx, func(tx pgx.Tx) error {
 			return s.enterGate(ctx, tx, r, stage, "after", st.AfterGate)
 		})
 	}
-	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
+	if err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		return s.transition(ctx, tx, r, types.RolloutStateRunning, stage+1, nil, "system:fleetmanager")
-	})
+	}); err != nil {
+		return true, err
+	}
+	return false, nil
 }
 
 // deliverBatch enqueues desired-state commands for up to `slots` pending

@@ -40,11 +40,11 @@ type Queue interface {
 
 // Service is the fleet manager facade.
 type Service struct {
-	db        *db.DB
-	store     *Store
-	audit     *audit.Store
-	clusters  ClusterLister
-	queue     Queue
+	db       *db.DB
+	store    *Store
+	audit    *audit.Store
+	clusters ClusterLister
+	queue    Queue
 	gates    GateRequester
 	decider  ApprovalDecider
 	assigner PolicyAssigner

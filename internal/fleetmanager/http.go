@@ -208,10 +208,10 @@ func (h *Handler) clusterSetMembers(ctx context.Context, in *clusterSetIDInput) 
 type createRolloutInput struct {
 	Org  string `path:"org"`
 	Body struct {
-		Name           string              `json:"name"`
-		Kind           string              `json:"kind" doc:"capability | policy_pack | agent_upgrade | catalog_version"`
-		TargetRef      string              `json:"targetRef"`
-		DesiredVersion string              `json:"desiredVersion"`
+		Name           string               `json:"name"`
+		Kind           string               `json:"kind" doc:"capability | policy_pack | agent_upgrade | catalog_version"`
+		TargetRef      string               `json:"targetRef"`
+		DesiredVersion string               `json:"desiredVersion"`
 		Stages         []types.RolloutStage `json:"stages"`
 	}
 }

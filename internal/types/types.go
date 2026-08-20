@@ -777,29 +777,42 @@ type RolloutStageGate struct {
 // MaxConcurrency is a count (e.g. "3") or a percentage of stage members
 // (e.g. "25%").
 type RolloutStage struct {
-	Name           string           `json:"name"`
-	ClusterSetIDs  []string         `json:"clusterSetIds"`
-	MaxConcurrency string           `json:"maxConcurrency"`
+	Name           string            `json:"name"`
+	ClusterSetIDs  []string          `json:"clusterSetIds"`
+	MaxConcurrency string            `json:"maxConcurrency"`
 	BeforeGate     *RolloutStageGate `json:"beforeGate,omitempty"`
 	AfterGate      *RolloutStageGate `json:"afterGate,omitempty"`
+}
+
+// RolloutGateContext records a pending before/after-stage gate while the
+// rollout sits in waiting_gate. For wait gates, EnteredAt + WaitSeconds
+// decide resumption; for approval gates, ApprovalID links the Approvals
+// request whose decision resumes the rollout.
+type RolloutGateContext struct {
+	Gate        string    `json:"gate"` // "before" | "after"
+	Type        string    `json:"type"` // "wait" | "approval"
+	WaitSeconds int       `json:"waitSeconds,omitempty"`
+	ApprovalID  string    `json:"approvalId,omitempty"`
+	EnteredAt   time.Time `json:"enteredAt"`
 }
 
 // Rollout is a staged, gated fleet operation (plan §5.9/§5.11). Desired
 // state is handed to agents via the command queue — execution stays
 // credential-free on the hub.
 type Rollout struct {
-	ID             string         `json:"id"`
-	OrgID          string         `json:"orgId"`
-	Name           string         `json:"name"`
-	Kind           string         `json:"kind"`
-	TargetRef      string         `json:"targetRef"` // pack ID / catalog item ID / capability name
-	DesiredVersion string         `json:"desiredVersion"`
-	Stages         []RolloutStage `json:"stages"`
-	State          string         `json:"state"`
-	CurrentStage   int            `json:"currentStage"`
-	CreatedBy      string         `json:"createdBy"`
-	CreatedAt      time.Time      `json:"createdAt"`
-	UpdatedAt      time.Time      `json:"updatedAt"`
+	ID             string              `json:"id"`
+	OrgID          string              `json:"orgId"`
+	Name           string              `json:"name"`
+	Kind           string              `json:"kind"`
+	TargetRef      string              `json:"targetRef"` // pack ID / catalog item ID / capability name
+	DesiredVersion string              `json:"desiredVersion"`
+	Stages         []RolloutStage      `json:"stages"`
+	State          string              `json:"state"`
+	CurrentStage   int                 `json:"currentStage"`
+	GateContext    *RolloutGateContext `json:"gateContext,omitempty"`
+	CreatedBy      string              `json:"createdBy"`
+	CreatedAt      time.Time           `json:"createdAt"`
+	UpdatedAt      time.Time           `json:"updatedAt"`
 }
 
 // Rollout target statuses.
@@ -837,20 +850,20 @@ const (
 
 // AgentChannel pins a desired agent version to a ClusterSet channel.
 type AgentChannel struct {
-	ID                 string    `json:"id"`
-	OrgID              string    `json:"orgId"`
-	ClusterSetID       string    `json:"clusterSetId"`
-	Channel            string    `json:"channel"`
-	DesiredAgentVersion string   `json:"desiredAgentVersion"`
-	CreatedAt          time.Time `json:"createdAt"`
-	UpdatedAt          time.Time `json:"updatedAt"`
+	ID                  string    `json:"id"`
+	OrgID               string    `json:"orgId"`
+	ClusterSetID        string    `json:"clusterSetId"`
+	Channel             string    `json:"channel"`
+	DesiredAgentVersion string    `json:"desiredAgentVersion"`
+	CreatedAt           time.Time `json:"createdAt"`
+	UpdatedAt           time.Time `json:"updatedAt"`
 }
 
 // Drift event kinds (plan §5.11): what diverged.
 const (
-	DriftKindInstanceSpec  = "instance_spec"
-	DriftKindCapability    = "capability"
-	DriftKindAgentVersion  = "agent_version"
+	DriftKindInstanceSpec = "instance_spec"
+	DriftKindCapability   = "capability"
+	DriftKindAgentVersion = "agent_version"
 )
 
 // DriftEvent records one detected desired-vs-reported divergence (§5.9).

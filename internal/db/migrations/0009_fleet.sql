@@ -16,6 +16,7 @@ CREATE TABLE rollouts (
     stages          JSONB NOT NULL DEFAULT '[]',
     state           TEXT NOT NULL DEFAULT 'pending',
     current_stage   INT NOT NULL DEFAULT 0,
+    gate_context    JSONB,
     created_by      TEXT NOT NULL DEFAULT '',
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),

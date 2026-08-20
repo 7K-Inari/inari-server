@@ -17,6 +17,8 @@ import (
 	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/7K-Inari/inari-server/internal/cloudaccounts"
 	"github.com/7K-Inari/inari-server/internal/clusterregistry"
+	"github.com/7K-Inari/inari-server/internal/extensionhost"
+	"github.com/7K-Inari/inari-server/internal/fleetmanager"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/notifications"
@@ -42,6 +44,8 @@ func buildAPI() huma.API {
 	notifications.NewHandler(nil, nil, nil).RegisterRoutes(api)
 	policyservice.NewHandler(nil, nil, nil).RegisterRoutes(api)
 	tenantzonefactory.NewHandler(nil, nil, nil).RegisterRoutes(api)
+	fleetmanager.NewHandler(nil, nil, nil).RegisterRoutes(api)
+	extensionhost.NewHandler(nil, nil, nil).RegisterRoutes(api)
 	return api
 }
 

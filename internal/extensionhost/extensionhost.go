@@ -237,6 +237,30 @@ func (s *Service) SetState(ctx context.Context, actor, id, state string) error {
 	})
 }
 
+// Verify runs the SDK handshake against the registered endpoint and moves
+// the extension to ready (or degraded on failure). Exec-mode artifact
+// checksums are verified by the supervisor at spawn; dial-mode deployments
+// verify identity + protocol version here.
+func (s *Service) Verify(ctx context.Context, actor, orgID, id string) (*types.Extension, error) {
+	e, err := s.Get(ctx, orgID, id)
+	if err != nil {
+		return nil, err
+	}
+	if e.Endpoint == "" {
+		return nil, fmt.Errorf("%w: endpoint is required for verification", ErrInvalidInput)
+	}
+	if _, err := VerifyHandshake(ctx, e.Endpoint, e); err != nil {
+		if serr := s.SetState(ctx, actor, id, types.ExtensionStateDegraded); serr != nil {
+			return nil, serr
+		}
+		return nil, err
+	}
+	if err := s.SetState(ctx, actor, id, types.ExtensionStateReady); err != nil {
+		return nil, err
+	}
+	return s.Get(ctx, orgID, id)
+}
+
 // Unregister removes the extension and its FGA parent tuple (via outbox).
 func (s *Service) Unregister(ctx context.Context, actor, orgID, id string) error {
 	if _, err := s.Get(ctx, orgID, id); err != nil {

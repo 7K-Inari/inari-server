@@ -64,6 +64,13 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Summary:     "Unregister an extension",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.unregister)
+	huma.Register(api, huma.Operation{
+		OperationID: "verifyExtension",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/tenants/{org}/extensions/{id}/verify",
+		Summary:     "Run the SDK handshake and mark the extension ready",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.verify)
 }
 
 func (h *Handler) authorizeOrg(ctx context.Context, slug, relation string) (*types.Organization, *authn.Identity, error) {
@@ -190,4 +197,18 @@ func (h *Handler) unregister(ctx context.Context, in *idInput) (*struct{}, error
 		return nil, mapErr(err)
 	}
 	return nil, nil
+}
+
+func (h *Handler) verify(ctx context.Context, in *idInput) (*extensionOutput, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	if err != nil {
+		return nil, err
+	}
+	e, err := h.svc.Verify(ctx, id.Subject, org.ID, in.ID)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	out := &extensionOutput{}
+	out.Body.Extension = *e
+	return out, nil
 }

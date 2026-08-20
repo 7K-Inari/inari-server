@@ -128,11 +128,11 @@ func RunSteps(ctx context.Context, env *Env, order []string, funcs map[string]St
 		if st.Status == types.ZoneStepSucceeded || st.Status == types.ZoneStepSkipped {
 			continue
 		}
-		st.Attempts++
 		st.Status = types.ZoneStepRunning
 		done, stepErr := funcs[name](ctx, env, rc, st)
 		switch {
 		case stepErr != nil:
+			st.Attempts++ // only genuine failures consume the attempt budget, not polls
 			st.Status = types.ZoneStepFailed
 			if uerr := onUpdate(ctx, rc, st); uerr != nil {
 				return false, uerr

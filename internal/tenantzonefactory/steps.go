@@ -39,7 +39,7 @@ func stepPreflight(ctx context.Context, env *Env, rc *RunContext, step *types.Te
 
 func stepAccountVend(ctx context.Context, env *Env, rc *RunContext, step *types.TenantZoneStep) (bool, error) {
 	if step.ExternalRef == "" {
-		res, err := env.AWS.CreateAccount(ctx, rc.Zone.Slug, rc.Zone.Slug+"@inari-zones.local", rc.Zone.OUID, rc.Zone.Tags)
+		res, err := env.AWS.CreateAccount(ctx, rc.Zone.Slug, rc.Zone.Slug+"@inari-zones.local", rc.Zone.OUID, rc.Zone.Tags, rc.Zone.ID)
 		if err != nil {
 			return false, fmt.Errorf("tzf: create account: %w", err)
 		}
@@ -52,8 +52,22 @@ func stepAccountVend(ctx context.Context, env *Env, rc *RunContext, step *types.
 	}
 	switch st.State {
 	case "SUCCEEDED":
+		// OU placement happens after the async vend completes — the account
+		// ID is empty until then. Detail flag makes the move idempotent.
+		var d struct {
+			AWSAccountID string `json:"awsAccountId"`
+			Moved        bool   `json:"moved"`
+		}
+		_ = json.Unmarshal(step.Detail, &d)
+		if rc.Zone.OUID != "" && !d.Moved {
+			if err := env.AWS.MoveAccount(ctx, st.AccountID, rc.Zone.OUID); err != nil {
+				return false, fmt.Errorf("tzf: move account to ou: %w", err)
+			}
+			d.Moved = true
+		}
 		rc.Zone.AWSAccountID = st.AccountID
-		step.Detail, _ = json.Marshal(map[string]string{"awsAccountId": st.AccountID})
+		d.AWSAccountID = st.AccountID
+		step.Detail, _ = json.Marshal(d)
 		return true, nil
 	case "FAILED":
 		return false, fmt.Errorf("tzf: account vend failed: %s", st.FailureReason)
@@ -161,28 +175,19 @@ func stepAccountClose(ctx context.Context, env *Env, rc *RunContext, step *types
 		step.Status = types.ZoneStepSkipped
 		return true, nil
 	}
-	if step.ExternalRef == "" {
-		res, err := env.AWS.CloseAccount(ctx, rc.Zone.AWSAccountID)
-		if err != nil {
-			return false, fmt.Errorf("tzf: close account: %w", err)
-		}
-		step.ExternalRef = res.RequestID
-		return false, nil
-	}
-	st, err := env.AWS.DescribeCreateAccountStatus(ctx, step.ExternalRef)
-	if err != nil {
-		return false, err
-	}
-	switch st.State {
-	case "SUCCEEDED":
+	if step.ExternalRef != "" {
+		// Close was already accepted by AWS; there is no close-status API to
+		// poll (DescribeCreateAccountStatus only tracks create requests), so
+		// acceptance is terminal for the state machine.
 		return true, nil
-	case "FAILED":
-		return false, fmt.Errorf("tzf: account close failed: %s", st.FailureReason)
-	default:
-		return false, nil
 	}
+	res, err := env.AWS.CloseAccount(ctx, rc.Zone.AWSAccountID)
+	if err != nil {
+		return false, fmt.Errorf("tzf: close account: %w", err)
+	}
+	step.ExternalRef = res.RequestID
+	return true, nil
 }
-
 func stepIdentityRevoke(ctx context.Context, env *Env, rc *RunContext, step *types.TenantZoneStep) (bool, error) {
 	if err := env.Wiring.UnwireZone(ctx, rc.Zone); err != nil {
 		return false, fmt.Errorf("tzf: identity revoke: %w", err)

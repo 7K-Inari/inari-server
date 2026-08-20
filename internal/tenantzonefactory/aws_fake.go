@@ -22,6 +22,7 @@ type FakeOrganizations struct {
 	FailCreate        bool
 	FailClose         bool
 	created           []string // account IDs, in creation order
+	moves             []string // "accountID->ouID" OU placements
 }
 
 type fakeRequest struct {
@@ -31,6 +32,7 @@ type fakeRequest struct {
 	succeedAt int
 	fail      bool
 	closed    bool
+	token     string // idempotency token (create only)
 }
 
 // NewFakeOrganizations returns a fake whose async operations succeed after
@@ -43,18 +45,39 @@ func NewFakeOrganizations() *FakeOrganizations {
 	}
 }
 
-// CreateAccount implements Organizations.
-func (f *FakeOrganizations) CreateAccount(_ context.Context, name, _, ouID string, _ map[string]string) (*CreateAccountResult, error) {
+// CreateAccount implements Organizations. The idempotency token dedupes
+// concurrent/duplicate vends onto the same in-flight request.
+func (f *FakeOrganizations) CreateAccount(_ context.Context, name, _, ouID string, _ map[string]string, idempotencyToken string) (*CreateAccountResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	for rid, r := range f.requests {
+		if r.kind == "create" && r.token == idempotencyToken && idempotencyToken != "" {
+			return &CreateAccountResult{RequestID: rid}, nil
+		}
+	}
 	f.nextAcct++
 	id := fmt.Sprintf("%012d", 100000000000+f.nextAcct)
 	rid := fmt.Sprintf("car-%d", f.nextAcct)
-	f.requests[rid] = &fakeRequest{kind: "create", accountID: id, succeedAt: f.SucceedAfterPolls, fail: f.FailCreate}
+	f.requests[rid] = &fakeRequest{kind: "create", accountID: id, succeedAt: f.SucceedAfterPolls, fail: f.FailCreate, token: idempotencyToken}
 	f.accounts[ouID]++
 	f.created = append(f.created, id)
 	_ = name
 	return &CreateAccountResult{RequestID: rid}, nil
+}
+
+// MoveAccount implements Organizations (records the placement).
+func (f *FakeOrganizations) MoveAccount(_ context.Context, accountID, ouID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.moves = append(f.moves, accountID+"->"+ouID)
+	return nil
+}
+
+// Moves returns recorded OU placements ("accountID->ouID") for assertions.
+func (f *FakeOrganizations) Moves() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.moves...)
 }
 
 // DescribeCreateAccountStatus implements Organizations.

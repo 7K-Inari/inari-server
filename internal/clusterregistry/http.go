@@ -74,6 +74,30 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 	}, h.getCluster)
 
 	huma.Register(api, huma.Operation{
+		OperationID: "issueRegistrationToken",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/tenants/{org}/clusters/{id}/tokens",
+		Summary:     "Issue a one-time TTL'd registration token",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.issueToken)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "approveCluster",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/tenants/{org}/clusters/{id}/approve",
+		Summary:     "Approve cluster enrollment (double opt-in)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.approveCluster)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "revokeCluster",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/tenants/{org}/clusters/{id}/revoke",
+		Summary:     "Revoke a cluster (disables its Keycloak client)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.revokeCluster)
+
+	huma.Register(api, huma.Operation{
 		OperationID: "cordonCluster",
 		Method:      http.MethodPost,
 		Path:        "/api/v1/tenants/{org}/clusters/{id}/cordon",

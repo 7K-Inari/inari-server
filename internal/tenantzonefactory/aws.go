@@ -28,8 +28,13 @@ type AccountStatus struct {
 // behind it is least-privilege: organizations:CreateAccount/TagResource/
 // DescribeCreateAccountStatus (+ CloseAccount for decommission) only.
 type Organizations interface {
-	// CreateAccount starts an async account vend in the target OU.
-	CreateAccount(ctx context.Context, name, email, ouID string, tags map[string]string) (*CreateAccountResult, error)
+	// CreateAccount starts an async account vend in the target OU. The
+	// idempotencyToken (zone ID) makes concurrent/duplicate invocations
+	// collapse onto one in-flight request (§10 zombie-zone mitigation).
+	CreateAccount(ctx context.Context, name, email, ouID string, tags map[string]string, idempotencyToken string) (*CreateAccountResult, error)
+	// MoveAccount places a vended account into the target OU (called after
+	// the async vend SUCCEEDs — CreateAccount lands in root by default).
+	MoveAccount(ctx context.Context, accountID, ouID string) error
 	// DescribeCreateAccountStatus polls the async vend/close operation.
 	DescribeCreateAccountStatus(ctx context.Context, requestID string) (*AccountStatus, error)
 	// CloseAccount starts async account closure (decommission).

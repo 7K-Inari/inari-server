@@ -19,6 +19,10 @@ func (f *qaTenantCreator) CreateTenant(_ context.Context, _, slug, _ string) (*t
 	return &types.Organization{ID: "org-" + slug, KeycloakOrgID: "kc-" + slug}, nil, nil
 }
 
+func (f *qaTenantCreator) GetTenant(_ context.Context, slug string) (*types.Organization, error) {
+	return &types.Organization{ID: "org-" + slug, KeycloakOrgID: "kc-" + slug}, nil
+}
+
 type qaAccounts struct{ failFirst bool }
 
 func (f *qaAccounts) Register(_ context.Context, _, _ string, _ cloudaccounts.RegisterInput) (*types.CloudAccount, error) {
@@ -29,16 +33,24 @@ func (f *qaAccounts) Register(_ context.Context, _, _ string, _ cloudaccounts.Re
 	return nil, cloudaccounts.ErrAlreadyRegistered
 }
 
+func (f *qaAccounts) List(_ context.Context, _ string) ([]types.CloudAccount, error) {
+	return []types.CloudAccount{{ID: "acct-1"}}, nil
+}
+
 func (f *qaAccounts) Deregister(_ context.Context, _, _, _ string) error { return nil }
 
 type qaClusters struct{ failFirst bool }
 
-func (f *qaClusters) CreateCluster(_ context.Context, _, _, _ string, _ map[string]string) (*types.Cluster, error) {
+func (f *qaClusters) CreateCluster(_ context.Context, _, _, name string, _ map[string]string) (*types.Cluster, error) {
 	if f.failFirst {
 		f.failFirst = false
 		return nil, errors.New("boom")
 	}
 	return nil, clusterregistry.ErrClusterNameTaken
+}
+
+func (f *qaClusters) ListClusters(_ context.Context, _ string) ([]types.Cluster, error) {
+	return []types.Cluster{{ID: "cl-1", Name: "acme-eks"}}, nil
 }
 
 func (f *qaClusters) IssueToken(_ context.Context, _, _ string) (string, *types.RegistrationToken, error) {
@@ -58,6 +70,7 @@ func TestQAWireZoneResumeAfterPartialFailure(t *testing.T) {
 		Clusters: &qaClusters{failFirst: true},
 		Accounts: &qaAccounts{failFirst: true},
 		Git:      newQAGit(),
+		Manifest: clusterregistry.ManifestParams{AgentImageRepo: "ghcr.io/7k-inari/inari-agent", AgentImageTag: "v0.1.0", GatewayAddress: "https://gw.example"},
 	}
 	zone := &types.TenantZone{Slug: "acme", DisplayName: "Acme", Region: "eu-west-1", Tier: "starter"}
 	if _, err := w.WireZone(context.Background(), zone, "arn:role"); err == nil {

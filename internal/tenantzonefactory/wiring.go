@@ -12,6 +12,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/cloudaccounts"
 	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
+	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -19,6 +20,7 @@ import (
 // (tenancy.Service seam).
 type TenantCreator interface {
 	CreateTenant(ctx context.Context, actor, slug, displayName string) (*types.Organization, []types.Team, error)
+	GetTenant(ctx context.Context, slug string) (*types.Organization, error)
 }
 
 // OrgDeleter removes the Keycloak Organization on zone teardown
@@ -31,6 +33,7 @@ type OrgDeleter interface {
 // registration token (clusterregistry.Service seam).
 type ClusterRegistrar interface {
 	CreateCluster(ctx context.Context, actor, orgID, name string, labels map[string]string) (*types.Cluster, error)
+	ListClusters(ctx context.Context, orgID string) ([]types.Cluster, error)
 	IssueToken(ctx context.Context, actor, clusterID string) (string, *types.RegistrationToken, error)
 }
 
@@ -38,6 +41,7 @@ type ClusterRegistrar interface {
 // (cloudaccounts.Service seam).
 type AccountRegistrar interface {
 	Register(ctx context.Context, actor, orgID string, in cloudaccounts.RegisterInput) (*types.CloudAccount, error)
+	List(ctx context.Context, orgID string) ([]types.CloudAccount, error)
 	Deregister(ctx context.Context, actor, orgID, id string) error
 }
 
@@ -65,6 +69,10 @@ type ModuleWiring struct {
 func (w *ModuleWiring) WireZone(ctx context.Context, zone *types.TenantZone, roleARN string) (*WiringResult, error) {
 	actor := "system:tenantzonefactory"
 	org, _, err := w.Tenants.CreateTenant(ctx, actor, zone.Slug, zone.DisplayName)
+	if errors.Is(err, tenancy.ErrSlugTaken) {
+		// Retry after a partial run: adopt the existing organization.
+		org, err = w.Tenants.GetTenant(ctx, zone.Slug)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("tzf: wiring keycloak org: %w", err)
 	}
@@ -72,20 +80,45 @@ func (w *ModuleWiring) WireZone(ctx context.Context, zone *types.TenantZone, rol
 		AccountID: zone.AWSAccountID, RoleARN: roleARN, IssuerURL: "",
 		RunContext: types.CloudAccountRunContextTenant,
 	})
-	if err != nil && !errors.Is(err, cloudaccounts.ErrAlreadyRegistered) {
+	if errors.Is(err, cloudaccounts.ErrAlreadyRegistered) {
+		// Retry after a partial run: adopt the existing record.
+		accts, lerr := w.Accounts.List(ctx, org.ID)
+		if lerr != nil {
+			return nil, fmt.Errorf("tzf: wiring cloud account lookup: %w", lerr)
+		}
+		for _, a := range accts {
+			if a.AccountID == zone.AWSAccountID {
+				acct = &a
+				break
+			}
+		}
+		if acct == nil {
+			return nil, fmt.Errorf("tzf: wiring cloud account: registered record for %s not found", zone.AWSAccountID)
+		}
+	} else if err != nil {
 		return nil, fmt.Errorf("tzf: wiring cloud account: %w", err)
 	}
-	if acct == nil {
-		return nil, fmt.Errorf("tzf: wiring cloud account: duplicate registration")
-	}
-	cluster, err := w.Clusters.CreateCluster(ctx, actor, org.ID, zone.Slug+"-eks", map[string]string{
+	clusterName := zone.Slug + "-eks"
+	cluster, err := w.Clusters.CreateCluster(ctx, actor, org.ID, clusterName, map[string]string{
 		"env": "zone", "region": zone.Region, "tier": zone.Tier, "zone": zone.Slug,
 	})
-	if err != nil && !errors.Is(err, clusterregistry.ErrClusterNameTaken) {
+	if errors.Is(err, clusterregistry.ErrClusterNameTaken) {
+		// Retry after a partial run: adopt the existing record.
+		clusters, lerr := w.Clusters.ListClusters(ctx, org.ID)
+		if lerr != nil {
+			return nil, fmt.Errorf("tzf: wiring cluster lookup: %w", lerr)
+		}
+		for _, c := range clusters {
+			if c.Name == clusterName {
+				cluster = &c
+				break
+			}
+		}
+		if cluster == nil {
+			return nil, fmt.Errorf("tzf: wiring cluster record: %q not found after name-taken", clusterName)
+		}
+	} else if err != nil {
 		return nil, fmt.Errorf("tzf: wiring cluster record: %w", err)
-	}
-	if cluster == nil {
-		return nil, fmt.Errorf("tzf: wiring cluster record: name taken on retry")
 	}
 	token, _, err := w.Clusters.IssueToken(ctx, actor, cluster.ID)
 	if err != nil {

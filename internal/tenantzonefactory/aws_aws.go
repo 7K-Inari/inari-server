@@ -38,8 +38,25 @@ func NewAWSOrganizations(ctx context.Context) (*AWSOrganizations, error) {
 	return &AWSOrganizations{org: organizations.NewFromConfig(cfg)}, nil
 }
 
-// CreateAccount implements Organizations.
-func (a *AWSOrganizations) CreateAccount(ctx context.Context, name, email, ouID string, tags map[string]string) (*CreateAccountResult, error) {
+// CreateAccount implements Organizations. AWS CreateAccount has no native
+// idempotency token, so in-flight requests are matched by account name
+// first (idempotencyToken is the zone ID, unused by the AWS impl) —
+// concurrent/duplicate vends collapse onto one request (§10).
+func (a *AWSOrganizations) CreateAccount(ctx context.Context, name, email, ouID string, tags map[string]string, idempotencyToken string) (*CreateAccountResult, error) {
+	p := organizations.NewListCreateAccountStatusPaginator(a.org, &organizations.ListCreateAccountStatusInput{
+		States: []orgtypes.CreateAccountState{orgtypes.CreateAccountStateInProgress},
+	})
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("tzf: list in-flight create requests: %w", err)
+		}
+		for _, st := range page.CreateAccountStatuses {
+			if aws.ToString(st.AccountName) == name {
+				return &CreateAccountResult{RequestID: aws.ToString(st.Id)}, nil
+			}
+		}
+	}
 	in := &organizations.CreateAccountInput{
 		AccountName: aws.String(name),
 		Email:       aws.String(email),
@@ -51,25 +68,26 @@ func (a *AWSOrganizations) CreateAccount(ctx context.Context, name, email, ouID 
 	if err != nil {
 		return nil, err
 	}
-	// Move to the target OU when one is requested (CreateAccount lands in
-	// root by default).
-	if ouID != "" {
-		root, err := a.org.ListRoots(ctx, &organizations.ListRootsInput{})
-		if err != nil {
-			return nil, fmt.Errorf("tzf: list roots: %w", err)
-		}
-		if len(root.Roots) == 0 {
-			return nil, fmt.Errorf("tzf: no organization root found")
-		}
-		if _, err := a.org.MoveAccount(ctx, &organizations.MoveAccountInput{
-			AccountId:           out.CreateAccountStatus.AccountId,
-			SourceParentId:      root.Roots[0].Id,
-			DestinationParentId: aws.String(ouID),
-		}); err != nil {
-			return nil, fmt.Errorf("tzf: move account to %s: %w", ouID, err)
-		}
-	}
 	return &CreateAccountResult{RequestID: aws.ToString(out.CreateAccountStatus.Id)}, nil
+}
+
+// MoveAccount implements Organizations.
+func (a *AWSOrganizations) MoveAccount(ctx context.Context, accountID, ouID string) error {
+	root, err := a.org.ListRoots(ctx, &organizations.ListRootsInput{})
+	if err != nil {
+		return fmt.Errorf("tzf: list roots: %w", err)
+	}
+	if len(root.Roots) == 0 {
+		return fmt.Errorf("tzf: no organization root found")
+	}
+	if _, err := a.org.MoveAccount(ctx, &organizations.MoveAccountInput{
+		AccountId:           aws.String(accountID),
+		SourceParentId:      root.Roots[0].Id,
+		DestinationParentId: aws.String(ouID),
+	}); err != nil {
+		return fmt.Errorf("tzf: move account to %s: %w", ouID, err)
+	}
+	return nil
 }
 
 // DescribeCreateAccountStatus implements Organizations.

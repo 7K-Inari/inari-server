@@ -19,6 +19,7 @@ func TestCanRolloutTransition(t *testing.T) {
 		{types.RolloutStateWaitingGate, types.RolloutStateRunning, true},
 		{types.RolloutStateWaitingGate, types.RolloutStateCompleted, false},
 		{types.RolloutStatePaused, types.RolloutStateRunning, true},
+		{types.RolloutStatePaused, types.RolloutStateWaitingGate, true},
 		{types.RolloutStatePaused, types.RolloutStateCompleted, false},
 		{types.RolloutStateFailed, types.RolloutStateRolledBack, true},
 		{types.RolloutStateFailed, types.RolloutStateRunning, true},

@@ -33,7 +33,7 @@ var rolloutTransitions = map[string][]string{
 	types.RolloutStatePending:     {types.RolloutStateRunning, types.RolloutStateFailed},
 	types.RolloutStateRunning:     {types.RolloutStateWaitingGate, types.RolloutStatePaused, types.RolloutStateFailed, types.RolloutStateCompleted, types.RolloutStateRolledBack},
 	types.RolloutStateWaitingGate: {types.RolloutStateRunning, types.RolloutStatePaused, types.RolloutStateFailed, types.RolloutStateRolledBack},
-	types.RolloutStatePaused:      {types.RolloutStateRunning, types.RolloutStateRolledBack},
+	types.RolloutStatePaused:      {types.RolloutStateRunning, types.RolloutStateWaitingGate, types.RolloutStateRolledBack},
 	types.RolloutStateFailed:      {types.RolloutStateRolledBack, types.RolloutStateRunning},
 	types.RolloutStateCompleted:   {types.RolloutStateRolledBack},
 }
@@ -272,8 +272,15 @@ func (s *Service) ResumeRollout(ctx context.Context, actor, orgID, id string) (*
 	if err != nil {
 		return nil, err
 	}
+	// A rollout paused while parked on a gate resumes into the gate, not
+	// past it: resuming directly into running would skip a before-gate
+	// entirely or re-request an after-gate approval.
+	to := types.RolloutStateRunning
+	if r.GateContext != nil {
+		to = types.RolloutStateWaitingGate
+	}
 	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
-		return s.transition(ctx, tx, r, types.RolloutStateRunning, r.CurrentStage, r.GateContext, actor)
+		return s.transition(ctx, tx, r, to, r.CurrentStage, r.GateContext, actor)
 	})
 	if err != nil {
 		return nil, err

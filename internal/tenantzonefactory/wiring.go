@@ -6,6 +6,7 @@ package tenantzonefactory
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/7K-Inari/inari-server/internal/cloudaccounts"
@@ -71,7 +72,7 @@ func (w *ModuleWiring) WireZone(ctx context.Context, zone *types.TenantZone, rol
 		AccountID: zone.AWSAccountID, RoleARN: roleARN, IssuerURL: "",
 		RunContext: types.CloudAccountRunContextTenant,
 	})
-	if err != nil && err != cloudaccounts.ErrAlreadyRegistered {
+	if err != nil && !errors.Is(err, cloudaccounts.ErrAlreadyRegistered) {
 		return nil, fmt.Errorf("tzf: wiring cloud account: %w", err)
 	}
 	if acct == nil {
@@ -80,7 +81,7 @@ func (w *ModuleWiring) WireZone(ctx context.Context, zone *types.TenantZone, rol
 	cluster, err := w.Clusters.CreateCluster(ctx, actor, org.ID, zone.Slug+"-eks", map[string]string{
 		"env": "zone", "region": zone.Region, "tier": zone.Tier, "zone": zone.Slug,
 	})
-	if err != nil && err != clusterregistry.ErrClusterNameTaken {
+	if err != nil && !errors.Is(err, clusterregistry.ErrClusterNameTaken) {
 		return nil, fmt.Errorf("tzf: wiring cluster record: %w", err)
 	}
 	if cluster == nil {

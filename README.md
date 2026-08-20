@@ -23,6 +23,10 @@ make test-integration
 # Lint / container image
 make lint
 make docker
+
+# Export the full REST surface to dist/openapi.yaml (build artifact, git-ignored;
+# works offline — no PostgreSQL/Keycloak/OpenFGA/NATS required)
+make export-openapi
 ```
 
 Dev realm (`deploy/dev/keycloak/inari-realm.json`) ships user `dev-admin` / `dev-admin` and public client `inari-server` with the `organization` scope. Get a token:

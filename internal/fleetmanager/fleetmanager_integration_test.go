@@ -296,6 +296,29 @@ func TestDriftSweepReportOnly(t *testing.T) {
 	if events[0].ResourceRef != "Deployment/default/web" {
 		t.Errorf("resourceRef = %q", events[0].ResourceRef)
 	}
+
+	// Back in sync: the sweep resolves the open event.
+	if _, err := database.Pool.Exec(ctx,
+		`UPDATE resource_instances SET sync_state = 'Synced' WHERE id = 'instance:1'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.DriftSweep(ctx); err != nil {
+		t.Fatal(err)
+	}
+	events, err = svc.ListDrift(ctx, "org:1", "cluster:1", "open")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("open events after resolution = %+v, want none", events)
+	}
+	resolved, err := svc.ListDrift(ctx, "org:1", "cluster:1", "resolved")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved) != 1 {
+		t.Fatalf("resolved events = %+v, want 1", resolved)
+	}
 }
 
 func TestAgentChannels(t *testing.T) {

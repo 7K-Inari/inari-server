@@ -140,6 +140,13 @@ func (s *Service) CreateRollout(ctx context.Context, actor, orgID string, in Cre
 		return nil, err
 	}
 	for _, st := range in.Stages {
+		for _, g := range []*types.RolloutStageGate{st.BeforeGate, st.AfterGate} {
+			if g != nil && g.Type == "approval" && s.gates == nil {
+				return nil, fmt.Errorf("fleetmanager: approval gate configured but no gate requester wired")
+			}
+		}
+	}
+	for _, st := range in.Stages {
 		for _, setID := range st.ClusterSetIDs {
 			if _, err := s.GetClusterSet(ctx, orgID, setID); err != nil {
 				return nil, fmt.Errorf("stage cluster set %s: %w", setID, err)
@@ -213,7 +220,7 @@ func (s *Service) transition(ctx context.Context, q db.Querier, r *types.Rollout
 		types.RolloutStateCompleted:   types.EventRolloutCompleted,
 		types.RolloutStateFailed:      types.EventRolloutFailed,
 		types.RolloutStateRolledBack:  types.EventRolloutRolledBack,
-		types.RolloutStateWaitingGate: types.EventRolloutPaused,
+		types.RolloutStateWaitingGate: types.EventRolloutGateEntered,
 	}[to]
 	if event == "" {
 		event = types.EventRolloutResumed
@@ -375,25 +382,52 @@ func (s *Service) stageMembers(ctx context.Context, orgID string, st types.Rollo
 }
 
 // enterGate parks the rollout on a before/after-stage gate.
-func (s *Service) enterGate(ctx context.Context, q db.Querier, r *types.Rollout, stage int, which string, g *types.RolloutStageGate) error {
+func (s *Service) enterGate(ctx context.Context, r *types.Rollout, stage int, which string, g *types.RolloutStageGate) error {
 	gc := &types.RolloutGateContext{Gate: which, Type: g.Type, WaitSeconds: g.WaitSeconds, EnteredAt: s.now()}
+	if err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		return s.transition(ctx, tx, r, types.RolloutStateWaitingGate, stage, gc, "system:fleetmanager")
+	}); err != nil {
+		return err
+	}
 	if g.Type == "approval" {
-		if s.gates == nil {
-			return fmt.Errorf("fleetmanager: approval gate configured but no gate requester wired")
-		}
-		spec, _ := json.Marshal(map[string]any{
-			"rolloutId": r.ID, "stage": stage, "gate": which,
-		})
-		req, err := s.gates.RequestLifecycleApproval(ctx, approvals.LifecycleApprovalInput{
-			OrgID: r.OrgID, Action: types.ApprovalActionRolloutStageGate,
-			Requester: "system:fleetmanager", Context: spec,
-		})
-		if err != nil {
-			return err
-		}
+		return s.requestGateApproval(ctx, r)
+	}
+	return nil
+}
+
+// requestGateApproval creates the Approvals request for a parked approval
+// gate after the waiting_gate transition has committed, then links it into
+// the gate context. Post-commit creation avoids orphan approvals when the
+// transition rolls back; advance retries while ApprovalID is empty, so a
+// failed request is recovered by the next sweep.
+func (s *Service) requestGateApproval(ctx context.Context, r *types.Rollout) error {
+	if s.gates == nil {
+		return fmt.Errorf("fleetmanager: approval gate configured but no gate requester wired")
+	}
+	gc := r.GateContext
+	if r.State != types.RolloutStateWaitingGate || gc == nil || gc.Type != "approval" || gc.ApprovalID != "" {
+		return nil // stale or already linked — idempotent
+	}
+	spec, _ := json.Marshal(map[string]any{
+		"rolloutId": r.ID, "stage": r.CurrentStage, "gate": gc.Gate,
+	})
+	req, err := s.gates.RequestLifecycleApproval(ctx, approvals.LifecycleApprovalInput{
+		OrgID: r.OrgID, Action: types.ApprovalActionRolloutStageGate,
+		Requester: "system:fleetmanager", Context: spec,
+	})
+	if err != nil {
+		return err
+	}
+	linked, err := s.store.setGateApproval(ctx, s.db.Pool, r.ID, r.CurrentStage, gc.Gate, req.ID)
+	if err != nil {
+		return err
+	}
+	if linked {
 		gc.ApprovalID = req.ID
 	}
-	return s.transition(ctx, q, r, types.RolloutStateWaitingGate, stage, gc, "system:fleetmanager")
+	// !linked: the rollout moved concurrently; the orphan approval's later
+	// decision is a no-op via the idempotency check in gateApproved.
+	return nil
 }
 
 // advance drives the rollout until it parks (gate/pause/terminal) or makes
@@ -427,6 +461,9 @@ func (s *Service) advanceOnce(ctx context.Context, rolloutID string) (done bool,
 		gc := r.GateContext
 		if gc == nil {
 			return true, s.clearGate(ctx, r)
+		}
+		if gc.Type == "approval" && gc.ApprovalID == "" {
+			return true, s.requestGateApproval(ctx, r) // recover a failed post-commit request
 		}
 		if gc.Type == "wait" && !s.now().Before(gc.EnteredAt.Add(time.Duration(gc.WaitSeconds)*time.Second)) {
 			return true, s.clearGate(ctx, r)
@@ -468,9 +505,7 @@ func (s *Service) advanceOnce(ctx context.Context, rolloutID string) (done bool,
 			}
 		}
 		if st.BeforeGate != nil {
-			return true, s.db.WithTx(ctx, func(tx pgx.Tx) error {
-				return s.enterGate(ctx, tx, r, stage, "before", st.BeforeGate)
-			})
+			return true, s.enterGate(ctx, r, stage, "before", st.BeforeGate)
 		}
 		n, err := ParseMaxConcurrency(st.MaxConcurrency, len(members))
 		if err != nil {
@@ -534,9 +569,7 @@ func (s *Service) advanceOnce(ctx context.Context, rolloutID string) (done bool,
 	// Stage fully healthy: after-gate, then continue into the next stage in
 	// the same advance call.
 	if st.AfterGate != nil {
-		return true, s.db.WithTx(ctx, func(tx pgx.Tx) error {
-			return s.enterGate(ctx, tx, r, stage, "after", st.AfterGate)
-		})
+		return true, s.enterGate(ctx, r, stage, "after", st.AfterGate)
 	}
 	if err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		return s.transition(ctx, tx, r, types.RolloutStateRunning, stage+1, nil, "system:fleetmanager")

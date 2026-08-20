@@ -113,15 +113,17 @@ const (
 	EventExtensionUnregistered = "extension.unregistered"
 	EventExtensionStateChanged = "extension.state_changed"
 
-	EventRolloutCreated    = "rollout.created"
-	EventRolloutStarted    = "rollout.started"
-	EventRolloutPaused     = "rollout.paused"
-	EventRolloutResumed    = "rollout.resumed"
-	EventRolloutCompleted  = "rollout.completed"
-	EventRolloutFailed     = "rollout.failed"
-	EventRolloutRolledBack = "rollout.rolled_back"
+	EventRolloutCreated     = "rollout.created"
+	EventRolloutStarted     = "rollout.started"
+	EventRolloutPaused      = "rollout.paused"
+	EventRolloutResumed     = "rollout.resumed"
+	EventRolloutCompleted   = "rollout.completed"
+	EventRolloutFailed      = "rollout.failed"
+	EventRolloutRolledBack  = "rollout.rolled_back"
+	EventRolloutGateEntered = "rollout.gate_entered"
 
 	EventDriftDetected = "drift.detected"
+	EventDriftResolved = "drift.resolved"
 )
 
 // ClusterState is the cluster lifecycle state (plan §5.11).

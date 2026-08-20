@@ -119,6 +119,21 @@ func (s *Store) setRolloutState(ctx context.Context, q db.Querier, id, wantState
 	return tag.RowsAffected() == 1, nil
 }
 
+// setGateApproval links a created approval request into the parked gate
+// context; returns false when the rollout moved concurrently (caller treats
+// the approval as orphan — its decision is a no-op via gateApproved).
+func (s *Store) setGateApproval(ctx context.Context, q db.Querier, rolloutID string, stage int, gate, approvalID string) (bool, error) {
+	const sql = `UPDATE rollouts
+	             SET gate_context = jsonb_set(gate_context, '{approvalId}', to_jsonb($4::text)), updated_at = now()
+	             WHERE id = $1 AND state = $5 AND current_stage = $2
+	               AND gate_context->>'gate' = $3 AND gate_context->>'approvalId' IS NULL`
+	tag, err := q.Exec(ctx, sql, rolloutID, stage, gate, approvalID, types.RolloutStateWaitingGate)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 func (s *Store) upsertTarget(ctx context.Context, q db.Querier, t *types.RolloutTarget) error {
 	const sql = `INSERT INTO rollout_targets (rollout_id, cluster_id, stage, status, command_id)
 	             VALUES ($1,$2,$3,$4,$5)
@@ -234,9 +249,48 @@ func (s *Store) hasOpenDrift(ctx context.Context, q db.Querier, clusterID, kind,
 	return err == nil, err
 }
 
+func scanDriftEvent(row interface{ Scan(...any) error }) (*types.DriftEvent, error) {
+	var d types.DriftEvent
+	err := row.Scan(&d.ID, &d.OrgID, &d.ClusterID, &d.Kind, &d.ResourceRef,
+		&d.DesiredHash, &d.ReportedHash, &d.Detail, &d.Status, &d.DetectedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &d, nil
+}
+
+const driftCols = `id, org_id, cluster_id, kind, resource_ref, desired_hash, reported_hash, detail, status, detected_at`
+
+// listOpenDrift returns every open drift event (sweep resolution pass).
+func (s *Store) listOpenDrift(ctx context.Context, q db.Querier) ([]types.DriftEvent, error) {
+	rows, err := q.Query(ctx, `SELECT `+driftCols+` FROM drift_events WHERE status = 'open'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []types.DriftEvent
+	for rows.Next() {
+		d, err := scanDriftEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *d)
+	}
+	return out, rows.Err()
+}
+
+// resolveDrift marks an open event resolved; returns false when it was
+// already resolved concurrently.
+func (s *Store) resolveDrift(ctx context.Context, q db.Querier, id string) (bool, error) {
+	tag, err := q.Exec(ctx, `UPDATE drift_events SET status = 'resolved' WHERE id = $1 AND status = 'open'`, id)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 func (s *Store) listDrift(ctx context.Context, q db.Querier, orgID, clusterID, status string) ([]types.DriftEvent, error) {
-	sql := `SELECT id, org_id, cluster_id, kind, resource_ref, desired_hash, reported_hash, detail, status, detected_at
-	        FROM drift_events WHERE org_id = $1`
+	sql := `SELECT ` + driftCols + ` FROM drift_events WHERE org_id = $1`
 	args := []any{orgID}
 	if clusterID != "" {
 		args = append(args, clusterID)
@@ -254,12 +308,11 @@ func (s *Store) listDrift(ctx context.Context, q db.Querier, orgID, clusterID, s
 	defer rows.Close()
 	var out []types.DriftEvent
 	for rows.Next() {
-		var d types.DriftEvent
-		if err := rows.Scan(&d.ID, &d.OrgID, &d.ClusterID, &d.Kind, &d.ResourceRef,
-			&d.DesiredHash, &d.ReportedHash, &d.Detail, &d.Status, &d.DetectedAt); err != nil {
+		d, err := scanDriftEvent(rows)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, d)
+		out = append(out, *d)
 	}
 	return out, rows.Err()
 }

@@ -19,21 +19,22 @@ import (
 // ReportDrift records one detected divergence, emitting audit + outbox
 // (EventDriftDetected drives notifications and the FGA tuple). Idempotent
 // per (cluster, kind, resource, reported hash) while an open event exists.
-func (s *Service) ReportDrift(ctx context.Context, d *types.DriftEvent) error {
+// Reports whether a new event was created.
+func (s *Service) ReportDrift(ctx context.Context, d *types.DriftEvent) (bool, error) {
 	if d.OrgID == "" || d.ClusterID == "" || d.Kind == "" {
-		return fmt.Errorf("%w: orgID, clusterID and kind are required", ErrInvalidInput)
+		return false, fmt.Errorf("%w: orgID, clusterID and kind are required", ErrInvalidInput)
 	}
 	open, err := s.store.hasOpenDrift(ctx, s.db.Pool, d.ClusterID, d.Kind, d.ResourceRef, d.ReportedHash)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if open {
-		return nil
+		return false, nil
 	}
 	if d.ID == "" {
 		d.ID = "drift:" + newUUID()
 	}
-	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
+	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		if err := s.store.insertDrift(ctx, tx, d); err != nil {
 			return err
 		}
@@ -44,6 +45,33 @@ func (s *Service) ReportDrift(ctx context.Context, d *types.DriftEvent) error {
 			return err
 		}
 		return audit.AppendOutbox(ctx, tx, d.OrgID, types.EventDriftDetected, types.DriftPayload{
+			OrgID: d.OrgID, DriftID: d.ID, ClusterID: d.ClusterID, Kind: d.Kind, ResourceRef: d.ResourceRef,
+		})
+	})
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ResolveDrift marks an open event resolved (audit + outbox), e.g. when the
+// resource reports in-sync again. No-op when already resolved.
+func (s *Service) ResolveDrift(ctx context.Context, d *types.DriftEvent) error {
+	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		ok, err := s.store.resolveDrift(ctx, tx, d.ID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return nil // already resolved
+		}
+		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
+			OrgID: d.OrgID, Actor: "system:fleetmanager", Action: "drift.resolved",
+			ObjectType: "drift_event", ObjectID: d.ID,
+		}); err != nil {
+			return err
+		}
+		return audit.AppendOutbox(ctx, tx, d.OrgID, types.EventDriftResolved, types.DriftPayload{
 			OrgID: d.OrgID, DriftID: d.ID, ClusterID: d.ClusterID, Kind: d.Kind, ResourceRef: d.ResourceRef,
 		})
 	})
@@ -92,20 +120,23 @@ func (s *Store) listOutOfSyncInstances(ctx context.Context, q interface {
 	return out, rows.Err()
 }
 
-// DriftSweep compares reported sync state against desired intent once and
-// reports new drift. Returns the number of new events.
+// DriftSweep compares reported sync state against desired intent once,
+// reports new drift, and resolves open events whose resource is back in
+// sync (or whose reported state changed). Returns the number of new events.
 func (s *Service) DriftSweep(ctx context.Context) (int, error) {
 	diverged, err := s.store.listOutOfSyncInstances(ctx, s.db.Pool)
 	if err != nil {
 		return 0, err
 	}
+	current := map[string]string{} // cluster|kind|ref → reported state
 	n := 0
 	for _, i := range diverged {
 		ref := i.Kind + "/" + i.Name
 		if i.Namespace != "" {
 			ref = i.Kind + "/" + i.Namespace + "/" + i.Name
 		}
-		err := s.ReportDrift(ctx, &types.DriftEvent{
+		current[i.ClusterID+"|"+types.DriftKindInstanceSpec+"|"+ref] = i.SyncState
+		created, err := s.ReportDrift(ctx, &types.DriftEvent{
 			OrgID: i.OrgID, ClusterID: i.ClusterID, Kind: types.DriftKindInstanceSpec,
 			ResourceRef: ref, ReportedHash: i.SyncState,
 			Detail: fmt.Sprintf("instance %s reported sync state %s", i.InstanceID, i.SyncState),
@@ -113,7 +144,28 @@ func (s *Service) DriftSweep(ctx context.Context) (int, error) {
 		if err != nil {
 			return n, err
 		}
-		n++
+		if created {
+			n++
+		}
+	}
+	// Resolution pass: open instance-spec events that no longer match the
+	// currently diverged set are stale (resource back in sync, or reported
+	// state changed and a fresh event was just opened).
+	open, err := s.store.listOpenDrift(ctx, s.db.Pool)
+	if err != nil {
+		return n, err
+	}
+	for i := range open {
+		d := &open[i]
+		if d.Kind != types.DriftKindInstanceSpec {
+			continue // other kinds are reported by their own detectors
+		}
+		if current[d.ClusterID+"|"+d.Kind+"|"+d.ResourceRef] == d.ReportedHash {
+			continue // still diverged as reported
+		}
+		if err := s.ResolveDrift(ctx, d); err != nil {
+			return n, err
+		}
 	}
 	return n, nil
 }

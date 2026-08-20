@@ -45,6 +45,7 @@ var subscribedEvents = []string{
 	types.EventDeployRequested,
 	types.EventInstanceUpgraded,
 	types.EventDriftDetected,
+	types.EventDriftResolved,
 	types.EventRolloutFailed,
 	types.EventRolloutCompleted,
 	types.EventRolloutRolledBack,

@@ -1,29 +1,9 @@
 package policyservice
 
 import (
-	"context"
-	"errors"
 	"testing"
 	"time"
-
-	"github.com/7K-Inari/inari-server/internal/types"
 )
-
-type fakeClusters struct {
-	clusters []types.Cluster
-	byID     map[string]*types.Cluster
-}
-
-func (f *fakeClusters) ListClusters(context.Context, string) ([]types.Cluster, error) {
-	return f.clusters, nil
-}
-
-func (f *fakeClusters) GetCluster(_ context.Context, id string) (*types.Cluster, error) {
-	if c, ok := f.byID[id]; ok {
-		return c, nil
-	}
-	return nil, errors.New("unknown cluster")
-}
 
 func TestValidateExemptionExpiry(t *testing.T) {
 	now := time.Now()

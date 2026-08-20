@@ -96,9 +96,10 @@ func itSetup(t *testing.T) (*fleetmanager.Service, *itQueue, *itGates, *db.DB) {
 func ackCommand(t *testing.T, database *db.DB, cmdID string, status types.CommandStatus) {
 	t.Helper()
 	// Rollout health gating reads agent_commands; the queue rows are written
-	// by the real gateway queue in production, so mirror one here.
+	// by the real gateway queue in production, so mirror one here (cluster:1
+	// satisfies the FK).
 	_, err := database.Pool.Exec(context.Background(),
-		`INSERT INTO agent_commands (id, cluster_id, type, payload, status) VALUES ($1,'cluster:x','t','{}',$2)
+		`INSERT INTO agent_commands (id, cluster_id, type, payload, status) VALUES ($1,'cluster:1','t','{}',$2)
 		 ON CONFLICT (id) DO UPDATE SET status = $2`, cmdID, status)
 	if err != nil {
 		t.Fatal(err)

@@ -92,20 +92,20 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rp := &httputil.ReverseProxy{
-		Director: func(req *http.Request) {
-			req.URL.Scheme = target.Scheme
-			req.URL.Host = target.Host
-			req.URL.Path = strings.TrimPrefix(req.URL.Path, "/api/extensions/"+name)
-			if req.URL.Path == "" {
-				req.URL.Path = "/"
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.Out.URL.Scheme = target.Scheme
+			pr.Out.URL.Host = target.Host
+			pr.Out.URL.Path = strings.TrimPrefix(pr.Out.URL.Path, "/api/extensions/"+name)
+			if pr.Out.URL.Path == "" {
+				pr.Out.URL.Path = "/"
 			}
-			req.Host = target.Host
+			pr.Out.Host = target.Host
 			for _, h := range strippedRequestHeaders {
-				req.Header.Del(h)
+				pr.Out.Header.Del(h)
 			}
-			req.Header.Set("X-Inari-User", id.Subject)
+			pr.Out.Header.Set("X-Inari-User", id.Subject)
 			if ext.OrgID != "" {
-				req.Header.Set("X-Inari-Org", ext.OrgID)
+				pr.Out.Header.Set("X-Inari-Org", ext.OrgID)
 			}
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {

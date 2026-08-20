@@ -23,6 +23,7 @@ const (
 	RelationOperator         = "operator"
 	RelationDeployer         = "deployer"
 	RelationEditor           = "editor"
+	RelationInvoke           = "invoke"
 )
 
 // Object types.
@@ -36,6 +37,9 @@ const (
 	TypePolicyPack       = "policy_pack"
 	TypeClusterSet       = "cluster_set"
 	TypeTenantZone       = "tenant_zone"
+	TypeExtension        = "extension"
+	TypeRollout          = "rollout"
+	TypeDriftEvent       = "drift_event"
 )
 
 // Tuple is one relationship fact.
@@ -241,6 +245,21 @@ func ModelV1() client.ClientWriteAuthorizationModelRequest {
 	orgScopedMeta := map[string]openfga.RelationMetadata{
 		RelationParent: {DirectlyRelatedUserTypes: &orgRef},
 	}
+	extensionRelations := map[string]openfga.Userset{
+		RelationParent: direct(),
+		RelationInvoke: union(fromParent(RelationPlatformEngineer), fromParent(RelationDeveloper)),
+		RelationViewer: fromParent(RelationViewer),
+	}
+	extensionMeta := map[string]openfga.RelationMetadata{
+		RelationParent: {DirectlyRelatedUserTypes: &orgRef},
+	}
+	driftRelations := map[string]openfga.Userset{
+		RelationParent: direct(),
+		RelationViewer: fromParent(RelationViewer),
+	}
+	driftMeta := map[string]openfga.RelationMetadata{
+		RelationParent: {DirectlyRelatedUserTypes: &orgRef},
+	}
 	return client.ClientWriteAuthorizationModelRequest{
 		SchemaVersion: "1.1",
 		TypeDefinitions: []openfga.TypeDefinition{
@@ -254,6 +273,9 @@ func ModelV1() client.ClientWriteAuthorizationModelRequest {
 			{Type: TypePolicyPack, Relations: ptr(orgScopedRelations()), Metadata: &openfga.Metadata{Relations: &orgScopedMeta}},
 			{Type: TypeClusterSet, Relations: ptr(orgScopedRelations()), Metadata: &openfga.Metadata{Relations: &orgScopedMeta}},
 			{Type: TypeTenantZone, Relations: ptr(orgScopedRelations()), Metadata: &openfga.Metadata{Relations: &orgScopedMeta}},
+			{Type: TypeExtension, Relations: &extensionRelations, Metadata: &openfga.Metadata{Relations: &extensionMeta}},
+			{Type: TypeRollout, Relations: ptr(orgScopedRelations()), Metadata: &openfga.Metadata{Relations: &orgScopedMeta}},
+			{Type: TypeDriftEvent, Relations: &driftRelations, Metadata: &openfga.Metadata{Relations: &driftMeta}},
 		},
 	}
 }
@@ -280,6 +302,9 @@ func CloudAccountObject(id string) string { return TypeCloudAccount + ":" + id }
 func PolicyPackObject(id string) string   { return TypePolicyPack + ":" + id }
 func ClusterSetObject(id string) string   { return TypeClusterSet + ":" + id }
 func TenantZoneObject(id string) string   { return TypeTenantZone + ":" + id }
+func ExtensionObject(id string) string    { return TypeExtension + ":" + id }
+func RolloutObject(id string) string      { return TypeRollout + ":" + id }
+func DriftEventObject(id string) string   { return TypeDriftEvent + ":" + id }
 func TeamMemberUserset(teamID string) string {
 	return TeamObject(teamID) + "#" + RelationMember
 }

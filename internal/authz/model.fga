@@ -55,3 +55,20 @@ type tenant_zone
     define parent: [organization]
     define operator: platform_engineer from parent
     define viewer: viewer from parent
+
+type extension
+  relations
+    define parent: [organization]
+    define invoke: platform_engineer from parent or developer from parent
+    define viewer: viewer from parent
+
+type rollout
+  relations
+    define parent: [organization]
+    define operator: platform_engineer from parent
+    define viewer: viewer from parent
+
+type drift_event
+  relations
+    define parent: [organization]
+    define viewer: viewer from parent

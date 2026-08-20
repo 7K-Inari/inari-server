@@ -19,7 +19,8 @@ import (
 // action.
 func ValidLifecycleAction(action string) bool {
 	switch action {
-	case types.ApprovalActionTenantZoneVend, types.ApprovalActionTenantZoneDecommission:
+	case types.ApprovalActionTenantZoneVend, types.ApprovalActionTenantZoneDecommission,
+		types.ApprovalActionRolloutStageGate:
 		return true
 	}
 	return false

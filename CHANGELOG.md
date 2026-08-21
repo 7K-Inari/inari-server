@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.1.0](https://github.com/7K-Inari/inari-server/compare/v1.0.0...v1.1.0) (2026-08-21)
+
+
+### Features
+
+* **ci:** golden-path e2e gate on kind ([3bc64ea](https://github.com/7K-Inari/inari-server/commit/3bc64ea91572e6a8272a42f3614a4ea016e0f9e9))
+* cluster lifecycle states + Tenant Zone Factory (M3-W2) ([#10](https://github.com/7K-Inari/inari-server/issues/10)) ([dea4c00](https://github.com/7K-Inari/inari-server/commit/dea4c00d77b573fe25001450614e13e892b72032))
+* **m3:** cloud accounts, approvals, notifications, policy service, impersonation ([#9](https://github.com/7K-Inari/inari-server/issues/9)) ([a6e0093](https://github.com/7K-Inari/inari-server/commit/a6e0093d8e537a37f0d65423c9cd1ff4c665a691))
+* **m4:** extension host + fleet manager (WAVE 2) ([#12](https://github.com/7K-Inari/inari-server/issues/12)) ([81d36ea](https://github.com/7K-Inari/inari-server/commit/81d36ea54e974c837f51ff2ebbc05330373ae6e9))
+* offline OpenAPI export of the full REST surface ([#11](https://github.com/7K-Inari/inari-server/issues/11)) ([10e644e](https://github.com/7K-Inari/inari-server/commit/10e644ef72214aee8925f80c112871aa11f3b8b7))
+* **tenancy:** creator auto-membership and team membership API ([5e32fed](https://github.com/7K-Inari/inari-server/commit/5e32fedf36da86f9b8cfa9e336be0f7531a7d4b2))
+* **tenancy:** creator auto-membership and team membership API ([5727368](https://github.com/7K-Inari/inari-server/commit/5727368f9d3cad23067c98aea2ca28aa7ef7b9b6))
+
+
+### Bug Fixes
+
+* agent client audience mapper + install-manifest alignment (M2.1) ([5968481](https://github.com/7K-Inari/inari-server/commit/5968481d7b94efd1012d5ea633aee7fb8809da44))
+* **ci:** fetch helm chart dependencies before the golden-path e2e run ([522c3ce](https://github.com/7K-Inari/inari-server/commit/522c3ce46a6ffff26785bc279f07ae8848f400fa))
+* **ci:** resolve agent Dockerfile path in e2e build; correct stale tuple-object assertion in tenancy integration test ([a22cbbf](https://github.com/7K-Inari/inari-server/commit/a22cbbf51ede3ec014c6206dfae0dca2b96564d3))
+* **clusterregistry:** align rendered agent manifest with agent env contract and RBAC ([b544c9e](https://github.com/7K-Inari/inari-server/commit/b544c9e6673fed365b7856b7eefbaebd47bb68ea))
+* **clusterregistry:** update NewHandler call in integration test for capabilities dependency ([f122b8c](https://github.com/7K-Inari/inari-server/commit/f122b8ce7ae2e7b58ee182db4c852db4623f50b4))
+* golden-path runtime blockers + kind e2e gate ([179340c](https://github.com/7K-Inari/inari-server/commit/179340c80b41a4f49303f9861d723191759eda2b))
+* **tenancy:** add inari-server audience mapper to cluster OIDC clients ([52b2533](https://github.com/7K-Inari/inari-server/commit/52b253310a6eaef77762da40c95ce1eba497474a))
+* **tenancy:** make membership add/remove idempotent ([dca05bc](https://github.com/7K-Inari/inari-server/commit/dca05bc78304c9ae67177b3aab9a580bc76424e0))
+* **tenancy:** serialize concurrent membership add/remove on the unique PK ([7eed6a7](https://github.com/7K-Inari/inari-server/commit/7eed6a7258fe5a215283fa1768954731d4e49614))
+* unblock the golden path end-to-end ([8b0ea7d](https://github.com/7K-Inari/inari-server/commit/8b0ea7d2b06ce8db3a1a1627254bb8d92880f464))
+
 ## 1.0.0 (2026-08-15)
 
 

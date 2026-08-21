@@ -1,5 +1,9 @@
 name: release-please
 
+# Maintains the Release PR (version bump + CHANGELOG) on every merge to main.
+# PR-only mode: this workflow never tags or releases anything. Merging the
+# Release PR is the human gate; release.yml performs the actual release.
+
 on:
   push:
     branches: [main]
@@ -7,6 +11,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  issues: write
 
 jobs:
   release-please:
@@ -14,5 +19,6 @@ jobs:
     steps:
       - uses: googleapis/release-please-action@v4
         with:
-          release-type: go
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
           skip-github-release: true

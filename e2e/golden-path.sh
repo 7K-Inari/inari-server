@@ -65,8 +65,6 @@ helm upgrade --install inari "$CHART_DIR" \
     {\"name\":\"INARI_DATABASE_URL\",\"value\":\"postgres://inari:inari-dev@postgresql-rw:5432/inari?sslmode=disable\"},
     {\"name\":\"INARI_OIDC_ISSUER_URL\",\"value\":\"http://$KC_FQDN/realms/inari\"},
     {\"name\":\"INARI_KEYCLOAK_BASE_URL\",\"value\":\"http://$KC_FQDN\"},
-    {\"name\":\"INARI_KEYCLOAK_ADMIN_USER\",\"value\":\"admin\"},
-    {\"name\":\"INARI_KEYCLOAK_ADMIN_PASS\",\"value\":\"admin-dev\"},
     {\"name\":\"INARI_OPENFGA_API_URL\",\"value\":\"http://openfga:8080\"},
     {\"name\":\"INARI_AGENT_GATEWAY_ADDRESS\",\"value\":\"http://$SERVER_SVC.${NAMESPACE}.svc:8080\"},
     {\"name\":\"INARI_AGENT_IMAGE_REPO\",\"value\":\"inari/agent\"},
@@ -99,8 +97,10 @@ for i in $(seq 1 24); do
 done
 
 admin_token() {
-  xcurl "http://keycloak-service:8080/realms/master/protocol/openid-connect/token" \
-    -d grant_type=password -d client_id=admin-cli -d username=admin -d password=admin-dev \
+  local secret
+  secret=$(kubectl -n "$NAMESPACE" get secret inari-keycloak-admin -o jsonpath='{.data.client-secret}' | base64 -d)
+  xcurl "http://keycloak-service:8080/realms/inari/protocol/openid-connect/token" \
+    -d grant_type=client_credentials -d client_id=inari-platform-admin -d client_secret="$secret" \
     | jq -r .access_token
 }
 user_token() {

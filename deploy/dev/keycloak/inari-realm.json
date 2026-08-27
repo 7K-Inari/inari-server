@@ -4,6 +4,16 @@
   "organizationsEnabled": true,
   "clients": [
     {
+      "clientId": "inari-platform-admin",
+      "enabled": true,
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "inari-dev-admin-client",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true
+    },
+    {
       "clientId": "inari-server",
       "enabled": true,
       "publicClient": true,

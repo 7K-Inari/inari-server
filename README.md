@@ -29,7 +29,7 @@ make docker
 make export-openapi
 ```
 
-Dev realm (`deploy/dev/keycloak/inari-realm.json`) ships user `dev-admin` / `dev-admin` and public client `inari-server` with the `organization` scope. Get a token:
+Dev realm (`deploy/dev/keycloak/inari-realm.json`) ships user `dev-admin` / `dev-admin`, public client `inari-server` with the `organization` scope, and confidential client `inari-platform-admin` / `inari-dev-admin-client` (service account for Admin REST calls; grant its service account the realm-management `realm-admin` role once in the admin console). Get a token:
 
 ```sh
 curl -s http://localhost:8081/realms/inari/protocol/openid-connect/token \

@@ -18,24 +18,24 @@ import (
 // KeycloakAdmin implements IdentityProvider against the Keycloak Admin REST
 // API (KC 26.x), incl. the Organizations endpoints.
 type KeycloakAdmin struct {
-	baseURL  string
-	realm    string
-	username string
-	password string
-	http     *http.Client
+	baseURL      string
+	realm        string
+	clientID     string
+	clientSecret string
+	http         *http.Client
 
 	mu     sync.Mutex
 	token  string
 	expiry time.Time
 }
 
-func NewKeycloakAdmin(baseURL, realm, username, password string) *KeycloakAdmin {
+func NewKeycloakAdmin(baseURL, realm, clientID, clientSecret string) *KeycloakAdmin {
 	return &KeycloakAdmin{
-		baseURL:  strings.TrimRight(baseURL, "/"),
-		realm:    realm,
-		username: username,
-		password: password,
-		http:     &http.Client{Timeout: 15 * time.Second},
+		baseURL:      strings.TrimRight(baseURL, "/"),
+		realm:        realm,
+		clientID:     clientID,
+		clientSecret: clientSecret,
+		http:         &http.Client{Timeout: 15 * time.Second},
 	}
 }
 
@@ -46,13 +46,12 @@ func (k *KeycloakAdmin) adminToken(ctx context.Context) (string, error) {
 		return k.token, nil
 	}
 	form := url.Values{
-		"grant_type": {"password"},
-		"client_id":  {"admin-cli"},
-		"username":   {k.username},
-		"password":   {k.password},
+		"grant_type":    {"client_credentials"},
+		"client_id":     {k.clientID},
+		"client_secret": {k.clientSecret},
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		k.baseURL+"/realms/master/protocol/openid-connect/token", strings.NewReader(form.Encode()))
+		k.baseURL+"/realms/"+k.realm+"/protocol/openid-connect/token", strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", err
 	}

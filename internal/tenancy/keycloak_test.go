@@ -12,7 +12,16 @@ import (
 func keycloakTestServer(t *testing.T, bodies *map[string][]byte) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/master/protocol/openid-connect/token" {
+		if r.URL.Path == "/realms/inari/protocol/openid-connect/token" {
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("parse token form: %v", err)
+			}
+			if got := r.Form.Get("grant_type"); got != "client_credentials" {
+				t.Errorf("grant_type = %q, want client_credentials", got)
+			}
+			if r.Form.Get("client_id") == "" || r.Form.Get("client_secret") == "" {
+				t.Errorf("token request missing client_id/client_secret: %v", r.Form)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"access_token":"tok","expires_in":300}`))
 			return
@@ -36,7 +45,7 @@ func TestCreateClusterClientIncludesAudienceMapper(t *testing.T) {
 	srv := keycloakTestServer(t, &bodies)
 	defer srv.Close()
 
-	k := NewKeycloakAdmin(srv.URL, "inari", "admin", "admin")
+	k := NewKeycloakAdmin(srv.URL, "inari", "inari-platform-admin", "test-secret")
 	clientID, err := k.CreateClusterClient(context.Background(), "abc-123")
 	if err != nil {
 		t.Fatal(err)

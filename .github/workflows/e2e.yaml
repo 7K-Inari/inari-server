@@ -19,10 +19,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Resolve matching inari-helm-charts ref
+        id: chart
+        run: |
+          BRANCH="${{ github.head_ref || github.ref_name }}"
+          if git ls-remote --exit-code https://github.com/7K-Inari/inari-helm-charts.git "refs/heads/$BRANCH" >/dev/null 2>&1; then
+            echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout inari-helm-charts
         uses: actions/checkout@v4
         with:
           repository: 7K-Inari/inari-helm-charts
+          ref: ${{ steps.chart.outputs.ref }}
           path: inari-helm-charts
 
       - name: Checkout inari-agent

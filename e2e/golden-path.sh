@@ -50,6 +50,9 @@ kubectl config use-context "kind-${CLUSTER_NAME}" >/dev/null
 log "loading images ($SERVER_IMAGE, $AGENT_IMAGE)"
 kind load docker-image "$SERVER_IMAGE" "$AGENT_IMAGE" --name "$CLUSTER_NAME"
 
+log "installing prerequisite operators (CNPG + Keycloak — the chart never installs operators)"
+"$(cd "$CHART_DIR/../.." && pwd)/scripts/install-operators.sh"
+
 log "installing platform chart (corrected server env via values + extraEnv — GAP(chart-env))"
 # The upstream chart template still ships stale env names (INARI_DATABASE_URI
 # etc.); extraEnv supplies the real ones the server reads (last wins).

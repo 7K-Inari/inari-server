@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/7K-Inari/inari-server/compare/v1.2.0...v1.3.0) (2026-08-28)
+
+
+### Features
+
+* add inari-server helm chart ([#20](https://github.com/7K-Inari/inari-server/issues/20)) ([721d593](https://github.com/7K-Inari/inari-server/commit/721d59340945a6a0f068f78fc4e61be4f3352cbf))
+
 ## [1.2.0](https://github.com/7K-Inari/inari-server/compare/v1.1.0...v1.2.0) (2026-08-27)
 
 

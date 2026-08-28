@@ -1,0 +1,116 @@
+name: chart-release
+
+# Runs after a Release PR is merged to main: detects released chart paths and
+# publishes the charts to GHCR as OCI artifacts. Not tag-triggered: tags are
+# created by release-please. The root go component release (image + kustomize
+# bundles) is handled by release.yml.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    # Repair path (still workflow-driven): force-publish a chart whose
+    # publish job previously failed after the release was already tagged.
+    inputs:
+      chart-path:
+        description: 'Chart path to (re)publish, e.g. charts/inari-operator'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  # Shared with release.yml: both run release-please detection on push to
+  # main, so serialize them — the second run sees the releases already
+  # created and returns empty.
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      paths_released: ${{ steps.rp.outputs.paths_released || steps.disp.outputs.paths || '[]' }}
+    steps:
+      - if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+      - name: Dispatch override
+        id: disp
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          path="${{ inputs.chart-path }}"
+          test -f "$path/Chart.yaml" || { echo "no Chart.yaml at $path"; exit 1; }
+          echo "paths=$(jq -cn --arg p "$path" '[$p]')" >> "$GITHUB_OUTPUT"
+      - if: github.event_name != 'workflow_dispatch'
+        uses: googleapis/release-please-action@v4
+        id: rp
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          # Detect merged Release PRs + create tags/Releases only; PR
+          # maintenance lives in release-please.yml (skip-github-release).
+          skip-github-pull-request: true
+
+  publish:
+    needs: detect
+    if: needs.detect.outputs.paths_released != '' && needs.detect.outputs.paths_released != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        chart-path: ${{ fromJSON(needs.detect.outputs.paths_released) }}
+    runs-on: ubuntu-latest
+    # Only chart paths publish here; the root go component is release.yml's job.
+    if: startsWith(matrix.chart-path, 'charts/')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.18.6
+
+      - name: Set up chart-testing
+        uses: helm/chart-testing-action@v2.7.0
+        with:
+          version: v3.12.0
+
+      - name: Resolve chart name and version
+        id: chart
+        run: |
+          CHART_PATH="${{ matrix.chart-path }}"
+          echo "name=$(basename "$CHART_PATH")" >> "$GITHUB_OUTPUT"
+          echo "version=$(jq -r '."'$CHART_PATH'"' .release-please-manifest.json)" >> "$GITHUB_OUTPUT"
+
+      - name: chart-testing lint
+        run: ct lint --config ct.yaml --charts "${{ matrix.chart-path }}" --validate-maintainers=false
+
+      - name: Package chart
+        run: |
+          mkdir -p dist
+          helm package "${{ matrix.chart-path }}" -d dist
+
+      - name: Verify package version matches manifest
+        run: |
+          ls "dist/${{ steps.chart.outputs.name }}-${{ steps.chart.outputs.version }}.tgz"
+
+      - name: Login to ghcr.io
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push chart as OCI artifact
+        run: helm push "dist/${{ steps.chart.outputs.name }}-${{ steps.chart.outputs.version }}.tgz" oci://ghcr.io/7k-inari/charts
+
+      - name: Verify published chart
+        run: |
+          TAG="${{ steps.chart.outputs.version }}"
+          for i in $(seq 1 12); do
+            if helm show chart "oci://ghcr.io/7k-inari/charts/${{ steps.chart.outputs.name }}" --version "$TAG" > /dev/null 2>&1; then
+              echo "Published ${{ steps.chart.outputs.name }}:$TAG verified"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::chart not visible in GHCR after push"
+          exit 1

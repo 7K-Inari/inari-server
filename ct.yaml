@@ -1,0 +1,9 @@
+# chart-testing configuration
+target-branch: main
+chart-dirs:
+  - charts
+# Version bumps are owned by release-please; ct's increment check would
+# duplicate the Release PR.
+check-version-increment: false
+helm-extra-args: --timeout 600s
+debug: true

@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "replicaCount": { "type": "integer", "minimum": 1 },
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+      },
+      "required": ["repository"]
+    },
+    "service": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "nodePort": { "type": "integer", "minimum": 30000, "maximum": 32767 }
+      },
+      "required": ["type", "port"]
+    },
+    "database": {
+      "type": "object",
+      "properties": {
+        "secret": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "uriKey": { "type": "string", "minLength": 1 }
+          },
+          "required": ["name", "uriKey"]
+        }
+      },
+      "required": ["secret"]
+    },
+    "openfga": {
+      "type": "object",
+      "properties": {
+        "url": { "type": "string", "minLength": 1 }
+      },
+      "required": ["url"]
+    },
+    "oidc": {
+      "type": "object",
+      "properties": {
+        "issuerUrl": { "type": "string" }
+      }
+    },
+    "keycloak": {
+      "type": "object",
+      "properties": {
+        "baseUrl": { "type": "string" },
+        "realm": { "type": "string", "minLength": 1 },
+        "adminRole": { "type": "string", "minLength": 1 },
+        "adminSecret": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "clientIdKey": { "type": "string", "minLength": 1 },
+            "clientSecretKey": { "type": "string", "minLength": 1 }
+          },
+          "required": ["name", "clientIdKey", "clientSecretKey"]
+        }
+      },
+      "required": ["realm", "adminRole", "adminSecret"]
+    },
+    "extraEnv": { "type": "array" },
+    "gateway": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "namespace": { "type": "string" },
+        "sectionName": { "type": "string" }
+      }
+    },
+    "route": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "hostnames": { "type": "array", "items": { "type": "string" } },
+        "pathPrefix": { "type": "string" },
+        "annotations": { "type": "object" }
+      }
+    },
+    "resources": { "type": "object" },
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "annotations": { "type": "object" }
+      }
+    },
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" }
+  }
+}

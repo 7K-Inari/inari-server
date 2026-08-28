@@ -1,0 +1,66 @@
+# Default values for inari-server.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/7k-inari/inari-server
+  # Defaults to the chart's appVersion when empty; release-please keeps
+  # appVersion aligned with the released server image.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8080
+
+# PostgreSQL connection. The URI is read from a secret key, never plaintext.
+database:
+  secret:
+    name: inari-db
+    uriKey: inari-uri
+
+# OpenFGA authorization service endpoint.
+openfga:
+  url: http://openfga:8080
+
+# OIDC issuer for token validation. Defaults to
+# <keycloak.baseUrl>/realms/<keycloak.realm> when empty.
+oidc:
+  issuerUrl: ""
+
+keycloak:
+  # Base URL of the platform Keycloak (used for the derived issuer URL and
+  # INARI_KEYCLOAK_BASE_URL).
+  baseUrl: ""
+  realm: inari
+  adminRole: inari-platform-admin
+  # Secret holding the Keycloak admin client credentials.
+  adminSecret:
+    name: inari-keycloak-admin
+    clientIdKey: client-id
+    clientSecretKey: client-secret
+
+# Extra INARI_* env vars, e.g. - name: INARI_AGENT_IMAGE_TAG / value: dev
+extraEnv: []
+
+# Gateway API — parentRef to an ALREADY-EXISTING Gateway. This chart never
+# creates a Gateway/GatewayClass: a Gateway must be deployed beforehand.
+gateway:
+  name: ""
+  namespace: ""
+  sectionName: ""
+
+# HTTPRoute exposing inari-server via the Gateway referenced in `gateway:`.
+route:
+  enabled: false
+  # e.g. ["api.example.org"]; empty = match all hostnames.
+  hostnames: []
+  # Optional PathPrefix match; empty = match all paths.
+  pathPrefix: ""
+  # Extra annotations (e.g. external-dns/cloudflare-proxy).
+  annotations: {}
+
+resources: {}
+
+serviceAccount:
+  annotations: {}

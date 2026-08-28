@@ -1,0 +1,126 @@
+suite: inari-server
+templates:
+  - deployment.yaml
+  - service.yaml
+  - serviceaccount.yaml
+  - httproute.yaml
+tests:
+  - it: renders Deployment, Service and ServiceAccount by default
+    asserts:
+      - hasDocuments:
+          count: 1
+    template: deployment.yaml
+  - it: renders the Deployment with the appVersion image by default
+    template: deployment.yaml
+    asserts:
+      - isKind:
+          of: Deployment
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/7k-inari/inari-server:1.2.0
+      - equal:
+          path: metadata.labels["app.kubernetes.io/component"]
+          value: inari-server
+  - it: uses an explicit image tag when set
+    template: deployment.yaml
+    set:
+      image.tag: "9.9.9"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/7k-inari/inari-server:9.9.9
+  - it: sources the database uri from a secret, not plaintext
+    template: deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[0].name
+          value: INARI_DATABASE_URL
+      - equal:
+          path: spec.template.spec.containers[0].env[0].valueFrom.secretKeyRef.name
+          value: inari-db
+      - equal:
+          path: spec.template.spec.containers[0].env[0].valueFrom.secretKeyRef.key
+          value: inari-uri
+  - it: passes the default platform admin role
+    template: deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_PLATFORM_ADMIN_ROLE
+            value: inari-platform-admin
+  - it: passes an overridden platform admin role
+    template: deployment.yaml
+    set:
+      keycloak.adminRole: custom-admin
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_PLATFORM_ADMIN_ROLE
+            value: custom-admin
+  - it: derives the OIDC issuer URL from keycloak baseUrl+realm
+    template: deployment.yaml
+    set:
+      keycloak.baseUrl: https://auth.example.org
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_OIDC_ISSUER_URL
+            value: https://auth.example.org/realms/inari
+  - it: honors an explicit OIDC issuer URL
+    template: deployment.yaml
+    set:
+      keycloak.baseUrl: https://auth.example.org
+      oidc.issuerUrl: https://alias.example.org/realms/inari
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_OIDC_ISSUER_URL
+            value: https://alias.example.org/realms/inari
+  - it: renders a Service
+    template: service.yaml
+    asserts:
+      - isKind:
+          of: Service
+      - equal:
+          path: spec.ports[0].port
+          value: 8080
+  - it: renders a ServiceAccount
+    template: serviceaccount.yaml
+    asserts:
+      - isKind:
+          of: ServiceAccount
+  - it: renders no HTTPRoute by default
+    template: httproute.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+  - it: fails when route is enabled without a gateway name
+    template: httproute.yaml
+    set:
+      route.enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: gateway.name is required when route.enabled=true — the chart does not create a Gateway; point gateway.name at the Gateway you have already deployed
+  - it: renders an HTTPRoute with a configured gateway
+    template: httproute.yaml
+    set:
+      route.enabled: true
+      gateway.name: platform-gateway
+      route.hostnames:
+        - api.example.org
+    asserts:
+      - isKind:
+          of: HTTPRoute
+      - equal:
+          path: spec.parentRefs[0].name
+          value: platform-gateway
+      - equal:
+          path: spec.hostnames[0]
+          value: api.example.org
+      - equal:
+          path: spec.rules[0].backendRefs[0].port
+          value: 8080

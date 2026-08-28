@@ -1,0 +1,41 @@
+{{- if .Values.route.enabled }}
+{{- $gateway := .Values.gateway }}
+{{- if not $gateway.name }}
+{{- fail "gateway.name is required when route.enabled=true — the chart does not create a Gateway; point gateway.name at the Gateway you have already deployed" }}
+{{- end }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "inari-server.fullname" . }}
+  {{- with .Values.route.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  labels:
+    {{- include "inari-server.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ $gateway.name }}
+      {{- with $gateway.namespace }}
+      namespace: {{ . }}
+      {{- end }}
+      {{- with $gateway.sectionName }}
+      sectionName: {{ . }}
+      {{- end }}
+  {{- with .Values.route.hostnames }}
+  hostnames:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - matches:
+        {{- with .Values.route.pathPrefix }}
+        - path:
+            type: PathPrefix
+            value: {{ . | quote }}
+        {{- else }}
+        []
+        {{- end }}
+      backendRefs:
+        - name: {{ include "inari-server.fullname" . }}
+          port: {{ .Values.service.port }}
+{{- end }}

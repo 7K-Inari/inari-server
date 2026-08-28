@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/7K-Inari/inari-server/compare/v1.1.0...v1.2.0) (2026-08-27)
+
+
+### Features
+
+* authenticate to Keycloak Admin REST via service account ([#18](https://github.com/7K-Inari/inari-server/issues/18)) ([b88f627](https://github.com/7K-Inari/inari-server/commit/b88f6276ab04b1ae57a478e9ee70e1172577d9e3))
+
 ## [1.1.0](https://github.com/7K-Inari/inari-server/compare/v1.0.0...v1.1.0) (2026-08-21)
 
 

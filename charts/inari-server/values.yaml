@@ -2,11 +2,22 @@
 
 replicaCount: 1
 
+global:
+  # Registry prefix prepended to every image repository rendered by this
+  # chart (e.g. "registry.example.com:5000" for mirrored/air-gapped
+  # installs). Empty = pull from the per-image upstream registry.
+  imageRegistry: ""
+  # Names of pre-created pull secrets (e.g. synced via ESO). Rendered into
+  # the ServiceAccount and every pod spec. Create the secrets out-of-band.
+  imagePullSecrets: []
+
 image:
   repository: ghcr.io/7k-inari/inari-server
   # Defaults to the chart's appVersion when empty; release-please keeps
   # appVersion aligned with the released server image.
   tag: ""
+  # Digest wins over tag when set (e.g. "sha256:...").
+  digest: ""
   pullPolicy: IfNotPresent
 
 service:

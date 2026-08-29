@@ -70,3 +70,7 @@ jobs:
         run: ct lint --config ct.yaml --validate-maintainers=false
       - name: helm unittest
         run: helm unittest charts/inari-server
+      - name: Global image values render check
+        # Fails if any rendered image ignores global.imageRegistry or any
+        # workload pod spec ignores global.imagePullSecrets (plan §4.2).
+        run: scripts/check-global-image-values.sh charts/inari-server

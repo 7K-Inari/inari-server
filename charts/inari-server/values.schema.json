@@ -2,12 +2,27 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "properties": {
+    "global": {
+      "type": "object",
+      "properties": {
+        "imageRegistry": {
+          "type": "string",
+          "description": "Registry prefix prepended to every image repository rendered by this chart (mirrored/air-gapped installs)."
+        },
+        "imagePullSecrets": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Names of pre-created pull secrets rendered into the ServiceAccount and every pod spec."
+        }
+      }
+    },
     "replicaCount": { "type": "integer", "minimum": 1 },
     "image": {
       "type": "object",
       "properties": {
         "repository": { "type": "string", "minLength": 1 },
         "tag": { "type": "string" },
+        "digest": { "type": "string" },
         "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
       },
       "required": ["repository"]

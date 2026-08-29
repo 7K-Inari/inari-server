@@ -57,3 +57,33 @@ OIDC issuer URL: explicit value, or derived from the Keycloak base URL+realm.
 {{- printf "%s/realms/%s" .Values.keycloak.baseUrl .Values.keycloak.realm }}
 {{- end }}
 {{- end }}
+
+{{/*
+Image reference: global.imageRegistry is prepended to the repository;
+digest wins over tag; empty tag defaults to the chart appVersion.
+Usage: {{ include "inari-server.image" (dict "root" . "image" .Values.image) }}
+*/}}
+{{- define "inari-server.image" -}}
+{{- $repo := .image.repository -}}
+{{- with .root.Values.global.imageRegistry -}}
+{{- $repo = printf "%s/%s" (. | trimSuffix "/") $repo -}}
+{{- end -}}
+{{- if .image.digest -}}
+{{- printf "%s@%s" $repo .image.digest -}}
+{{- else -}}
+{{- printf "%s:%s" $repo (.image.tag | default .root.Chart.AppVersion) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+imagePullSecrets from global.imagePullSecrets (list of secret names), for
+pod specs and the ServiceAccount. Include at the target indentation.
+*/}}
+{{- define "inari-server.imagePullSecrets" -}}
+{{- with .Values.global.imagePullSecrets }}
+imagePullSecrets:
+  {{- range . }}
+  - name: {{ . | quote }}
+  {{- end }}
+{{- end }}
+{{- end -}}

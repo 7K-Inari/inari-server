@@ -15,9 +15,10 @@ spec:
         {{- include "inari-server.selectorLabels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "inari-server.serviceAccountName" . }}
+      {{- include "inari-server.imagePullSecrets" . | nindent 6 }}
       containers:
         - name: server
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: {{ include "inari-server.image" (dict "root" . "image" .Values.image) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http

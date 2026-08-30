@@ -70,6 +70,13 @@ helm upgrade --install platform-config "$PLATFORM_CHART_DIR" \
   --set keycloak.resources.requests.memory=256Mi \
   --wait --timeout 10m
 
+# helm --wait does not cover CR-only resources (CNPG Cluster, Keycloak CR);
+# wait until the operators have the database and Keycloak actually running,
+# otherwise the inari-server pods below can never become ready.
+log "waiting for PostgreSQL (CNPG) and Keycloak"
+kubectl -n "$NAMESPACE" wait --for=condition=Ready cluster.postgresql.cnpg.io/postgresql --timeout=600s
+kubectl -n "$NAMESPACE" rollout status statefulset/keycloak --timeout=420s
+
 log "installing NATS (JetStream)"
 helm repo add openfga https://openfga.github.io/helm-charts >/dev/null
 helm repo add nats https://nats-io.github.io/k8s/helm/charts/ >/dev/null

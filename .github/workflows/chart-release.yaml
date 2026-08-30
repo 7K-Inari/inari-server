@@ -117,31 +117,6 @@ jobs:
         if: env.IS_CHART == 'true'
         run: helm push "dist/${{ steps.chart.outputs.name }}-${{ steps.chart.outputs.version }}.tgz" oci://ghcr.io/7k-inari/${{ github.event.repository.name }}/charts
 
-      # Packages pushed with GITHUB_TOKEN default to private; flip visibility
-      # so ArgoCD and helm can pull anonymously. Requires GHCR_ADMIN_TOKEN (a
-      # PAT with write:packages on the 7k-inari org); warns and continues when
-      # the secret is absent or the API call fails.
-      - name: Make GHCR package public
-        if: env.IS_CHART == 'true'
-        continue-on-error: true
-        env:
-          GHCR_ADMIN_TOKEN: ${{ secrets.GHCR_ADMIN_TOKEN }}
-        run: |
-          if [ -z "$GHCR_ADMIN_TOKEN" ]; then
-            echo "::warning::GHCR_ADMIN_TOKEN not set; package ${{ github.event.repository.name }}/charts/${{ steps.chart.outputs.name }} keeps its current visibility"
-            exit 0
-          fi
-          STATUS=$(curl -sS -o /tmp/pkg.json -w '%{http_code}' -X PATCH \
-            -H "Authorization: Bearer $GHCR_ADMIN_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/orgs/7k-inari/packages/container/${{ github.event.repository.name }}%2Fcharts%2F${{ steps.chart.outputs.name }}" \
-            -d '{"visibility":"public"}')
-          if [ "$STATUS" != "200" ]; then
-            echo "::warning::could not set ${{ github.event.repository.name }}/charts/${{ steps.chart.outputs.name }} to public (HTTP $STATUS): $(cat /tmp/pkg.json)"
-            exit 0
-          fi
-          echo "${{ github.event.repository.name }}/charts/${{ steps.chart.outputs.name }} is now public"
-
       - name: Verify published chart
         if: env.IS_CHART == 'true'
         run: |

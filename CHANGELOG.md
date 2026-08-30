@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1](https://github.com/7K-Inari/inari-server/compare/v1.3.0...v1.3.1) (2026-08-30)
+
+
+### Bug Fixes
+
+* **ci:** publish chart to repo-scoped GHCR path and make package public ([#23](https://github.com/7K-Inari/inari-server/issues/23)) ([92ad228](https://github.com/7K-Inari/inari-server/commit/92ad2281f5062c00dca3ad9ff702c3465e7060e7))
+
 ## [1.3.0](https://github.com/7K-Inari/inari-server/compare/v1.2.0...v1.3.0) (2026-08-28)
 
 

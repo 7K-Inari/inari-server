@@ -59,16 +59,19 @@ jobs:
           cluster_name: inari-e2e
           wait: 60s
 
-      - name: Fetch chart dependencies
-        run: helm dependency build inari-helm-charts/charts/inari-platform
-
       - name: Run golden path
-        run: CHART_DIR=inari-helm-charts/charts/inari-platform KEEP_CLUSTER=false bash e2e/golden-path.sh
+        # KEEP_CLUSTER=true: the workflow owns teardown (final step) so the
+        # diagnostics step still has a cluster to inspect on failure.
+        run: HELM_CHARTS_DIR=inari-helm-charts KEEP_CLUSTER=true bash e2e/golden-path.sh
 
       - name: Dump diagnostics on failure
         if: failure()
         run: |
           kubectl config use-context kind-inari-e2e || true
           kubectl -n inari get pods || true
-          kubectl -n inari logs deployment/inari-inari-platform-server --tail=100 || true
+          kubectl -n inari logs deployment/inari-server --tail=100 || true
           kubectl -n inari-system logs deployment/inari-agent --tail=100 || true
+
+      - name: Delete kind cluster
+        if: always()
+        run: kind delete cluster --name inari-e2e || true

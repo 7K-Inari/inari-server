@@ -13,20 +13,24 @@
 # Prereqs: docker, kind, kubectl, helm, jq. Configurable via env:
 #   CLUSTER_NAME (default inari-e2e)
 #   SERVER_IMAGE / AGENT_IMAGE (default inari/server:e2e / inari/agent:e2e)
-#   CHART_DIR (default ../inari-helm-charts/charts/inari-platform)
+#   HELM_CHARTS_DIR (default ../inari-helm-charts — checkout of the
+#     inari-helm-charts repo providing charts/platform-config + scripts)
+#   SERVER_CHART_DIR (default ./charts/inari-server)
 #   KEEP_CLUSTER=true to skip teardown
 set -euo pipefail
 
 CLUSTER_NAME="${CLUSTER_NAME:-inari-e2e}"
 SERVER_IMAGE="${SERVER_IMAGE:-inari/server:e2e}"
 AGENT_IMAGE="${AGENT_IMAGE:-inari/agent:e2e}"
-CHART_DIR="${CHART_DIR:-$(dirname "$0")/../../inari-helm-charts/charts/inari-platform}"
+HELM_CHARTS_DIR="${HELM_CHARTS_DIR:-$(dirname "$0")/../../inari-helm-charts}"
+PLATFORM_CHART_DIR="${PLATFORM_CHART_DIR:-$HELM_CHARTS_DIR/charts/platform-config}"
+SERVER_CHART_DIR="${SERVER_CHART_DIR:-$(dirname "$0")/../charts/inari-server}"
 NAMESPACE="${NAMESPACE:-inari}"
 TENANT="${TENANT:-e2e-org}"
 KEEP_CLUSTER="${KEEP_CLUSTER:-false}"
 TOOLS=golden-path-tools
 KC_FQDN="keycloak-service.${NAMESPACE}.svc:8080"
-SERVER_SVC="inari-inari-platform-server"
+SERVER_SVC="inari-server"
 
 log() { printf '\033[1;34m[e2e]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[e2e] %s\033[0m\n' "$*" >&2; exit 1; }
@@ -50,31 +54,67 @@ kubectl config use-context "kind-${CLUSTER_NAME}" >/dev/null
 log "loading images ($SERVER_IMAGE, $AGENT_IMAGE)"
 kind load docker-image "$SERVER_IMAGE" "$AGENT_IMAGE" --name "$CLUSTER_NAME"
 
-log "installing prerequisite operators (CNPG + Keycloak — the chart never installs operators)"
-"$(cd "$CHART_DIR/../.." && pwd)/scripts/install-operators.sh"
+log "installing prerequisite operators (CNPG + Keycloak — the charts never install operators)"
+"$HELM_CHARTS_DIR/scripts/install-operators.sh"
 
-log "installing platform chart (corrected server env via values + extraEnv — GAP(chart-env))"
-# The upstream chart template still ships stale env names (INARI_DATABASE_URI
-# etc.); extraEnv supplies the real ones the server reads (last wins).
-helm upgrade --install inari "$CHART_DIR" \
+# Platform stack without ArgoCD: the gitops-composed pieces installed by hand
+# (platform-config from git, NATS/OpenFGA from their public helm repos, values
+# mirroring gitops/platform/*.yaml), then the inari-server chart from this
+# repo with the e2e images.
+log "installing platform-config (CNPG cluster + db secrets + Keycloak realm)"
+helm upgrade --install platform-config "$PLATFORM_CHART_DIR" \
   --namespace "$NAMESPACE" --create-namespace \
-  --set inariServer.enabled=true \
-  --set inariServer.image.repository="${SERVER_IMAGE%:*}" \
-  --set inariServer.image.tag="${SERVER_IMAGE##*:}" \
-  --set inariServer.image.pullPolicy=IfNotPresent \
-  --set inariServer.oidcIssuerUrl="http://$KC_FQDN/realms/inari" \
-  --set inariServer.keycloakBaseUrl="http://$KC_FQDN" \
-  --set-json "inariServer.extraEnv=[
-    {\"name\":\"INARI_DATABASE_URL\",\"value\":\"postgres://inari:inari-dev@postgresql-rw:5432/inari?sslmode=disable\"},
-    {\"name\":\"INARI_OIDC_ISSUER_URL\",\"value\":\"http://$KC_FQDN/realms/inari\"},
-    {\"name\":\"INARI_KEYCLOAK_BASE_URL\",\"value\":\"http://$KC_FQDN\"},
-    {\"name\":\"INARI_OPENFGA_API_URL\",\"value\":\"http://openfga:8080\"},
+  --set postgresql.storageSize=1Gi \
+  --set keycloak.hostname.hostname=http://keycloak.local:8080 \
+  --set keycloak.resources.requests.cpu=100m \
+  --set keycloak.resources.requests.memory=256Mi \
+  --wait --timeout 10m
+
+# helm --wait does not cover CR-only resources (CNPG Cluster, Keycloak CR);
+# wait until the operators have the database and Keycloak actually running,
+# otherwise the inari-server pods below can never become ready.
+log "waiting for PostgreSQL (CNPG) and Keycloak"
+kubectl -n "$NAMESPACE" wait --for=condition=Ready cluster.postgresql.cnpg.io/postgresql --timeout=600s
+kubectl -n "$NAMESPACE" rollout status statefulset/keycloak --timeout=420s
+
+log "installing NATS (JetStream)"
+helm repo add openfga https://openfga.github.io/helm-charts >/dev/null
+helm repo add nats https://nats-io.github.io/k8s/helm/charts/ >/dev/null
+helm repo update >/dev/null
+helm upgrade --install nats nats/nats --version 1.3.2 \
+  --namespace "$NAMESPACE" \
+  --set fullnameOverride=nats \
+  --set config.jetstream.enabled=true \
+  --set config.jetstream.fileStore.enabled=true \
+  --set config.jetstream.fileStore.pvc.size=1Gi \
+  --wait --timeout 5m
+
+log "installing OpenFGA (postgres datastore via the inari-db secret)"
+helm upgrade --install openfga openfga/openfga --version 0.2.27 \
+  --namespace "$NAMESPACE" \
+  --set fullnameOverride=openfga \
+  --set replicaCount=1 \
+  --set datastore.engine=postgres \
+  --set datastore.existingSecret=inari-db \
+  --set datastore.secretKeys.uriKey=openfga-uri \
+  --set datastore.migrationType=initContainer \
+  --set playground.enabled=false \
+  --wait --timeout 5m
+
+log "installing inari-server chart (e2e image)"
+helm upgrade --install inari-server "$SERVER_CHART_DIR" \
+  --namespace "$NAMESPACE" \
+  --set image.repository="${SERVER_IMAGE%:*}" \
+  --set image.tag="${SERVER_IMAGE##*:}" \
+  --set image.pullPolicy=IfNotPresent \
+  --set keycloak.baseUrl="http://$KC_FQDN" \
+  --set-json "extraEnv=[
     {\"name\":\"INARI_AGENT_GATEWAY_ADDRESS\",\"value\":\"http://$SERVER_SVC.${NAMESPACE}.svc:8080\"},
     {\"name\":\"INARI_AGENT_IMAGE_REPO\",\"value\":\"inari/agent\"},
     {\"name\":\"INARI_AGENT_IMAGE_TAG\",\"value\":\"e2e\"}
   ]" \
   --wait --timeout 10m
-kubectl -n "$NAMESPACE" rollout status deployment/inari-inari-platform-server --timeout=180s
+kubectl -n "$NAMESPACE" rollout status deployment/inari-server --timeout=180s
 
 log "starting toolbox pod"
 kubectl -n "$NAMESPACE" delete pod "$TOOLS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
@@ -91,7 +131,7 @@ kubectl -n "$NAMESPACE" wait --for=condition=complete job -l app.kubernetes.io/c
 kubectl -n "$NAMESPACE" patch keycloak keycloak --type merge \
   -p "{\"spec\":{\"hostname\":{\"hostname\":\"http://$KC_FQDN\",\"strict\":true}}}"
 kubectl -n "$NAMESPACE" rollout status statefulset/keycloak --timeout=420s
-kubectl -n "$NAMESPACE" rollout status deployment/inari-inari-platform-server --timeout=180s || true
+kubectl -n "$NAMESPACE" rollout status deployment/inari-server --timeout=180s || true
 for i in $(seq 1 24); do
   ISS=$(xcurl "http://keycloak-service:8080/realms/inari/.well-known/openid-configuration" | jq -r .issuer 2>/dev/null || true)
   [ "$ISS" = "http://$KC_FQDN/realms/inari" ] && break

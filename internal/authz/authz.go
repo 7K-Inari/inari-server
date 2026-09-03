@@ -174,8 +174,9 @@ func (s *OpenFGAStore) DeleteTuples(ctx context.Context, tuples []Tuple) error {
 	return nil
 }
 
-// ModelV1 is the M0 authorization model: organization roles derive from team
-// membership; higher roles imply lower ones. Mirrors model.fga.
+// ModelV1 is the authorization model: organization roles derive from team
+// membership; higher roles imply lower ones. Includes the global platform type (M1).
+// Mirrors model.fga.
 func ModelV1() client.ClientWriteAuthorizationModelRequest {
 	this := func() *map[string]any { m := map[string]any{}; return &m }
 	computed := func(rel string) openfga.Userset {

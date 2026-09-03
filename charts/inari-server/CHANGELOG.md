@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/7K-Inari/inari-server/compare/inari-server-chart-v0.1.2...inari-server-chart-v0.1.3) (2026-09-03)
+
+
+### Features
+
+* **authz:** add platform-global type to OpenFGA model ([#25](https://github.com/7K-Inari/inari-server/issues/25)) ([830ab8b](https://github.com/7K-Inari/inari-server/commit/830ab8bfcdeb97a48c83d99fdd21781e37bd87f9))
+
 ## [0.1.2](https://github.com/7K-Inari/inari-server/compare/inari-server-chart-v0.1.1...inari-server-chart-v0.1.2) (2026-08-30)
 
 

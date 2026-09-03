@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.4.0](https://github.com/7K-Inari/inari-server/compare/v1.3.1...v1.4.0) (2026-09-03)
+
+
+### Features
+
+* **authz:** add platform-global type to OpenFGA model ([#25](https://github.com/7K-Inari/inari-server/issues/25)) ([830ab8b](https://github.com/7K-Inari/inari-server/commit/830ab8bfcdeb97a48c83d99fdd21781e37bd87f9))
+* **authz:** platform permission surface, org_creator enforcement and group sync (M1.W2) ([#27](https://github.com/7K-Inari/inari-server/issues/27)) ([48c6c2a](https://github.com/7K-Inari/inari-server/commit/48c6c2a94eabf166f1709a9c74b0340d0dbce97f))
+
 ## [1.3.1](https://github.com/7K-Inari/inari-server/compare/v1.3.0...v1.3.1) (2026-08-30)
 
 

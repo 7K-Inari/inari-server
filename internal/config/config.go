@@ -22,8 +22,14 @@ type Config struct {
 	KeycloakClientSecret string
 	OpenFGAAPIURL        string
 	OpenFGAStoreName     string
-	OutboxPollInterval   time.Duration
-	ShutdownTimeout      time.Duration
+	// PlatformAdminGroup is the Keycloak realm group whose members receive
+	// platform:inari org_creator tuples (M1; path relative to realm root).
+	PlatformAdminGroup string
+	// PlatformGroupSyncInterval is the platform group → tuple reconciliation
+	// period; it bounds the consistency window for grants/revocations.
+	PlatformGroupSyncInterval time.Duration
+	OutboxPollInterval        time.Duration
+	ShutdownTimeout           time.Duration
 
 	RegistrationTokenTTL       time.Duration
 	EnrollmentApprovalRequired bool
@@ -64,20 +70,22 @@ type Config struct {
 
 func Load() (*Config, error) {
 	c := &Config{
-		HTTPAddr:             env("INARI_HTTP_ADDR", ":8080"),
-		LogLevel:             env("INARI_LOG_LEVEL", "info"),
-		LogFormat:            env("INARI_LOG_FORMAT", "json"),
-		DatabaseURL:          env("INARI_DATABASE_URL", "postgres://inari:inari@localhost:5432/inari?sslmode=disable"),
-		OIDCIssuerURL:        env("INARI_OIDC_ISSUER_URL", "http://localhost:8081/realms/inari"),
-		OIDCClientID:         env("INARI_OIDC_CLIENT_ID", "inari-server"),
-		KeycloakBaseURL:      env("INARI_KEYCLOAK_BASE_URL", "http://localhost:8081"),
-		KeycloakRealm:        env("INARI_KEYCLOAK_REALM", "inari"),
-		KeycloakClientID:     env("INARI_KEYCLOAK_CLIENT_ID", "inari-platform-admin"),
-		KeycloakClientSecret: env("INARI_KEYCLOAK_CLIENT_SECRET", ""),
-		OpenFGAAPIURL:        env("INARI_OPENFGA_API_URL", "http://localhost:8082"),
-		OpenFGAStoreName:     env("INARI_OPENFGA_STORE_NAME", "inari"),
-		OutboxPollInterval:   durEnv("INARI_OUTBOX_POLL_INTERVAL", time.Second),
-		ShutdownTimeout:      durEnv("INARI_SHUTDOWN_TIMEOUT", 10*time.Second),
+		HTTPAddr:                  env("INARI_HTTP_ADDR", ":8080"),
+		LogLevel:                  env("INARI_LOG_LEVEL", "info"),
+		LogFormat:                 env("INARI_LOG_FORMAT", "json"),
+		DatabaseURL:               env("INARI_DATABASE_URL", "postgres://inari:inari@localhost:5432/inari?sslmode=disable"),
+		OIDCIssuerURL:             env("INARI_OIDC_ISSUER_URL", "http://localhost:8081/realms/inari"),
+		OIDCClientID:              env("INARI_OIDC_CLIENT_ID", "inari-server"),
+		KeycloakBaseURL:           env("INARI_KEYCLOAK_BASE_URL", "http://localhost:8081"),
+		KeycloakRealm:             env("INARI_KEYCLOAK_REALM", "inari"),
+		KeycloakClientID:          env("INARI_KEYCLOAK_CLIENT_ID", "inari-platform-admin"),
+		KeycloakClientSecret:      env("INARI_KEYCLOAK_CLIENT_SECRET", ""),
+		OpenFGAAPIURL:             env("INARI_OPENFGA_API_URL", "http://localhost:8082"),
+		OpenFGAStoreName:          env("INARI_OPENFGA_STORE_NAME", "inari"),
+		PlatformAdminGroup:        env("INARI_PLATFORM_ADMIN_GROUP", "platform-admins"),
+		PlatformGroupSyncInterval: durEnv("INARI_PLATFORM_GROUP_SYNC_INTERVAL", 30*time.Second),
+		OutboxPollInterval:        durEnv("INARI_OUTBOX_POLL_INTERVAL", time.Second),
+		ShutdownTimeout:           durEnv("INARI_SHUTDOWN_TIMEOUT", 10*time.Second),
 
 		RegistrationTokenTTL:       durEnv("INARI_REGISTRATION_TOKEN_TTL", time.Hour),
 		EnrollmentApprovalRequired: boolEnv("INARI_ENROLLMENT_APPROVAL_REQUIRED", false),

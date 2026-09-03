@@ -4,8 +4,12 @@ package tenancy_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -16,8 +20,10 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/7K-Inari/inari-server/internal/audit"
+	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -86,6 +92,11 @@ func (f *fakeIdP) RemoveGroupMember(_ context.Context, groupPath, userID string)
 	f.grpMembers[groupPath] = removeStr(f.grpMembers[groupPath], userID)
 	return nil
 }
+func (f *fakeIdP) ListGroupMembers(_ context.Context, groupPath string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.grpMembers[groupPath]...), nil
+}
 func (f *fakeIdP) GetUser(_ context.Context, userID string) (*types.User, error) {
 	if !f.users[userID] {
 		return nil, tenancy.ErrUserNotFound
@@ -112,6 +123,9 @@ func (r *recordingStore) Check(context.Context, string, string, string) (bool, e
 	return false, nil
 }
 func (r *recordingStore) ListObjects(context.Context, string, string, string) ([]string, error) {
+	return nil, nil
+}
+func (r *recordingStore) ReadTuples(context.Context, string, string) ([]authz.Tuple, error) {
 	return nil, nil
 }
 func (r *recordingStore) WriteTuples(_ context.Context, t []authz.Tuple) error {
@@ -461,5 +475,76 @@ func TestMembershipIdempotent(t *testing.T) {
 	}
 	if deletes != 1 {
 		t.Errorf("membership tuple deleted %d times, want 1", deletes)
+	}
+}
+
+// allowOrgCreator grants only platform:inari org_creator (M1.W2 enforcement).
+type allowOrgCreator struct{ allow bool }
+
+func (a allowOrgCreator) Check(_ context.Context, _, relation, object string) (bool, error) {
+	if object == authz.ObjectPlatform && relation == authz.RelationOrgCreator {
+		return a.allow, nil
+	}
+	return false, nil
+}
+func (a allowOrgCreator) ListObjects(context.Context, string, string, string) ([]string, error) {
+	return nil, nil
+}
+
+type fixedValidator struct{ id *authn.Identity }
+
+func (v fixedValidator) Validate(context.Context, string) (*authn.Identity, error) { return v.id, nil }
+
+type readyOK struct{}
+
+func (readyOK) Ping(context.Context) error { return nil }
+
+// TestCreateTenantHTTPEnforcement verifies POST /api/v1/tenants is 403 without
+// the org_creator tuple and 201 with it (M1.W2).
+func TestCreateTenantHTTPEnforcement(t *testing.T) {
+	database := setupDB(t)
+	newServer := func(allow bool) *httptest.Server {
+		idp := newFakeIdP()
+		svc := tenancy.NewService(database, idp, tenancy.NewStore(), audit.NewStore())
+		router, api := httpserver.NewRouter(slog.New(slog.NewTextHandler(nil, nil)),
+			fixedValidator{id: &authn.Identity{Subject: "user-1"}}, readyOK{})
+		tenancy.NewHandler(svc, allowOrgCreator{allow: allow}).RegisterRoutes(api)
+		srv := httptest.NewServer(router)
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	post := func(srv *httptest.Server, slug string) *http.Response {
+		req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/tenants",
+			strings.NewReader(`{"slug":"`+slug+`","displayName":"Acme"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer good")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = resp.Body.Close() })
+		return resp
+	}
+
+	if resp := post(newServer(false), "denied-org"); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("without tuple: got %d, want 403", resp.StatusCode)
+	}
+
+	resp := post(newServer(true), "allowed-org")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("with tuple: got %d, want 200", resp.StatusCode)
+	}
+	var body struct {
+		Organization types.Organization `json:"organization"`
+		Teams        []types.Team       `json:"teams"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Organization.Slug != "allowed-org" || len(body.Teams) != 3 {
+		t.Errorf("body = %+v", body)
 	}
 }

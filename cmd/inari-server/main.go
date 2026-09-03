@@ -137,6 +137,12 @@ func run() error {
 	idp := tenancy.NewKeycloakAdmin(cfg.KeycloakBaseURL, cfg.KeycloakRealm, cfg.KeycloakClientID, cfg.KeycloakClientSecret)
 	svc := tenancy.NewService(database, idp, tenancy.NewStore(), auditStore)
 	handler := tenancy.NewHandler(svc, authorizer)
+	meHandler := tenancy.NewMeHandler(authorizer)
+
+	// Platform group sync (M1.W2, ADR-0003): Keycloak realm group →
+	// platform:inari org_creator tuples. Single writer for those tuples.
+	platformSync := authz.NewPlatformGroupSync(fgaStore, idp, cfg.PlatformAdminGroup)
+	go platformSync.Run(ctx, cfg.PlatformGroupSyncInterval)
 
 	registry := clusterregistry.NewService(database, idp, clusterregistry.NewStore(), auditStore,
 		cfg.RegistrationTokenTTL, cfg.EnrollmentApprovalRequired)
@@ -278,6 +284,7 @@ func run() error {
 
 	router, api := httpserver.NewRouter(log, validator, database)
 	handler.RegisterRoutes(api)
+	meHandler.RegisterRoutes(api)
 	registryHandler.RegisterRoutes(api)
 	catalogHandler.RegisterRoutes(api)
 	approvalsHandler.RegisterRoutes(api)

@@ -40,6 +40,37 @@ func keycloakTestServer(t *testing.T, bodies *map[string][]byte) *httptest.Serve
 	}))
 }
 
+func TestListGroupMembers(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/realms/inari/protocol/openid-connect/token":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"tok","expires_in":300}`))
+		case "/admin/realms/inari/groups":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"id":"g1","name":"platform-admins"}]`))
+		case "/admin/realms/inari/groups/g1/members":
+			if got := r.URL.Query().Get("max"); got != "500" {
+				t.Errorf("max = %q, want 500", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"id":"u1"},{"id":"u2"}]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	k := NewKeycloakAdmin(srv.URL, "inari", "inari-platform-admin", "test-secret")
+	members, err := k.ListGroupMembers(context.Background(), "platform-admins")
+	if err != nil {
+		t.Fatalf("ListGroupMembers: %v", err)
+	}
+	if len(members) != 2 || members[0] != "u1" || members[1] != "u2" {
+		t.Errorf("members = %v, want [u1 u2]", members)
+	}
+}
+
 func TestCreateClusterClientIncludesAudienceMapper(t *testing.T) {
 	bodies := map[string][]byte{}
 	srv := keycloakTestServer(t, &bodies)

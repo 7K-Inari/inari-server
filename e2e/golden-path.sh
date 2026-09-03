@@ -198,8 +198,39 @@ jq -e '.sub != null' <<<"$CLAIMS" >/dev/null || die "token has no sub claim (bas
 jq -e '.aud == "inari-server" or (.aud | type == "array" and index("inari-server"))' <<<"$CLAIMS" >/dev/null \
   || die "token has wrong aud (audience mapper missing): $(jq -c .aud <<<"$CLAIMS")"
 
-log "creating tenant '$TENANT'"
 API="http://$SERVER_SVC:8080/api/v1"
+log "GAP(kc-platform-group): ensuring dev-admin is in platform-admins (drives org_creator tuple sync)"
+GROUP_ID=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/groups?exact=true&search=platform-admins" | jq -r '.[0].id // empty')
+if [ -z "$GROUP_ID" ]; then
+  xcurl -X POST -H "Authorization: Bearer $AT" -H "Content-Type: application/json" \
+    -d '{"name":"platform-admins"}' -o /dev/null -w '%{http_code}' \
+    "http://keycloak-service:8080/admin/realms/inari/groups" | grep -qE '201|409' \
+    || die "failed to create platform-admins group"
+  GROUP_ID=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/groups?exact=true&search=platform-admins" | jq -r '.[0].id')
+fi
+# Join is idempotent (204); the server's platform group sync reconciler turns
+# membership into platform:inari org_creator tuples within its poll interval.
+kubectl -n "$NAMESPACE" exec "$TOOLS" -- curl -s -o /dev/null -X PUT \
+  -H "Authorization: Bearer $AT" \
+  "http://keycloak-service:8080/admin/realms/inari/users/$KC_UID/groups/$GROUP_ID"
+
+log "waiting for the platform group sync to grant dev-admin org_creator"
+FGA_STORE=$(xcurl "http://openfga:8080/stores" | jq -r '.stores[0].id')
+ORG_CREATOR=false
+for i in $(seq 1 18); do
+  ORG_CREATOR=$(xcurl -X POST "http://openfga:8080/stores/$FGA_STORE/check" -H "Content-Type: application/json" \
+    -d "{\"tuple_key\":{\"user\":\"user:$KC_UID\",\"relation\":\"org_creator\",\"object\":\"platform:inari\"}}" | jq -r .allowed 2>/dev/null || echo false)
+  [ "$ORG_CREATOR" = "true" ] && break
+  sleep 5
+done
+[ "$ORG_CREATOR" = "true" ] || die "org_creator tuple never appeared (platform group sync not running?)"
+
+log "verifying /me/permissions reflects the org_creator tuple"
+PERMS=$(xcurl -H "Authorization: Bearer $(user_token)" "$API/me/permissions" 2>/dev/null || true)
+jq -e '.canCreateOrganizations == true' <<<"$PERMS" >/dev/null \
+  || die "me/permissions = $PERMS, want canCreateOrganizations=true"
+
+log "creating tenant '$TENANT'"
 TENANT_RESP=""
 for i in $(seq 1 12); do
   TOKEN="$(user_token || true)"

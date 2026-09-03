@@ -56,6 +56,9 @@ type Tuple struct {
 type Store interface {
 	Check(ctx context.Context, user, relation, object string) (bool, error)
 	ListObjects(ctx context.Context, user, relation, objectType string) ([]string, error)
+	// ReadTuples returns all tuples matching the object+relation filter
+	// (any user). Used by reconcilers that diff desired vs actual state.
+	ReadTuples(ctx context.Context, object, relation string) ([]Tuple, error)
 	WriteTuples(ctx context.Context, tuples []Tuple) error
 	DeleteTuples(ctx context.Context, tuples []Tuple) error
 }
@@ -148,6 +151,30 @@ func (s *OpenFGAStore) ListObjects(ctx context.Context, user, relation, objectTy
 		return nil, fmt.Errorf("authz: list objects: %w", err)
 	}
 	return resp.Objects, nil
+}
+
+func (s *OpenFGAStore) ReadTuples(ctx context.Context, object, relation string) ([]Tuple, error) {
+	var out []Tuple
+	var token *string
+	for {
+		opts := client.ClientReadOptions{PageSize: openfga.PtrInt32(100)}
+		if token != nil {
+			opts.ContinuationToken = token
+		}
+		resp, err := s.client.Read(ctx).Body(client.ClientReadRequest{
+			Object: &object, Relation: &relation,
+		}).Options(opts).Execute()
+		if err != nil {
+			return nil, fmt.Errorf("authz: read tuples: %w", err)
+		}
+		for _, t := range resp.Tuples {
+			out = append(out, Tuple{User: t.Key.User, Relation: t.Key.Relation, Object: t.Key.Object})
+		}
+		if resp.ContinuationToken == "" {
+			return out, nil
+		}
+		token = &resp.ContinuationToken
+	}
 }
 
 func (s *OpenFGAStore) WriteTuples(ctx context.Context, tuples []Tuple) error {

@@ -102,6 +102,16 @@ func (h *Handler) createTenant(ctx context.Context, in *createTenantInput) (*ten
 	if id == nil {
 		return nil, huma.Error401Unauthorized("unauthenticated")
 	}
+	// Platform-level fine PEP: only org_creator on platform:inari may create
+	// tenants (M1.W2). Tuples are synced from the Keycloak platform-admins
+	// group by the PlatformGroupSync reconciler.
+	ok, err := h.authz.Check(ctx, authz.UserObject(id.Subject), authz.RelationOrgCreator, authz.ObjectPlatform)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, huma.Error403Forbidden("organization creation requires the platform org_creator permission")
+	}
 	org, teams, err := h.svc.CreateTenant(ctx, id.Subject, in.Body.Slug, in.Body.DisplayName)
 	if errors.Is(err, ErrSlugTaken) {
 		return nil, huma.Error409Conflict("tenant slug already exists")

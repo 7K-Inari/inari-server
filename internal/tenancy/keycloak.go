@@ -403,6 +403,34 @@ func (k *KeycloakAdmin) RemoveGroupMember(ctx context.Context, groupPath, userID
 	return nil
 }
 
+// ListGroupMembers returns the Keycloak user ids of the group at path a/b/c.
+func (k *KeycloakAdmin) ListGroupMembers(ctx context.Context, groupPath string) ([]string, error) {
+	gid, err := k.resolveGroupID(ctx, groupPath)
+	if err != nil {
+		return nil, err
+	}
+	// Dev-scale: a single page is plenty; paginate when the group outgrows it.
+	resp, err := k.do(ctx, http.MethodGet, "/groups/"+gid+"/members?max=500", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("keycloak: list group members: status %d", resp.StatusCode)
+	}
+	var users []struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&users); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(users))
+	for _, u := range users {
+		out = append(out, u.ID)
+	}
+	return out, nil
+}
+
 // resolveGroupID walks a/b/c one level at a time to the leaf group id.
 func (k *KeycloakAdmin) resolveGroupID(ctx context.Context, path string) (string, error) {
 	parts := strings.Split(strings.Trim(path, "/"), "/")

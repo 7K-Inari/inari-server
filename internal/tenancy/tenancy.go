@@ -26,6 +26,8 @@ type IdentityProvider interface {
 	RemoveOrganizationMember(ctx context.Context, kcOrgID, userID string) error
 	AddGroupMember(ctx context.Context, groupPath, userID string) error
 	RemoveGroupMember(ctx context.Context, groupPath, userID string) error
+	// ListGroupMembers returns the Keycloak user ids in the group at the path.
+	ListGroupMembers(ctx context.Context, groupPath string) ([]string, error)
 	GetUser(ctx context.Context, userID string) (*types.User, error)
 }
 

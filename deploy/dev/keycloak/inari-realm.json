@@ -25,11 +25,18 @@
       "optionalClientScopes": []
     }
   ],
+  "groups": [
+    {
+      "name": "platform-admins",
+      "path": "/platform-admins"
+    }
+  ],
   "users": [
     {
       "username": "dev-admin",
       "enabled": true,
       "email": "dev-admin@inari.local",
+      "groups": ["/platform-admins"],
       "credentials": [{"type": "password", "value": "dev-admin", "temporary": false}]
     }
   ]

@@ -20,6 +20,9 @@ func (f *fakeStore) Check(_ context.Context, user, relation, object string) (boo
 func (f *fakeStore) ListObjects(context.Context, string, string, string) ([]string, error) {
 	return nil, nil
 }
+func (f *fakeStore) ReadTuples(context.Context, string, string) ([]Tuple, error) {
+	return nil, nil
+}
 func (f *fakeStore) WriteTuples(_ context.Context, t []Tuple) error {
 	f.written = append(f.written, t...)
 	return nil

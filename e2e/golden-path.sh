@@ -210,9 +210,10 @@ if [ -z "$GROUP_ID" ]; then
 fi
 # Join is idempotent (204); the server's platform group sync reconciler turns
 # membership into platform:inari org_creator tuples within its poll interval.
-kubectl -n "$NAMESPACE" exec "$TOOLS" -- curl -s -o /dev/null -X PUT \
+xcurl -o /dev/null -X PUT \
   -H "Authorization: Bearer $AT" \
-  "http://keycloak-service:8080/admin/realms/inari/users/$KC_UID/groups/$GROUP_ID"
+  "http://keycloak-service:8080/admin/realms/inari/users/$KC_UID/groups/$GROUP_ID" \
+  || die "failed to add dev-admin to platform-admins"
 
 log "waiting for the platform group sync to grant dev-admin org_creator"
 FGA_STORE=$(xcurl "http://openfga:8080/stores" | jq -r '.stores[0].id')

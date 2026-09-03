@@ -104,3 +104,21 @@ func TestPlatformGroupSyncEmptyGroupDeletesAll(t *testing.T) {
 		t.Errorf("deleted = %+v, want only the org_creator tuple", st.deleted)
 	}
 }
+
+// Regression: a non-positive interval (e.g. INARI_PLATFORM_GROUP_SYNC_INTERVAL=0s)
+// must not panic time.NewTicker; Run still syncs once and exits on cancel.
+func TestPlatformGroupSyncRunZeroInterval(t *testing.T) {
+	st := &syncStore{}
+	syncer := NewPlatformGroupSync(st, &fakeMemberLister{ids: []string{"u1"}}, "platform-admins")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		syncer.Run(ctx, 0)
+		close(done)
+	}()
+	cancel()
+	<-done
+	if len(st.written) != 1 {
+		t.Errorf("written = %+v, want the initial sync to have run", st.written)
+	}
+}

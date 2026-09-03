@@ -70,7 +70,12 @@ func (s *PlatformGroupSync) SyncOnce(ctx context.Context) error {
 }
 
 // Run reconciles on a ticker until ctx is cancelled; errors are logged, not fatal.
+// A non-positive interval (misconfiguration) falls back to 30s instead of
+// panicking in time.NewTicker.
 func (s *PlatformGroupSync) Run(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
 	if err := s.SyncOnce(ctx); err != nil {
 		slog.Warn("platform group sync", "error", err)
 	}

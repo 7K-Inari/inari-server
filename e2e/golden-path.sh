@@ -77,6 +77,18 @@ log "waiting for PostgreSQL (CNPG) and Keycloak"
 kubectl -n "$NAMESPACE" wait --for=condition=Ready cluster.postgresql.cnpg.io/postgresql --timeout=600s
 kubectl -n "$NAMESPACE" rollout status statefulset/keycloak --timeout=420s
 
+log "pinning Keycloak hostname to the in-cluster FQDN (issuer consistency)"
+# With a dynamic hostname, token issuers vary by request host and never match
+# the server's configured issuer. The FQDN resolves from every namespace
+# (server in $NAMESPACE, agent in inari-system). In production this is a real
+# DNS name reachable from both sides. This must happen BEFORE inari-server is
+# installed: the server derives its expected issuer from keycloak.baseUrl and
+# crashes on OIDC discovery if the provider still reports keycloak.local.
+kubectl -n "$NAMESPACE" wait --for=condition=complete job -l app.kubernetes.io/component=keycloak --timeout=300s 2>/dev/null || true
+kubectl -n "$NAMESPACE" patch keycloak keycloak --type merge \
+  -p "{\"spec\":{\"hostname\":{\"hostname\":\"http://$KC_FQDN\",\"strict\":true}}}"
+kubectl -n "$NAMESPACE" rollout status statefulset/keycloak --timeout=420s
+
 log "installing NATS (JetStream)"
 helm repo add openfga https://openfga.github.io/helm-charts >/dev/null
 helm repo add nats https://nats-io.github.io/k8s/helm/charts/ >/dev/null
@@ -122,16 +134,7 @@ kubectl -n "$NAMESPACE" run "$TOOLS" --image=curlimages/curl:8.10.1 --restart=Ne
   --overrides='{"spec":{"securityContext":{"runAsUser":1000}}}' --command -- sleep 3600 >/dev/null
 kubectl -n "$NAMESPACE" wait --for=condition=ready "pod/$TOOLS" --timeout=120s >/dev/null
 
-log "pinning Keycloak hostname to the in-cluster FQDN (issuer consistency)"
-# With a dynamic hostname, token issuers vary by request host and never match
-# the server's configured issuer. The FQDN resolves from every namespace
-# (server in $NAMESPACE, agent in inari-system). In production this is a real
-# DNS name reachable from both sides.
-kubectl -n "$NAMESPACE" wait --for=condition=complete job -l app.kubernetes.io/component=keycloak --timeout=300s 2>/dev/null || true
-kubectl -n "$NAMESPACE" patch keycloak keycloak --type merge \
-  -p "{\"spec\":{\"hostname\":{\"hostname\":\"http://$KC_FQDN\",\"strict\":true}}}"
-kubectl -n "$NAMESPACE" rollout status statefulset/keycloak --timeout=420s
-kubectl -n "$NAMESPACE" rollout status deployment/inari-server --timeout=180s || true
+log "waiting for the Keycloak issuer to converge on the FQDN"
 for i in $(seq 1 24); do
   ISS=$(xcurl "http://keycloak-service:8080/realms/inari/.well-known/openid-configuration" | jq -r .issuer 2>/dev/null || true)
   [ "$ISS" = "http://$KC_FQDN/realms/inari" ] && break

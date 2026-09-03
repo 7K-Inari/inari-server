@@ -24,6 +24,8 @@ const (
 	RelationDeployer         = "deployer"
 	RelationEditor           = "editor"
 	RelationInvoke           = "invoke"
+	RelationSuperuser        = "superuser"
+	RelationOrgCreator       = "org_creator"
 )
 
 // Object types.
@@ -40,6 +42,7 @@ const (
 	TypeExtension        = "extension"
 	TypeRollout          = "rollout"
 	TypeDriftEvent       = "drift_event"
+	TypePlatform         = "platform"
 )
 
 // Tuple is one relationship fact.
@@ -171,8 +174,9 @@ func (s *OpenFGAStore) DeleteTuples(ctx context.Context, tuples []Tuple) error {
 	return nil
 }
 
-// ModelV1 is the M0 authorization model: organization roles derive from team
-// membership; higher roles imply lower ones. Mirrors model.fga.
+// ModelV1 is the authorization model: organization roles derive from team
+// membership; higher roles imply lower ones. Includes the global platform type (M1).
+// Mirrors model.fga.
 func ModelV1() client.ClientWriteAuthorizationModelRequest {
 	this := func() *map[string]any { m := map[string]any{}; return &m }
 	computed := func(rel string) openfga.Userset {
@@ -260,10 +264,19 @@ func ModelV1() client.ClientWriteAuthorizationModelRequest {
 	driftMeta := map[string]openfga.RelationMetadata{
 		RelationParent: {DirectlyRelatedUserTypes: &orgRef},
 	}
+	platformRelations := map[string]openfga.Userset{
+		RelationSuperuser:  direct(),
+		RelationOrgCreator: union(direct(), computed(RelationSuperuser)),
+	}
+	platformMeta := map[string]openfga.RelationMetadata{
+		RelationSuperuser:  {DirectlyRelatedUserTypes: &userRef},
+		RelationOrgCreator: {DirectlyRelatedUserTypes: &userRef},
+	}
 	return client.ClientWriteAuthorizationModelRequest{
 		SchemaVersion: "1.1",
 		TypeDefinitions: []openfga.TypeDefinition{
 			{Type: "user"},
+			{Type: TypePlatform, Relations: &platformRelations, Metadata: &openfga.Metadata{Relations: &platformMeta}},
 			{Type: TypeTeam, Relations: &teamRelations, Metadata: &openfga.Metadata{Relations: &teamMeta}},
 			{Type: TypeOrganization, Relations: &orgRelations, Metadata: &openfga.Metadata{Relations: &orgMeta}},
 			{Type: TypeCluster, Relations: &clusterRelations, Metadata: &openfga.Metadata{Relations: &clusterMeta}},
@@ -305,6 +318,11 @@ func TenantZoneObject(id string) string   { return TypeTenantZone + ":" + id }
 func ExtensionObject(id string) string    { return TypeExtension + ":" + id }
 func RolloutObject(id string) string      { return TypeRollout + ":" + id }
 func DriftEventObject(id string) string   { return TypeDriftEvent + ":" + id }
+
+// ObjectPlatform is the single global platform object used for platform-wide permission
+// checks (M1). Tuples are written as e.g. "platform:inari org_creator user:<id>".
+const ObjectPlatform = TypePlatform + ":inari"
+
 func TeamMemberUserset(teamID string) string {
 	return TeamObject(teamID) + "#" + RelationMember
 }

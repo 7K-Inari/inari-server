@@ -17,7 +17,7 @@ tests:
           of: Deployment
       - equal:
           path: spec.template.spec.containers[0].image
-          value: ghcr.io/7k-inari/inari-server:1.3.0
+          value: ghcr.io/7k-inari/inari-server:1.3.1
       - equal:
           path: metadata.labels["app.kubernetes.io/component"]
           value: inari-server

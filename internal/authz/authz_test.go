@@ -161,3 +161,67 @@ func TestTupleWriterM4Entities(t *testing.T) {
 		t.Errorf("deleted = %+v", fs.deleted)
 	}
 }
+
+func TestPlatformModelShape(t *testing.T) {
+	m := ModelV1()
+	var found bool
+	for _, td := range m.TypeDefinitions {
+		if td.Type != TypePlatform {
+			continue
+		}
+		found = true
+		rels := *td.Relations
+		if _, ok := rels[RelationSuperuser]; !ok {
+			t.Error("platform: missing superuser relation")
+		}
+		if _, ok := rels[RelationOrgCreator]; !ok {
+			t.Error("platform: missing org_creator relation")
+		}
+		uc := *rels[RelationOrgCreator].Union
+		if len(uc.Child) != 2 {
+			t.Errorf("org_creator should be direct or computed superuser, got %d children", len(uc.Child))
+		}
+	}
+	if !found {
+		t.Error("platform type not found in ModelV1")
+	}
+}
+
+func TestPlatformConstants(t *testing.T) {
+	if ObjectPlatform != "platform:inari" {
+		t.Errorf("ObjectPlatform = %q, want platform:inari", ObjectPlatform)
+	}
+	if RelationSuperuser != "superuser" || RelationOrgCreator != "org_creator" {
+		t.Errorf("relations = %q/%q", RelationSuperuser, RelationOrgCreator)
+	}
+}
+
+func TestPlatformCheckNoTuplesDenies(t *testing.T) {
+	fs := &fakeStore{checks: map[string]bool{}}
+	a := NewAuthorizer(fs)
+	for _, rel := range []string{RelationOrgCreator, RelationSuperuser} {
+		ok, err := a.Check(context.Background(), UserObject("u1"), rel, ObjectPlatform)
+		if err != nil {
+			t.Fatalf("Check %s: %v", rel, err)
+		}
+		if ok {
+			t.Errorf("expected deny for %s with no tuples", rel)
+		}
+	}
+}
+
+func TestPlatformCheckWithTupleAllows(t *testing.T) {
+	fs := &fakeStore{checks: map[string]bool{
+		"user:u1|org_creator|platform:inari": true,
+		"user:u2|superuser|platform:inari":   true,
+	}}
+	a := NewAuthorizer(fs)
+	ok, err := a.Check(context.Background(), "user:u1", RelationOrgCreator, ObjectPlatform)
+	if err != nil || !ok {
+		t.Errorf("Check org_creator = %v, %v; want true, nil", ok, err)
+	}
+	ok, err = a.Check(context.Background(), "user:u2", RelationSuperuser, ObjectPlatform)
+	if err != nil || !ok {
+		t.Errorf("Check superuser = %v, %v; want true, nil", ok, err)
+	}
+}

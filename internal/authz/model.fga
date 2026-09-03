@@ -3,6 +3,11 @@ model
 
 type user
 
+type platform
+  relations
+    define superuser: [user]
+    define org_creator: [user] or superuser
+
 type team
   relations
     define member: [user]

@@ -42,14 +42,14 @@ func keycloakTestServer(t *testing.T, bodies *map[string][]byte) *httptest.Serve
 
 func TestListGroupMembers(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/realms/inari/protocol/openid-connect/token":
+		switch r.URL.Path {
+		case "/realms/inari/protocol/openid-connect/token":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"access_token":"tok","expires_in":300}`))
-		case r.URL.Path == "/admin/realms/inari/groups":
+		case "/admin/realms/inari/groups":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`[{"id":"g1","name":"platform-admins"}]`))
-		case r.URL.Path == "/admin/realms/inari/groups/g1/members":
+		case "/admin/realms/inari/groups/g1/members":
 			if got := r.URL.Query().Get("max"); got != "500" {
 				t.Errorf("max = %q, want 500", got)
 			}

@@ -18,6 +18,53 @@ env:
   IMAGE: ghcr.io/7k-inari/inari-server
 
 jobs:
+  # Publish the huma-generated OpenAPI contract as an OCI artifact so the
+  # inari-ui (and any other client) can codegen TypeScript types from the
+  # exact released schema instead of hand-maintained copies (the drift
+  # class behind e.g. 422 "unexpected property" in production).
+  openapi:
+    runs-on: ubuntu-latest
+    env:
+      SPEC_IMAGE: ghcr.io/7k-inari/inari-server-openapi
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: render spec
+        run: make export-openapi
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: oras-project/setup-oras@v1
+
+      - name: push spec to GHCR
+        id: push
+        run: |
+          major_minor="${VERSION%.*}"
+          for tag in "${VERSION}" "${major_minor}" "latest"; do
+            out="$(oras push "${SPEC_IMAGE}:${tag}" \
+              dist/openapi.yaml:application/vnd.oai.openapi+yaml)"
+            echo "${out}"
+            if [ "${tag}" = "${VERSION}" ]; then
+              echo "digest=$(echo "${out}" | grep -oE 'sha256:[a-f0-9]{64}' | tail -1)" >> "$GITHUB_OUTPUT"
+            fi
+          done
+        env:
+          SPEC_IMAGE: ${{ env.SPEC_IMAGE }}
+          VERSION: ${{ inputs.version }}
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: sign spec (keyless)
+        run: cosign sign --yes ${{ env.SPEC_IMAGE }}@${{ steps.push.outputs.digest }}
+
   build:
     runs-on: ubuntu-latest
     steps:

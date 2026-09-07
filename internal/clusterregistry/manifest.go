@@ -54,6 +54,21 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces", "nodes"]
     verbs: ["get", "list", "watch"]
+  # Capability-discovery watchers (internal/capability): report installed
+  # platforms to the control plane. Permissions mirror the agent's watchers;
+  # on clusters without the API installed the watch degrades to log noise.
+  - apiGroups: ["pkg.crossplane.io"]
+    resources: ["providers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apiextensions.crossplane.io"]
+    resources: ["compositions", "compositeresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["kro.run"]
+    resources: ["resourcegraphdefinitions"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["operators.coreos.com"]
+    resources: ["clusterserviceversions"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -116,11 +131,14 @@ spec:
           imagePullPolicy: IfNotPresent
           resources:
             requests:
-              cpu: 50m
-              memory: 64Mi
-            limits:
               cpu: 100m
-              memory: 128Mi
+              memory: 256Mi
+            limits:
+              cpu: 250m
+              # Informer caches (CRDs, compositions, nodes, …) plateau around
+              # 360Mi on CRD-heavy clusters; 128Mi OOM-killed the agent ~60s
+              # after every start (kernel SIGKILL, exit 137).
+              memory: 512Mi
           env:
             - name: INARI_CONTROL_PLANE
               value: {{ .GatewayAddress | quote }}

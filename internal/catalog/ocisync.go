@@ -4,19 +4,42 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
+
+	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/google/go-containerregistry/pkg/name"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"gopkg.in/yaml.v3"
 
 	"github.com/7K-Inari/inari-server/internal/types"
 )
+
+// ChartRef carries the Helm chart coordinates of a platform-app package
+// (from the package's chart.yaml).
+type ChartRef struct {
+	RepoURL   string `json:"repoURL"`
+	Chart     string `json:"chart"`
+	Namespace string `json:"namespace"`
+}
 
 // Package is one curated package version pulled from the catalog registry.
 type Package struct {
 	Name        string
 	DisplayName string
 	Description string
-	Version     string
-	Channel     string
+	// Type is the package.yaml/index type: "platform-app", "kro-rgd",
+	// "policy-pack". Empty behaves as "kro-rgd".
+	Type    string
+	Version string
+	Channel string
+	// OCIRef is the image reference this package version was pulled from.
+	OCIRef string
+	// Chart is set for platform-app packages.
+	Chart *ChartRef
 	// RGD is the raw KRO ResourceGraphDefinition YAML.
 	RGD []byte
 	// Schema is the OpenAPI v3 schema for the instance form; when absent it
@@ -25,9 +48,27 @@ type Package struct {
 	UIHints []byte
 }
 
-// OCIPuller fetches curated packages. Built against a fixture OCI layout at
-// M2 (inari-catalog artifacts publish in parallel); a go-containerregistry
-// client slots in behind this interface without callers changing.
+// itemIDForPackage maps a pulled package to its catalog item ID. Platform
+// apps reconcile with the items seeded by SeedPlatformApps
+// ("platform:<name>", e.g. platform:external-secrets); all other curated
+// packages keep the "curated:<name>" prefix.
+func itemIDForPackage(p Package) string {
+	if p.Type == "platform-app" {
+		return "platform:" + p.Name
+	}
+	return "curated:" + p.Name
+}
+
+// sourceForPackage preserves the seeded platform source for platform apps.
+func sourceForPackage(p Package) types.CatalogSource {
+	if p.Type == "platform-app" {
+		return types.CatalogSourcePlatform
+	}
+	return types.CatalogSourceCurated
+}
+
+// OCIPuller fetches curated packages. FixturePuller serves tests/dev;
+// RegistryPuller pulls the real inari-catalog OCI artifacts.
 type OCIPuller interface {
 	Pull(ctx context.Context) ([]Package, error)
 }
@@ -37,6 +78,36 @@ type packageMetadata struct {
 	DisplayName string `json:"displayName"`
 	Description string `json:"description"`
 	Channel     string `json:"channel"`
+}
+
+// packageYAML mirrors packages/<name>/package.yaml in inari-catalog.
+type packageYAML struct {
+	Version     string `yaml:"version"`
+	Channel     string `yaml:"channel"`
+	Type        string `yaml:"type"`
+	Description string `yaml:"description"`
+	Category    string `yaml:"category"`
+}
+
+// chartYAML mirrors packages/<name>/chart.yaml (platform apps only).
+type chartYAML struct {
+	RepoURL   string            `yaml:"repoURL"`
+	Chart     string            `yaml:"chart"`
+	Namespace string            `yaml:"namespace"`
+	Channels  map[string]string `yaml:"channels"`
+}
+
+// catalogIndex mirrors catalog.yaml in inari-catalog.
+type catalogIndex struct {
+	Packages []struct {
+		Name        string `yaml:"name"`
+		Version     string `yaml:"version"`
+		Channel     string `yaml:"channel"`
+		Type        string `yaml:"type"`
+		Description string `yaml:"description"`
+		OCIRef      string `yaml:"ociRef"`
+		ChannelRef  string `yaml:"channelRef"`
+	} `yaml:"packages"`
 }
 
 // FixturePuller reads a local OCI-style layout:
@@ -107,9 +178,231 @@ func readPackageDir(dir string) (*Package, error) {
 	return &pkg, nil
 }
 
+// RegistryPuller pulls the real curated packages from an OCI registry. It
+// first fetches the catalog index artifact (an oras-pushed catalog.yaml,
+// e.g. ghcr.io/7k-inari/catalog/index:latest), then each package artifact
+// listed in it. inari-catalog pushes per-package artifacts today; publishing
+// the index artifact is the companion step on that repo.
+type RegistryPuller struct {
+	// IndexRef is the OCI reference of the catalog index artifact.
+	IndexRef string
+	// Keychain overrides registry auth (default: authn.DefaultKeychain).
+	Keychain authn.Keychain
+	// Insecure allows plain-HTTP registries (tests/dev).
+	Insecure bool
+}
+
+func (p *RegistryPuller) remoteOpts(ctx context.Context) []remote.Option {
+	kc := p.Keychain
+	if kc == nil {
+		kc = authn.DefaultKeychain
+	}
+	return []remote.Option{remote.WithAuthFromKeychain(kc), remote.WithContext(ctx)}
+}
+
+func (p *RegistryPuller) Pull(ctx context.Context) ([]Package, error) {
+	indexRaw, err := p.fetchFile(ctx, p.IndexRef, "catalog.yaml")
+	if err != nil {
+		return nil, fmt.Errorf("catalog: pull index %s: %w", p.IndexRef, err)
+	}
+	var idx catalogIndex
+	if err := yaml.Unmarshal(indexRaw, &idx); err != nil {
+		return nil, fmt.Errorf("catalog: parse index %s: %w", p.IndexRef, err)
+	}
+	var out []Package
+	for _, entry := range idx.Packages {
+		ref := entry.ChannelRef
+		if ref == "" {
+			ref = entry.OCIRef
+		}
+		if ref == "" {
+			return nil, fmt.Errorf("catalog: index package %q has no ociRef", entry.Name)
+		}
+		files, err := p.fetchDir(ctx, ref)
+		if err != nil {
+			return nil, fmt.Errorf("catalog: pull package %s (%s): %w", entry.Name, ref, err)
+		}
+		pkgs, err := packageFromFiles(entry.Name, entry.Type, entry.Description, ref, files)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, pkgs...)
+	}
+	return out, nil
+}
+
+// fetchFile pulls an oras-style artifact and returns the content of the
+// layer titled filename.
+func (p *RegistryPuller) fetchFile(ctx context.Context, ref, filename string) ([]byte, error) {
+	files, err := p.fetchDir(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	raw, ok := files[filename]
+	if !ok {
+		return nil, fmt.Errorf("catalog: %s: no layer named %q", ref, filename)
+	}
+	return raw, nil
+}
+
+// fetchDir pulls an oras directory-push artifact: every layer carries its
+// file name in the org.opencontainers.image.title annotation.
+func (p *RegistryPuller) fetchDir(ctx context.Context, ref string) (map[string][]byte, error) {
+	opts := []name.Option{}
+	if p.Insecure {
+		opts = append(opts, name.Insecure)
+	}
+	r, err := name.ParseReference(ref, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("catalog: parse ref %q: %w", ref, err)
+	}
+	desc, err := remote.Get(r, p.remoteOpts(ctx)...)
+	if err != nil {
+		return nil, err
+	}
+	img, err := desc.Image()
+	if err != nil {
+		return nil, err
+	}
+	manifest, err := img.Manifest()
+	if err != nil {
+		return nil, err
+	}
+	layers, err := img.Layers()
+	if err != nil {
+		return nil, err
+	}
+	byDigest := map[v1.Hash]v1.Layer{}
+	for _, l := range layers {
+		d, err := l.Digest()
+		if err != nil {
+			return nil, err
+		}
+		byDigest[d] = l
+	}
+	files := map[string][]byte{}
+	for _, ld := range manifest.Layers {
+		title := ld.Annotations["org.opencontainers.image.title"]
+		if title == "" {
+			continue
+		}
+		l, ok := byDigest[ld.Digest]
+		if !ok {
+			return nil, fmt.Errorf("catalog: %s: layer %s not found", ref, ld.Digest)
+		}
+		rc, err := l.Uncompressed()
+		if err != nil {
+			return nil, err
+		}
+		raw, err := io.ReadAll(rc)
+		_ = rc.Close()
+		if err != nil {
+			return nil, err
+		}
+		files[title] = raw
+	}
+	return files, nil
+}
+
+// packageFromFiles builds Packages from one pulled package artifact.
+// Platform apps expand chart.yaml channels into one Package per channel
+// (the chart version is what deploys resolve); other package types yield a
+// single Package at their package.yaml version/channel.
+func packageFromFiles(name, typ, indexDesc, ref string, files map[string][]byte) ([]Package, error) {
+	base := Package{Name: name, Type: typ, Description: indexDesc, OCIRef: ref}
+	if raw, ok := files["package.yaml"]; ok {
+		var py packageYAML
+		if err := yaml.Unmarshal(raw, &py); err != nil {
+			return nil, fmt.Errorf("catalog: %s: package.yaml: %w", ref, err)
+		}
+		if py.Type != "" {
+			base.Type = py.Type
+		}
+		if base.Description == "" {
+			base.Description = py.Description
+		}
+		base.Version = py.Version
+		base.Channel = py.Channel
+	}
+	base.Schema = files["schema.json"]
+	base.UIHints = files["ui-hints.json"]
+	if raw, ok := files["chart.yaml"]; ok {
+		var cy chartYAML
+		if err := yaml.Unmarshal(raw, &cy); err != nil {
+			return nil, fmt.Errorf("catalog: %s: chart.yaml: %w", ref, err)
+		}
+		base.Chart = &ChartRef{RepoURL: cy.RepoURL, Chart: cy.Chart, Namespace: cy.Namespace}
+		if len(cy.Channels) == 0 {
+			return nil, fmt.Errorf("catalog: %s: chart.yaml has no channels", ref)
+		}
+		channels := make([]string, 0, len(cy.Channels))
+		for ch := range cy.Channels {
+			channels = append(channels, ch)
+		}
+		sort.Strings(channels)
+		out := make([]Package, 0, len(channels))
+		for _, ch := range channels {
+			pkg := base
+			pkg.Channel = ch
+			pkg.Version = cy.Channels[ch]
+			out = append(out, pkg)
+		}
+		return out, nil
+	}
+	if raw, ok := files["rgd.yaml"]; ok {
+		base.RGD = raw
+	}
+	if base.Channel == "" {
+		base.Channel = "stable"
+	}
+	return []Package{base}, nil
+}
+
 // ErrSyncNotConfigured is returned when no OCI puller is wired (no
-// INARI_CATALOG_OCI_PATH / registry client configured).
+// INARI_CATALOG_OCI_INDEX_REF / INARI_CATALOG_OCI_PATH configured).
 var ErrSyncNotConfigured = fmt.Errorf("catalog: sync not configured (no OCI puller)")
+
+// syncPlan turns pulled packages into item + version upserts. Pure — kept
+// separate from Sync so tests can assert the mapping without a database.
+func syncPlan(pkgs []Package) ([]*types.CatalogItem, []*types.CatalogItemVersion, error) {
+	items := make([]*types.CatalogItem, 0, len(pkgs))
+	versions := make([]*types.CatalogItemVersion, 0, len(pkgs))
+	for _, p := range pkgs {
+		itemID := itemIDForPackage(p)
+		payload := map[string]any{}
+		if len(p.RGD) > 0 {
+			payload["rgd"] = string(p.RGD)
+		}
+		if p.Chart != nil {
+			payload["chart"] = p.Chart
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return nil, nil, err
+		}
+		ociRef := p.OCIRef
+		if ociRef == "" {
+			ociRef = "fixture://" + p.Name + ":" + p.Version
+		}
+		items = append(items, &types.CatalogItem{
+			ID:          itemID,
+			Source:      sourceForPackage(p),
+			Name:        p.Name,
+			DisplayName: p.DisplayName,
+			Description: p.Description,
+			OCIRef:      ociRef,
+		})
+		versions = append(versions, &types.CatalogItemVersion{
+			ItemID:  itemID,
+			Version: p.Version,
+			Channel: p.Channel,
+			Schema:  p.Schema,
+			UIHints: p.UIHints,
+			Payload: raw,
+		})
+	}
+	return items, versions, nil
+}
 
 // Sync pulls curated packages and upserts them as catalog items (one item
 // per package name, one version row per package version). Idempotent.
@@ -121,32 +414,13 @@ func (s *Service) Sync(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	items, versions, err := syncPlan(pkgs)
+	if err != nil {
+		return 0, err
+	}
 	count := 0
-	for _, p := range pkgs {
-		itemID := "curated:" + p.Name
-		payload, err := json.Marshal(map[string]string{
-			"rgd": string(p.RGD),
-		})
-		if err != nil {
-			return count, err
-		}
-		item := &types.CatalogItem{
-			ID:          itemID,
-			Source:      types.CatalogSourceCurated,
-			Name:        p.Name,
-			DisplayName: p.DisplayName,
-			Description: p.Description,
-			OCIRef:      "fixture://" + p.Name + ":" + p.Version,
-		}
-		version := &types.CatalogItemVersion{
-			ItemID:  itemID,
-			Version: p.Version,
-			Channel: p.Channel,
-			Schema:  p.Schema,
-			UIHints: p.UIHints,
-			Payload: payload,
-		}
-		if err := s.UpsertItem(ctx, item, version); err != nil {
+	for i := range items {
+		if err := s.UpsertItem(ctx, items[i], versions[i]); err != nil {
 			return count, err
 		}
 		count++

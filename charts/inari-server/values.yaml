@@ -57,10 +57,12 @@ route:
   hostnames: []
   # Optional PathPrefix match; empty = match all paths.
   pathPrefix: ""
-  # Additional PathPrefix matches routed to the same backend, e.g. ["/inari."]
-  # so agent-facing ConnectRPC services (RegistrationService/EventStreamService
-  # under /inari.agent.v1.*) are reachable through the gateway alongside /api.
-  extraPathPrefixes: []
+  # Dedicated agent-gateway hostnames (e.g. ["inari-gw.example.org"]):
+  # rendered as a second HTTPRoute routing ALL paths to inari-server so
+  # agent-facing ConnectRPC (/inari.agent.v1.*) is reachable publicly.
+  # PathPrefix cannot express this — Gateway API prefixes are segment-based
+  # and "/inari." is a partial segment.
+  agentHostnames: []
   # Extra annotations (e.g. external-dns/cloudflare-proxy).
   annotations: {}
 

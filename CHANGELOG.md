@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/7K-Inari/inari-server/compare/v1.4.1...v1.5.0) (2026-09-07)
+
+
+### Features
+
+* **charts:** dedicated agent-gateway hostname via route.agentHostnames ([#33](https://github.com/7K-Inari/inari-server/issues/33)) ([ffc9d13](https://github.com/7K-Inari/inari-server/commit/ffc9d134b5f82aa77a2f29dd8977cf8bbd045040))
+
 ## [1.4.1](https://github.com/7K-Inari/inari-server/compare/v1.4.0...v1.4.1) (2026-09-07)
 
 

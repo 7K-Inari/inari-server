@@ -337,3 +337,44 @@ func TestClusterDecommissionOwnershipBlock(t *testing.T) {
 	}
 	_ = ctx
 }
+
+// TestClusterAPIDelete verifies cancel-pending-registration semantics:
+// 204 on a pending cluster (row removed, tokens burned), 409 once
+// registered, 404 on unknown or already-deleted IDs.
+func TestClusterAPIDelete(t *testing.T) {
+	srv, svc := itServer(t, itAuthorizer{allow: true})
+	defer srv.Close()
+	ctx := context.Background()
+
+	// Unknown ID -> 404.
+	if code, _ := itReq(t, srv, "DELETE", "/api/v1/tenants/acme/clusters/cluster:nope", "good", ""); code != http.StatusNotFound {
+		t.Errorf("unknown id: got %d, want 404", code)
+	}
+
+	// Pending cluster with an unconsumed token -> 204, row gone, token burned.
+	cid := itCreate(t, srv, "acme", "del-pending")
+	if code, body := itReq(t, srv, "POST", "/api/v1/tenants/acme/clusters/"+cid+"/tokens", "good", ""); code != http.StatusOK {
+		t.Fatalf("issue token: %d %s", code, body)
+	}
+	if code, body := itReq(t, srv, "DELETE", "/api/v1/tenants/acme/clusters/"+cid, "good", ""); code != http.StatusNoContent {
+		t.Fatalf("delete pending: got %d %s, want 204", code, body)
+	}
+	if _, err := svc.GetCluster(ctx, cid); !errors.Is(err, ErrClusterNotFound) {
+		t.Errorf("cluster still present after delete: %v", err)
+	}
+	if code, _ := itReq(t, srv, "DELETE", "/api/v1/tenants/acme/clusters/"+cid, "good", ""); code != http.StatusNotFound {
+		t.Errorf("delete again: got %d, want 404", code)
+	}
+
+	// Registered cluster -> 409 and the row survives.
+	cid = itCreate(t, srv, "acme", "del-registered")
+	if err := svc.MarkRegistered(ctx, "user-1", cid, "cluster-x", "v1.30.0", "v1.5.0", nil); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := itReq(t, srv, "DELETE", "/api/v1/tenants/acme/clusters/"+cid, "good", ""); code != http.StatusConflict {
+		t.Fatalf("delete registered: got %d %s, want 409", code, body)
+	}
+	if _, err := svc.GetCluster(ctx, cid); err != nil {
+		t.Errorf("registered cluster removed by delete: %v", err)
+	}
+}

@@ -31,6 +31,9 @@ var (
 	ErrTokenUsed         = errors.New("registration token already used")
 	ErrClusterNotPending = errors.New("cluster is not pending approval")
 	ErrClusterRevoked    = errors.New("cluster is revoked")
+	// ErrClusterNotPendingDeletion rejects deleting a cluster that already
+	// completed registration — only pending registrations can be cancelled.
+	ErrClusterNotPendingDeletion = errors.New("cluster is registered; revoke or decommission it instead")
 )
 
 // ClientManager provisions per-cluster OIDC identity (plan §5.3). Only
@@ -150,6 +153,28 @@ func (s *Store) ListClusters(ctx context.Context, q db.Querier, orgID string) ([
 		out = append(out, *c)
 	}
 	return out, rows.Err()
+}
+
+// DeleteCluster removes the cluster row; registration tokens cascade away.
+func (s *Store) DeleteCluster(ctx context.Context, q db.Querier, id string) error {
+	const sql = `DELETE FROM clusters WHERE id = $1`
+	tag, err := q.Exec(ctx, sql, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrClusterNotFound
+	}
+	return nil
+}
+
+// BurnTokensForCluster marks every unconsumed registration token of the
+// cluster as used, so a deleted cluster's leaked plaintext can never be
+// replayed against a re-created record.
+func (s *Store) BurnTokensForCluster(ctx context.Context, q db.Querier, clusterID string) error {
+	const sql = `UPDATE registration_tokens SET used_at = now() WHERE cluster_id = $1 AND used_at IS NULL`
+	_, err := q.Exec(ctx, sql, clusterID)
+	return err
 }
 
 func (s *Store) SetState(ctx context.Context, q db.Querier, id string, state types.ClusterState) error {
@@ -425,6 +450,39 @@ func (s *Service) RevokeCluster(ctx context.Context, actor, clusterID string) er
 		})
 	})
 	return err
+}
+
+// DeleteCluster cancels a pending registration: the cluster row is removed
+// and any unconsumed registration tokens are burned in the same TX. Only
+// pending clusters (pending_approval / pending_registration) can be deleted
+// — a registered cluster has a live identity and must be revoked or
+// decommissioned instead. Pending clusters never had a Keycloak client
+// provisioned, so no identity teardown is needed.
+func (s *Service) DeleteCluster(ctx context.Context, actor, clusterID string) error {
+	c, err := s.store.GetCluster(ctx, s.db.Pool, clusterID)
+	if err != nil {
+		return err
+	}
+	if c.State != types.ClusterStatePendingApproval && c.State != types.ClusterStatePendingRegistration {
+		return fmt.Errorf("%w (state: %s)", ErrClusterNotPendingDeletion, c.State)
+	}
+	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		if err := s.store.BurnTokensForCluster(ctx, tx, clusterID); err != nil {
+			return err
+		}
+		if err := s.store.DeleteCluster(ctx, tx, clusterID); err != nil {
+			return err
+		}
+		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
+			OrgID: c.OrgID, Actor: actor, Action: "cluster.deleted", ObjectType: "cluster", ObjectID: clusterID,
+			Payload: json.RawMessage(fmt.Sprintf(`{"name":%q,"state":%q}`, c.Name, c.State)),
+		}); err != nil {
+			return err
+		}
+		return audit.AppendOutbox(ctx, tx, c.OrgID, types.EventClusterDeleted, types.ClusterPayload{
+			OrgID: c.OrgID, ClusterID: clusterID, Name: c.Name,
+		})
+	})
 }
 
 // CordonCluster blocks new deploys while existing workloads keep running

@@ -87,6 +87,7 @@ const (
 	EventClusterCordoned       = "cluster.cordoned"
 	EventClusterUncordoned     = "cluster.uncordoned"
 	EventClusterDecommissioned = "cluster.decommissioned"
+	EventClusterDeleted        = "cluster.deleted"
 	EventCapabilitiesIngested  = "capabilities.ingested"
 
 	EventCatalogItemUpserted = "catalog.item_upserted"

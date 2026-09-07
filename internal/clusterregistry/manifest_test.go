@@ -82,7 +82,7 @@ func TestRenderInstallManifestExternalSecret(t *testing.T) {
 	s := string(out)
 	for _, want := range []string{
 		"kind: ExternalSecret",
-		"apiVersion: external-secrets.io/v1beta1",
+		"apiVersion: external-secrets.io/v1",
 		"name: inari-agent-oidc-client",
 		"namespace: inari-system",
 		"name: inari-platform",

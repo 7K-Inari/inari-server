@@ -170,8 +170,9 @@ spec:
 ---
 # OIDC client secret projection: ESO pulls the per-cluster secret the
 # control plane wrote to Vault during the registration exchange. Requires
-# ESO plus a SecretStore named per SecretDeliveryReference in the cluster.
-apiVersion: external-secrets.io/v1beta1
+# ESO >= 1.0 (external-secrets.io/v1) plus a SecretStore named per
+# SecretDeliveryReference in the cluster.
+apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
   name: {{ .ESOSecretName }}

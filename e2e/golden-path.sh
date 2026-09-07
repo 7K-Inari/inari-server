@@ -304,7 +304,7 @@ kubectl create namespace inari-system --dry-run=client -o yaml | kubectl apply -
 kubectl -n inari-system create secret generic inari-vault-token \
   --from-literal=token="$VAULT_DEV_TOKEN" --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -f - <<EOF
-apiVersion: external-secrets.io/v1beta1
+apiVersion: external-secrets.io/v1
 kind: ClusterSecretStore
 metadata:
   name: inari-platform

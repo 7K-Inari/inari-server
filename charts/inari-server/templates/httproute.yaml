@@ -32,7 +32,13 @@ spec:
         - path:
             type: PathPrefix
             value: {{ . | quote }}
-        {{- else }}
+        {{- end }}
+        {{- range .Values.route.extraPathPrefixes }}
+        - path:
+            type: PathPrefix
+            value: {{ . | quote }}
+        {{- end }}
+        {{- if and (not .Values.route.pathPrefix) (not .Values.route.extraPathPrefixes) }}
         []
         {{- end }}
       backendRefs:

@@ -220,6 +220,21 @@ func TestClusterAPITokenAndManifest(t *testing.T) {
 	if strings.Contains(body, "kubeconfig") {
 		t.Error("manifest must never contain a kubeconfig")
 	}
+	// Capability-discovery RBAC must mirror the agent's watchers — a missing
+	// rule fails closed at runtime (watch denied, capability never reported).
+	for _, want := range []string{
+		`resources: ["providers"]`,
+		`resources: ["compositions", "compositeresourcedefinitions"]`,
+		`resources: ["resourcegraphdefinitions"]`,
+		`resources: ["clusterserviceversions"]`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("manifest missing capability-watcher RBAC %s", want)
+		}
+	}
+	if !strings.Contains(body, "memory: 512Mi") {
+		t.Error("manifest memory limit too small for informer caches (OOM loop)")
+	}
 }
 
 // TestClusterAPIRevokeFlow verifies revocation blocks further token issuance

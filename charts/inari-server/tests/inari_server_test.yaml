@@ -124,3 +124,23 @@ tests:
       - equal:
           path: spec.rules[0].backendRefs[0].port
           value: 8080
+  - it: adds extra path prefixes to the same rule
+    template: httproute.yaml
+    set:
+      route.enabled: true
+      gateway.name: platform-gateway
+      route.hostnames:
+        - api.example.org
+      route.pathPrefix: /api
+      route.extraPathPrefixes:
+        - /inari.
+    asserts:
+      - equal:
+          path: spec.rules[0].matches[0].path.value
+          value: /api
+      - equal:
+          path: spec.rules[0].matches[1].path.value
+          value: /inari.
+      - equal:
+          path: spec.rules[0].backendRefs[0].port
+          value: 8080

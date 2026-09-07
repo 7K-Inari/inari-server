@@ -8,6 +8,7 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/7K-Inari/inari-server/internal/secrets"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -19,6 +20,18 @@ type ManifestParams struct {
 	AgentImageTag  string
 	// GatewayAddress is the base URL agents dial out to (pull, never push).
 	GatewayAddress string
+	// ESO delivery wiring for the per-cluster OIDC client secret (plan
+	// §5.3). When ESOSecretStore is set the manifest renders an
+	// ExternalSecret that projects the Vault path
+	// inari/clusters/<id>/oidc-client-secret into
+	// ESOSecretNamespace/ESOSecretName — this manifest is the delivery
+	// channel (pull, never push: the control plane never applies anything
+	// into tenant clusters).
+	ESOSecretStore     string
+	ESOSecretStoreKind string
+	ESOSecretName      string
+	ESOSecretNamespace string
+	ESOSecretKey       string
 }
 
 var installManifest = template.Must(template.New("agent-install").Funcs(template.FuncMap{
@@ -153,6 +166,29 @@ spec:
                 secretKeyRef:
                   name: inari-agent-bootstrap
                   key: registration-token
+{{- if .ESOSecretStore }}
+---
+# OIDC client secret projection: ESO pulls the per-cluster secret the
+# control plane wrote to Vault during the registration exchange. Requires
+# ESO plus a SecretStore named per SecretDeliveryReference in the cluster.
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: {{ .ESOSecretName }}
+  namespace: {{ .ESOSecretNamespace }}
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: {{ .ESOSecretStore }}
+    kind: {{ .ESOSecretStoreKind }}
+  target:
+    name: {{ .ESOSecretName }}
+  data:
+    - secretKey: {{ .ESOSecretKey }}
+      remoteRef:
+        key: {{ .ESORemotePath }}
+        property: {{ .ESOSecretKey }}
+{{- end }}
 `))
 
 // RenderInstallManifest renders the agent install manifest embedding the
@@ -164,13 +200,33 @@ func RenderInstallManifest(cluster *types.Cluster, token string, p ManifestParam
 	if p.GatewayAddress == "" {
 		return nil, fmt.Errorf("clusterregistry: gateway address required")
 	}
+	if p.ESOSecretStore != "" {
+		if p.ESOSecretName == "" {
+			p.ESOSecretName = "inari-agent-oidc-client"
+		}
+		if p.ESOSecretNamespace == "" {
+			p.ESOSecretNamespace = "inari-system"
+		}
+		if p.ESOSecretKey == "" {
+			p.ESOSecretKey = "client-secret"
+		}
+		if p.ESOSecretStoreKind == "" {
+			p.ESOSecretStoreKind = "ClusterSecretStore"
+		}
+	}
 	var buf bytes.Buffer
 	err := installManifest.Execute(&buf, map[string]string{
-		"Token":          token,
-		"Image":          p.AgentImageRepo + ":" + p.AgentImageTag,
-		"GatewayAddress": p.GatewayAddress,
-		"TenantID":       cluster.OrgID,
-		"Labels":         encodeLabels(cluster.Labels),
+		"Token":              token,
+		"Image":              p.AgentImageRepo + ":" + p.AgentImageTag,
+		"GatewayAddress":     p.GatewayAddress,
+		"TenantID":           cluster.OrgID,
+		"Labels":             encodeLabels(cluster.Labels),
+		"ESOSecretStore":     p.ESOSecretStore,
+		"ESOSecretStoreKind": p.ESOSecretStoreKind,
+		"ESOSecretName":      p.ESOSecretName,
+		"ESOSecretNamespace": p.ESOSecretNamespace,
+		"ESOSecretKey":       p.ESOSecretKey,
+		"ESORemotePath":      secrets.ClusterOIDCPath(cluster.ID),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("clusterregistry: render manifest: %w", err)

@@ -5,10 +5,11 @@
 # Mirrors the manually validated flow. All HTTP calls run through a toolbox
 # pod in the cluster (kubectl exec) so the script is immune to
 # port-forward fragility. It intentionally performs a few Keycloak
-# provisioning steps imperatively (audience mapper, client secret delivery)
+# provisioning steps imperatively (audience mapper)
 # that are not yet automated in inari-server — each is marked GAP(n) and maps
 # to a tracked upstream fix; the script must keep
-# passing once those land.
+# passing once those land. The OIDC client-secret delivery is fully
+# automated: Vault (dev mode) + ESO + the manifest-rendered ExternalSecret.
 #
 # Prereqs: docker, kind, kubectl, helm, jq. Configurable via env:
 #   CLUSTER_NAME (default inari-e2e)
@@ -31,6 +32,7 @@ KEEP_CLUSTER="${KEEP_CLUSTER:-false}"
 TOOLS=golden-path-tools
 KC_FQDN="keycloak-service.${NAMESPACE}.svc:8080"
 SERVER_SVC="inari-server"
+VAULT_DEV_TOKEN="${VAULT_DEV_TOKEN:-e2e-root-token}"
 
 log() { printf '\033[1;34m[e2e]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[e2e] %s\033[0m\n' "$*" >&2; exit 1; }
@@ -113,6 +115,22 @@ helm upgrade --install openfga openfga/openfga --version 0.2.27 \
   --set playground.enabled=false \
   --wait --timeout 5m
 
+log "installing Vault (dev mode) + ESO for the OIDC client-secret delivery path"
+helm repo add hashicorp https://helm.releases.hashicorp.com >/dev/null
+helm repo add external-secrets https://charts.external-secrets.io >/dev/null
+helm repo update >/dev/null
+helm upgrade --install vault hashicorp/vault \
+  --namespace "$NAMESPACE" \
+  --set server.dev.enabled=true \
+  --set server.dev.devRootToken="$VAULT_DEV_TOKEN" \
+  --set injector.enabled=false \
+  --wait --timeout 5m
+helm upgrade --install external-secrets external-secrets/external-secrets \
+  --namespace external-secrets --create-namespace \
+  --wait --timeout 5m
+kubectl -n "$NAMESPACE" create secret generic inari-vault \
+  --from-literal=token="$VAULT_DEV_TOKEN" --dry-run=client -o yaml | kubectl apply -f -
+
 log "installing inari-server chart (e2e image)"
 helm upgrade --install inari-server "$SERVER_CHART_DIR" \
   --namespace "$NAMESPACE" \
@@ -120,6 +138,7 @@ helm upgrade --install inari-server "$SERVER_CHART_DIR" \
   --set image.tag="${SERVER_IMAGE##*:}" \
   --set image.pullPolicy=IfNotPresent \
   --set keycloak.baseUrl="http://$KC_FQDN" \
+  --set vault.addr="http://vault.${NAMESPACE}.svc:8200" \
   --set-json "extraEnv=[
     {\"name\":\"INARI_AGENT_GATEWAY_ADDRESS\",\"value\":\"http://$SERVER_SVC.${NAMESPACE}.svc:8080\"},
     {\"name\":\"INARI_AGENT_IMAGE_REPO\",\"value\":\"inari/agent\"},
@@ -272,23 +291,50 @@ MANIFEST=$(mktemp)
 trap 'rm -f "$MANIFEST"; cleanup' EXIT
 xcurl -X POST -H "Authorization: Bearer $(user_token)" \
   "$API/tenants/$TENANT/clusters/$CLUSTER_ID/install-manifest" >"$MANIFEST"
+# ESO wiring must exist BEFORE the agent registers: the manifest's
+# ExternalSecret pulls from the ClusterSecretStore the registration
+# response references (SecretDeliveryReference.esoSecretStore).
+kubectl create namespace inari-system --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n inari-system create secret generic inari-vault-token \
+  --from-literal=token="$VAULT_DEV_TOKEN" --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -f - <<EOF
+apiVersion: external-secrets.io/v1beta1
+kind: ClusterSecretStore
+metadata:
+  name: inari-platform
+spec:
+  provider:
+    vault:
+      server: http://vault.${NAMESPACE}.svc:8200
+      path: secret
+      version: v2
+      auth:
+        tokenSecretRef:
+          name: inari-vault-token
+          namespace: inari-system
+          key: token
+EOF
 kubectl apply -f "$MANIFEST"
 kubectl -n inari-system rollout status deployment/inari-agent --timeout=180s
 
-log "GAP(eso-secret): waiting for registration, then delivering the client secret"
+log "waiting for registration, then the ESO-projected client secret"
 for i in $(seq 1 24); do
   STATE=$(xcurl -H "Authorization: Bearer $(user_token)" "$API/tenants/$TENANT/clusters/$CLUSTER_ID" | jq -r '.cluster.state' 2>/dev/null || true)
   [ "$STATE" = "active" ] && break
   sleep 5
   [ "$i" = 24 ] && die "cluster never became active (agent logs: kubectl -n inari-system logs deploy/inari-agent)"
 done
+for i in $(seq 1 24); do
+  kubectl -n inari-system get secret inari-agent-oidc-client >/dev/null 2>&1 && break
+  sleep 5
+  [ "$i" = 24 ] && die "ESO never projected inari-agent-oidc-client (kubectl -n inari-system get externalsecret inari-agent-oidc-client -o yaml)"
+done
+ESO_SECRET=$(kubectl -n inari-system get secret inari-agent-oidc-client -o jsonpath='{.data.client-secret}' | base64 -d)
 KC_CLIENT_ID=$(xcurl -H "Authorization: Bearer $(user_token)" "$API/tenants/$TENANT/clusters/$CLUSTER_ID" | jq -r '.cluster.keycloakClientId')
 AT="$(admin_token)"
 KCID=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/clients?clientId=$KC_CLIENT_ID" | jq -r '.[0].id')
-CLIENT_SECRET=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/clients/$KCID/client-secret" | jq -r .value)
-kubectl -n inari-system create secret generic inari-agent-oidc-client \
-  --from-literal=client-secret="$CLIENT_SECRET" --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n inari-system rollout restart deployment/inari-agent 2>/dev/null || true
+KC_SECRET=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/clients/$KCID/client-secret" | jq -r .value)
+[ "$ESO_SECRET" = "$KC_SECRET" ] || die "ESO-projected secret does not match the Keycloak client secret"
 
 log "verifying capabilities stream"
 CAPS=0

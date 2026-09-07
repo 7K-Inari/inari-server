@@ -34,6 +34,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
 	gitgithub "github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider/github"
 	"github.com/7K-Inari/inari-server/internal/policyservice"
+	"github.com/7K-Inari/inari-server/internal/secrets"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/tenantzonefactory"
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -151,11 +152,25 @@ func run() error {
 		return invStore.List(ctx, database.Pool, orgID, inventory.ListFilters{ClusterID: clusterID})
 	}))
 	capsStore := capabilities.NewStore()
-	registryHandler := clusterregistry.NewHandler(registry, svc, authorizer, clusterregistry.ManifestParams{
-		AgentImageRepo: cfg.AgentImageRepo,
-		AgentImageTag:  cfg.AgentImageTag,
-		GatewayAddress: cfg.AgentGatewayAddress,
-	}, clusterregistry.CapabilitiesListerFunc(func(ctx context.Context, clusterID string) ([]types.Capability, error) {
+	// ESO delivery wiring: the Vault writer pushes the per-cluster OIDC
+	// client secret at registration; the install manifest renders the
+	// matching ExternalSecret (pull, never push).
+	var secretWriter secrets.Writer
+	if cfg.VaultAddr != "" {
+		secretWriter = secrets.NewVaultWriter(cfg.VaultAddr, cfg.VaultToken, cfg.VaultKVMount)
+	} else {
+		log.Warn("INARI_VAULT_ADDR unset: cluster registration will fail with pending_secret_delivery")
+	}
+	manifestParams := clusterregistry.ManifestParams{
+		AgentImageRepo:     cfg.AgentImageRepo,
+		AgentImageTag:      cfg.AgentImageTag,
+		GatewayAddress:     cfg.AgentGatewayAddress,
+		ESOSecretStore:     cfg.ESOSecretStore,
+		ESOSecretKey:       "client-secret",
+		ESOSecretName:      "inari-agent-oidc-client",
+		ESOSecretNamespace: "inari-system",
+	}
+	registryHandler := clusterregistry.NewHandler(registry, svc, authorizer, manifestParams, clusterregistry.CapabilitiesListerFunc(func(ctx context.Context, clusterID string) ([]types.Capability, error) {
 		return capsStore.List(ctx, database.Pool, clusterID)
 	}))
 	caps := capabilities.NewService(database, capsStore, auditStore)
@@ -163,7 +178,7 @@ func run() error {
 		OIDCIssuerURL:       cfg.OIDCIssuerURL,
 		ESOSecretStore:      cfg.ESOSecretStore,
 		CurrentAgentVersion: cfg.CurrentAgentVersion,
-	})
+	}).WithSecretWriter(secretWriter)
 
 	var puller catalog.OCIPuller
 	if cfg.CatalogOCIPath != "" {
@@ -259,10 +274,7 @@ func run() error {
 	tzfEnv.Wiring = &tenantzonefactory.ModuleWiring{
 		Tenants: svc, IDP: idp, Clusters: registry, Accounts: cloudAccountsSvc,
 		Git: git, GitCfg: orchestratorSvc,
-		Manifest: clusterregistry.ManifestParams{
-			AgentImageRepo: cfg.AgentImageRepo, AgentImageTag: cfg.AgentImageTag,
-			GatewayAddress: cfg.AgentGatewayAddress,
-		},
+		Manifest: manifestParams,
 	}
 	tzfEnv.Clusters = tzfClusterLifecycle{registry}
 	tzfSvc := tenantzonefactory.NewService(database, tenantzonefactory.NewStore(), auditStore, tzfEnv, approvalsSvc, log)

@@ -38,6 +38,14 @@ type Config struct {
 	AgentGatewayAddress        string
 	ESOSecretStore             string
 
+	// Platform Vault (ESO delivery of per-cluster OIDC client secrets, plan
+	// §5.3). Empty VaultAddr disables delivery; registration then fails
+	// explicitly (pending_secret_delivery) instead of promising a secret
+	// that never arrives.
+	VaultAddr    string
+	VaultToken   string
+	VaultKVMount string
+
 	// CatalogOCIPath points at the curated package source: a local fixture
 	// OCI layout directory at M2 (a registry client slots in later).
 	CatalogOCIPath string
@@ -93,6 +101,10 @@ func Load() (*Config, error) {
 		AgentImageTag:              env("INARI_AGENT_IMAGE_TAG", "edge"),
 		AgentGatewayAddress:        env("INARI_AGENT_GATEWAY_ADDRESS", "https://inari-server.example.com"),
 		ESOSecretStore:             env("INARI_ESO_SECRET_STORE", "inari-platform"),
+
+		VaultAddr:    env("INARI_VAULT_ADDR", ""),
+		VaultToken:   env("INARI_VAULT_TOKEN", ""),
+		VaultKVMount: env("INARI_VAULT_KV_MOUNT", "secret"),
 
 		CatalogOCIPath:          env("INARI_CATALOG_OCI_PATH", ""),
 		GitProvider:             env("INARI_GIT_PROVIDER", "fake"),

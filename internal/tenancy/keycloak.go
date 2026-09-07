@@ -286,6 +286,38 @@ func (k *KeycloakAdmin) CreateClusterClient(ctx context.Context, clusterID strin
 	return clientID, nil
 }
 
+// ClusterClientSecret reads the generated secret of a confidential client
+// via the admin API so the registration exchange can hand it to the platform
+// secret store (ESO delivery, plan §5.3). The value never transits the
+// agent-facing API.
+func (k *KeycloakAdmin) ClusterClientSecret(ctx context.Context, clientID string) (string, error) {
+	uuid, err := k.findClientUUID(ctx, clientID)
+	if err != nil {
+		return "", err
+	}
+	if uuid == "" {
+		return "", fmt.Errorf("keycloak: client %s not found", clientID)
+	}
+	resp, err := k.do(ctx, http.MethodGet, "/clients/"+uuid+"/client-secret", nil)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("keycloak: client secret: status %d", resp.StatusCode)
+	}
+	var body struct {
+		Value string `json:"value"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return "", err
+	}
+	if body.Value == "" {
+		return "", fmt.Errorf("keycloak: client %s has empty secret", clientID)
+	}
+	return body.Value, nil
+}
+
 // DisableClient revokes a cluster's identity by disabling its client (plan
 // §5.3 revocation path); in-flight tokens expire on their short TTL.
 func (k *KeycloakAdmin) DisableClient(ctx context.Context, clientID string) error {

@@ -11,6 +11,8 @@ import (
 	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
 
 	"github.com/7K-Inari/inari-server/internal/clusterregistry"
+	"github.com/7K-Inari/inari-server/internal/secrets"
+	"github.com/7K-Inari/inari-server/internal/types"
 )
 
 // RegistrationService implements inari.agent.v1.RegistrationService: the
@@ -20,25 +22,33 @@ func (g *Gateway) RegisterCluster(ctx context.Context, req *connect.Request[agen
 	if req.Msg.RegistrationToken == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("registration_token required"))
 	}
-	cluster, err := g.registry.ConsumeRegistrationToken(ctx, req.Msg.RegistrationToken)
-	switch {
-	case errors.Is(err, clusterregistry.ErrTokenInvalid):
-		return nil, connect.NewError(connect.CodeUnauthenticated, err)
-	case errors.Is(err, clusterregistry.ErrTokenUsed):
-		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
-	case errors.Is(err, clusterregistry.ErrTokenExpired):
-		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
-	case errors.Is(err, clusterregistry.ErrClusterRevoked):
-		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("cluster is revoked"))
-	case errors.Is(err, clusterregistry.ErrClusterNotPending):
-		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("cluster enrollment pending approval"))
-	case err != nil:
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("consume token: %w", err))
+	cluster, err := g.peekToken(ctx, req.Msg.RegistrationToken)
+	if err != nil {
+		return nil, err
 	}
 
+	// External side effects run BEFORE the token is burned: a failure leaves
+	// the token consumable so the agent retries with backoff instead of
+	// waiting for a secret that never arrives (the old ~2min deadline).
 	clientID, err := g.clients.CreateClusterClient(ctx, cluster.ID)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("provision identity: %w", err))
+	}
+	if g.secrets == nil {
+		return nil, connect.NewError(connect.CodeUnavailable,
+			fmt.Errorf("pending_secret_delivery: platform secret store not configured"))
+	}
+	secret, err := g.clients.ClusterClientSecret(ctx, clientID)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeUnavailable, fmt.Errorf("pending_secret_delivery: read client secret: %w", err))
+	}
+	if err := g.secrets.Put(ctx, secrets.ClusterOIDCPath(cluster.ID), g.cfg.ESOSecretKey, secret); err != nil {
+		return nil, connect.NewError(connect.CodeUnavailable, fmt.Errorf("pending_secret_delivery: write secret store: %w", err))
+	}
+
+	cluster, err = g.consumeToken(ctx, req.Msg.RegistrationToken)
+	if err != nil {
+		return nil, err
 	}
 	labels := cluster.Labels
 	if len(req.Msg.ClusterLabels) > 0 {
@@ -62,4 +72,33 @@ func (g *Gateway) RegisterCluster(ctx context.Context, req *connect.Request[agen
 		CredentialsExpireHint: timestamppb.Now(),
 	})
 	return res, nil
+}
+
+func (g *Gateway) peekToken(ctx context.Context, token string) (*types.Cluster, error) {
+	cluster, err := g.registry.PeekRegistrationToken(ctx, token)
+	return cluster, g.tokenErr(err)
+}
+
+func (g *Gateway) consumeToken(ctx context.Context, token string) (*types.Cluster, error) {
+	cluster, err := g.registry.ConsumeRegistrationToken(ctx, token)
+	return cluster, g.tokenErr(err)
+}
+
+func (g *Gateway) tokenErr(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, clusterregistry.ErrTokenInvalid):
+		return connect.NewError(connect.CodeUnauthenticated, err)
+	case errors.Is(err, clusterregistry.ErrTokenUsed):
+		return connect.NewError(connect.CodeFailedPrecondition, err)
+	case errors.Is(err, clusterregistry.ErrTokenExpired):
+		return connect.NewError(connect.CodeFailedPrecondition, err)
+	case errors.Is(err, clusterregistry.ErrClusterRevoked):
+		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("cluster is revoked"))
+	case errors.Is(err, clusterregistry.ErrClusterNotPending):
+		return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("cluster enrollment pending approval"))
+	default:
+		return connect.NewError(connect.CodeInternal, fmt.Errorf("consume token: %w", err))
+	}
 }

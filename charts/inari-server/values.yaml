@@ -43,6 +43,18 @@ keycloak:
 # Extra INARI_* env vars, e.g. - name: INARI_AGENT_IMAGE_TAG / value: dev
 extraEnv: []
 
+# Platform Vault for ESO delivery of per-cluster OIDC client secrets
+# (registration exchange). Without addr, cluster registration fails
+# explicitly with pending_secret_delivery.
+vault:
+  addr: ""
+  kvMount: secret
+  # Secret holding the Vault token (policy: update on
+  # <kvMount>/data/inari/clusters/* only).
+  tokenSecret:
+    name: inari-vault
+    tokenKey: token
+
 # Gateway API — parentRef to an ALREADY-EXISTING Gateway. This chart never
 # creates a Gateway/GatewayClass: a Gateway must be deployed beforehand.
 gateway:

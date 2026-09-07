@@ -67,6 +67,22 @@
       "required": ["realm", "adminRole", "adminSecret"]
     },
     "extraEnv": { "type": "array" },
+    "vault": {
+      "type": "object",
+      "properties": {
+        "addr": { "type": "string" },
+        "kvMount": { "type": "string", "minLength": 1 },
+        "tokenSecret": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "tokenKey": { "type": "string", "minLength": 1 }
+          },
+          "required": ["name", "tokenKey"]
+        }
+      },
+      "required": ["tokenSecret"]
+    },
     "gateway": {
       "type": "object",
       "properties": {

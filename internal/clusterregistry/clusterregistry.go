@@ -33,12 +33,16 @@ var (
 	ErrClusterRevoked    = errors.New("cluster is revoked")
 )
 
-// ClientManager provisions per-cluster OIDC identity (plan §5.3). Only
-// client metadata crosses this seam — never secrets.
+// ClientManager provisions per-cluster OIDC identity (plan §5.3). Secrets
+// only leave this seam toward the platform secret store (ESO delivery) —
+// never toward the agent-facing API.
 type ClientManager interface {
 	// CreateClusterClient creates the cluster-<id> client (client-credentials
 	// grant, hardcoded cluster_id claim) and returns its clientID.
 	CreateClusterClient(ctx context.Context, clusterID string) (clientID string, err error)
+	// ClusterClientSecret returns the client's generated secret for delivery
+	// to the platform secret store.
+	ClusterClientSecret(ctx context.Context, clientID string) (secret string, err error)
 	// DisableClient revokes a cluster's identity (plan §5.3 revocation path).
 	DisableClient(ctx context.Context, clientID string) error
 }
@@ -508,6 +512,43 @@ func (s *Service) transition(ctx context.Context, actor, clusterID string, to ty
 		return nil, err
 	}
 	c.State = to
+	return c, nil
+}
+
+// PeekRegistrationToken validates a bootstrap token exactly like
+// ConsumeRegistrationToken but WITHOUT burning it. The registration exchange
+// peeks first so a failed external side effect (Keycloak client secret
+// delivery) leaves the token consumable for a retry instead of stranding the
+// agent until its deadline. Consume still revalidates in its TX, so a
+// peek/consume race is safe.
+func (s *Service) PeekRegistrationToken(ctx context.Context, plaintext string) (*types.Cluster, error) {
+	const sel = `SELECT id, cluster_id, expires_at, used_at, created_by, created_at
+	             FROM registration_tokens WHERE token_hash = $1`
+	var t types.RegistrationToken
+	err := s.db.Pool.QueryRow(ctx, sel, HashToken(plaintext)).
+		Scan(&t.ID, &t.ClusterID, &t.ExpiresAt, &t.UsedAt, &t.CreatedBy, &t.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrTokenInvalid
+	}
+	if err != nil {
+		return nil, err
+	}
+	if t.UsedAt != nil {
+		return nil, ErrTokenUsed
+	}
+	if s.now().After(t.ExpiresAt) {
+		return nil, ErrTokenExpired
+	}
+	c, err := s.store.GetCluster(ctx, s.db.Pool, t.ClusterID)
+	if err != nil {
+		return nil, err
+	}
+	switch c.State {
+	case types.ClusterStateRevoked:
+		return nil, ErrClusterRevoked
+	case types.ClusterStatePendingApproval:
+		return nil, ErrClusterNotPending
+	}
 	return c, nil
 }
 

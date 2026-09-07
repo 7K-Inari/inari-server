@@ -65,7 +65,8 @@ type itClients struct{}
 func (itClients) CreateClusterClient(context.Context, string) (string, error) {
 	return "cluster-x", nil
 }
-func (itClients) DisableClient(context.Context, string) error { return nil }
+func (itClients) ClusterClientSecret(context.Context, string) (string, error) { return "s", nil }
+func (itClients) DisableClient(context.Context, string) error                 { return nil }
 
 func itServer(t *testing.T, az itAuthorizer) (*httptest.Server, *Service) {
 	t.Helper()

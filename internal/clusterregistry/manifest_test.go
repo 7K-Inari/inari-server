@@ -69,6 +69,46 @@ func TestRenderInstallManifestOmitsEmptyLabels(t *testing.T) {
 	}
 }
 
+func TestRenderInstallManifestExternalSecret(t *testing.T) {
+	c := &types.Cluster{ID: "cluster:abc-123", OrgID: "org:x"}
+	p := ManifestParams{
+		AgentImageRepo: "r", AgentImageTag: "v1", GatewayAddress: "https://g",
+		ESOSecretStore: "inari-platform",
+	}
+	out, err := RenderInstallManifest(c, "t", p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	for _, want := range []string{
+		"kind: ExternalSecret",
+		"apiVersion: external-secrets.io/v1",
+		"name: inari-agent-oidc-client",
+		"namespace: inari-system",
+		"name: inari-platform",
+		"kind: ClusterSecretStore",
+		"key: inari/clusters/abc-123/oidc-client-secret",
+		"secretKey: client-secret",
+		"property: client-secret",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("manifest missing %q\n---\n%s", want, s)
+		}
+	}
+}
+
+func TestRenderInstallManifestNoESO(t *testing.T) {
+	c := &types.Cluster{ID: "cluster:abc", OrgID: "org:x"}
+	p := ManifestParams{AgentImageRepo: "r", AgentImageTag: "v1", GatewayAddress: "https://g"}
+	out, err := RenderInstallManifest(c, "t", p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "ExternalSecret") {
+		t.Errorf("ExternalSecret must be omitted without an ESO store:\n%s", out)
+	}
+}
+
 func TestRenderInstallManifestRequiresParams(t *testing.T) {
 	c := &types.Cluster{ID: "cluster:abc"}
 	if _, err := RenderInstallManifest(c, "t", ManifestParams{}); err == nil {

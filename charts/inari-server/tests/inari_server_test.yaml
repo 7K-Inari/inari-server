@@ -82,6 +82,36 @@ tests:
           content:
             name: INARI_OIDC_ISSUER_URL
             value: https://alias.example.org/realms/inari
+  - it: renders no Vault env without vault.addr
+    template: deployment.yaml
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_VAULT_ADDR
+  - it: renders Vault env with the token sourced from a secret
+    template: deployment.yaml
+    set:
+      vault.addr: https://vault.example.org
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_VAULT_ADDR
+            value: https://vault.example.org
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_VAULT_KV_MOUNT
+            value: secret
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_VAULT_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: inari-vault
+                key: token
   - it: renders a Service
     template: service.yaml
     asserts:

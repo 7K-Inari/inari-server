@@ -48,6 +48,17 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.keycloak.adminSecret.name }}
                   key: {{ .Values.keycloak.adminSecret.clientSecretKey }}
+            {{- if .Values.vault.addr }}
+            - name: INARI_VAULT_ADDR
+              value: {{ .Values.vault.addr | quote }}
+            - name: INARI_VAULT_KV_MOUNT
+              value: {{ .Values.vault.kvMount | quote }}
+            - name: INARI_VAULT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.vault.tokenSecret.name }}
+                  key: {{ .Values.vault.tokenSecret.tokenKey }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

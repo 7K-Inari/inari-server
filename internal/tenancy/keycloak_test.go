@@ -71,6 +71,54 @@ func TestListGroupMembers(t *testing.T) {
 	}
 }
 
+func TestClusterClientSecret(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/realms/inari/protocol/openid-connect/token":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"tok","expires_in":300}`))
+		case r.URL.Path == "/admin/realms/inari/clients" && r.Method == http.MethodGet:
+			if got := r.URL.Query().Get("clientId"); got != "cluster-abc" {
+				t.Errorf("clientId query = %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"id":"uuid-1"}]`))
+		case r.URL.Path == "/admin/realms/inari/clients/uuid-1/client-secret":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"type":"secret","value":"s3cr3t"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	k := NewKeycloakAdmin(srv.URL, "inari", "inari-platform-admin", "test-secret")
+	secret, err := k.ClusterClientSecret(context.Background(), "cluster-abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secret != "s3cr3t" {
+		t.Errorf("secret = %q", secret)
+	}
+}
+
+func TestClusterClientSecretMissingClient(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/realms/inari/protocol/openid-connect/token" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"tok","expires_in":300}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+	k := NewKeycloakAdmin(srv.URL, "inari", "inari-platform-admin", "test-secret")
+	if _, err := k.ClusterClientSecret(context.Background(), "cluster-gone"); err == nil {
+		t.Fatal("expected error for missing client")
+	}
+}
+
 func TestCreateClusterClientIncludesAudienceMapper(t *testing.T) {
 	bodies := map[string][]byte{}
 	srv := keycloakTestServer(t, &bodies)

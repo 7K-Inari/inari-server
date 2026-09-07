@@ -18,6 +18,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/capabilities"
 	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/secrets"
 )
 
 // Config tunes the gateway runtime behavior.
@@ -72,6 +73,10 @@ type Gateway struct {
 	db         *db.DB
 	cfg        Config
 	statusSink StatusSink
+	// secrets delivers the OIDC client secret to the platform secret store
+	// (ESO path); nil means delivery is unconfigured and registration fails
+	// explicitly with CodeUnavailable instead of a false promise.
+	secrets secrets.Writer
 }
 
 func NewGateway(d *db.DB, registry *clusterregistry.Service, clients clusterregistry.ClientManager,
@@ -86,6 +91,13 @@ func NewGateway(d *db.DB, registry *clusterregistry.Service, clients clusterregi
 		db:       d,
 		cfg:      c,
 	}
+}
+
+// WithSecretWriter attaches the platform secret-store delivery seam used by
+// the registration exchange. Must be set before agents register.
+func (g *Gateway) WithSecretWriter(w secrets.Writer) *Gateway {
+	g.secrets = w
+	return g
 }
 
 // Queue exposes the durable command queue for future modules (Orchestrator).

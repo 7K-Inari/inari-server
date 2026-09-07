@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/capabilities"
 	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/secrets"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -34,8 +36,29 @@ func (f *fakeClients) CreateClusterClient(_ context.Context, clusterID string) (
 	f.created = append(f.created, clusterID)
 	return "cluster-" + clusterID, nil
 }
+func (f *fakeClients) ClusterClientSecret(_ context.Context, clientID string) (string, error) {
+	return "secret-for-" + clientID, nil
+}
 func (f *fakeClients) DisableClient(_ context.Context, clientID string) error {
 	f.disabled = append(f.disabled, clientID)
+	return nil
+}
+
+// fakeSecrets captures delivered secrets; fail makes Put error (delivery
+// outage simulation).
+type fakeSecrets struct {
+	puts map[string]string
+	fail bool
+}
+
+func (f *fakeSecrets) Put(_ context.Context, path, key, value string) error {
+	if f.fail {
+		return errors.New("vault down")
+	}
+	if f.puts == nil {
+		f.puts = map[string]string{}
+	}
+	f.puts[path+"#"+key] = value
 	return nil
 }
 
@@ -82,6 +105,7 @@ type rig struct {
 	registry *clusterregistry.Service
 	caps     *capabilities.Service
 	clients  *fakeClients
+	secrets  *fakeSecrets
 	db       *db.DB
 }
 
@@ -90,6 +114,7 @@ func newRig(t *testing.T, approvalRequired bool) *rig {
 	database := setupDB(t)
 	seedOrg(t, database, "org:1")
 	clients := &fakeClients{}
+	secretsW := &fakeSecrets{}
 	auditStore := audit.NewStore()
 	registry := clusterregistry.NewService(database, clients, clusterregistry.NewStore(), auditStore,
 		time.Hour, approvalRequired)
@@ -97,8 +122,8 @@ func newRig(t *testing.T, approvalRequired bool) *rig {
 	gw := NewGateway(database, registry, clients, caps, auditStore, Config{
 		OIDCIssuerURL:  "http://keycloak/realms/inari",
 		ESOSecretStore: "inari-platform",
-	})
-	return &rig{gw: gw, registry: registry, caps: caps, clients: clients, db: database}
+	}).WithSecretWriter(secretsW)
+	return &rig{gw: gw, registry: registry, caps: caps, clients: clients, secrets: secretsW, db: database}
 }
 
 func registerReq(token string) *connect.Request[agentv1.RegisterClusterRequest] {
@@ -142,6 +167,13 @@ func TestRegistrationExchangeEndToEnd(t *testing.T) {
 		t.Errorf("keycloak clients created = %v", r.clients.created)
 	}
 
+	// The OIDC client secret was delivered to the platform secret store at
+	// the promised Vault path before the response was returned.
+	wantPath := secrets.ClusterOIDCPath(cluster.ID) + "#client-secret"
+	if got := r.secrets.puts[wantPath]; got != "secret-for-cluster-"+cluster.ID {
+		t.Errorf("delivered secret at %q = %q", wantPath, got)
+	}
+
 	got, err := r.registry.GetCluster(ctx, cluster.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -163,6 +195,69 @@ func TestRegistrationExchangeEndToEnd(t *testing.T) {
 	// Unknown token is rejected.
 	if _, err := r.gw.RegisterCluster(ctx, registerReq("bogus")); connect.CodeOf(err) != connect.CodeUnauthenticated {
 		t.Errorf("bogus token code = %v, want Unauthenticated", connect.CodeOf(err))
+	}
+}
+
+// Regression: when secret delivery is down, registration fails fast and
+// explicitly (CodeUnavailable) and the token is NOT burned — the agent
+// retries instead of waiting ~2min for an ESO secret that will never exist
+// (the live incident behind inari-server#31).
+func TestSecretDeliveryFailureDoesNotBurnToken(t *testing.T) {
+	r := newRig(t, false)
+	ctx := context.Background()
+	cluster, err := r.registry.CreateCluster(ctx, "user-1", "org:1", "kind-dev", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := r.registry.IssueToken(ctx, "user-1", cluster.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r.secrets.fail = true
+	_, err = r.gw.RegisterCluster(ctx, registerReq(token))
+	if connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("delivery outage code = %v, want Unavailable (%v)", connect.CodeOf(err), err)
+	}
+	got, err := r.registry.GetCluster(ctx, cluster.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != types.ClusterStatePendingRegistration {
+		t.Errorf("state = %q, want pending_registration (not marked active)", got.State)
+	}
+
+	// Delivery recovers: the same token completes registration.
+	r.secrets.fail = false
+	res, err := r.gw.RegisterCluster(ctx, registerReq(token))
+	if err != nil {
+		t.Fatalf("retry after delivery recovery: %v", err)
+	}
+	if res.Msg.ClientSecretDelivery.GetEsoSecretStore() != "inari-platform" {
+		t.Errorf("eso store = %q", res.Msg.ClientSecretDelivery.GetEsoSecretStore())
+	}
+}
+
+// No secret writer configured at all: fail explicitly, never a false
+// delivery promise.
+func TestRegistrationWithoutSecretWriterFailsExplicitly(t *testing.T) {
+	r := newRig(t, false)
+	r.gw.WithSecretWriter(nil)
+	ctx := context.Background()
+	cluster, err := r.registry.CreateCluster(ctx, "user-1", "org:1", "kind-dev", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := r.registry.IssueToken(ctx, "user-1", cluster.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = r.gw.RegisterCluster(ctx, registerReq(token))
+	if connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("code = %v, want Unavailable (%v)", connect.CodeOf(err), err)
+	}
+	if !strings.Contains(err.Error(), "pending_secret_delivery") {
+		t.Errorf("error must name pending_secret_delivery: %v", err)
 	}
 }
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.1](https://github.com/7K-Inari/inari-server/compare/v1.4.0...v1.4.1) (2026-09-07)
+
+
+### Bug Fixes
+
+* agent install manifest drift + route ConnectRPC paths on the gateway chart ([#30](https://github.com/7K-Inari/inari-server/issues/30)) ([7cc505a](https://github.com/7K-Inari/inari-server/commit/7cc505a24d07c8887fd5c8e87d34b2d9b078ac37))
+
 ## [1.4.0](https://github.com/7K-Inari/inari-server/compare/v1.3.1...v1.4.0) (2026-09-03)
 
 

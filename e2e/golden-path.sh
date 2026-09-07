@@ -127,7 +127,13 @@ helm upgrade --install vault hashicorp/vault \
   --wait --timeout 5m
 helm upgrade --install external-secrets external-secrets/external-secrets \
   --namespace external-secrets --create-namespace \
+  --set installCRDs=true \
   --wait --timeout 5m
+# helm --wait covers the controller deployments, not CRD establishment;
+# applying a ClusterSecretStore before the API is established fails with
+# "no matches for kind".
+kubectl wait --for=condition=established crd/clustersecretstores.external-secrets.io --timeout=120s
+kubectl wait --for=condition=established crd/externalsecrets.external-secrets.io --timeout=120s
 kubectl -n "$NAMESPACE" create secret generic inari-vault \
   --from-literal=token="$VAULT_DEV_TOKEN" --dry-run=client -o yaml | kubectl apply -f -
 

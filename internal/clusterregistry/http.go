@@ -130,6 +130,14 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 	}, h.renderManifest)
 
 	huma.Register(api, huma.Operation{
+		OperationID: "deleteCluster",
+		Method:      http.MethodDelete,
+		Path:        "/api/v1/tenants/{org}/clusters/{id}",
+		Summary:     "Cancel a pending cluster registration (409 once registered)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.deleteCluster)
+
+	huma.Register(api, huma.Operation{
 		OperationID: "listCapabilities",
 		Method:      http.MethodGet,
 		Path:        "/api/v1/tenants/{org}/clusters/{id}/capabilities",
@@ -277,6 +285,22 @@ func (h *Handler) revokeCluster(ctx context.Context, in *clusterPathInput) (*str
 		return nil, err
 	}
 	if err := h.svc.RevokeCluster(ctx, id.Subject, in.ID); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+func (h *Handler) deleteCluster(ctx context.Context, in *clusterPathInput) (*struct{}, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.requireOrgCluster(ctx, org.ID, in.ID); err != nil {
+		return nil, err
+	}
+	if err := h.svc.DeleteCluster(ctx, id.Subject, in.ID); errors.Is(err, ErrClusterNotPendingDeletion) {
+		return nil, huma.Error409Conflict(err.Error())
+	} else if err != nil {
 		return nil, err
 	}
 	return nil, nil

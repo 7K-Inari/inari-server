@@ -163,12 +163,18 @@ func (s *Service) EffectiveVersion(ctx context.Context, orgID, itemID, channel s
 	if err != nil {
 		return "", err
 	}
-	if pin != "" {
-		return pin, nil
-	}
 	versions, err := s.store.ListVersions(ctx, s.db.Pool, itemID)
 	if err != nil {
 		return "", err
+	}
+	return resolveChannelVersion(pin, versions, itemID, channel)
+}
+
+// resolveChannelVersion applies pin-then-channel resolution to a version
+// list. Kept DB-free so the deploy-path error is unit-testable.
+func resolveChannelVersion(pin string, versions []types.CatalogItemVersion, itemID, channel string) (string, error) {
+	if pin != "" {
+		return pin, nil
 	}
 	latest := latestInChannel(versions, channel)
 	if latest == "" {

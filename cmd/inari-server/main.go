@@ -181,7 +181,9 @@ func run() error {
 	}).WithSecretWriter(secretWriter)
 
 	var puller catalog.OCIPuller
-	if cfg.CatalogOCIPath != "" {
+	if cfg.CatalogOCIIndexRef != "" {
+		puller = &catalog.RegistryPuller{IndexRef: cfg.CatalogOCIIndexRef}
+	} else if cfg.CatalogOCIPath != "" {
 		puller = &catalog.FixturePuller{Root: cfg.CatalogOCIPath}
 	}
 	catalogSvc := catalog.NewService(database, catalog.NewStore(), capabilities.NewStore(), auditStore, puller)
@@ -190,8 +192,15 @@ func run() error {
 		return err
 	}
 	if puller != nil {
-		if _, err := catalogSvc.Sync(ctx); err != nil {
-			return fmt.Errorf("catalog sync: %w", err)
+		// Startup sync is best-effort: a transient registry outage must not
+		// crashloop the control plane; the interval loop retries.
+		if n, err := catalogSvc.Sync(ctx); err != nil {
+			slog.Error("catalog sync failed", "error", err)
+		} else {
+			slog.Info("catalog sync complete", "packages", n)
+		}
+		if cfg.CatalogSyncInterval > 0 {
+			go runCatalogSyncLoop(ctx, catalogSvc, cfg.CatalogSyncInterval)
 		}
 	}
 
@@ -354,4 +363,23 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// runCatalogSyncLoop re-pulls the curated catalog on the configured
+// interval. Failures are logged and retried next tick.
+func runCatalogSyncLoop(ctx context.Context, svc *catalog.Service, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if n, err := svc.Sync(ctx); err != nil {
+				slog.Error("catalog sync failed", "error", err)
+			} else {
+				slog.Info("catalog sync complete", "packages", n)
+			}
+		}
+	}
 }

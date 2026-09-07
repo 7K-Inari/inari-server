@@ -38,9 +38,16 @@ type Config struct {
 	AgentGatewayAddress        string
 	ESOSecretStore             string
 
-	// CatalogOCIPath points at the curated package source: a local fixture
-	// OCI layout directory at M2 (a registry client slots in later).
+	// CatalogOCIPath points at a local fixture OCI layout directory
+	// (dev/tests). CatalogOCIIndexRef takes precedence when both are set.
 	CatalogOCIPath string
+	// CatalogOCIIndexRef is the OCI reference of the inari-catalog index
+	// artifact (e.g. ghcr.io/7k-inari/catalog/index:latest). When set, the
+	// real registry puller is used instead of the fixture.
+	CatalogOCIIndexRef string
+	// CatalogSyncInterval re-syncs the catalog periodically; 0 = sync once
+	// at startup only.
+	CatalogSyncInterval time.Duration
 	// GitProvider selects the git backend: "fake" (default, local dev/tests)
 	// or "github" (GitHub App credentials, §12.1/2 — never PATs).
 	GitProvider             string
@@ -95,6 +102,8 @@ func Load() (*Config, error) {
 		ESOSecretStore:             env("INARI_ESO_SECRET_STORE", "inari-platform"),
 
 		CatalogOCIPath:          env("INARI_CATALOG_OCI_PATH", ""),
+		CatalogOCIIndexRef:      env("INARI_CATALOG_OCI_INDEX_REF", ""),
+		CatalogSyncInterval:     durEnv("INARI_CATALOG_SYNC_INTERVAL", 0),
 		GitProvider:             env("INARI_GIT_PROVIDER", "fake"),
 		GitHubAppID:             intEnv("INARI_GITHUB_APP_ID", 0),
 		GitHubInstallationID:    intEnv("INARI_GITHUB_APP_INSTALLATION_ID", 0),

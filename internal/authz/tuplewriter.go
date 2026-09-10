@@ -34,6 +34,7 @@ func (w *TupleWriter) EventTypes() []string {
 	return []string{
 		types.EventTenantCreated,
 		types.EventTeamCreated,
+		types.EventTeamDeleted,
 		types.EventMembershipAdded,
 		types.EventMembershipRemoved,
 		types.EventClusterCreated,
@@ -69,6 +70,14 @@ func (w *TupleWriter) Handle(ctx context.Context, ev *types.OutboxEvent) error {
 			return err
 		}
 		return w.writeOrgRoleTuples(ctx, p.OrgID, []types.TeamSeed{{TeamID: p.TeamID, Name: p.Name, Role: p.Role}}, false)
+	case types.EventTeamDeleted:
+		var p types.TeamCreatedPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		// Removes the team#member → role org tuple. Per-member team:<id>#member
+		// tuples dangle harmlessly once the team object is gone.
+		return w.writeOrgRoleTuples(ctx, p.OrgID, []types.TeamSeed{{TeamID: p.TeamID, Name: p.Name, Role: p.Role}}, true)
 	case types.EventMembershipAdded:
 		var p types.MembershipPayload
 		if err := json.Unmarshal(ev.Payload, &p); err != nil {

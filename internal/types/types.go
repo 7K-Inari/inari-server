@@ -98,6 +98,7 @@ const (
 	EventApprovalDecided          = "approval.decided"
 	EventApprovalCancelled        = "approval.cancelled"
 	EventApprovalExpired          = "approval.expired"
+	EventApprovalConfigUpdated    = "approvals.config.updated"
 	EventDeployRequested          = "deploy.requested"
 	EventInstanceCreated          = "instance.created"
 	EventInstanceStatus           = "instance.status"
@@ -299,6 +300,66 @@ const (
 	ApprovalPolicyPeer          ApprovalPolicy = "peer"
 	ApprovalPolicyPlatformAdmin ApprovalPolicy = "platform-admin"
 )
+
+func (p ApprovalPolicy) Valid() bool {
+	switch p {
+	case ApprovalPolicyAuto, ApprovalPolicyPeer, ApprovalPolicyPlatformAdmin:
+		return true
+	}
+	return false
+}
+
+// ApprovalThreshold escalates the effective approval policy when a numeric
+// condition (e.g. estimated cost) exceeds Gt.
+type ApprovalThreshold struct {
+	Kind   string         `json:"kind"` // e.g. "cost"
+	Gt     float64        `json:"gt"`
+	Policy ApprovalPolicy `json:"policy"`
+}
+
+// ApproverGroup names a set of subjects eligible to approve under the
+// group-scoped policies.
+type ApproverGroup struct {
+	Name     string   `json:"name"`
+	Subjects []string `json:"subjects"`
+}
+
+// AutoApproveRule exempts matching actions from approval entirely.
+type AutoApproveRule struct {
+	Kind    string   `json:"kind"` // e.g. "catalog_item"
+	ItemIDs []string `json:"itemIds"`
+}
+
+// ApprovalConfig is the per-org approval policy (Settings design §2),
+// persisted as a JSONB blob and consumed by the approvals lifecycle.
+type ApprovalConfig struct {
+	DefaultPolicy  ApprovalPolicy      `json:"defaultPolicy"`
+	ApprovalTTL    string              `json:"approvalTtl"` // Go duration string
+	Thresholds     []ApprovalThreshold `json:"thresholds,omitempty"`
+	ApproverGroups []ApproverGroup     `json:"approverGroups,omitempty"`
+	AutoApprove    []AutoApproveRule   `json:"autoApprove,omitempty"`
+}
+
+// TTLDuration parses ApprovalTTL as a Go duration.
+func (c *ApprovalConfig) TTLDuration() (time.Duration, error) {
+	return time.ParseDuration(c.ApprovalTTL)
+}
+
+// ApprovalConfigRecord is the effective per-org config; UpdatedAt is nil
+// when the org has no stored row and defaults apply.
+type ApprovalConfigRecord struct {
+	OrgID     string         `json:"orgId"`
+	Config    ApprovalConfig `json:"config"`
+	UpdatedAt *time.Time     `json:"updatedAt,omitempty"`
+}
+
+// ApprovalConfigPayload is the audit/outbox payload for
+// EventApprovalConfigUpdated, carrying the before/after effective configs.
+type ApprovalConfigPayload struct {
+	OrgID  string          `json:"orgId"`
+	Before *ApprovalConfig `json:"before"`
+	After  *ApprovalConfig `json:"after"`
+}
 
 // CapabilityRef points a discovered-source catalog item at its capability.
 type CapabilityRef struct {

@@ -129,6 +129,8 @@ const (
 
 	EventDriftDetected = "drift.detected"
 	EventDriftResolved = "drift.resolved"
+
+	EventRBACMappingsUpdated = "rbac.mappings.updated"
 )
 
 // ClusterState is the cluster lifecycle state (plan §5.11).
@@ -524,6 +526,53 @@ type MembershipPayload struct {
 	TeamID string `json:"teamId"`
 	UserID string `json:"userId"`
 	Role   Role   `json:"role"`
+}
+
+// Identity client types (Settings design §3.1). The client secret lives only
+// in Keycloak — it is returned exactly once at create/rotate and never
+// persisted server-side; the DB projection carries metadata only.
+const (
+	IdentityClientTypeService = "service"
+	IdentityClientTypePublic  = "public"
+
+	IdentityClientStatusActive   = "active"
+	IdentityClientStatusDisabled = "disabled"
+)
+
+// IdentityClient is the server-side metadata projection of a tenant-scoped
+// Keycloak OIDC client (clientId org-<org>-<name>).
+type IdentityClient struct {
+	ClientID     string    `json:"clientId"`
+	OrgID        string    `json:"-"`
+	Name         string    `json:"name"`
+	Type         string    `json:"type"`
+	Audiences    []string  `json:"audiences"`
+	Scopes       []string  `json:"scopes"`
+	RedirectURIs []string  `json:"redirectUris,omitempty"`
+	Status       string    `json:"status"`
+	CreatedAt    time.Time `json:"createdAt"`
+}
+
+// TeamRoleMapping is one team → org role assignment in the declarative RBAC
+// mapping set.
+type TeamRoleMapping struct {
+	Team string `json:"team"`
+	Role Role   `json:"role"`
+}
+
+// TeamRoleChange records one role transition applied by a mappings update.
+type TeamRoleChange struct {
+	TeamID  string `json:"teamId"`
+	Name    string `json:"name"`
+	OldRole Role   `json:"oldRole"`
+	NewRole Role   `json:"newRole"`
+}
+
+// RBACMappingsPayload is the outbox payload for EventRBACMappingsUpdated;
+// the tuple writer retracts old-role and writes new-role team tuples.
+type RBACMappingsPayload struct {
+	OrgID   string           `json:"orgId"`
+	Changes []TeamRoleChange `json:"changes"`
 }
 
 // Cloud account states (plan §5.7).

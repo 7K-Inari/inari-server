@@ -10,14 +10,16 @@ import (
 
 	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/authz"
+	"github.com/7K-Inari/inari-server/internal/config"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
 // Handler exposes the tenancy REST surface.
 type Handler struct {
-	svc   *Service
-	authz authz.Authorizer
+	svc    *Service
+	authz  authz.Authorizer
+	scopes []config.ServiceScopes
 }
 
 func NewHandler(svc *Service, az authz.Authorizer) *Handler {
@@ -129,6 +131,8 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Summary:     "Remove a user from a team (platform-engineer/admin only)",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.removeMember)
+
+	h.registerIdentityRoutes(api)
 }
 
 type createTenantInput struct {

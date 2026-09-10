@@ -45,6 +45,38 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 }
 
+func TestIdentityScopesDefault(t *testing.T) {
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(c.IdentityScopes) == 0 || c.IdentityScopes[0].Audience != "inari-server" {
+		t.Errorf("IdentityScopes = %v, want built-in default", c.IdentityScopes)
+	}
+}
+
+func TestIdentityScopesEnvOverride(t *testing.T) {
+	t.Setenv("INARI_IDENTITY_SCOPES", `[{"audience":"svc-a","scopes":["x","y"]}]`)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(c.IdentityScopes) != 1 || c.IdentityScopes[0].Audience != "svc-a" || len(c.IdentityScopes[0].Scopes) != 2 {
+		t.Errorf("IdentityScopes = %v", c.IdentityScopes)
+	}
+}
+
+func TestIdentityScopesInvalidFallsBack(t *testing.T) {
+	t.Setenv("INARI_IDENTITY_SCOPES", `not-json`)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(c.IdentityScopes) == 0 || c.IdentityScopes[0].Audience != "inari-server" {
+		t.Errorf("IdentityScopes = %v, want fallback default", c.IdentityScopes)
+	}
+}
+
 func TestRoleValid(t *testing.T) {
 	t.Setenv("INARI_DATABASE_URL", "postgres://x")
 	if _, err := Load(); err != nil {

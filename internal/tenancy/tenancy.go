@@ -385,10 +385,11 @@ func (s *Store) HighestRole(ctx context.Context, q db.Querier, orgID, userID str
 // Service orchestrates tenant creation across Keycloak and PostgreSQL,
 // emitting audit + outbox events in the same DB transaction.
 type Service struct {
-	db    *db.DB
-	idp   IdentityProvider
-	store *Store
-	audit *audit.Store
+	db      *db.DB
+	idp     IdentityProvider
+	clients ClientManager
+	store   *Store
+	audit   *audit.Store
 }
 
 func NewService(d *db.DB, idp IdentityProvider, store *Store, auditStore *audit.Store) *Service {

@@ -136,8 +136,8 @@ func run() error {
 	auditStore := audit.NewStore()
 
 	idp := tenancy.NewKeycloakAdmin(cfg.KeycloakBaseURL, cfg.KeycloakRealm, cfg.KeycloakClientID, cfg.KeycloakClientSecret)
-	svc := tenancy.NewService(database, idp, tenancy.NewStore(), auditStore)
-	handler := tenancy.NewHandler(svc, authorizer)
+	svc := tenancy.NewService(database, idp, tenancy.NewStore(), auditStore).WithClientManager(idp)
+	handler := tenancy.NewHandler(svc, authorizer).WithScopesCatalog(cfg.IdentityScopes)
 	meHandler := tenancy.NewMeHandler(authorizer)
 
 	// Platform group sync (M1.W2, ADR-0003): Keycloak realm group →

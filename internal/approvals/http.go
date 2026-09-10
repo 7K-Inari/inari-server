@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sort"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -40,6 +41,14 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Summary:     "List approval requests (default: pending)",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.list)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "inboxApprovals",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/approvals/inbox",
+		Summary:     "List pending approvals across all orgs the caller belongs to",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.inbox)
 
 	huma.Register(api, huma.Operation{
 		OperationID: "getApproval",
@@ -124,6 +133,68 @@ func (h *Handler) list(ctx context.Context, in *listInput) (*listOutput, error) 
 type approvalPathInput struct {
 	Org string `path:"org"`
 	ID  string `path:"id"`
+}
+
+// inboxListLimit bounds the caller-scoped inbox aggregate.
+const (
+	inboxDefaultLimit = 50
+	inboxMaxLimit     = 200
+)
+
+type inboxInput struct {
+	Limit int `query:"limit" doc:"Max items to return (default 50, max 200)"`
+}
+
+type inboxOutput struct {
+	Body struct {
+		Items []types.ApprovalRequest `json:"items"`
+	}
+}
+
+// inbox aggregates pending approvals across every org the caller belongs to
+// (JWT organization claim), guarded per org by the same viewer check as the
+// per-tenant list route. Orgs that fail resolution or authorization are
+// silently omitted — the inbox never 403s on partial access.
+func (h *Handler) inbox(ctx context.Context, in *inboxInput) (*inboxOutput, error) {
+	id := httpserver.IdentityFromContext(ctx)
+	if id == nil {
+		return nil, huma.Error401Unauthorized("unauthenticated")
+	}
+	limit := in.Limit
+	if limit <= 0 {
+		limit = inboxDefaultLimit
+	}
+	if limit > inboxMaxLimit {
+		limit = inboxMaxLimit
+	}
+	items := []types.ApprovalRequest{}
+	for _, slug := range id.Organizations {
+		org, err := h.tenants.GetTenant(ctx, slug)
+		if err != nil {
+			continue // claim/org drift — omit silently
+		}
+		ok, err := h.authz.Check(ctx, authz.UserObject(id.Subject), authz.RelationViewer, authz.OrgObject(org.ID))
+		if err != nil || !ok {
+			continue
+		}
+		reqs, err := h.svc.List(ctx, org.ID, string(types.ApprovalStatePending), "")
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, reqs...)
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].CreatedAt.Equal(items[j].CreatedAt) {
+			return items[i].ID < items[j].ID
+		}
+		return items[i].CreatedAt.After(items[j].CreatedAt)
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	out := &inboxOutput{}
+	out.Body.Items = items
+	return out, nil
 }
 
 type approvalOutput struct {

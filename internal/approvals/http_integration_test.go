@@ -40,6 +40,8 @@ func (itValidator) Validate(_ context.Context, raw string) (*authn.Identity, err
 		return &authn.Identity{Subject: "user-3", Organizations: []string{"acme"}}, nil
 	case "outsider":
 		return &authn.Identity{Subject: "user-2", Organizations: []string{"other"}}, nil
+	case "drifter":
+		return &authn.Identity{Subject: "user-4", Organizations: []string{"ghost", "acme"}}, nil
 	}
 	return nil, errInvalidTestToken
 }
@@ -340,5 +342,24 @@ func TestInboxEmptyAndLimit(t *testing.T) {
 	}
 	if got := inboxItems(t, body); len(got) != 3 {
 		t.Errorf("limit=999 inbox = %d items, want 3", len(got))
+	}
+}
+
+// TestInboxSkipsUnresolvableOrgs verifies claim/org drift: an org slug in the
+// JWT that no longer resolves in tenancy is omitted silently, while the
+// caller's remaining orgs still list.
+func TestInboxSkipsUnresolvableOrgs(t *testing.T) {
+	srv, database := itServer(t, allowAll())
+	defer srv.Close()
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	seeded := itSeed(t, database, "org:1", "pending", "acme", base)
+
+	code, body := itReq(t, srv, "/api/v1/approvals/inbox", "drifter")
+	if code != http.StatusOK {
+		t.Fatalf("drifter inbox: %d %s", code, body)
+	}
+	got := itemIDs(inboxItems(t, body))
+	if len(got) != 1 || got[0] != seeded {
+		t.Errorf("drifter inbox = %v, want [%s] (ghost org skipped)", got, seeded)
 	}
 }

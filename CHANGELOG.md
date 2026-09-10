@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.6.0](https://github.com/7K-Inari/inari-server/compare/v1.5.0...v1.6.0) (2026-09-10)
+
+
+### Features
+
+* add caller-scoped GET /api/v1/approvals/inbox ([#39](https://github.com/7K-Inari/inari-server/issues/39)) ([45c3b7c](https://github.com/7K-Inari/inari-server/commit/45c3b7cdf9074b1b678e2c372e2c5e7d970b5e73))
+* **agentgateway:** deliver per-cluster OIDC client secret via Vault + ESO ([#35](https://github.com/7K-Inari/inari-server/issues/35)) ([bc80ac2](https://github.com/7K-Inari/inari-server/commit/bc80ac28504e3b3bf503f833a0f4504a2f9f0322))
+* **clusterregistry:** add DELETE cluster endpoint to cancel pending registrations ([#37](https://github.com/7K-Inari/inari-server/issues/37)) ([d5c7a79](https://github.com/7K-Inari/inari-server/commit/d5c7a79702b4eb6a1deebb3687be180c318574e7))
+
+
+### Bug Fixes
+
+* **catalog:** sync real package versions for platform apps from OCI registry ([#36](https://github.com/7K-Inari/inari-server/issues/36)) ([3a49832](https://github.com/7K-Inari/inari-server/commit/3a49832a75549b301bf4d3e9a4e6be2780f18cea))
+
 ## [1.5.0](https://github.com/7K-Inari/inari-server/compare/v1.4.1...v1.5.0) (2026-09-07)
 
 

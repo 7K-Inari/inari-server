@@ -210,6 +210,46 @@ func (s *Store) VisibilityMap(ctx context.Context, q db.Querier) (map[string][]t
 	return out, rows.Err()
 }
 
+// OrgVisibilityMap returns item_id → visible for an org's overlay rows.
+func (s *Store) OrgVisibilityMap(ctx context.Context, q db.Querier, orgID string) (map[string]bool, error) {
+	rows, err := q.Query(ctx, `SELECT item_id, visible FROM catalog_org_visibility WHERE org_id = $1`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var id string
+		var v bool
+		if err := rows.Scan(&id, &v); err != nil {
+			return nil, err
+		}
+		out[id] = v
+	}
+	return out, rows.Err()
+}
+
+// GetOrgVisibility returns one overlay row (visible, found).
+func (s *Store) GetOrgVisibility(ctx context.Context, q db.Querier, orgID, itemID string) (bool, bool, error) {
+	var v bool
+	err := q.QueryRow(ctx, `SELECT visible FROM catalog_org_visibility WHERE org_id = $1 AND item_id = $2`, orgID, itemID).Scan(&v)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	return v, true, nil
+}
+
+// SetOrgVisibility upserts one org overlay row.
+func (s *Store) SetOrgVisibility(ctx context.Context, q db.Querier, orgID, itemID string, visible bool) error {
+	const sql = `INSERT INTO catalog_org_visibility (org_id, item_id, visible) VALUES ($1,$2,$3)
+	             ON CONFLICT (org_id, item_id) DO UPDATE SET visible = EXCLUDED.visible, updated_at = now()`
+	_, err := q.Exec(ctx, sql, orgID, itemID, visible)
+	return err
+}
+
 func (s *Store) SetPin(ctx context.Context, q db.Querier, pin *types.VersionPin) error {
 	const sql = `INSERT INTO catalog_pins (org_id, item_id, version) VALUES ($1,$2,$3)
 	             ON CONFLICT (org_id, item_id) DO UPDATE SET version = EXCLUDED.version`

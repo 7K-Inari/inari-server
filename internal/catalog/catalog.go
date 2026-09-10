@@ -274,6 +274,55 @@ func (s *Service) SetVisibility(ctx context.Context, actor string, rules []types
 	})
 }
 
+// ListOrgVisibility returns the effective visibility of every catalog item
+// for a tenant org: platform rule AND org overlay (Settings design §3.4).
+func (s *Service) ListOrgVisibility(ctx context.Context, orgID string) ([]OrgVisibilityEntry, error) {
+	items, err := s.store.ListItems(ctx, s.db.Pool)
+	if err != nil {
+		return nil, err
+	}
+	visMap, err := s.store.VisibilityMap(ctx, s.db.Pool)
+	if err != nil {
+		return nil, err
+	}
+	overlay, err := s.store.OrgVisibilityMap(ctx, s.db.Pool, orgID)
+	if err != nil {
+		return nil, err
+	}
+	return effectiveVisibility(items, visMap, overlay, orgID), nil
+}
+
+// SetOrgVisibility sets the org-level overlay for one item and audits the
+// change with before/after overlay state.
+func (s *Service) SetOrgVisibility(ctx context.Context, actor, orgID, itemID string, visible bool) error {
+	if _, err := s.store.GetItem(ctx, s.db.Pool, itemID); err != nil {
+		return err
+	}
+	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		before, found, err := s.store.GetOrgVisibility(ctx, tx, orgID, itemID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			before = true
+		}
+		if err := s.store.SetOrgVisibility(ctx, tx, orgID, itemID, visible); err != nil {
+			return err
+		}
+		payload, err := json.Marshal(types.CatalogVisibilityPayload{
+			OrgID: orgID, ItemID: itemID, Before: before, After: visible,
+		})
+		if err != nil {
+			return err
+		}
+		return s.audit.Record(ctx, tx, &types.AuditEvent{
+			OrgID: orgID, Actor: actor, Action: types.EventCatalogVisibilityChanged,
+			ObjectType: "catalog_item", ObjectID: itemID,
+			Payload: payload,
+		})
+	})
+}
+
 // PlatformApps is the M2 stub list of platform-cluster apps (plan §5.5
 // source 3). It is seeded at startup via SeedPlatformApps.
 var PlatformApps = []types.CatalogItem{

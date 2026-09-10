@@ -90,15 +90,16 @@ const (
 	EventClusterDeleted        = "cluster.deleted"
 	EventCapabilitiesIngested  = "capabilities.ingested"
 
-	EventCatalogItemUpserted = "catalog.item_upserted"
-	EventApprovalRequested   = "approval.requested"
-	EventApprovalDecided     = "approval.decided"
-	EventApprovalCancelled   = "approval.cancelled"
-	EventApprovalExpired     = "approval.expired"
-	EventDeployRequested     = "deploy.requested"
-	EventInstanceCreated     = "instance.created"
-	EventInstanceStatus      = "instance.status"
-	EventInstanceUpgraded    = "instance.upgraded"
+	EventCatalogItemUpserted      = "catalog.item_upserted"
+	EventCatalogVisibilityChanged = "catalog.visibility.changed"
+	EventApprovalRequested        = "approval.requested"
+	EventApprovalDecided          = "approval.decided"
+	EventApprovalCancelled        = "approval.cancelled"
+	EventApprovalExpired          = "approval.expired"
+	EventDeployRequested          = "deploy.requested"
+	EventInstanceCreated          = "instance.created"
+	EventInstanceStatus           = "instance.status"
+	EventInstanceUpgraded         = "instance.upgraded"
 
 	EventCloudAccountRegistered   = "cloud_account.registered"
 	EventCloudAccountValidated    = "cloud_account.validated"
@@ -341,6 +342,14 @@ type VersionPin struct {
 	OrgID   string `json:"orgId"`
 	ItemID  string `json:"itemId"`
 	Version string `json:"version"`
+}
+
+// CatalogVisibilityPayload is the audit payload for catalog.visibility.changed.
+type CatalogVisibilityPayload struct {
+	OrgID  string `json:"orgId"`
+	ItemID string `json:"itemId"`
+	Before bool   `json:"before"`
+	After  bool   `json:"after"`
 }
 
 // Approval states.

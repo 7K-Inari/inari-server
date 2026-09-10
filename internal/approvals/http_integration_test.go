@@ -50,13 +50,18 @@ var errInvalidTestToken = errors.New("invalid token")
 
 // itAuthorizer allows viewer checks per org ID listed in allow; an empty map
 // denies everything. errOn, when set, makes Check fail for that org object
-// (inbox must omit the org silently).
+// (inbox must omit the org silently). seen, when non-nil, records every
+// relation+object pair Check was asked about.
 type itAuthorizer struct {
 	allow map[string]bool
 	errOn string
+	seen  *[]string
 }
 
-func (a itAuthorizer) Check(_ context.Context, _, _, object string) (bool, error) {
+func (a itAuthorizer) Check(_ context.Context, _, relation, object string) (bool, error) {
+	if a.seen != nil {
+		*a.seen = append(*a.seen, relation+" "+object)
+	}
 	if a.errOn != "" && object == a.errOn {
 		return false, errors.New("fga unavailable")
 	}

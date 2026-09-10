@@ -228,3 +228,36 @@ func TestApprovalConfigUnknownOrg(t *testing.T) {
 		t.Errorf("unknown org GET: got %d, want 404", code)
 	}
 }
+
+// TestApprovalConfigRelations asserts the exact authz relation each route
+// checks: GET gates on viewer, PUT on platform_engineer. The allowAll
+// authorizer ignores relations, so without recording them a swapped relation
+// would pass the other tests silently.
+func TestApprovalConfigRelations(t *testing.T) {
+	var seen []string
+	az := allowAll()
+	az.seen = &seen
+	srv, _ := itServer(t, az)
+	defer srv.Close()
+
+	if code, body := itReq(t, srv, "/api/v1/tenants/acme/approval-config", "good"); code != http.StatusOK {
+		t.Fatalf("GET: %d %s", code, body)
+	}
+	put := map[string]any{"config": map[string]any{"defaultPolicy": "peer", "approvalTtl": "48h"}}
+	if code, body := itPut(t, srv, "/api/v1/tenants/acme/approval-config", "good", put); code != http.StatusOK {
+		t.Fatalf("PUT: %d %s", code, body)
+	}
+
+	want := []string{
+		"viewer organization:1",
+		"platform_engineer organization:1",
+	}
+	if len(seen) != len(want) {
+		t.Fatalf("checks = %v, want %v", seen, want)
+	}
+	for i := range want {
+		if seen[i] != want[i] {
+			t.Errorf("check[%d] = %q, want %q", i, seen[i], want[i])
+		}
+	}
+}

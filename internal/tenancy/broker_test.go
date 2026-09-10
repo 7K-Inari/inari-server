@@ -54,12 +54,12 @@ func TestValidateDomainHints(t *testing.T) {
 		}
 	}
 	invalid := [][]string{
-		{"localhost"},                       // 1 part
-		{"Acme.com"},                        // uppercase
-		{"*.com"},                           // wildcard over a single label
-		{"-bad.acme.com"},                   // leading hyphen
-		{"a.b.c.d.e.f.g.h.i.j.com"},         // 11 parts
-		{"acme.com", "not a domain"},        // one bad entry fails all
+		{"localhost"},                // 1 part
+		{"Acme.com"},                 // uppercase
+		{"*.com"},                    // wildcard over a single label
+		{"-bad.acme.com"},            // leading hyphen
+		{"a.b.c.d.e.f.g.h.i.j.com"},  // 11 parts
+		{"acme.com", "not a domain"}, // one bad entry fails all
 	}
 	for _, hints := range invalid {
 		if err := validateDomainHints(hints); err == nil {

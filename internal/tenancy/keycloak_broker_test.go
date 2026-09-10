@@ -3,6 +3,7 @@ package tenancy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -24,8 +25,10 @@ type idpCrudFake struct {
 	createdMaps  []map[string]any
 	deletedMaps  []string
 	orgDomains   []string
+	orgPutStatus int
 	groups       []string
 	existingMaps []map[string]any
+	getIdPStatus int
 }
 
 func newIdpCrudFake(t *testing.T) (*httptest.Server, *idpCrudFake) {
@@ -67,6 +70,10 @@ func newIdpCrudFake(t *testing.T) (*httptest.Server, *idpCrudFake) {
 			f.createdIdP = body
 			w.WriteHeader(http.StatusCreated)
 		case r.URL.Path == base+"/identity-provider/instances/org-acme-sso" && r.Method == http.MethodGet:
+			if f.getIdPStatus != 0 && f.getIdPStatus != http.StatusOK {
+				w.WriteHeader(f.getIdPStatus)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"alias":      "org-acme-sso",
 				"providerId": "oidc",
@@ -122,6 +129,10 @@ func newIdpCrudFake(t *testing.T) (*httptest.Server, *idpCrudFake) {
 				"domains": []map[string]any{{"name": "acme.inari.local", "verified": false}},
 			})
 		case r.URL.Path == base+"/organizations/org-1" && r.Method == http.MethodPut:
+			if f.orgPutStatus != 0 {
+				w.WriteHeader(f.orgPutStatus)
+				return
+			}
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Errorf("decode org update body: %v", err)
@@ -282,5 +293,62 @@ func TestSetOrgDomainsKeepsPlaceholder(t *testing.T) {
 	}
 	if len(f.orgDomains) != 3 || f.orgDomains[0] != "acme.inari.local" {
 		t.Errorf("domains = %v", f.orgDomains)
+	}
+}
+
+// TestSetOrgDomainsConflictIsDomainTaken guards the realm-wide domain
+// uniqueness mapping: KC's 400 must surface as ErrDomainTaken so the HTTP
+// layer can render a clean 409.
+func TestSetOrgDomainsConflictIsDomainTaken(t *testing.T) {
+	srv, f := newIdpCrudFake(t)
+	defer srv.Close()
+	f.orgPutStatus = http.StatusBadRequest
+	k := NewKeycloakAdmin(srv.URL, "inari", "inari-platform-admin", "test-secret")
+
+	err := k.SetOrgDomains(context.Background(), "org-1", []string{"acme.inari.local", "taken.com"})
+	if !errors.Is(err, ErrDomainTaken) {
+		t.Errorf("err = %v, want ErrDomainTaken", err)
+	}
+}
+
+// TestSetOrgDomainsOtherErrorsPropagate ensures non-400 org-update failures
+// are not misreported as domain conflicts.
+func TestSetOrgDomainsOtherErrorsPropagate(t *testing.T) {
+	srv, f := newIdpCrudFake(t)
+	defer srv.Close()
+	f.orgPutStatus = http.StatusInternalServerError
+	k := NewKeycloakAdmin(srv.URL, "inari", "inari-platform-admin", "test-secret")
+
+	err := k.SetOrgDomains(context.Background(), "org-1", []string{"acme.inari.local"})
+	if err == nil || errors.Is(err, ErrDomainTaken) {
+		t.Errorf("err = %v, want generic error", err)
+	}
+}
+
+// TestUpdateIdPMissingInstanceFails ensures updating a non-existent IdP
+// errors instead of PUTting an empty representation.
+func TestUpdateIdPMissingInstanceFails(t *testing.T) {
+	srv, f := newIdpCrudFake(t)
+	defer srv.Close()
+	f.getIdPStatus = http.StatusNotFound
+	k := NewKeycloakAdmin(srv.URL, "inari", "inari-platform-admin", "test-secret")
+
+	spec := testBrokerSpec()
+	spec.ClientSecret = ""
+	if err := k.UpdateIdP(context.Background(), spec); err == nil {
+		t.Error("UpdateIdP on missing IdP succeeded")
+	}
+}
+
+// TestLinkIdPToOrgErrorSurfaces ensures non-idempotent link failures
+// (anything but 201/204/409) propagate.
+func TestLinkIdPToOrgErrorSurfaces(t *testing.T) {
+	srv, f := newIdpCrudFake(t)
+	defer srv.Close()
+	f.linkStatus = http.StatusInternalServerError
+	k := NewKeycloakAdmin(srv.URL, "inari", "inari-platform-admin", "test-secret")
+
+	if err := k.LinkIdPToOrg(context.Background(), "org-1", "org-acme-sso"); err == nil {
+		t.Error("LinkIdPToOrg (500) succeeded")
 	}
 }

@@ -35,6 +35,7 @@ import (
 	gitgithub "github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider/github"
 	"github.com/7K-Inari/inari-server/internal/policyservice"
 	"github.com/7K-Inari/inari-server/internal/secrets"
+	"github.com/7K-Inari/inari-server/internal/secretstores"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/tenantzonefactory"
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -243,6 +244,14 @@ func run() error {
 	go fleetSvc.RunAdvanceLoop(ctx, cfg.FleetAdvanceInterval)
 	go fleetSvc.RunDriftLoop(ctx, cfg.DriftSweepInterval)
 
+	// Secret Stores (M6.W4, Settings design §3.2): ESO SecretStore registry.
+	// Needs fleetSvc (ClusterSet resolution) and the agent command queue, so
+	// it is constructed after the fleet manager.
+	secretStoresSvc := secretstores.NewService(database, secretstores.NewStore(), auditStore,
+		gateway.Queue(), registry, fleetSvc)
+	secretStoresHandler := secretstores.NewHandler(secretStoresSvc, svc, authorizer)
+	gateway.WithSecretStoreLookup(secretStoresSvc)
+
 	// Extension Host (plan §5.8): plugin registry + authenticated reverse
 	// proxy for verified sidecars.
 	extSvc := extensionhost.NewService(database, extensionhost.NewStore(), auditStore)
@@ -316,6 +325,7 @@ func run() error {
 	policyHandler.RegisterRoutes(api)
 	tzfHandler.RegisterRoutes(api)
 	fleetHandler.RegisterRoutes(api)
+	secretStoresHandler.RegisterRoutes(api)
 	extHandler.RegisterRoutes(api)
 
 	// Agent-facing Connect-RPC services mount on chi directly, outside the

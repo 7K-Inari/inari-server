@@ -132,6 +132,10 @@ const (
 	EventDriftResolved = "drift.resolved"
 
 	EventRBACMappingsUpdated = "rbac.mappings.updated"
+
+	EventSecretStoreCreated = "secretstore.created"
+	EventSecretStoreUpdated = "secretstore.updated"
+	EventSecretStoreDeleted = "secretstore.deleted"
 )
 
 // ClusterState is the cluster lifecycle state (plan §5.11).
@@ -1130,6 +1134,105 @@ const (
 	EventTenantZoneDecommissionDenied    = "tenant_zone.decommission_denied"
 	EventTenantZoneClosed                = "tenant_zone.closed"
 )
+
+// Secret store scopes (Settings design §3.2): platform stores are managed by
+// the platform team and read-only for tenants; cluster stores are tenant-owned.
+const (
+	SecretStoreScopePlatform = "platform"
+	SecretStoreScopeCluster  = "cluster"
+)
+
+// Secret store agent command types (desired-state fan-out over the agent
+// command queue, same path as SecretDeliveryReference).
+const (
+	AgentCommandSecretStoreApply  = "inari.secrets.SecretStoreApply"
+	AgentCommandSecretStoreDelete = "inari.secrets.SecretStoreDelete"
+)
+
+// SecretRef references a cluster-side Kubernetes Secret holding the
+// provider credentials. The control plane only ever stores this reference —
+// credential values never transit or persist on the hub (plan §4.1/§5.10).
+type SecretRef struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+}
+
+// Provider configs. Exactly one field is set on a SecretStoreProvider.
+type AWSSMProvider struct {
+	Region        string    `json:"region"`
+	AuthSecretRef SecretRef `json:"authSecretRef"`
+}
+
+type VaultProvider struct {
+	Server        string    `json:"server"`
+	Path          string    `json:"path,omitempty"`
+	AuthSecretRef SecretRef `json:"authSecretRef"`
+}
+
+type GCPSMProvider struct {
+	ProjectID     string    `json:"projectId"`
+	AuthSecretRef SecretRef `json:"authSecretRef"`
+}
+
+type AzureKVProvider struct {
+	VaultURL      string    `json:"vaultUrl"`
+	TenantID      string    `json:"tenantId,omitempty"`
+	AuthSecretRef SecretRef `json:"authSecretRef"`
+}
+
+// SecretStoreProvider selects exactly one ESO backend. All credential
+// material stays cluster-side via AuthSecretRef.
+type SecretStoreProvider struct {
+	AWSSM   *AWSSMProvider   `json:"awsSM,omitempty"`
+	Vault   *VaultProvider   `json:"vault,omitempty"`
+	GCPSM   *GCPSMProvider   `json:"gcpsm,omitempty"`
+	AzureKV *AzureKVProvider `json:"azurekv,omitempty"`
+}
+
+// SecretStoreTargets selects the clusters a store is delivered to: exactly
+// one of ClusterSetRef or ClusterIDs.
+type SecretStoreTargets struct {
+	ClusterSetRef string   `json:"clusterSetRef,omitempty"`
+	ClusterIDs    []string `json:"clusterIds,omitempty"`
+}
+
+// SecretStore is one registered ESO SecretStore (Settings design §3.2). The
+// store name is the registry lookup key used by secret delivery (replacing
+// the hardcoded "inari-platform").
+type SecretStore struct {
+	ID        string              `json:"id"`
+	OrgID     string              `json:"orgId"`
+	Name      string              `json:"name"`
+	Scope     string              `json:"scope"`
+	Targets   SecretStoreTargets  `json:"targets"`
+	Provider  SecretStoreProvider `json:"provider"`
+	CreatedAt time.Time           `json:"createdAt"`
+	UpdatedAt time.Time           `json:"updatedAt"`
+}
+
+// SecretStoreCondition is one agent-reported delivery condition per cluster.
+type SecretStoreCondition struct {
+	ClusterID string `json:"clusterId"`
+	Type      string `json:"type"`   // e.g. "Ready"
+	Status    string `json:"status"` // "True" | "False"
+	Reason    string `json:"reason"` // "Delivered" | "Pending" | "Failed"
+	Message   string `json:"message,omitempty"`
+}
+
+// SecretStoreStatus is the delivery projection for one store (Settings
+// design §3.2): delivered is true once every target cluster acked.
+type SecretStoreStatus struct {
+	Delivered  bool                   `json:"delivered"`
+	Conditions []SecretStoreCondition `json:"conditions,omitempty"`
+}
+
+// SecretStorePayload is the outbox payload for secretstore lifecycle events.
+type SecretStorePayload struct {
+	OrgID   string `json:"orgId"`
+	StoreID string `json:"storeId"`
+	Name    string `json:"name"`
+	Scope   string `json:"scope"`
+}
 
 // TenantZonePayload is the outbox payload for tenant zone events. ZoneOrgID
 // is the zone's own (wired) organization, set once known; OrgID is the

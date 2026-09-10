@@ -188,7 +188,9 @@ func TestInboxAggregatesAcrossOrgs(t *testing.T) {
 	other := itSeed(t, database, "org:3", "pending", "other-pending", base.Add(3*time.Hour))
 
 	// Authz parity, direction 1: visible per org route -> visible in inbox.
-	code, body := itReq(t, srv, "/api/v1/tenants/acme/approvals", "good")
+	// state=pending because the per-org route defaults to all states while
+	// the inbox is pending-only by contract.
+	code, body := itReq(t, srv, "/api/v1/tenants/acme/approvals?state=pending", "good")
 	if code != http.StatusOK {
 		t.Fatalf("per-org list: %d %s", code, body)
 	}

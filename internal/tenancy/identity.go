@@ -67,6 +67,13 @@ func (s *Service) CreateIdentityClient(ctx context.Context, actor, slug string, 
 		RedirectURIs: in.RedirectURIs,
 		Status:       types.IdentityClientStatusActive,
 	}
+	// Fast-path name conflict against the projection so a duplicate fails
+	// before any Keycloak write.
+	if _, err := s.store.GetIdentityClient(ctx, s.db.Pool, org.ID, client.ClientID); err == nil {
+		return nil, "", ErrClientNameTaken
+	} else if !errors.Is(err, ErrClientNotFound) {
+		return nil, "", err
+	}
 	secret, err := s.clients.CreateClient(ctx, ClientSpec{
 		ClientID:     client.ClientID,
 		Name:         client.Name,

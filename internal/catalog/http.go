@@ -66,6 +66,22 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 	}, h.deletePin)
 
 	huma.Register(api, huma.Operation{
+		OperationID: "listCatalogVisibility",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/tenants/{org}/catalog-visibility",
+		Summary:     "List effective catalog visibility for the tenant (platform rule AND org overlay)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.listOrgVisibility)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "setCatalogOrgVisibility",
+		Method:      http.MethodPut,
+		Path:        "/api/v1/tenants/{org}/catalog-visibility/{item}",
+		Summary:     "Set the org-level visibility overlay for one catalog item (org admin)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.setOrgVisibility)
+
+	huma.Register(api, huma.Operation{
 		OperationID: "setCatalogVisibility",
 		Method:      http.MethodPut,
 		Path:        "/api/v1/admin/catalog/{item}/visibility",
@@ -212,6 +228,50 @@ func (h *Handler) deletePin(ctx context.Context, in *itemPathInput) (*struct{}, 
 		return nil, err
 	}
 	return nil, h.svc.DeletePin(ctx, "user:"+id.Subject, org.ID, in.Item)
+}
+
+type listOrgVisibilityInput struct {
+	Org string `path:"org"`
+}
+
+type listOrgVisibilityOutput struct {
+	Body struct {
+		Items []OrgVisibilityEntry `json:"items"`
+	}
+}
+
+func (h *Handler) listOrgVisibility(ctx context.Context, in *listOrgVisibilityInput) (*listOrgVisibilityOutput, error) {
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	if err != nil {
+		return nil, err
+	}
+	items, err := h.svc.ListOrgVisibility(ctx, org.ID)
+	if err != nil {
+		return nil, err
+	}
+	out := &listOrgVisibilityOutput{}
+	out.Body.Items = items
+	return out, nil
+}
+
+type orgVisibilityInput struct {
+	Org  string `path:"org"`
+	Item string `path:"item"`
+	Body struct {
+		Visible bool `json:"visible" doc:"false hides the item for this org; true shows it (subject to platform rules)"`
+	}
+}
+
+func (h *Handler) setOrgVisibility(ctx context.Context, in *orgVisibilityInput) (*struct{}, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	if err != nil {
+		return nil, err
+	}
+	err = h.svc.SetOrgVisibility(ctx, "user:"+id.Subject, org.ID, in.Item, in.Body.Visible)
+	if errors.Is(err, ErrItemNotFound) {
+		return nil, huma.Error404NotFound("catalog item not found")
+	}
+	return nil, err
 }
 
 type visibilityInput struct {

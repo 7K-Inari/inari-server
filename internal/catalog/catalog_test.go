@@ -82,3 +82,63 @@ func TestDiscoveredProjectionSkipsMetadata(t *testing.T) {
 		t.Errorf("source = %q, want discovered", items[0].Source)
 	}
 }
+
+func TestEffectiveVisibilityMerge(t *testing.T) {
+	items := []types.CatalogItem{
+		{ID: "public", Name: "public"},
+		{ID: "platform-hidden", Name: "platform-hidden"},
+		{ID: "org-hidden", Name: "org-hidden"},
+		{ID: "both-hidden", Name: "both-hidden"},
+	}
+	platform := map[string][]types.VisibilityRule{
+		"platform-hidden": {{ItemID: "platform-hidden", OrgID: "org-other", ClusterID: "*"}},
+		"both-hidden":     {{ItemID: "both-hidden", OrgID: "org-other", ClusterID: "*"}},
+	}
+	overlay := map[string]bool{
+		"org-hidden":  false,
+		"both-hidden": false,
+	}
+	got := effectiveVisibility(items, platform, overlay, "org-1")
+	if len(got) != 4 {
+		t.Fatalf("got %d entries, want 4", len(got))
+	}
+	byID := map[string]OrgVisibilityEntry{}
+	for _, e := range got {
+		byID[e.ItemID] = e
+	}
+	if e := byID["public"]; !e.Visible || e.OrgHidden || e.PlatformHidden {
+		t.Errorf("public = %+v, want visible", e)
+	}
+	if e := byID["platform-hidden"]; e.Visible || e.OrgHidden || !e.PlatformHidden {
+		t.Errorf("platform-hidden = %+v, want hidden by platform only", e)
+	}
+	if e := byID["org-hidden"]; e.Visible || !e.OrgHidden || e.PlatformHidden {
+		t.Errorf("org-hidden = %+v, want hidden by org only", e)
+	}
+	if e := byID["both-hidden"]; e.Visible || !e.OrgHidden || !e.PlatformHidden {
+		t.Errorf("both-hidden = %+v, want hidden by both", e)
+	}
+}
+
+func TestEffectiveVisibilityOrgCannotUnhidePlatform(t *testing.T) {
+	items := []types.CatalogItem{{ID: "i1", Name: "i1"}}
+	platform := map[string][]types.VisibilityRule{
+		"i1": {{ItemID: "i1", OrgID: "org-other", ClusterID: "*"}},
+	}
+	overlay := map[string]bool{"i1": true}
+	got := effectiveVisibility(items, platform, overlay, "org-1")
+	if got[0].Visible {
+		t.Error("org overlay must not un-hide a platform-hidden item")
+	}
+	if got[0].OrgHidden {
+		t.Error("explicitly shown by org should not report OrgHidden")
+	}
+}
+
+func TestEffectiveVisibilityNoOverlayRowDefaultsShown(t *testing.T) {
+	items := []types.CatalogItem{{ID: "i1", Name: "i1"}}
+	got := effectiveVisibility(items, nil, nil, "org-1")
+	if !got[0].Visible || got[0].OrgHidden {
+		t.Errorf("no rules and no overlay = %+v, want visible", got[0])
+	}
+}

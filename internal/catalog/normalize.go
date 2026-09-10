@@ -95,6 +95,40 @@ func visibleTo(rules []types.VisibilityRule, orgID, clusterID string) bool {
 	return false
 }
 
+// OrgVisibilityEntry is one catalog item's effective visibility for a tenant
+// org: platform rule AND org overlay (Settings design §3.4).
+type OrgVisibilityEntry struct {
+	ItemID         string `json:"itemId"`
+	Name           string `json:"name"`
+	DisplayName    string `json:"displayName"`
+	Visible        bool   `json:"visible"`
+	OrgHidden      bool   `json:"orgHidden"`
+	PlatformHidden bool   `json:"platformHidden"`
+}
+
+// effectiveVisibility merges platform visibility rules with the org overlay
+// (item_id → visible). An org can hide items the platform exposes, but can
+// never un-hide an item the platform hides.
+func effectiveVisibility(items []types.CatalogItem, platform map[string][]types.VisibilityRule, overlay map[string]bool, orgID string) []OrgVisibilityEntry {
+	out := make([]OrgVisibilityEntry, 0, len(items))
+	for _, it := range items {
+		platformOK := visibleTo(platform[it.ID], orgID, "*")
+		orgOK := true
+		if v, ok := overlay[it.ID]; ok {
+			orgOK = v
+		}
+		out = append(out, OrgVisibilityEntry{
+			ItemID:         it.ID,
+			Name:           it.Name,
+			DisplayName:    it.DisplayName,
+			Visible:        platformOK && orgOK,
+			OrgHidden:      !orgOK,
+			PlatformHidden: !platformOK,
+		})
+	}
+	return out
+}
+
 // projectDiscovered turns live cluster capabilities into catalog item views
 // (plan §5.5 source 1). cluster-metadata capabilities are operational
 // signals, not deployable items.

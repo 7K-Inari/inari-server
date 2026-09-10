@@ -169,12 +169,10 @@ func (s *Service) SetMemberRole(ctx context.Context, actor, slug, userID string,
 		if err := s.store.UpsertUser(ctx, tx, user); err != nil {
 			return err
 		}
-		inserted, err := s.store.AddMembership(ctx, tx, &types.Membership{
-			UserID: userID, OrgID: org.ID, TeamID: anchor.ID, Role: role,
-		})
-		if err != nil {
-			return err
-		}
+		// Remove other-team rows first: memberships are keyed
+		// (user, org, role), so an insert would conflict (and be
+		// skipped) when the user already holds the same role via
+		// another team — leaving them with no row at all.
 		for _, m := range removed {
 			removedRow, err := s.store.RemoveMembership(ctx, tx, &types.Membership{
 				UserID: userID, OrgID: org.ID, TeamID: m.TeamID,
@@ -189,6 +187,12 @@ func (s *Service) SetMemberRole(ctx context.Context, actor, slug, userID string,
 					return err
 				}
 			}
+		}
+		inserted, err := s.store.AddMembership(ctx, tx, &types.Membership{
+			UserID: userID, OrgID: org.ID, TeamID: anchor.ID, Role: role,
+		})
+		if err != nil {
+			return err
 		}
 		if inserted {
 			if err := audit.AppendOutbox(ctx, tx, org.ID, types.EventMembershipAdded, types.MembershipPayload{

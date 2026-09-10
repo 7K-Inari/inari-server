@@ -896,9 +896,13 @@ func TestSetMemberRoleSameRoleDifferentTeam(t *testing.T) {
 }
 
 // relationGate grants a fixed relation on any org object (fine PEP stub).
+// Like the OpenFGA model, admin implies viewer.
 type relationGate struct{ relation string }
 
 func (g relationGate) Check(_ context.Context, _, relation, _ string) (bool, error) {
+	if g.relation == "admin" && relation == "viewer" {
+		return true, nil
+	}
 	return relation == g.relation, nil
 }
 func (g relationGate) ListObjects(context.Context, string, string, string) ([]string, error) {

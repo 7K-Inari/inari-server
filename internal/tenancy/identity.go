@@ -296,6 +296,9 @@ func (s *Store) UpdateIdentityClient(ctx context.Context, q db.Querier, c *types
 	             WHERE org_id=$1 AND client_id=$2`
 	_, err := q.Exec(ctx, sql, c.OrgID, c.ClientID, c.Name,
 		nonEmptyJSON(c.Audiences), nonEmptyJSON(c.Scopes), nonEmptyJSON(c.RedirectURIs))
+	if isUniqueViolation(err) {
+		return ErrClientNameTaken
+	}
 	return err
 }
 

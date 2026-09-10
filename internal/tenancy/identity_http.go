@@ -224,6 +224,9 @@ func (h *Handler) updateIdentityClient(ctx context.Context, in *updateIdentityCl
 	}
 	id := identity(ctx)
 	if err := h.svc.UpdateIdentityClient(ctx, id.Subject, in.Org, client); err != nil {
+		if errors.Is(err, ErrClientNameTaken) {
+			return nil, huma.Error409Conflict("client name already exists in tenant")
+		}
 		return nil, err
 	}
 	return identityClientResult(client, nil)

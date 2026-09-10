@@ -77,6 +77,24 @@ type Gateway struct {
 	// (ESO path); nil means delivery is unconfigured and registration fails
 	// explicitly with CodeUnavailable instead of a false promise.
 	secrets secrets.Writer
+	// storeLookup resolves the platform ESO SecretStore name from the
+	// secret-stores registry (M6.W4); nil means fall back to
+	// cfg.ESOSecretStore.
+	storeLookup SecretStoreLookup
+}
+
+// SecretStoreLookup resolves platform-scoped SecretStore names from the
+// registry (secretstores.Service seam). ErrNotFound from the registry means
+// "keep the configured default".
+type SecretStoreLookup interface {
+	PlatformStoreName(ctx context.Context, name string) (string, error)
+}
+
+// WithSecretStoreLookup wires the registry lookup for the ESO store name
+// advertised at registration. Nil-safe: unset keeps the config default.
+func (g *Gateway) WithSecretStoreLookup(l SecretStoreLookup) *Gateway {
+	g.storeLookup = l
+	return g
 }
 
 func NewGateway(d *db.DB, registry *clusterregistry.Service, clients clusterregistry.ClientManager,

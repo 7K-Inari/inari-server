@@ -59,12 +59,20 @@ func (g *Gateway) RegisterCluster(ctx context.Context, req *connect.Request[agen
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("mark registered: %w", err))
 	}
 
+	// The ESO store name comes from the secret-stores registry when wired,
+	// falling back to the configured default (pre-registry deployments).
+	esoStore := g.cfg.ESOSecretStore
+	if g.storeLookup != nil {
+		if name, err := g.storeLookup.PlatformStoreName(ctx, esoStore); err == nil {
+			esoStore = name
+		}
+	}
 	res := connect.NewResponse(&agentv1.RegisterClusterResponse{
 		ClusterId:     cluster.ID,
 		OidcIssuerUrl: g.cfg.OIDCIssuerURL,
 		ClientId:      clientID,
 		ClientSecretDelivery: &agentv1.SecretDeliveryReference{
-			EsoSecretStore:  g.cfg.ESOSecretStore,
+			EsoSecretStore:  esoStore,
 			SecretName:      g.cfg.ESOSecretName,
 			SecretNamespace: g.cfg.ESOSecretNamespace,
 			SecretKey:       g.cfg.ESOSecretKey,

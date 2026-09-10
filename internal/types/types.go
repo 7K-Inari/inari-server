@@ -640,6 +640,41 @@ type RBACMappingsPayload struct {
 	Changes []TeamRoleChange `json:"changes"`
 }
 
+// IdP brokering types (Settings design §3.3, OIDC-only v1). The IdP client
+// secret lives only in Keycloak — it is write-only (masked on read) and
+// never persisted or returned server-side; the DB projection carries
+// metadata only.
+const (
+	EventIdPBrokerCreated = "idp.broker.created"
+	EventIdPBrokerUpdated = "idp.broker.updated"
+	EventIdPBrokerDeleted = "idp.broker.deleted"
+)
+
+// IdPClaimMapping names the brokered tokens' claims used for identity
+// attributes (email) and group attribution (groups).
+type IdPClaimMapping struct {
+	Email  string `json:"email,omitempty"`
+	Groups string `json:"groups,omitempty"`
+}
+
+// BrokeredIdP is the server-side metadata projection of a tenant's brokered
+// OIDC identity provider (KC alias org-<org>-<alias>); one per org in v1.
+type BrokeredIdP struct {
+	Alias        string          `json:"alias"`
+	OrgID        string          `json:"-"`
+	IssuerURL    string          `json:"issuerUrl"`
+	ClientID     string          `json:"clientId"`
+	ClaimMapping IdPClaimMapping `json:"claimMapping"`
+	DomainHints  []string        `json:"domainHints"`
+	CreatedAt    time.Time       `json:"createdAt"`
+}
+
+// IdPBrokerPayload is the outbox payload for the idp.broker.* events.
+type IdPBrokerPayload struct {
+	OrgID string `json:"orgId"`
+	Alias string `json:"alias"`
+}
+
 // Cloud account states (plan §5.7).
 const (
 	CloudAccountStatePendingValidation = "pending_validation"

@@ -133,6 +133,7 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 	}, h.removeMember)
 
 	h.registerIdentityRoutes(api)
+	h.registerBrokerRoutes(api)
 }
 
 type createTenantInput struct {

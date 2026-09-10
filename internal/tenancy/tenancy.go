@@ -388,6 +388,7 @@ type Service struct {
 	db      *db.DB
 	idp     IdentityProvider
 	clients ClientManager
+	brokers IdentityProviderManager
 	store   *Store
 	audit   *audit.Store
 }

@@ -137,7 +137,9 @@ func run() error {
 	auditStore := audit.NewStore()
 
 	idp := tenancy.NewKeycloakAdmin(cfg.KeycloakBaseURL, cfg.KeycloakRealm, cfg.KeycloakClientID, cfg.KeycloakClientSecret)
-	svc := tenancy.NewService(database, idp, tenancy.NewStore(), auditStore).WithClientManager(idp)
+	svc := tenancy.NewService(database, idp, tenancy.NewStore(), auditStore).
+		WithClientManager(idp).
+		WithIdentityProviderManager(idp)
 	handler := tenancy.NewHandler(svc, authorizer).WithScopesCatalog(cfg.IdentityScopes)
 	meHandler := tenancy.NewMeHandler(authorizer)
 

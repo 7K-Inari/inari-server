@@ -866,6 +866,35 @@ func TestOrgMemberRoleLifecycle(t *testing.T) {
 	}
 }
 
+// TestSetMemberRoleSameRoleDifferentTeam reproduces a membership loss bug:
+// memberships are keyed (user_id, org_id, role), so when a user holds role R
+// via custom team T and PUT sets role R (anchor team A), the anchor insert
+// conflicts and is skipped while T's row is removed — leaving zero rows.
+func TestSetMemberRoleSameRoleDifferentTeam(t *testing.T) {
+	database := setupDB(t)
+	ctx := context.Background()
+	idp := newFakeIdP()
+	idp.users["user-2"] = true
+	svc := tenancy.NewService(database, idp, tenancy.NewStore(), audit.NewStore())
+	org, _, err := svc.CreateTenant(ctx, "user-1", "acme", "Acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CreateTeam(ctx, "user-1", "acme", "ops", types.RoleViewer); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.AddMember(ctx, "user-1", "acme", "ops", "user-2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.SetMemberRole(ctx, "user-1", "acme", "user-2", types.RoleViewer); err != nil {
+		t.Fatal(err)
+	}
+	role, ok, err := tenancy.NewStore().HighestRole(ctx, database.Pool, org.ID, "user-2")
+	if err != nil || !ok || role != types.RoleViewer {
+		t.Errorf("user-2 lost viewer role after same-role PUT: role=%q ok=%v err=%v", role, ok, err)
+	}
+}
+
 // relationGate grants a fixed relation on any org object (fine PEP stub).
 type relationGate struct{ relation string }
 

@@ -76,7 +76,7 @@ func (t itTenants) GetTenant(_ context.Context, slug string) (*types.Organizatio
 }
 
 func allowAll() itAuthorizer {
-	return itAuthorizer{allow: map[string]bool{"organization:org:1": true, "organization:org:2": true, "organization:org:3": true}}
+	return itAuthorizer{allow: map[string]bool{"organization:1": true, "organization:2": true, "organization:3": true}}
 }
 
 func itServer(t *testing.T, az itAuthorizer) (*httptest.Server, *db.DB) {
@@ -260,7 +260,7 @@ func TestInboxAggregatesAcrossOrgs(t *testing.T) {
 // TestInboxOmitsForbiddenOrgs verifies partial access never 403s: orgs denied
 // by OpenFGA (or erroring) are silently omitted while allowed orgs still list.
 func TestInboxOmitsForbiddenOrgs(t *testing.T) {
-	srv, database := itServer(t, itAuthorizer{allow: map[string]bool{"organization:org:1": true}})
+	srv, database := itServer(t, itAuthorizer{allow: map[string]bool{"organization:1": true}})
 	defer srv.Close()
 	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	allowed := itSeed(t, database, "org:1", "pending", "acme", base)
@@ -282,8 +282,8 @@ func TestInboxOmitsForbiddenOrgs(t *testing.T) {
 
 	// FGA errors are treated the same as denials.
 	srv2, database2 := itServer(t, itAuthorizer{
-		allow: map[string]bool{"organization:org:1": true},
-		errOn: "organization:org:2",
+		allow: map[string]bool{"organization:1": true},
+		errOn: "organization:2",
 	})
 	defer srv2.Close()
 	itSeed(t, database2, "org:1", "pending", "acme", base)

@@ -51,12 +51,60 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 	}, h.getTenant)
 
 	huma.Register(api, huma.Operation{
+		OperationID: "updateTenant",
+		Method:      http.MethodPatch,
+		Path:        "/api/v1/tenants/{org}",
+		Summary:     "Update the tenant profile (org admin only)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.updateTenant)
+
+	huma.Register(api, huma.Operation{
 		OperationID: "listTeams",
 		Method:      http.MethodGet,
 		Path:        "/api/v1/tenants/{org}/teams",
 		Summary:     "List teams of a tenant",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.listTeams)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "createTeam",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/tenants/{org}/teams",
+		Summary:     "Create a team granting an org role (org admin only)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.createTeam)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "deleteTeam",
+		Method:      http.MethodDelete,
+		Path:        "/api/v1/tenants/{org}/teams/{team}",
+		Summary:     "Delete a team (org admin only; default teams are protected)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.deleteTeam)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "listOrgMembers",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/tenants/{org}/members",
+		Summary:     "Org-wide member view (highest role + teams)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.listOrgMembers)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "setMemberRole",
+		Method:      http.MethodPut,
+		Path:        "/api/v1/tenants/{org}/members/{subject}",
+		Summary:     "Set a user's org role (org admin only)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.putMember)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "removeOrgMember",
+		Method:      http.MethodDelete,
+		Path:        "/api/v1/tenants/{org}/members/{subject}",
+		Summary:     "Remove a user from the organization (org admin only)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.removeOrgMember)
 
 	huma.Register(api, huma.Operation{
 		OperationID: "listMembers",
@@ -272,6 +320,160 @@ func (h *Handler) removeMember(ctx context.Context, in *removeMemberInput) (*str
 	switch {
 	case errors.Is(err, ErrTeamNotFound):
 		return nil, huma.Error404NotFound("team not found")
+	case errors.Is(err, ErrOrgNotFound):
+		return nil, huma.Error404NotFound("organization not found")
+	case err != nil:
+		return nil, err
+	}
+	return nil, nil
+}
+
+type updateTenantInput struct {
+	Org  string `path:"org" doc:"Tenant slug"`
+	Body struct {
+		DisplayName string `json:"displayName" minLength:"1" maxLength:"200"`
+	}
+}
+
+func (h *Handler) updateTenant(ctx context.Context, in *updateTenantInput) (*tenantOutput, error) {
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	if err != nil {
+		return nil, err
+	}
+	id := identity(ctx)
+	updated, err := h.svc.UpdateTenantProfile(ctx, id.Subject, in.Org, in.Body.DisplayName)
+	if err != nil {
+		return nil, err
+	}
+	out := &tenantOutput{}
+	out.Body.Organization = *updated
+	teams, err := h.svc.ListTeams(ctx, org.ID)
+	if err != nil {
+		return nil, err
+	}
+	out.Body.Teams = teams
+	return out, nil
+}
+
+type createTeamInput struct {
+	Org  string `path:"org" doc:"Tenant slug"`
+	Body struct {
+		Name string     `json:"name" minLength:"1" maxLength:"63" pattern:"^[a-z0-9][a-z0-9-]*$" doc:"URL-safe team name"`
+		Role types.Role `json:"role,omitempty" doc:"Org role the team grants (default viewer)"`
+	}
+}
+
+type teamOutput struct {
+	Body struct {
+		Team types.Team `json:"team"`
+	}
+}
+
+func (h *Handler) createTeam(ctx context.Context, in *createTeamInput) (*teamOutput, error) {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+		return nil, err
+	}
+	role := in.Body.Role
+	if role == "" {
+		role = types.RoleViewer
+	}
+	if !role.Valid() {
+		return nil, huma.Error400BadRequest("invalid role")
+	}
+	id := identity(ctx)
+	team, err := h.svc.CreateTeam(ctx, id.Subject, in.Org, in.Body.Name, role)
+	switch {
+	case errors.Is(err, ErrTeamNameTaken):
+		return nil, huma.Error409Conflict("team name already exists in tenant")
+	case errors.Is(err, ErrOrgNotFound):
+		return nil, huma.Error404NotFound("organization not found")
+	case err != nil:
+		return nil, err
+	}
+	out := &teamOutput{}
+	out.Body.Team = *team
+	return out, nil
+}
+
+func (h *Handler) deleteTeam(ctx context.Context, in *teamPathInput) (*struct{}, error) {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+		return nil, err
+	}
+	id := identity(ctx)
+	err := h.svc.DeleteTeam(ctx, id.Subject, in.Org, in.Team)
+	switch {
+	case errors.Is(err, ErrDefaultTeam):
+		return nil, huma.Error409Conflict("default teams cannot be deleted")
+	case errors.Is(err, ErrTeamNotFound):
+		return nil, huma.Error404NotFound("team not found")
+	case errors.Is(err, ErrOrgNotFound):
+		return nil, huma.Error404NotFound("organization not found")
+	case err != nil:
+		return nil, err
+	}
+	return nil, nil
+}
+
+type listOrgMembersOutput struct {
+	Body struct {
+		Members []OrgMemberView `json:"members"`
+	}
+}
+
+func (h *Handler) listOrgMembers(ctx context.Context, in *orgPathInput) (*listOrgMembersOutput, error) {
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	if err != nil {
+		return nil, err
+	}
+	members, err := h.svc.ListOrgMembers(ctx, org.ID)
+	if err != nil {
+		return nil, err
+	}
+	out := &listOrgMembersOutput{}
+	out.Body.Members = members
+	return out, nil
+}
+
+type putMemberInput struct {
+	Org     string `path:"org"`
+	Subject string `path:"subject"`
+	Body    struct {
+		Role types.Role `json:"role" doc:"Org role to grant"`
+	}
+}
+
+func (h *Handler) putMember(ctx context.Context, in *putMemberInput) (*struct{}, error) {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+		return nil, err
+	}
+	if !in.Body.Role.Valid() {
+		return nil, huma.Error400BadRequest("invalid role")
+	}
+	id := identity(ctx)
+	err := h.svc.SetMemberRole(ctx, id.Subject, in.Org, in.Subject, in.Body.Role)
+	switch {
+	case errors.Is(err, ErrUserNotFound):
+		return nil, huma.Error404NotFound("user not found")
+	case errors.Is(err, ErrOrgNotFound):
+		return nil, huma.Error404NotFound("organization not found")
+	case err != nil:
+		return nil, err
+	}
+	return nil, nil
+}
+
+type removeOrgMemberInput struct {
+	Org     string `path:"org"`
+	Subject string `path:"subject"`
+}
+
+func (h *Handler) removeOrgMember(ctx context.Context, in *removeOrgMemberInput) (*struct{}, error) {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+		return nil, err
+	}
+	id := identity(ctx)
+	err := h.svc.RemoveOrgMember(ctx, id.Subject, in.Org, in.Subject)
+	switch {
 	case errors.Is(err, ErrOrgNotFound):
 		return nil, huma.Error404NotFound("organization not found")
 	case err != nil:

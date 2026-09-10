@@ -27,6 +27,7 @@ var (
 	ErrClusterNotFound   = errors.New("cluster not found")
 	ErrClusterNameTaken  = errors.New("cluster name already exists in tenant")
 	ErrTokenInvalid      = errors.New("registration token invalid")
+	ErrTokenNotFound     = errors.New("registration token not found")
 	ErrTokenExpired      = errors.New("registration token expired")
 	ErrTokenUsed         = errors.New("registration token already used")
 	ErrClusterNotPending = errors.New("cluster is not pending approval")
@@ -288,6 +289,55 @@ func (s *Store) ConsumeToken(ctx context.Context, q db.Querier, tokenHash string
 	return &t, nil
 }
 
+// ListActiveTokens returns a cluster's unconsumed, unexpired registration
+// tokens (metadata only — hashes never leave the store).
+func (s *Store) ListActiveTokens(ctx context.Context, q db.Querier, clusterID string, now time.Time) ([]types.RegistrationToken, error) {
+	const sql = `SELECT id, cluster_id, expires_at, used_at, created_by, created_at
+	             FROM registration_tokens
+	             WHERE cluster_id = $1 AND used_at IS NULL AND expires_at > $2
+	             ORDER BY created_at`
+	rows, err := q.Query(ctx, sql, clusterID, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []types.RegistrationToken
+	for rows.Next() {
+		var t types.RegistrationToken
+		if err := rows.Scan(&t.ID, &t.ClusterID, &t.ExpiresAt, &t.UsedAt, &t.CreatedBy, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// RevokeToken burns an unconsumed token, reporting whether this call did
+// the burn (false when already consumed or unknown).
+func (s *Store) RevokeToken(ctx context.Context, q db.Querier, clusterID, tokenID string) (bool, error) {
+	const sql = `UPDATE registration_tokens SET used_at = now()
+	             WHERE id = $1 AND cluster_id = $2 AND used_at IS NULL`
+	tag, err := q.Exec(ctx, sql, tokenID, clusterID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// TokenExists reports whether the token id belongs to the cluster.
+func (s *Store) TokenExists(ctx context.Context, q db.Querier, clusterID, tokenID string) (bool, error) {
+	const sql = `SELECT 1 FROM registration_tokens WHERE id = $1 AND cluster_id = $2`
+	var one int
+	err := q.QueryRow(ctx, sql, tokenID, clusterID).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // Service orchestrates cluster lifecycle: DB projection + audit + outbox in
 // one TX, Keycloak identity via ClientManager.
 type Service struct {
@@ -399,6 +449,41 @@ func (s *Service) IssueToken(ctx context.Context, actor, clusterID string) (plai
 		return "", nil, err
 	}
 	return plaintext, t, nil
+}
+
+// ListTokens returns the cluster's active (unconsumed, unexpired)
+// registration tokens.
+func (s *Service) ListTokens(ctx context.Context, clusterID string) ([]types.RegistrationToken, error) {
+	return s.store.ListActiveTokens(ctx, s.db.Pool, clusterID, s.now())
+}
+
+// RevokeToken burns a registration token so it can no longer be exchanged.
+// Idempotent: an already-burned token is a no-op; an unknown id 404s.
+func (s *Service) RevokeToken(ctx context.Context, actor, clusterID, tokenID string) error {
+	c, err := s.store.GetCluster(ctx, s.db.Pool, clusterID)
+	if err != nil {
+		return err
+	}
+	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		burned, err := s.store.RevokeToken(ctx, tx, clusterID, tokenID)
+		if err != nil {
+			return err
+		}
+		if !burned {
+			exists, err := s.store.TokenExists(ctx, tx, clusterID, tokenID)
+			if err != nil {
+				return err
+			}
+			if !exists {
+				return ErrTokenNotFound
+			}
+			return nil // already burned: revoke is idempotent
+		}
+		return s.audit.Record(ctx, tx, &types.AuditEvent{
+			OrgID: c.OrgID, Actor: actor, Action: "token.revoked", ObjectType: "registration_token", ObjectID: tokenID,
+			Payload: json.RawMessage(fmt.Sprintf(`{"clusterId":%q}`, clusterID)),
+		})
+	})
 }
 
 // ApproveCluster completes the double opt-in: pending_approval →

@@ -139,6 +139,36 @@ func (k *KeycloakAdmin) DeleteOrganization(ctx context.Context, kcOrgID string) 
 	return nil
 }
 
+// UpdateOrganization updates the org profile (display name is carried in the
+// KC description field, mirroring CreateOrganization). KC 26 PUT requires
+// the full representation, so the org is read-modify-written.
+func (k *KeycloakAdmin) UpdateOrganization(ctx context.Context, kcOrgID, displayName string) error {
+	resp, err := k.do(ctx, http.MethodGet, "/organizations/"+kcOrgID, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		return fmt.Errorf("keycloak: get organization: status %d", resp.StatusCode)
+	}
+	var rep map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&rep); err != nil {
+		_ = resp.Body.Close()
+		return err
+	}
+	_ = resp.Body.Close()
+	rep["description"] = displayName
+	put, err := k.do(ctx, http.MethodPut, "/organizations/"+kcOrgID, rep)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = put.Body.Close() }()
+	if put.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("keycloak: update organization: status %d", put.StatusCode)
+	}
+	return nil
+}
+
 // CreateGroup creates nested groups along the path a/b/c.
 func (k *KeycloakAdmin) CreateGroup(ctx context.Context, path string) (string, error) {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
@@ -431,6 +461,25 @@ func (k *KeycloakAdmin) RemoveGroupMember(ctx context.Context, groupPath, userID
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
 		return fmt.Errorf("keycloak: remove group member: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// DeleteGroup removes the group at path a/b/c. Idempotent: an unresolvable
+// path means the group is already gone.
+func (k *KeycloakAdmin) DeleteGroup(ctx context.Context, groupPath string) error {
+	gid, err := k.resolveGroupID(ctx, groupPath)
+	if err != nil {
+		// Resolution failure means the path (or a parent) is gone already.
+		return nil
+	}
+	resp, err := k.do(ctx, http.MethodDelete, "/groups/"+gid, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("keycloak: delete group: status %d", resp.StatusCode)
 	}
 	return nil
 }

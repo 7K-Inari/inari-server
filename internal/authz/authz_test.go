@@ -85,6 +85,40 @@ func TestTupleWriterMembership(t *testing.T) {
 	}
 }
 
+func TestTupleWriterTeamDeletedRetractsRoleTuple(t *testing.T) {
+	fs := &fakeStore{}
+	w := NewTupleWriter(fs)
+	create := event(t, types.EventTeamCreated, types.TeamCreatedPayload{
+		OrgID: "org:1", TeamID: "t9", Name: "ops", Role: types.RoleDeveloper,
+	})
+	if err := w.Handle(context.Background(), create); err != nil {
+		t.Fatalf("Handle create: %v", err)
+	}
+	del := event(t, types.EventTeamDeleted, types.TeamCreatedPayload{
+		OrgID: "org:1", TeamID: "t9", Name: "ops", Role: types.RoleDeveloper,
+	})
+	if err := w.Handle(context.Background(), del); err != nil {
+		t.Fatalf("Handle delete: %v", err)
+	}
+	want := Tuple{User: "team:t9#member", Relation: "developer", Object: "organization:1"}
+	if len(fs.written) != 1 || fs.written[0] != want {
+		t.Errorf("written = %+v", fs.written)
+	}
+	if len(fs.deleted) != 1 || fs.deleted[0] != want {
+		t.Errorf("deleted = %+v", fs.deleted)
+	}
+	// EventTypes must include team.deleted or the dispatcher skips it.
+	found := false
+	for _, et := range w.EventTypes() {
+		if et == types.EventTeamDeleted {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("EventTypes missing team.deleted")
+	}
+}
+
 func TestAuthorizerDelegates(t *testing.T) {
 	fs := &fakeStore{checks: map[string]bool{"user:u1|viewer|organization:org:1": true}}
 	a := NewAuthorizer(fs)

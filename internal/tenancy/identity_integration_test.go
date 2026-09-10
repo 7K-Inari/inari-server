@@ -459,6 +459,11 @@ func TestIdentityClientHTTPRoutes(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("mappings bad role: got %d, want 400", resp.StatusCode)
 	}
+	resp = do(http.MethodPut, "/api/v1/tenants/acme/rbac/mappings",
+		`{"mappings":[{"team":"developers","role":"viewer"},{"team":"developers","role":"org-admin"}]}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("mappings duplicate team: got %d, want 400", resp.StatusCode)
+	}
 
 	// Delete disables.
 	resp = do(http.MethodDelete, "/api/v1/tenants/acme/identity/clients/org-acme-ci-bot", "")

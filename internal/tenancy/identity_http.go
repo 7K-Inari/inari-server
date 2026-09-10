@@ -336,10 +336,15 @@ func (h *Handler) putRBACMappings(ctx context.Context, in *putRBACMappingsInput)
 	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
 		return nil, err
 	}
+	seen := make(map[string]bool, len(in.Body.Mappings))
 	for _, m := range in.Body.Mappings {
 		if !m.Role.Valid() {
 			return nil, huma.Error400BadRequest("invalid role: " + string(m.Role))
 		}
+		if seen[m.Team] {
+			return nil, huma.Error400BadRequest("duplicate team in mappings: " + m.Team)
+		}
+		seen[m.Team] = true
 	}
 	id := identity(ctx)
 	changes, err := h.svc.SetRBACMappings(ctx, id.Subject, in.Org, in.Body.Mappings)

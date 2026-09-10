@@ -194,6 +194,17 @@ func (s *Service) RotateIdentityClientSecret(ctx context.Context, actor, slug, c
 // in one TX with a single audit row and one outbox event driving the
 // OpenFGA tuple rewrite.
 func (s *Service) SetRBACMappings(ctx context.Context, actor, slug string, mappings []types.TeamRoleMapping) ([]types.TeamRoleChange, error) {
+	// Reject duplicate teams up front: each entry is compared against the
+	// team's original role, so a repeated team would emit multiple changes
+	// with the same old role and the tuple writer would grant every new
+	// role instead of the last one.
+	seen := make(map[string]bool, len(mappings))
+	for _, m := range mappings {
+		if seen[m.Team] {
+			return nil, fmt.Errorf("tenancy: duplicate team %q in mappings", m.Team)
+		}
+		seen[m.Team] = true
+	}
 	org, err := s.store.GetOrganizationBySlug(ctx, s.db.Pool, slug)
 	if err != nil {
 		return nil, err

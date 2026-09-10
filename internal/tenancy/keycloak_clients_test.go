@@ -77,7 +77,7 @@ func newClientCrudFake(t *testing.T) (*httptest.Server, *clientCrudFake) {
 			_, _ = w.Write([]byte(`{"type":"secret","value":"initial-secret"}`))
 		case r.URL.Path == "/admin/realms/inari/clients/uuid-1/client-secret" && r.Method == http.MethodPost:
 			f.secretCalls++
-			_, _ = w.Write([]byte(fmt.Sprintf(`{"type":"secret","value":%q}`, f.rotatedSecret)))
+			_, _ = fmt.Fprintf(w, `{"type":"secret","value":%q}`, f.rotatedSecret)
 		case r.URL.Path == "/admin/realms/inari/client-scopes" && r.Method == http.MethodGet:
 			type scopeRep struct {
 				ID   string `json:"id"`

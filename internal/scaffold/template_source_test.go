@@ -298,3 +298,57 @@ func TestSeedTemplatesPullCleanly(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestSeedGoServiceRendersTenantContext renders the repo-shipped go-service
+// skeleton with a tenant projection and asserts the plan §6 contract: every
+// k8s manifest carries the org_id/tenant attribution labels and deploys
+// into the <org-slug>--<component-name> namespace. Guards against skeleton
+// template typos that strict missingkey=error can't catch for struct
+// fields until a real scaffold run executes them.
+func TestSeedGoServiceRendersTenantContext(t *testing.T) {
+	root := filepath.Join("..", "..", "templates", "go-service")
+	if _, err := os.Stat(root); err != nil {
+		t.Skip("templates/ seed dir not present")
+	}
+	data := &RenderData{
+		Values: map[string]any{
+			"serviceName": "payments-api",
+			"module":      "github.com/inari-apps/payments-api",
+			"goVersion":   "1.24",
+			"port":        "8080",
+		},
+		Tenant: TenantContext{
+			Slug: "acme", OrgID: "org:acme", Namespace: "acme--payments-api",
+			GroupPath: "tenant-acme/members", ClusterID: "cluster:dev-1",
+		},
+		Run: RunRef{ID: "run-1", Name: "payments-api"},
+	}
+	files, err := renderSkeleton(root, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deploy, svc string
+	for _, f := range files {
+		switch f.Path {
+		case "k8s/deployment.yaml":
+			deploy = f.Content
+		case "k8s/service.yaml":
+			svc = f.Content
+		}
+	}
+	if deploy == "" || svc == "" {
+		t.Fatalf("k8s manifests missing from render: %+v", files)
+	}
+	for _, want := range []string{
+		"namespace: acme--payments-api",
+		"inari.io/org-id: org:acme",
+		"inari.io/tenant: acme",
+	} {
+		if !strings.Contains(deploy, want) {
+			t.Fatalf("deployment.yaml missing %q:\n%s", want, deploy)
+		}
+		if !strings.Contains(svc, want) {
+			t.Fatalf("service.yaml missing %q:\n%s", want, svc)
+		}
+	}
+}

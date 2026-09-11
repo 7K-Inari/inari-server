@@ -241,6 +241,29 @@ func TestBindingRBACGuards(t *testing.T) {
 	}
 }
 
+// A run with no recorded creator still binds the team; membership is
+// simply skipped (nothing to join).
+func TestBindingRBACEmptyCreator(t *testing.T) {
+	rc, _, rbac := catalogFixture(t, `{"name":"payments-api"}`)
+	rc.Run.CreatedBy = ""
+	b := &fakeRBACBinder{}
+
+	done, err := stepBindingRBAC(context.Background(), &ExecEnv{RBAC: b}, rc, rbac)
+	if err != nil || !done {
+		t.Fatalf("done=%v err=%v", done, err)
+	}
+	if len(b.teams) != 1 {
+		t.Fatalf("EnsureTeam calls = %+v", b.teams)
+	}
+	if len(b.members) != 0 {
+		t.Fatalf("AddMember must be skipped, got %+v", b.members)
+	}
+	var res bindRBACResult
+	if err := json.Unmarshal(rbac.Result, &res); err != nil || res.Member != "" {
+		t.Fatalf("result = %s (%v)", rbac.Result, err)
+	}
+}
+
 func TestBindingRBACManifestRoleOverride(t *testing.T) {
 	dir := t.TempDir()
 	writeScaffoldTemplate(t, dir, "go-service", "1.0.0",

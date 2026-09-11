@@ -198,7 +198,7 @@ func TestApplyStatusAndGet(t *testing.T) {
 	}
 	var actor, action string
 	if err := database.Pool.QueryRow(ctx,
-		`SELECT actor, action FROM audit_events WHERE object_id = $1 ORDER BY id DESC LIMIT 1`, r.ID).
+		`SELECT actor, action FROM audit_events WHERE object_id = $1 AND action = 'platform-resource.status' ORDER BY created_at DESC LIMIT 1`, r.ID).
 		Scan(&actor, &action); err != nil {
 		t.Fatal(err)
 	}

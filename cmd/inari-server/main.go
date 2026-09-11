@@ -35,6 +35,7 @@ import (
 	gitgithub "github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider/github"
 	"github.com/7K-Inari/inari-server/internal/platformresources"
 	"github.com/7K-Inari/inari-server/internal/policyservice"
+	"github.com/7K-Inari/inari-server/internal/scaffold"
 	"github.com/7K-Inari/inari-server/internal/secrets"
 	"github.com/7K-Inari/inari-server/internal/secretstores"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
@@ -269,6 +270,19 @@ func run() error {
 		}
 		if cfg.CatalogSyncInterval > 0 {
 			go runCatalogSyncLoop(ctx, catalogSvc, cfg.CatalogSyncInterval)
+		}
+	}
+
+	// M8.W2: software templates ship in a local dir (baked into the image);
+	// sync them into the catalog as source=template items. Best-effort like
+	// the catalog sync above; the dir only changes on redeploy, so a startup
+	// sync suffices.
+	if cfg.ScaffoldTemplateDir != "" {
+		puller := &scaffold.FilePuller{Root: cfg.ScaffoldTemplateDir}
+		if n, err := scaffold.SyncTemplates(ctx, puller, catalogSvc); err != nil {
+			slog.Error("template sync failed", "error", err)
+		} else {
+			slog.Info("template sync complete", "templates", n)
 		}
 	}
 

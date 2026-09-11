@@ -1,0 +1,26 @@
+{
+  "type": "object",
+  "required": ["serviceName", "module"],
+  "properties": {
+    "serviceName": {
+      "type": "string",
+      "title": "Service name",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "module": {
+      "type": "string",
+      "title": "Go module path",
+      "description": "e.g. github.com/myorg/my-service"
+    },
+    "goVersion": {
+      "type": "string",
+      "title": "Go version",
+      "default": "1.23"
+    },
+    "port": {
+      "type": "integer",
+      "title": "HTTP port",
+      "default": 8080
+    }
+  }
+}

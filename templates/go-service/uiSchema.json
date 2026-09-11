@@ -1,0 +1,6 @@
+{
+  "ui:order": ["serviceName", "module", "goVersion", "port"],
+  "module": {
+    "ui:placeholder": "github.com/myorg/my-service"
+  }
+}

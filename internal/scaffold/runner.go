@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/7K-Inari/inari-server/internal/approvals"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -37,10 +38,16 @@ type TenantContextResolver interface {
 	ResolveTenant(ctx context.Context, orgID string) (*TenantContext, error)
 }
 
+// ApprovalGate evaluates approval policy for a gated template run
+// (approvals.Service subset; plan §5.3 — same seam the orchestrator uses).
+type ApprovalGate interface {
+	Gate(ctx context.Context, in approvals.GateInput) (*approvals.GateResult, error)
+}
+
 // ExecEnv bundles the backend seams the steps run against. Git, Upsert,
 // RBAC and Registrar are consumed by the W4 phase steps; Templates and
-// Tenants by the rendering step. All are optional — a nil seam makes the
-// depending step fail, not the engine.
+// Tenants by the rendering step; Gate by the W6 approval hold. All are
+// optional — a nil seam makes the depending step fail, not the engine.
 type ExecEnv struct {
 	Git       GitProvider
 	GitOrg    string // git organization/owner receiving scaffolded repos
@@ -49,6 +56,7 @@ type ExecEnv struct {
 	Registrar AppRegistrar
 	Templates TemplateSource
 	Tenants   TenantContextResolver
+	Gate      ApprovalGate
 }
 
 // StepFunc runs one step idempotently. done=false means the step is

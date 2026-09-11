@@ -1376,6 +1376,11 @@ const (
 	ScaffoldPhaseBindingRBAC        ScaffoldPhase = "binding-rbac"
 	ScaffoldPhaseCompleted          ScaffoldPhase = "completed"
 	ScaffoldPhaseFailed             ScaffoldPhase = "failed"
+	// ScaffoldPhasePendingApproval parks a run after rendering while its
+	// template's approval request awaits a decision (M8.W6, plan §5.3).
+	// Not in the reconcile claim allowlist — the approval.decided outbox
+	// event resumes (or fails) the run.
+	ScaffoldPhasePendingApproval ScaffoldPhase = "pending_approval"
 )
 
 // Scaffold run step states (mirrors the tenant-zone-step vocabulary;
@@ -1428,6 +1433,7 @@ const (
 	EventScaffoldRunCompleted   = "scaffold.completed"
 	EventScaffoldRunFailed      = "scaffold.failed"
 	EventScaffoldRunCancelled   = "scaffold.cancelled"
+	EventScaffoldRunRetried     = "scaffold.run_retried"
 )
 
 // ScaffoldRunPayload is the outbox payload for scaffold run lifecycle

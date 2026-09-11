@@ -74,7 +74,7 @@ func TestFilePullerPullsValidTemplates(t *testing.T) {
 	if len(goSvc.Manifest.Tags) != 2 || goSvc.Manifest.Tags[0] != "go" {
 		t.Errorf("tags = %v", goSvc.Manifest.Tags)
 	}
-	if goSvc.Manifest.Scaffold["createRepo"]["visibility"] != "private" {
+	if goSvc.Manifest.Scaffold.Phases["createRepo"]["visibility"] != "private" {
 		t.Errorf("scaffold block = %v", goSvc.Manifest.Scaffold)
 	}
 	if string(goSvc.Schema) != `{"type":"object"}` {

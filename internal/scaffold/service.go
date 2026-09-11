@@ -11,11 +11,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/7K-Inari/inari-server/internal/approvals"
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -169,7 +171,25 @@ func (s *Service) driveRun(ctx context.Context, run *types.ScaffoldRun) error {
 			})
 		})
 	}
-	complete, runErr := RunSteps(ctx, s.execEnv(), rc, stepNames, stepFuncs, onUpdate, isCancelled)
+	// Two passes (W6): rendering first, then the approval hold, then the
+	// remaining phases — the gate sits between rendering and the external
+	// side effects (repo/pipeline/catalog/rbac), never mid-phase.
+	var complete bool
+	var runErr error
+	if st := stepMap["rendering"]; st == nil || st.State != types.ScaffoldStepCompleted {
+		_, runErr = RunSteps(ctx, s.execEnv(), rc, stepNames[:1], stepFuncs, onUpdate, isCancelled)
+	}
+	gated := false
+	if runErr == nil && !isCancelled() {
+		var err error
+		gated, err = s.maybeGate(ctx, run, stepMap)
+		if err != nil {
+			return err
+		}
+	}
+	if runErr == nil && !gated {
+		complete, runErr = RunSteps(ctx, s.execEnv(), rc, stepNames[1:], stepFuncs, onUpdate, isCancelled)
+	}
 	switch {
 	case errors.Is(runErr, ErrCancelled):
 		return s.finalize(ctx, run, types.ScaffoldPhaseFailed, "cancelled", types.EventScaffoldRunFailed, actor)
@@ -185,6 +205,130 @@ func (s *Service) driveRun(ctx context.Context, run *types.ScaffoldRun) error {
 	default:
 		return nil // waiting on an async operation (or a W4 placeholder); the loop re-enters
 	}
+}
+
+// approvalHoldKey is the run-outputs key holding the approval request ID
+// of a gated run. Set when the run parks in pending_approval; kept after
+// resume so a re-driven run never requests a second approval (the retry
+// route clears it to re-gate).
+const approvalHoldKey = "approvalId"
+
+// maybeGate parks the run in pending_approval when its template declares
+// scaffold.requiresApproval and the run has finished rendering but not yet
+// started the remaining phases. Returns gated=true when the run was parked
+// (the caller must not drive it further this tick). Ungated templates, an
+// unfinished rendering step, an already-gated run, or missing seams are
+// pass-throughs.
+func (s *Service) maybeGate(ctx context.Context, run *types.ScaffoldRun, steps map[string]*types.ScaffoldRunStep) (bool, error) {
+	r := steps["rendering"]
+	if r == nil || r.State != types.ScaffoldStepCompleted {
+		return false, nil
+	}
+	if outputValue(run.Outputs, approvalHoldKey) != "" {
+		return false, nil
+	}
+	env := s.execEnv()
+	if env.Gate == nil || env.Templates == nil {
+		return false, nil
+	}
+	name := strings.TrimPrefix(run.TemplateItemID, "template:")
+	pkg, err := env.Templates.Get(ctx, name, run.TemplateVersion)
+	if err != nil {
+		return false, err
+	}
+	if !pkg.Manifest.Scaffold.requiresApproval() {
+		return false, nil
+	}
+	item, err := s.catalog.GetItemByID(ctx, run.TemplateItemID)
+	if err != nil {
+		return false, fmt.Errorf("scaffold: gate: load template item %s: %w", run.TemplateItemID, err)
+	}
+	spec, err := json.Marshal(map[string]string{"runId": run.ID})
+	if err != nil {
+		return false, err
+	}
+	res, err := env.Gate.Gate(ctx, approvals.GateInput{
+		OrgID: run.OrgID, Item: item, Version: run.TemplateVersion,
+		Requester: run.CreatedBy, Spec: spec,
+	})
+	if err != nil {
+		return false, fmt.Errorf("scaffold: gate run %s: %w", run.ID, err)
+	}
+	if res.Approved {
+		return false, nil
+	}
+	outputs, err := setOutput(run.Outputs, approvalHoldKey, res.ApprovalID)
+	if err != nil {
+		return false, err
+	}
+	run.Outputs = outputs
+	actor := "system:scaffold"
+	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		if err := s.store.UpdateRunPhase(ctx, tx, run.ID, types.ScaffoldPhasePendingApproval, "", outputs); err != nil {
+			return err
+		}
+		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
+			OrgID: run.OrgID, Actor: actor, Action: "scaffold.approval_requested",
+			ObjectType: "scaffold_run", ObjectID: run.ID,
+			Payload: json.RawMessage(fmt.Sprintf(`{"approvalId":%q}`, res.ApprovalID)),
+		}); err != nil {
+			return err
+		}
+		return audit.AppendOutbox(ctx, tx, run.OrgID, types.EventScaffoldRunStepUpdated, types.ScaffoldRunPayload{
+			OrgID: run.OrgID, RunID: run.ID, Version: run.TemplateVersion,
+			Phase: string(types.ScaffoldPhasePendingApproval),
+		})
+	})
+	if err != nil {
+		return false, err
+	}
+	run.Phase = types.ScaffoldPhasePendingApproval
+	return true, nil
+}
+
+// setOutput returns a copy of the run outputs JSON object with key set.
+func setOutput(raw json.RawMessage, key string, value any) (json.RawMessage, error) {
+	var outputs map[string]any
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &outputs)
+	}
+	if outputs == nil {
+		outputs = map[string]any{}
+	}
+	outputs[key] = value
+	return json.Marshal(outputs)
+}
+
+// deleteOutput returns a copy of the run outputs JSON object with key removed.
+func deleteOutput(raw json.RawMessage, key string) (json.RawMessage, error) {
+	var outputs map[string]any
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &outputs)
+	}
+	delete(outputs, key)
+	return json.Marshal(outputs)
+}
+
+// outputString reads one string key from the run outputs JSON object.
+func outputValue(raw json.RawMessage, key string) string {
+	var outputs map[string]any
+	if len(raw) == 0 || json.Unmarshal(raw, &outputs) != nil {
+		return ""
+	}
+	s, _ := outputs[key].(string)
+	return s
+}
+
+// nextPhaseForRun computes the phase a resumed run re-enters: the first
+// non-completed step in execution order (fallback: creating-repo — the
+// gate sits between rendering and the remaining phases).
+func nextPhaseForRun(steps []types.ScaffoldRunStep) types.ScaffoldPhase {
+	for _, st := range steps {
+		if st.State != types.ScaffoldStepCompleted {
+			return phaseForStep(st.Name)
+		}
+	}
+	return types.ScaffoldPhaseCreatingRepo
 }
 
 // execEnv tolerates a nil exec env (steps then fail on the missing seam)

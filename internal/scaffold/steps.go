@@ -210,7 +210,7 @@ func manifestParam(m *TemplateManifest, phase, key, def string) string {
 	if m.Scaffold == nil {
 		return def
 	}
-	if v, ok := m.Scaffold[phase][key].(string); ok && v != "" {
+	if v, ok := m.Scaffold.Phases[phase][key].(string); ok && v != "" {
 		return v
 	}
 	return def

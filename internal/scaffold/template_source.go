@@ -18,10 +18,39 @@ import (
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
-// TemplateManifest mirrors <template>/template.yaml. The Scaffold block
-// carries per-phase params (createRepo, createPipeline, registerCatalog,
-// bindRBAC) consumed by the run executor in a later wave; it is kept
-// permissive (phase name → param map) and only validated for shape here.
+// ScaffoldConfig is the manifest's scaffold: block. RequiresApproval gates
+// the run after rendering (M8.W6: approvals.Gate + outbox resume, same as
+// orchestrator deploys); Phases carries the per-phase params (createRepo,
+// createPipeline, registerCatalog, bindRBAC) consumed by the run executor
+// — kept permissive (phase name → param map) and only validated for shape.
+type ScaffoldConfig struct {
+	RequiresApproval bool `yaml:"requiresApproval" json:"requiresApproval,omitempty"`
+	// Phases maps phase name → phase params (yaml inline: the phase keys
+	// sit alongside requiresApproval in the scaffold: mapping).
+	Phases map[string]map[string]any `yaml:",inline" json:"-"`
+}
+
+// MarshalJSON flattens Phases back alongside requiresApproval so the
+// catalog version payload keeps the pre-W6 shape ({"scaffold":
+// {"createRepo": {...}, "requiresApproval": true}}) — the UI wizard and
+// parseTags read the manifest from that payload.
+func (c ScaffoldConfig) MarshalJSON() ([]byte, error) {
+	m := make(map[string]any, len(c.Phases)+1)
+	for k, v := range c.Phases {
+		m[k] = v
+	}
+	if c.RequiresApproval {
+		m["requiresApproval"] = true
+	}
+	return json.Marshal(m)
+}
+
+// requiresApproval reports whether the manifest gates runs on approval.
+func (c *ScaffoldConfig) requiresApproval() bool {
+	return c != nil && c.RequiresApproval
+}
+
+// TemplateManifest mirrors <template>/template.yaml.
 type TemplateManifest struct {
 	Name        string   `yaml:"name" json:"name"`
 	DisplayName string   `yaml:"displayName" json:"displayName,omitempty"`
@@ -29,8 +58,8 @@ type TemplateManifest struct {
 	Tags        []string `yaml:"tags" json:"tags,omitempty"`
 	Version     string   `yaml:"version" json:"version"`
 	Channel     string   `yaml:"channel" json:"channel,omitempty"`
-	// Scaffold maps phase name → phase params.
-	Scaffold map[string]map[string]any `yaml:"scaffold" json:"scaffold,omitempty"`
+	// Scaffold holds the per-phase params + the approval gate flag.
+	Scaffold *ScaffoldConfig `yaml:"scaffold" json:"scaffold,omitempty"`
 }
 
 // TemplatePackage is one parsed software-template package pulled from the
@@ -230,6 +259,16 @@ type CatalogUpserter interface {
 	UpsertItem(ctx context.Context, item *types.CatalogItem, version *types.CatalogItemVersion) error
 }
 
+// approvalPolicyFor maps the manifest's requiresApproval flag onto the
+// catalog item's approval policy so approvals.Gate/Decide enforce it
+// unmodified (platform-admin policy, self-approval rejected).
+func approvalPolicyFor(sc *ScaffoldConfig) types.ApprovalPolicy {
+	if sc.requiresApproval() {
+		return types.ApprovalPolicyPlatformAdmin
+	}
+	return ""
+}
+
 // templateSyncPlan turns pulled template packages into catalog item/version
 // upserts: item ID "template:<name>", source types.CatalogSourceTemplate,
 // payload = manifest + skeleton digest. Pure — kept separate from
@@ -254,6 +293,9 @@ func templateSyncPlan(pkgs []TemplatePackage) ([]*types.CatalogItem, []*types.Ca
 			DisplayName: p.Manifest.DisplayName,
 			Description: p.Manifest.Description,
 			OCIRef:      fmt.Sprintf("file://%s:%s", p.Dir, p.Manifest.Version),
+			// requiresApproval templates gate runs through approvals.Gate
+			// under the platform-admin policy (M8.W6, parent plan §5.3).
+			ApprovalPolicy: approvalPolicyFor(p.Manifest.Scaffold),
 		})
 		versions = append(versions, &types.CatalogItemVersion{
 			ItemID:  itemID,

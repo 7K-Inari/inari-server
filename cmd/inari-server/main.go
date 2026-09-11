@@ -385,6 +385,7 @@ func run() error {
 			Registrar: gateway.Queue(),
 			Templates: templateSource,
 			Tenants:   scaffoldTenantResolver{tenants: svc, clusters: registry},
+			Gate:      approvalsSvc,
 		})
 		go scaffoldSvc.RunReconcileLoop(ctx, cfg.ScaffoldReconcileInterval)
 	}
@@ -467,6 +468,7 @@ func run() error {
 		policyservice.NewDistributeHandler(policySvc, log),
 		tenantzonefactory.NewResumeHandler(tzfSvc, approvalsSvc, log),
 		fleetmanager.NewResumeHandler(fleetSvc, approvalsSvc, log),
+		scaffold.NewResumeHandler(scaffoldSvc, approvalsSvc, log),
 	)
 	go dispatcher.Run(ctx)
 

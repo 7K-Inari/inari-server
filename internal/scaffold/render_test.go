@@ -164,3 +164,47 @@ func TestStepRenderingUnknownTemplateFails(t *testing.T) {
 		t.Fatal("want error for unknown template")
 	}
 }
+
+// The shipped go-service seed template must render with schema-valid
+// wizard values (regression: the skeleton once referenced capitalized
+// .Values keys the schema does not define, failing every run under
+// missingkey=error).
+func TestSeedTemplateRendersWithSchemaValidValues(t *testing.T) {
+	env := &ExecEnv{Templates: &FilePuller{Root: "../../templates"}}
+	run := &types.ScaffoldRun{
+		ID: "run:1", OrgID: "org:acme", TemplateItemID: "template:go-service",
+		TemplateVersion: "0.1.0", DisplayName: "payments-api",
+		Values: json.RawMessage(`{"serviceName":"payments-api","module":"github.com/acme/payments-api","goVersion":"1.23","port":8080}`),
+	}
+	rc := &RunContext{Run: run, Steps: map[string]*types.ScaffoldRunStep{},
+		Tenant: &TenantContext{Slug: "acme", OrgID: "org:acme", Namespace: "acme", GroupPath: "tenant-acme/members"}}
+	step := &types.ScaffoldRunStep{RunID: run.ID, Name: "rendering", State: types.ScaffoldStepRunning}
+	done, err := stepRendering(context.Background(), env, rc, step)
+	if err != nil || !done {
+		t.Fatalf("seed template must render: done=%v err=%v", done, err)
+	}
+	var res renderResult
+	if err := json.Unmarshal(step.Result, &res); err != nil || len(res.Files) == 0 {
+		t.Fatalf("render result = %s (%v)", step.Result, err)
+	}
+	for _, f := range res.Files {
+		if strings.Contains(f.Content, "{{") {
+			t.Fatalf("%s: unrendered template syntax left: %s", f.Path, f.Content)
+		}
+	}
+}
+
+func TestStepRenderingRejectsUnsafeTemplateName(t *testing.T) {
+	dir := t.TempDir()
+	writeFixtureTemplate(t, dir, "go-service", "1.0.0", map[string]string{"a.txt": "x"})
+	env := &ExecEnv{Templates: &FilePuller{Root: dir}}
+	for _, itemID := range []string{"template:../go-service", "template:a/b", "template:"} {
+		run := renderStepRun(`{"name":"payments-api"}`)
+		run.TemplateItemID = itemID
+		rc := &RunContext{Run: run, Steps: map[string]*types.ScaffoldRunStep{}, Actor: "dev-1"}
+		step := &types.ScaffoldRunStep{RunID: run.ID, Name: "rendering", State: types.ScaffoldStepRunning}
+		if _, err := stepRendering(context.Background(), env, rc, step); err == nil || !strings.Contains(err.Error(), "invalid template name") {
+			t.Fatalf("%s: want invalid template name error, got %v", itemID, err)
+		}
+	}
+}

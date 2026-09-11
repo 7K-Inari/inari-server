@@ -1,27 +1,27 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Values.ServiceName }}
+  name: {{ .Values.serviceName }}
   namespace: {{ .Tenant.Namespace }}
   labels:
-    app.kubernetes.io/name: {{ .Values.ServiceName }}
+    app.kubernetes.io/name: {{ .Values.serviceName }}
     inari.io/run: {{ .Run.Name }}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: {{ .Values.ServiceName }}
+      app.kubernetes.io/name: {{ .Values.serviceName }}
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: {{ .Values.ServiceName }}
+        app.kubernetes.io/name: {{ .Values.serviceName }}
     spec:
       containers:
         - name: service
-          image: ghcr.io/example/{{ .Values.ServiceName }}:latest
+          image: ghcr.io/example/{{ .Values.serviceName }}:latest
           ports:
-            - containerPort: {{ .Values.Port }}
+            - containerPort: {{ .Values.port }}
           readinessProbe:
             httpGet:
               path: /healthz
-              port: {{ .Values.Port }}
+              port: {{ .Values.port }}

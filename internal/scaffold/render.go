@@ -114,6 +114,12 @@ func stepRendering(_ context.Context, env *ExecEnv, rc *RunContext, step *types.
 		return false, errors.New("scaffold: no template source configured")
 	}
 	name := strings.TrimPrefix(rc.Run.TemplateItemID, "template:")
+	// Defensive: the name becomes a filesystem path under the template
+	// root. The file source enforces the dir↔name invariant at sync time,
+	// but never join an unchecked catalog value onto a path.
+	if name == "" || name != filepath.Base(name) {
+		return false, fmt.Errorf("scaffold: invalid template name %q", name)
+	}
 	pkg, err := readTemplateDir(filepath.Join(env.Templates.Root, name), name)
 	if err != nil {
 		return false, err

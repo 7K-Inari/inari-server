@@ -1,3 +1,3 @@
-module {{ .Values.Module }}
+module {{ .Values.module }}
 
-go {{ .Values.GoVersion }}
+go {{ .Values.goVersion }}

@@ -128,6 +128,9 @@ func TestFilePullerValidation(t *testing.T) {
 		"missing version": func(dir string) {
 			_ = os.WriteFile(filepath.Join(dir, "template.yaml"), []byte("name: x\n"), 0o644)
 		},
+		"manifest name differs from directory": func(dir string) {
+			_ = os.WriteFile(filepath.Join(dir, "template.yaml"), []byte("name: other-svc\nversion: 0.1.0\n"), 0o644)
+		},
 		"invalid schema.json": func(dir string) {
 			_ = os.WriteFile(filepath.Join(dir, "schema.json"), []byte("{nope"), 0o644)
 		},

@@ -95,6 +95,15 @@ func readTemplateDir(dir, dirName string) (*TemplatePackage, error) {
 	if m.Name == "" {
 		m.Name = dirName
 	}
+	// The render step locates the package on disk by the catalog item ID
+	// (which the sync keys by manifest name), so the manifest name must
+	// match the directory name exactly and be a single safe path segment.
+	if m.Name != dirName {
+		return nil, fmt.Errorf("scaffold: %s: template.yaml: name %q must match the template directory name", dirName, m.Name)
+	}
+	if m.Name != filepath.Base(m.Name) {
+		return nil, fmt.Errorf("scaffold: %s: template.yaml: name %q must not contain path separators", dirName, m.Name)
+	}
 	if m.Version == "" {
 		return nil, fmt.Errorf("scaffold: %s: template.yaml: version is required", dirName)
 	}

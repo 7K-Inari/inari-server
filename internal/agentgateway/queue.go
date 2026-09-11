@@ -81,6 +81,17 @@ func (q *Queue) MarkDelivered(ctx context.Context, id string) error {
 	return err
 }
 
+// CompletePendingByType retires every pending/delivered command of one type
+// for a cluster. Used for commands the agent answers with a dedicated
+// response event instead of a CommandAck (e.g. resync requests, answered by
+// EVENT_TYPE_RESYNC_RESPONSE).
+func (q *Queue) CompletePendingByType(ctx context.Context, clusterID, cmdType, message string) error {
+	const sql = `UPDATE agent_commands SET status = 'acked', result_message = $3, updated_at = now()
+	             WHERE cluster_id = $1 AND type = $2 AND status IN ('pending', 'delivered')`
+	_, err := q.db.Pool.Exec(ctx, sql, clusterID, cmdType, message)
+	return err
+}
+
 // Complete records the agent's ack/nack; the command leaves the queue.
 func (q *Queue) Complete(ctx context.Context, id string, status types.CommandStatus, message string) error {
 	if status != types.CommandStatusAcked && status != types.CommandStatusNacked {

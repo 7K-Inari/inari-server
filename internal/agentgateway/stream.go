@@ -161,6 +161,14 @@ func (s *session) handleEvent(ctx context.Context, ev *agentv1.Event) ([]*agentv
 			}
 			s.cluster.CapabilityChecksum = resp.StateChecksum
 		}
+		// Retire any queued resync requests (ops-triggered reconcile, M7.W4):
+		// the agent answered with a resync response, not a CommandAck.
+		if s.gw.queue != nil {
+			if err := s.gw.queue.CompletePendingByType(ctx, s.cluster.ID,
+				agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_RESYNC_REQUEST), "resync completed"); err != nil {
+				slog.Warn("agentgateway: retire resync commands", "cluster", s.cluster.ID, "error", err)
+			}
+		}
 		s.resyncSent = false
 
 	default:

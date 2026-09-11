@@ -146,6 +146,14 @@ func run() error {
 	handler := tenancy.NewHandler(svc, authorizer).WithScopesCatalog(cfg.IdentityScopes)
 	meHandler := tenancy.NewMeHandler(authorizer)
 
+	// Platform pseudo-org (ADR-0005, D1): seed the reserved "platform" org so
+	// the 7kgroup platform cluster registers through the standard org-scoped
+	// cluster registry flow. Idempotent; mirrors SeedPlatformApps below.
+	// Runs before the backfill so the platform org gets base resources too.
+	if err := svc.SeedPlatformOrg(ctx); err != nil {
+		return fmt.Errorf("seed platform org: %w", err)
+	}
+
 	// Startup backfill (M7.W2): ensure base platform-resource rows for
 	// pre-existing tenants. Idempotent and best-effort — a transient failure
 	// must not crashloop the control plane; the next boot retries.

@@ -133,7 +133,7 @@ func TestCreatingRepoHappyPath(t *testing.T) {
 	if res.RepoURL == "" || res.CommitSHA == "" || res.Branch != "main" {
 		t.Fatalf("result = %+v", res)
 	}
-	files := git.Fake.Files(res.RepoName, "main")
+	files := git.Files(res.RepoName, "main")
 	if len(files) != 2 || files["k8s/deployment.yaml"] != "kind: Deployment" {
 		t.Fatalf("committed files = %v", files)
 	}
@@ -253,7 +253,7 @@ func TestCreatingRepoManifestNameOverride(t *testing.T) {
 	if res.RepoName != "inari-apps/custom-repo" || res.Branch != "trunk" {
 		t.Fatalf("result = %+v", res)
 	}
-	if files := git.Fake.Files(res.RepoName, "trunk"); len(files) != 2 {
+	if files := git.Files(res.RepoName, "trunk"); len(files) != 2 {
 		t.Fatalf("committed files on trunk = %v", files)
 	}
 }

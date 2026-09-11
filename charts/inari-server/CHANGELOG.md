@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/7K-Inari/inari-server/compare/inari-server-chart-v0.1.5...inari-server-chart-v0.1.6) (2026-09-10)
+
+
+### Features
+
+* **agentgateway:** deliver per-cluster OIDC client secret via Vault + ESO ([#35](https://github.com/7K-Inari/inari-server/issues/35)) ([bc80ac2](https://github.com/7K-Inari/inari-server/commit/bc80ac28504e3b3bf503f833a0f4504a2f9f0322))
+
 ## [0.1.5](https://github.com/7K-Inari/inari-server/compare/inari-server-chart-v0.1.4...inari-server-chart-v0.1.5) (2026-09-07)
 
 

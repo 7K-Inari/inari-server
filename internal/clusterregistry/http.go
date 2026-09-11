@@ -82,6 +82,22 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 	}, h.issueToken)
 
 	huma.Register(api, huma.Operation{
+		OperationID: "listRegistrationTokens",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/tenants/{org}/clusters/{id}/tokens",
+		Summary:     "List active (unconsumed, unexpired) registration tokens",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.listTokens)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "revokeRegistrationToken",
+		Method:      http.MethodDelete,
+		Path:        "/api/v1/tenants/{org}/clusters/{id}/tokens/{tokenId}",
+		Summary:     "Revoke (burn) a registration token (org admin only)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.revokeToken)
+
+	huma.Register(api, huma.Operation{
 		OperationID: "approveCluster",
 		Method:      http.MethodPost,
 		Path:        "/api/v1/tenants/{org}/clusters/{id}/approve",
@@ -254,6 +270,53 @@ func (h *Handler) issueToken(ctx context.Context, in *clusterPathInput) (*tokenO
 	out.Body.Record = *rec
 	out.Body.ExpiresAt = rec.ExpiresAt.Format("2006-01-02T15:04:05Z07:00")
 	return out, nil
+}
+
+type listTokensOutput struct {
+	Body struct {
+		Tokens []types.RegistrationToken `json:"tokens"`
+	}
+}
+
+func (h *Handler) listTokens(ctx context.Context, in *clusterPathInput) (*listTokensOutput, error) {
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.requireOrgCluster(ctx, org.ID, in.ID); err != nil {
+		return nil, err
+	}
+	tokens, err := h.svc.ListTokens(ctx, in.ID)
+	if err != nil {
+		return nil, err
+	}
+	out := &listTokensOutput{}
+	out.Body.Tokens = tokens
+	return out, nil
+}
+
+type revokeTokenInput struct {
+	Org     string `path:"org"`
+	ID      string `path:"id"`
+	TokenID string `path:"tokenId"`
+}
+
+func (h *Handler) revokeToken(ctx context.Context, in *revokeTokenInput) (*struct{}, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.requireOrgCluster(ctx, org.ID, in.ID); err != nil {
+		return nil, err
+	}
+	err = h.svc.RevokeToken(ctx, id.Subject, in.ID, in.TokenID)
+	if errors.Is(err, ErrTokenNotFound) {
+		return nil, huma.Error404NotFound("registration token not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return nil, nil
 }
 
 func (h *Handler) approveCluster(ctx context.Context, in *clusterPathInput) (*clusterOutput, error) {

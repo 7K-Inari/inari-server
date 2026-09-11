@@ -70,6 +70,12 @@ func (itClients) DisableClient(context.Context, string) error                 { 
 
 func itServer(t *testing.T, az itAuthorizer) (*httptest.Server, *Service) {
 	t.Helper()
+	srv, svc, _ := itServerDB(t, az)
+	return srv, svc
+}
+
+func itServerDB(t *testing.T, az itAuthorizer) (*httptest.Server, *Service, *db.DB) {
+	t.Helper()
 	ctx := context.Background()
 	pg, err := postgres.Run(ctx, "postgres:16-alpine",
 		postgres.WithDatabase("inari"),
@@ -105,7 +111,7 @@ func itServer(t *testing.T, az itAuthorizer) (*httptest.Server, *Service) {
 	}, az, ManifestParams{AgentImageRepo: "ghcr.io/7k-inari/inari-agent", AgentImageTag: "v0.1.0", GatewayAddress: "https://gw.example.com"}, nil)
 	router, api := httpserver.NewRouter(slog.Default(), itValidator{}, database)
 	h.RegisterRoutes(api)
-	return httptest.NewServer(router), svc
+	return httptest.NewServer(router), svc, database
 }
 
 func itReq(t *testing.T, srv *httptest.Server, method, path, token, body string) (int, string) {
@@ -377,5 +383,100 @@ func TestClusterAPIDelete(t *testing.T) {
 	}
 	if _, err := svc.GetCluster(ctx, cid); err != nil {
 		t.Errorf("registered cluster removed by delete: %v", err)
+	}
+}
+
+// TestClusterAPITokenListAndRevoke covers listing active registration tokens
+// and revoking them (Settings §2 token routes).
+func TestClusterAPITokenListAndRevoke(t *testing.T) {
+	srv, _, database := itServerDB(t, itAuthorizer{allow: true})
+	defer srv.Close()
+	ctx := context.Background()
+	cid := itCreate(t, srv, "acme", "tok1")
+	base := "/api/v1/tenants/acme/clusters/" + cid + "/tokens"
+
+	issue := func() string {
+		code, body := itReq(t, srv, "POST", base, "good", "")
+		if code != http.StatusOK {
+			t.Fatalf("issue token: %d %s", code, body)
+		}
+		var out struct {
+			Record types.RegistrationToken `json:"record"`
+		}
+		if err := json.Unmarshal([]byte(body), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.Record.ID
+	}
+	t1, t2 := issue(), issue()
+
+	list := func() []types.RegistrationToken {
+		code, body := itReq(t, srv, "GET", base, "good", "")
+		if code != http.StatusOK {
+			t.Fatalf("list tokens: %d %s", code, body)
+		}
+		var out struct {
+			Tokens []types.RegistrationToken `json:"tokens"`
+		}
+		if err := json.Unmarshal([]byte(body), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.Tokens
+	}
+
+	tokens := list()
+	if len(tokens) != 2 {
+		t.Fatalf("active tokens = %d, want 2", len(tokens))
+	}
+	// Metadata only: no token hash or plaintext field in the response.
+	code, body := itReq(t, srv, "GET", base, "good", "")
+	if code == http.StatusOK && (strings.Contains(body, "tokenHash") || strings.Contains(body, "hash")) {
+		t.Errorf("token list leaks hash material: %s", body)
+	}
+
+	// Revoke one.
+	if code, body := itReq(t, srv, "DELETE", base+"/"+t1, "good", ""); code != http.StatusOK && code != http.StatusNoContent {
+		t.Fatalf("revoke: %d %s", code, body)
+	}
+	if tokens := list(); len(tokens) != 1 || tokens[0].ID != t2 {
+		t.Errorf("after revoke: %+v, want only %s", tokens, t2)
+	}
+
+	// Idempotent: re-revoke the burned token is a no-op success.
+	if code, _ := itReq(t, srv, "DELETE", base+"/"+t1, "good", ""); code != http.StatusOK && code != http.StatusNoContent {
+		t.Errorf("re-revoke: got %d, want 200/204", code)
+	}
+	// Unknown token 404s.
+	if code, _ := itReq(t, srv, "DELETE", base+"/00000000-0000-0000-0000-000000000000", "good", ""); code != http.StatusNotFound {
+		t.Errorf("unknown token: got %d, want 404", code)
+	}
+
+	// Cross-tenant: acme2 cannot see or burn acme's tokens.
+	other := "/api/v1/tenants/acme2/clusters/" + cid + "/tokens"
+	if code, _ := itReq(t, srv, "GET", other, "good", ""); code != http.StatusNotFound {
+		t.Errorf("cross-tenant list: got %d, want 404", code)
+	}
+	if code, _ := itReq(t, srv, "DELETE", other+"/"+t2, "good", ""); code != http.StatusNotFound {
+		t.Errorf("cross-tenant revoke: got %d, want 404", code)
+	}
+
+	// Outsider (no acme claim) is rejected at coarse PEP.
+	if code, _ := itReq(t, srv, "GET", base, "outsider", ""); code != http.StatusForbidden {
+		t.Errorf("outsider list: got %d, want 403", code)
+	}
+
+	// token.revoked is audited exactly once (the re-revoke is a no-op).
+	events, err := audit.NewStore().List(ctx, database.Pool, "org:1", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revocations := 0
+	for _, e := range events {
+		if e.Action == "token.revoked" && e.ObjectID == t1 {
+			revocations++
+		}
+	}
+	if revocations != 1 {
+		t.Errorf("token.revoked audit rows = %d, want 1", revocations)
 	}
 }

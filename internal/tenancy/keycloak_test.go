@@ -3,6 +3,7 @@ package tenancy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -68,6 +69,48 @@ func TestListGroupMembers(t *testing.T) {
 	}
 	if len(members) != 2 || members[0] != "u1" || members[1] != "u2" {
 		t.Errorf("members = %v, want [u1 u2]", members)
+	}
+}
+
+func TestListGroupMembersPaginates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/realms/inari/protocol/openid-connect/token":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"tok","expires_in":300}`))
+		case "/admin/realms/inari/groups":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"id":"g1","name":"platform-admins"}]`))
+		case "/admin/realms/inari/groups/g1/members":
+			first := r.URL.Query().Get("first")
+			w.Header().Set("Content-Type", "application/json")
+			switch first {
+			case "0":
+				// Full page: exactly pageSize users, so the client must ask again.
+				users := make([]map[string]string, 500)
+				for i := range users {
+					users[i] = map[string]string{"id": fmt.Sprintf("u%d", i)}
+				}
+				_ = json.NewEncoder(w).Encode(users)
+			case "500":
+				_, _ = w.Write([]byte(`[{"id":"u500"}]`))
+			default:
+				t.Errorf("unexpected page first=%s", first)
+				w.WriteHeader(http.StatusBadRequest)
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	k := NewKeycloakAdmin(srv.URL, "inari", "inari-platform-admin", "test-secret")
+	members, err := k.ListGroupMembers(context.Background(), "platform-admins")
+	if err != nil {
+		t.Fatalf("ListGroupMembers: %v", err)
+	}
+	if len(members) != 501 || members[0] != "u0" || members[500] != "u500" {
+		t.Errorf("members = %d entries, want 501 across two pages", len(members))
 	}
 }
 

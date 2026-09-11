@@ -34,6 +34,7 @@ func (w *TupleWriter) EventTypes() []string {
 	return []string{
 		types.EventTenantCreated,
 		types.EventTeamCreated,
+		types.EventTeamDeleted,
 		types.EventMembershipAdded,
 		types.EventMembershipRemoved,
 		types.EventClusterCreated,
@@ -52,6 +53,7 @@ func (w *TupleWriter) EventTypes() []string {
 		types.EventExtensionUnregistered,
 		types.EventRolloutCreated,
 		types.EventDriftDetected,
+		types.EventRBACMappingsUpdated,
 	}
 }
 
@@ -69,6 +71,14 @@ func (w *TupleWriter) Handle(ctx context.Context, ev *types.OutboxEvent) error {
 			return err
 		}
 		return w.writeOrgRoleTuples(ctx, p.OrgID, []types.TeamSeed{{TeamID: p.TeamID, Name: p.Name, Role: p.Role}}, false)
+	case types.EventTeamDeleted:
+		var p types.TeamCreatedPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		// Removes the team#member → role org tuple. Per-member team:<id>#member
+		// tuples dangle harmlessly once the team object is gone.
+		return w.writeOrgRoleTuples(ctx, p.OrgID, []types.TeamSeed{{TeamID: p.TeamID, Name: p.Name, Role: p.Role}}, true)
 	case types.EventMembershipAdded:
 		var p types.MembershipPayload
 		if err := json.Unmarshal(ev.Payload, &p); err != nil {
@@ -221,6 +231,32 @@ func (w *TupleWriter) Handle(ctx context.Context, ev *types.OutboxEvent) error {
 		return w.store.WriteTuples(ctx, []Tuple{{
 			User: OrgObject(p.OrgID), Relation: RelationParent, Object: DriftEventObject(p.DriftID),
 		}})
+	case types.EventRBACMappingsUpdated:
+		var p types.RBACMappingsPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		var del, add []Tuple
+		for _, c := range p.Changes {
+			oldRel, err := RoleRelation(c.OldRole)
+			if err != nil {
+				return err
+			}
+			newRel, err := RoleRelation(c.NewRole)
+			if err != nil {
+				return err
+			}
+			del = append(del, Tuple{User: TeamMemberUserset(c.TeamID), Relation: oldRel, Object: OrgObject(p.OrgID)})
+			add = append(add, Tuple{User: TeamMemberUserset(c.TeamID), Relation: newRel, Object: OrgObject(p.OrgID)})
+		}
+		if len(del) > 0 {
+			if err := w.store.DeleteTuples(ctx, del); err != nil {
+				return err
+			}
+		}
+		if len(add) > 0 {
+			return w.store.WriteTuples(ctx, add)
+		}
 	}
 	return nil
 }

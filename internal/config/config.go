@@ -2,12 +2,29 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// ServiceScopes is one entry of the read-only identity scopes catalog: the
+// audiences/scope names tenant OIDC clients may request (plan §5.4, Settings
+// design §3.1).
+type ServiceScopes struct {
+	Audience string   `json:"audience"`
+	Scopes   []string `json:"scopes"`
+}
+
+// DefaultIdentityScopes is the built-in scopes catalog used when
+// INARI_IDENTITY_SCOPES is unset.
+var DefaultIdentityScopes = []ServiceScopes{
+	{Audience: "inari-server", Scopes: []string{"read", "write"}},
+	{Audience: "inari-agent-gateway", Scopes: []string{"connect"}},
+	{Audience: "inari-catalog", Scopes: []string{"read", "deploy"}},
+}
 
 type Config struct {
 	HTTPAddr             string
@@ -28,8 +45,12 @@ type Config struct {
 	// PlatformGroupSyncInterval is the platform group → tuple reconciliation
 	// period; it bounds the consistency window for grants/revocations.
 	PlatformGroupSyncInterval time.Duration
-	OutboxPollInterval        time.Duration
-	ShutdownTimeout           time.Duration
+	// OrgGroupSyncInterval is the org team group → tuple reconciliation
+	// period (ADR-0004); it bounds the convergence window for IdP-brokered
+	// managed members.
+	OrgGroupSyncInterval time.Duration
+	OutboxPollInterval   time.Duration
+	ShutdownTimeout      time.Duration
 
 	RegistrationTokenTTL       time.Duration
 	EnrollmentApprovalRequired bool
@@ -81,6 +102,10 @@ type Config struct {
 	CurrentAgentVersion  string
 	FleetAdvanceInterval time.Duration
 	DriftSweepInterval   time.Duration
+
+	// IdentityScopes is the read-only catalog of per-service audiences/scopes
+	// served at GET /tenants/{org}/identity/scopes (Settings design §3.1).
+	IdentityScopes []ServiceScopes
 }
 
 func Load() (*Config, error) {
@@ -99,6 +124,7 @@ func Load() (*Config, error) {
 		OpenFGAStoreName:          env("INARI_OPENFGA_STORE_NAME", "inari"),
 		PlatformAdminGroup:        env("INARI_PLATFORM_ADMIN_GROUP", "platform-admins"),
 		PlatformGroupSyncInterval: durEnv("INARI_PLATFORM_GROUP_SYNC_INTERVAL", 30*time.Second),
+		OrgGroupSyncInterval:      durEnv("INARI_ORG_GROUP_SYNC_INTERVAL", 30*time.Second),
 		OutboxPollInterval:        durEnv("INARI_OUTBOX_POLL_INTERVAL", time.Second),
 		ShutdownTimeout:           durEnv("INARI_SHUTDOWN_TIMEOUT", 10*time.Second),
 
@@ -133,6 +159,8 @@ func Load() (*Config, error) {
 		CurrentAgentVersion:  env("INARI_AGENT_VERSION", ""),
 		FleetAdvanceInterval: durEnv("INARI_FLEET_ADVANCE_INTERVAL", 10*time.Second),
 		DriftSweepInterval:   durEnv("INARI_DRIFT_SWEEP_INTERVAL", time.Minute),
+
+		IdentityScopes: identityScopesEnv("INARI_IDENTITY_SCOPES", DefaultIdentityScopes),
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("config: INARI_DATABASE_URL must not be empty")
@@ -200,6 +228,20 @@ func listEnv(key string, def []string) []string {
 		if s := strings.TrimSpace(p); s != "" {
 			out = append(out, s)
 		}
+	}
+	return out
+}
+
+// identityScopesEnv reads the scopes catalog as JSON
+// ([{audience, scopes: []}]); empty or invalid means the default.
+func identityScopesEnv(key string, def []ServiceScopes) []ServiceScopes {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	var out []ServiceScopes
+	if err := json.Unmarshal([]byte(v), &out); err != nil || len(out) == 0 {
+		return def
 	}
 	return out
 }

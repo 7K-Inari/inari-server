@@ -26,10 +26,18 @@ func NewPlatformGroupSync(store Store, members GroupMemberLister, group string) 
 	return &PlatformGroupSync{store: store, members: members, group: group}
 }
 
-// SyncOnce diffs group membership against stored org_creator tuples and
-// writes/deletes the difference. Idempotent.
+// SyncOnce reconciles the platform admin group to org_creator tuples on
+// platform:inari. Idempotent.
 func (s *PlatformGroupSync) SyncOnce(ctx context.Context) error {
-	ids, err := s.members.ListGroupMembers(ctx, s.group)
+	return reconcileGroup(ctx, s.store, s.members, s.group, ObjectPlatform, RelationOrgCreator)
+}
+
+// reconcileGroup diffs Keycloak group membership against the stored tuples
+// for (object, relation) and writes/deletes the set difference in both
+// directions. Keycloak is the source of truth; FGA state is derived from
+// group membership on every pass. Idempotent.
+func reconcileGroup(ctx context.Context, store Store, members GroupMemberLister, groupPath, object, relation string) error {
+	ids, err := members.ListGroupMembers(ctx, groupPath)
 	if err != nil {
 		return err
 	}
@@ -37,7 +45,7 @@ func (s *PlatformGroupSync) SyncOnce(ctx context.Context) error {
 	for _, id := range ids {
 		desired[UserObject(id)] = true
 	}
-	existing, err := s.store.ReadTuples(ctx, ObjectPlatform, RelationOrgCreator)
+	existing, err := store.ReadTuples(ctx, object, relation)
 	if err != nil {
 		return err
 	}
@@ -48,21 +56,21 @@ func (s *PlatformGroupSync) SyncOnce(ctx context.Context) error {
 	var writes, deletes []Tuple
 	for user := range desired {
 		if !actual[user] {
-			writes = append(writes, Tuple{User: user, Relation: RelationOrgCreator, Object: ObjectPlatform})
+			writes = append(writes, Tuple{User: user, Relation: relation, Object: object})
 		}
 	}
 	for user := range actual {
 		if !desired[user] {
-			deletes = append(deletes, Tuple{User: user, Relation: RelationOrgCreator, Object: ObjectPlatform})
+			deletes = append(deletes, Tuple{User: user, Relation: relation, Object: object})
 		}
 	}
 	if len(writes) > 0 {
-		if err := s.store.WriteTuples(ctx, writes); err != nil {
+		if err := store.WriteTuples(ctx, writes); err != nil {
 			return err
 		}
 	}
 	if len(deletes) > 0 {
-		if err := s.store.DeleteTuples(ctx, deletes); err != nil {
+		if err := store.DeleteTuples(ctx, deletes); err != nil {
 			return err
 		}
 	}

@@ -36,6 +36,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/platformresources"
 	"github.com/7K-Inari/inari-server/internal/policyservice"
 	"github.com/7K-Inari/inari-server/internal/secrets"
+	"github.com/7K-Inari/inari-server/internal/secretstores"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/tenantzonefactory"
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -137,14 +138,34 @@ func run() error {
 	auditStore := audit.NewStore()
 
 	idp := tenancy.NewKeycloakAdmin(cfg.KeycloakBaseURL, cfg.KeycloakRealm, cfg.KeycloakClientID, cfg.KeycloakClientSecret)
-	svc := tenancy.NewService(database, idp, tenancy.NewStore(), auditStore)
-	handler := tenancy.NewHandler(svc, authorizer)
+	svc := tenancy.NewService(database, idp, tenancy.NewStore(), auditStore).
+		WithClientManager(idp).
+		WithIdentityProviderManager(idp)
+	handler := tenancy.NewHandler(svc, authorizer).WithScopesCatalog(cfg.IdentityScopes)
 	meHandler := tenancy.NewMeHandler(authorizer)
 
 	// Platform group sync (M1.W2, ADR-0003): Keycloak realm group →
 	// platform:inari org_creator tuples. Single writer for those tuples.
 	platformSync := authz.NewPlatformGroupSync(fgaStore, idp, cfg.PlatformAdminGroup)
 	go platformSync.Run(ctx, cfg.PlatformGroupSyncInterval)
+
+	// Org team group sync (M6.W7, ADR-0004): every tenant's team groups
+	// (tenant-<slug>/<team>) → team:<id>#member tuples, both directions.
+	// This is the convergence mechanism for IdP-brokered managed members,
+	// who never pass through the inline invite path.
+	teamSync := authz.NewOrgTeamSync(fgaStore, idp, authz.TeamGroupListerFunc(
+		func(ctx context.Context) ([]authz.TeamGroupRef, error) {
+			teams, err := svc.ListAllTeams(ctx)
+			if err != nil {
+				return nil, err
+			}
+			refs := make([]authz.TeamGroupRef, 0, len(teams))
+			for _, t := range teams {
+				refs = append(refs, authz.TeamGroupRef{TeamID: t.ID, GroupPath: t.KeycloakGroupPath})
+			}
+			return refs, nil
+		}))
+	go teamSync.Run(ctx, cfg.OrgGroupSyncInterval)
 
 	registry := clusterregistry.NewService(database, idp, clusterregistry.NewStore(), auditStore,
 		cfg.RegistrationTokenTTL, cfg.EnrollmentApprovalRequired)
@@ -249,6 +270,14 @@ func run() error {
 	go fleetSvc.RunAdvanceLoop(ctx, cfg.FleetAdvanceInterval)
 	go fleetSvc.RunDriftLoop(ctx, cfg.DriftSweepInterval)
 
+	// Secret Stores (M6.W4, Settings design §3.2): ESO SecretStore registry.
+	// Needs fleetSvc (ClusterSet resolution) and the agent command queue, so
+	// it is constructed after the fleet manager.
+	secretStoresSvc := secretstores.NewService(database, secretstores.NewStore(), auditStore,
+		gateway.Queue(), registry, fleetSvc)
+	secretStoresHandler := secretstores.NewHandler(secretStoresSvc, svc, authorizer)
+	gateway.WithSecretStoreLookup(secretStoresSvc)
+
 	// Extension Host (plan §5.8): plugin registry + authenticated reverse
 	// proxy for verified sidecars.
 	extSvc := extensionhost.NewService(database, extensionhost.NewStore(), auditStore)
@@ -323,6 +352,7 @@ func run() error {
 	policyHandler.RegisterRoutes(api)
 	tzfHandler.RegisterRoutes(api)
 	fleetHandler.RegisterRoutes(api)
+	secretStoresHandler.RegisterRoutes(api)
 	extHandler.RegisterRoutes(api)
 
 	// Agent-facing Connect-RPC services mount on chi directly, outside the

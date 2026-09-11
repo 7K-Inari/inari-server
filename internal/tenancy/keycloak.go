@@ -139,6 +139,36 @@ func (k *KeycloakAdmin) DeleteOrganization(ctx context.Context, kcOrgID string) 
 	return nil
 }
 
+// UpdateOrganization updates the org profile (display name is carried in the
+// KC description field, mirroring CreateOrganization). KC 26 PUT requires
+// the full representation, so the org is read-modify-written.
+func (k *KeycloakAdmin) UpdateOrganization(ctx context.Context, kcOrgID, displayName string) error {
+	resp, err := k.do(ctx, http.MethodGet, "/organizations/"+kcOrgID, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		return fmt.Errorf("keycloak: get organization: status %d", resp.StatusCode)
+	}
+	var rep map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&rep); err != nil {
+		_ = resp.Body.Close()
+		return err
+	}
+	_ = resp.Body.Close()
+	rep["description"] = displayName
+	put, err := k.do(ctx, http.MethodPut, "/organizations/"+kcOrgID, rep)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = put.Body.Close() }()
+	if put.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("keycloak: update organization: status %d", put.StatusCode)
+	}
+	return nil
+}
+
 // CreateGroup creates nested groups along the path a/b/c.
 func (k *KeycloakAdmin) CreateGroup(ctx context.Context, path string) (string, error) {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
@@ -318,6 +348,337 @@ func (k *KeycloakAdmin) ClusterClientSecret(ctx context.Context, clientID string
 	return body.Value, nil
 }
 
+// Identity client types for the generic OIDC client CRUD (Settings design
+// §3.1). Secrets live only in Keycloak and are returned once at create/rotate.
+const (
+	ClientTypeService = "service"
+	ClientTypePublic  = "public"
+)
+
+// ClientSpec describes a tenant-scoped OIDC client (clientId
+// org-<org>-<name>) managed via the Admin API.
+type ClientSpec struct {
+	ClientID     string
+	Name         string
+	ClientType   string
+	Audiences    []string
+	Scopes       []string
+	RedirectURIs []string
+	Enabled      bool
+}
+
+// CreateClient provisions a tenant OIDC client in the inari realm and, for
+// confidential (service) clients, returns the generated secret exactly once.
+// Public clients have no secret. Scopes are attached as optional client
+// scopes (realm client scopes are created on demand).
+func (k *KeycloakAdmin) CreateClient(ctx context.Context, spec ClientSpec) (string, error) {
+	public := spec.ClientType == ClientTypePublic
+	rep := map[string]any{
+		"clientId":                  spec.ClientID,
+		"name":                      spec.Name,
+		"enabled":                   true,
+		"publicClient":              public,
+		"standardFlowEnabled":       public,
+		"serviceAccountsEnabled":    !public,
+		"directAccessGrantsEnabled": false,
+		"redirectUris":              spec.RedirectURIs,
+		"protocolMappers":           audienceMappers(spec.Audiences),
+	}
+	resp, err := k.do(ctx, http.MethodPost, "/clients", rep)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusConflict {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("keycloak: create client: status %d: %s", resp.StatusCode, b)
+	}
+	if err := k.syncOptionalScopes(ctx, spec.ClientID, spec.Scopes); err != nil {
+		return "", err
+	}
+	if public {
+		return "", nil
+	}
+	return k.readClientSecret(ctx, spec.ClientID)
+}
+
+// GetClient returns the spec of a managed client, or nil when it does not
+// exist in the realm.
+func (k *KeycloakAdmin) GetClient(ctx context.Context, clientID string) (*ClientSpec, error) {
+	uuid, err := k.findClientUUID(ctx, clientID)
+	if err != nil {
+		return nil, err
+	}
+	if uuid == "" {
+		return nil, nil
+	}
+	rep, err := k.getClientRep(ctx, uuid)
+	if err != nil {
+		return nil, err
+	}
+	spec := &ClientSpec{
+		ClientID:   clientID,
+		Name:       stringField(rep, "name"),
+		Enabled:    boolField(rep, "enabled"),
+		Scopes:     stringSliceField(rep, "optionalClientScopes"),
+		ClientType: ClientTypeService,
+	}
+	if boolField(rep, "publicClient") {
+		spec.ClientType = ClientTypePublic
+	}
+	spec.RedirectURIs = stringSliceField(rep, "redirectUris")
+	if mappers, ok := rep["protocolMappers"].([]any); ok {
+		for _, m := range mappers {
+			mm, _ := m.(map[string]any)
+			if mm["protocolMapper"] != "oidc-audience-mapper" {
+				continue
+			}
+			if cfg, ok := mm["config"].(map[string]any); ok {
+				spec.Audiences = append(spec.Audiences, fmt.Sprint(cfg["included.client.audience"]))
+			}
+		}
+	}
+	return spec, nil
+}
+
+// UpdateClient applies a full read-modify-write of the client
+// representation: display name, enabled flag, redirect URIs, managed audience
+// mappers, and optional client scopes.
+func (k *KeycloakAdmin) UpdateClient(ctx context.Context, spec ClientSpec) error {
+	uuid, err := k.findClientUUID(ctx, spec.ClientID)
+	if err != nil {
+		return err
+	}
+	if uuid == "" {
+		return fmt.Errorf("keycloak: client %s not found", spec.ClientID)
+	}
+	rep, err := k.getClientRep(ctx, uuid)
+	if err != nil {
+		return err
+	}
+	rep["name"] = spec.Name
+	rep["enabled"] = spec.Enabled
+	rep["redirectUris"] = spec.RedirectURIs
+	// Replace only the audience mappers we manage (name prefix audience-);
+	// any other mappers on the client are preserved.
+	var kept []any
+	if mappers, ok := rep["protocolMappers"].([]any); ok {
+		for _, m := range mappers {
+			mm, _ := m.(map[string]any)
+			if name, _ := mm["name"].(string); strings.HasPrefix(name, "audience-") {
+				continue
+			}
+			kept = append(kept, m)
+		}
+	}
+	for _, m := range audienceMappers(spec.Audiences) {
+		kept = append(kept, m)
+	}
+	rep["protocolMappers"] = kept
+	put, err := k.do(ctx, http.MethodPut, "/clients/"+uuid, rep)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = put.Body.Close() }()
+	if put.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("keycloak: update client: status %d", put.StatusCode)
+	}
+	return k.syncOptionalScopes(ctx, spec.ClientID, spec.Scopes)
+}
+
+// RotateClientSecret regenerates the confidential client's secret in
+// Keycloak and returns the new value exactly once (recovery path, Settings
+// design §3.1).
+func (k *KeycloakAdmin) RotateClientSecret(ctx context.Context, clientID string) (string, error) {
+	uuid, err := k.findClientUUID(ctx, clientID)
+	if err != nil {
+		return "", err
+	}
+	if uuid == "" {
+		return "", fmt.Errorf("keycloak: client %s not found", clientID)
+	}
+	resp, err := k.do(ctx, http.MethodPost, "/clients/"+uuid+"/client-secret", nil)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("keycloak: rotate client secret: status %d", resp.StatusCode)
+	}
+	var body struct {
+		Value string `json:"value"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return "", err
+	}
+	if body.Value == "" {
+		return "", fmt.Errorf("keycloak: client %s rotated to empty secret", clientID)
+	}
+	return body.Value, nil
+}
+
+// audienceMappers renders one oidc-audience-mapper per audience (same shape
+// as the cluster client's inari-server mapper).
+func audienceMappers(audiences []string) []map[string]any {
+	mappers := make([]map[string]any, 0, len(audiences))
+	for _, aud := range audiences {
+		mappers = append(mappers, map[string]any{
+			"name":           "audience-" + aud,
+			"protocol":       "openid-connect",
+			"protocolMapper": "oidc-audience-mapper",
+			"config": map[string]string{
+				"included.client.audience": aud,
+				"id.token.claim":           "false",
+				"access.token.claim":       "true",
+				"userinfo.token.claim":     "false",
+			},
+		})
+	}
+	return mappers
+}
+
+// syncOptionalScopes ensures each scope exists as a realm client scope and
+// links it to the client as an optional client scope.
+func (k *KeycloakAdmin) syncOptionalScopes(ctx context.Context, clientID string, scopes []string) error {
+	if len(scopes) == 0 {
+		return nil
+	}
+	uuid, err := k.findClientUUID(ctx, clientID)
+	if err != nil {
+		return err
+	}
+	if uuid == "" {
+		return fmt.Errorf("keycloak: client %s not found", clientID)
+	}
+	for _, scope := range scopes {
+		scopeUUID, err := k.ensureClientScope(ctx, scope)
+		if err != nil {
+			return err
+		}
+		resp, err := k.do(ctx, http.MethodPut, "/clients/"+uuid+"/optional-client-scopes/"+scopeUUID, nil)
+		if err != nil {
+			return err
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusNoContent {
+			return fmt.Errorf("keycloak: link optional scope %s: status %d", scope, resp.StatusCode)
+		}
+	}
+	return nil
+}
+
+// ensureClientScope returns the id of the realm client scope with the given
+// name, creating it when missing.
+func (k *KeycloakAdmin) ensureClientScope(ctx context.Context, name string) (string, error) {
+	resp, err := k.do(ctx, http.MethodGet, "/client-scopes", nil)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		return "", fmt.Errorf("keycloak: list client scopes: status %d", resp.StatusCode)
+	}
+	var scopes []struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&scopes); err != nil {
+		_ = resp.Body.Close()
+		return "", err
+	}
+	_ = resp.Body.Close()
+	for _, s := range scopes {
+		if s.Name == name {
+			return s.ID, nil
+		}
+	}
+	create, err := k.do(ctx, http.MethodPost, "/client-scopes", map[string]any{
+		"name":     name,
+		"protocol": "openid-connect",
+	})
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = create.Body.Close() }()
+	if create.StatusCode == http.StatusConflict {
+		return "", fmt.Errorf("keycloak: client scope %s listed absent but create conflicted", name)
+	}
+	if create.StatusCode != http.StatusCreated {
+		b, _ := io.ReadAll(create.Body)
+		return "", fmt.Errorf("keycloak: create client scope %s: status %d: %s", name, create.StatusCode, b)
+	}
+	loc := create.Header.Get("Location")
+	return loc[strings.LastIndex(loc, "/")+1:], nil
+}
+
+// readClientSecret reads the generated secret of a confidential client once
+// (create/rotate responses only; never persisted server-side).
+func (k *KeycloakAdmin) readClientSecret(ctx context.Context, clientID string) (string, error) {
+	uuid, err := k.findClientUUID(ctx, clientID)
+	if err != nil {
+		return "", err
+	}
+	if uuid == "" {
+		return "", fmt.Errorf("keycloak: client %s not found", clientID)
+	}
+	resp, err := k.do(ctx, http.MethodGet, "/clients/"+uuid+"/client-secret", nil)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("keycloak: client secret: status %d", resp.StatusCode)
+	}
+	var body struct {
+		Value string `json:"value"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return "", err
+	}
+	if body.Value == "" {
+		return "", fmt.Errorf("keycloak: client %s has empty secret", clientID)
+	}
+	return body.Value, nil
+}
+
+func (k *KeycloakAdmin) getClientRep(ctx context.Context, uuid string) (map[string]any, error) {
+	resp, err := k.do(ctx, http.MethodGet, "/clients/"+uuid, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("keycloak: get client: status %d", resp.StatusCode)
+	}
+	var rep map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&rep); err != nil {
+		return nil, err
+	}
+	return rep, nil
+}
+
+func stringField(rep map[string]any, key string) string {
+	s, _ := rep[key].(string)
+	return s
+}
+
+func boolField(rep map[string]any, key string) bool {
+	b, _ := rep[key].(bool)
+	return b
+}
+
+func stringSliceField(rep map[string]any, key string) []string {
+	var out []string
+	if items, ok := rep[key].([]any); ok {
+		for _, it := range items {
+			if s, ok := it.(string); ok {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
+
 // DisableClient revokes a cluster's identity by disabling its client (plan
 // §5.3 revocation path); in-flight tokens expire on their short TTL.
 func (k *KeycloakAdmin) DisableClient(ctx context.Context, clientID string) error {
@@ -435,32 +796,61 @@ func (k *KeycloakAdmin) RemoveGroupMember(ctx context.Context, groupPath, userID
 	return nil
 }
 
-// ListGroupMembers returns the Keycloak user ids of the group at path a/b/c.
+// DeleteGroup removes the group at path a/b/c. Idempotent: an unresolvable
+// path means the group is already gone.
+func (k *KeycloakAdmin) DeleteGroup(ctx context.Context, groupPath string) error {
+	gid, err := k.resolveGroupID(ctx, groupPath)
+	if err != nil {
+		// Resolution failure means the path (or a parent) is gone already.
+		return nil
+	}
+	resp, err := k.do(ctx, http.MethodDelete, "/groups/"+gid, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("keycloak: delete group: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// ListGroupMembers returns the Keycloak user ids of the group at path
+// a/b/c, paging through the full membership. Truncation is not an option:
+// the org-team reconciler (ADR-0004) diffs this set against FGA tuples and
+// would revoke members beyond the first page.
 func (k *KeycloakAdmin) ListGroupMembers(ctx context.Context, groupPath string) ([]string, error) {
 	gid, err := k.resolveGroupID(ctx, groupPath)
 	if err != nil {
 		return nil, err
 	}
-	// Dev-scale: a single page is plenty; paginate when the group outgrows it.
-	resp, err := k.do(ctx, http.MethodGet, "/groups/"+gid+"/members?max=500", nil)
-	if err != nil {
-		return nil, err
+	const pageSize = 500
+	var out []string
+	for first := 0; ; first += pageSize {
+		resp, err := k.do(ctx, http.MethodGet,
+			fmt.Sprintf("/groups/%s/members?first=%d&max=%d", gid, first, pageSize), nil)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("keycloak: list group members: status %d", resp.StatusCode)
+		}
+		var users []struct {
+			ID string `json:"id"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&users)
+		_ = resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		for _, u := range users {
+			out = append(out, u.ID)
+		}
+		if len(users) < pageSize {
+			return out, nil
+		}
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("keycloak: list group members: status %d", resp.StatusCode)
-	}
-	var users []struct {
-		ID string `json:"id"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&users); err != nil {
-		return nil, err
-	}
-	out := make([]string, 0, len(users))
-	for _, u := range users {
-		out = append(out, u.ID)
-	}
-	return out, nil
 }
 
 // resolveGroupID walks a/b/c one level at a time to the leaf group id.

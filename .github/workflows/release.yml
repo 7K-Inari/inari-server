@@ -4,10 +4,27 @@ name: release
 # under merge-commit and squash alike), creates tag + GitHub Release, then
 # runs the publish jobs gated on the action's outputs. No tag-push triggers,
 # no manual releases.
+#
+# Sole release-please detector on push to main. chart-release.yaml no longer
+# detects releases, so the server and chart publishes can never race each
+# other for the same release (previously both workflows ran detection on the
+# same push and the second run saw the release already created, skipping its
+# publish job — that is how v1.6.0 lost its image/OpenAPI artifacts).
 
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    # Repair path (still workflow-driven): re-publish the server artifacts and
+    # all charts for an already-tagged version whose publish jobs failed or
+    # were skipped, e.g. after fixing the pipeline. Run with the release tag
+    # as the workflow ref so the built artifacts match the release exactly:
+    #   gh workflow run release.yml --ref vX.Y.Z -f version=X.Y.Z
+    inputs:
+      version:
+        description: 'Already-released version to (re)publish, e.g. 1.6.0'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -15,19 +32,18 @@ permissions:
   issues: write
 
 concurrency:
-  # Shared with chart-release.yaml: both run release-please detection on
-  # push to main, so serialize them — the second run sees the releases
-  # already created and returns empty.
   group: release-main
   cancel-in-progress: false
 
 jobs:
   release:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.rp.outputs.release_created }}
       tag_name: ${{ steps.rp.outputs.tag_name }}
       version: ${{ steps.rp.outputs.version }}
+      paths_released: ${{ steps.rp.outputs.paths_released }}
     steps:
       - uses: actions/checkout@v4
       - uses: googleapis/release-please-action@v4
@@ -39,12 +55,49 @@ jobs:
 
   publish:
     needs: release
-    if: needs.release.outputs.release_created == 'true'
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.release.outputs.release_created == 'true')
     uses: ./.github/workflows/publish.yml
     with:
-      version: ${{ needs.release.outputs.version }}
+      version: ${{ github.event_name == 'workflow_dispatch' && inputs.version || needs.release.outputs.version }}
     permissions:
       contents: read
       packages: write
       id-token: write
       attestations: write
+
+  chart-paths:
+    needs: release
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.release.outputs.release_created == 'true')
+    runs-on: ubuntu-latest
+    outputs:
+      paths: ${{ steps.filter.outputs.paths }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          fetch-depth: 0
+
+      - name: Resolve chart paths to publish
+        id: filter
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Repair path: publish every chart at its manifest version.
+            paths=$(jq -c 'keys | map(select(startswith("charts/")))' .release-please-manifest.json)
+          else
+            paths=$(echo '${{ needs.release.outputs.paths_released }}' | jq -c '[.[] | select(startswith("charts/"))]')
+          fi
+          echo "paths=$paths" >> "$GITHUB_OUTPUT"
+
+  publish-chart:
+    needs: chart-paths
+    if: needs.chart-paths.outputs.paths != '' && needs.chart-paths.outputs.paths != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        chart-path: ${{ fromJSON(needs.chart-paths.outputs.paths) }}
+    uses: ./.github/workflows/chart-publish.yml
+    with:
+      chart-path: ${{ matrix.chart-path }}
+    permissions:
+      contents: read
+      packages: write

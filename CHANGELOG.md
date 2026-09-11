@@ -1,5 +1,37 @@
 # Changelog
 
+## [1.7.0](https://github.com/7K-Inari/inari-server/compare/v1.6.0...v1.7.0) (2026-09-11)
+
+
+### Features
+
+* **approvals:** add per-org approval policy config routes ([#44](https://github.com/7K-Inari/inari-server/issues/44)) ([858b0d8](https://github.com/7K-Inari/inari-server/commit/858b0d8dc32ac890f2c1832d831cdf0db2fe4c3f))
+* **authz:** reconcile org team groups for IdP-brokered members ([#48](https://github.com/7K-Inari/inari-server/issues/48)) ([278fcaf](https://github.com/7K-Inari/inari-server/commit/278fcafe640e620f5b2126f4a66684b2909af138))
+* **catalog:** tenant-scoped catalog visibility overlay routes ([#42](https://github.com/7K-Inari/inari-server/issues/42)) ([872bfb8](https://github.com/7K-Inari/inari-server/commit/872bfb80580e955e9fa1d96ecdb226ae3d96fbc5))
+* **secretstores:** add ESO SecretStore registry ([#46](https://github.com/7K-Inari/inari-server/issues/46)) ([9e0c0f4](https://github.com/7K-Inari/inari-server/commit/9e0c0f436f91c7f96551c0fd5f5bb83a700ce66f))
+* **tenancy:** add OIDC client/scope management and declarative RBAC mappings ([#45](https://github.com/7K-Inari/inari-server/issues/45)) ([1127b6b](https://github.com/7K-Inari/inari-server/commit/1127b6b944257ba2b0e8d7c2afdac7ff5db1bacd))
+* **tenancy:** add OIDC IdP brokering for tenant organizations ([#47](https://github.com/7K-Inari/inari-server/issues/47)) ([baccd43](https://github.com/7K-Inari/inari-server/commit/baccd43766484b65a89d4a329c2cba6fbbda1f82))
+* **tenancy:** tenant-scoped org profile, teams, members, and token management routes ([#43](https://github.com/7K-Inari/inari-server/issues/43)) ([5f3b45d](https://github.com/7K-Inari/inari-server/commit/5f3b45d00f1801c336181375082866266852fbee))
+
+
+### Bug Fixes
+
+* **ci:** make release.yml the sole release-please detector on push to main ([#40](https://github.com/7K-Inari/inari-server/issues/40)) ([137af3f](https://github.com/7K-Inari/inari-server/commit/137af3f7ebe3cf27ff2d33348d7d634bafe049b0))
+
+## [1.6.0](https://github.com/7K-Inari/inari-server/compare/v1.5.0...v1.6.0) (2026-09-10)
+
+
+### Features
+
+* add caller-scoped GET /api/v1/approvals/inbox ([#39](https://github.com/7K-Inari/inari-server/issues/39)) ([45c3b7c](https://github.com/7K-Inari/inari-server/commit/45c3b7cdf9074b1b678e2c372e2c5e7d970b5e73))
+* **agentgateway:** deliver per-cluster OIDC client secret via Vault + ESO ([#35](https://github.com/7K-Inari/inari-server/issues/35)) ([bc80ac2](https://github.com/7K-Inari/inari-server/commit/bc80ac28504e3b3bf503f833a0f4504a2f9f0322))
+* **clusterregistry:** add DELETE cluster endpoint to cancel pending registrations ([#37](https://github.com/7K-Inari/inari-server/issues/37)) ([d5c7a79](https://github.com/7K-Inari/inari-server/commit/d5c7a79702b4eb6a1deebb3687be180c318574e7))
+
+
+### Bug Fixes
+
+* **catalog:** sync real package versions for platform apps from OCI registry ([#36](https://github.com/7K-Inari/inari-server/issues/36)) ([3a49832](https://github.com/7K-Inari/inari-server/commit/3a49832a75549b301bf4d3e9a4e6be2780f18cea))
+
 ## [1.5.0](https://github.com/7K-Inari/inari-server/compare/v1.4.1...v1.5.0) (2026-09-07)
 
 

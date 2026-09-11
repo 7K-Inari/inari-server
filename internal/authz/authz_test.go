@@ -66,6 +66,39 @@ func TestTupleWriterTenantCreatedSeedsRoleTuples(t *testing.T) {
 	}
 }
 
+func TestTupleWriterRBACMappingsUpdatedRewritesRoleTuples(t *testing.T) {
+	fs := &fakeStore{}
+	w := NewTupleWriter(fs)
+	ev := event(t, types.EventRBACMappingsUpdated, types.RBACMappingsPayload{
+		OrgID: "org:1",
+		Changes: []types.TeamRoleChange{
+			{TeamID: "t1", Name: "developers", OldRole: types.RoleDeveloper, NewRole: types.RolePlatformEngineer},
+			{TeamID: "t2", Name: "viewers", OldRole: types.RoleViewer, NewRole: types.RoleOrgAdmin},
+		},
+	})
+	if err := w.Handle(context.Background(), ev); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(fs.deleted) != 2 {
+		t.Fatalf("deleted = %v, want 2 tuples", fs.deleted)
+	}
+	if fs.deleted[0] != (Tuple{User: "team:t1#member", Relation: "developer", Object: "organization:1"}) {
+		t.Errorf("deleted[0] = %+v", fs.deleted[0])
+	}
+	if fs.deleted[1] != (Tuple{User: "team:t2#member", Relation: "viewer", Object: "organization:1"}) {
+		t.Errorf("deleted[1] = %+v", fs.deleted[1])
+	}
+	if len(fs.written) != 2 {
+		t.Fatalf("written = %v, want 2 tuples", fs.written)
+	}
+	if fs.written[0] != (Tuple{User: "team:t1#member", Relation: "platform_engineer", Object: "organization:1"}) {
+		t.Errorf("written[0] = %+v", fs.written[0])
+	}
+	if fs.written[1] != (Tuple{User: "team:t2#member", Relation: "admin", Object: "organization:1"}) {
+		t.Errorf("written[1] = %+v", fs.written[1])
+	}
+}
+
 func TestTupleWriterMembership(t *testing.T) {
 	fs := &fakeStore{}
 	w := NewTupleWriter(fs)
@@ -82,6 +115,40 @@ func TestTupleWriterMembership(t *testing.T) {
 	}
 	if len(fs.deleted) != 1 {
 		t.Errorf("deleted = %+v", fs.deleted)
+	}
+}
+
+func TestTupleWriterTeamDeletedRetractsRoleTuple(t *testing.T) {
+	fs := &fakeStore{}
+	w := NewTupleWriter(fs)
+	create := event(t, types.EventTeamCreated, types.TeamCreatedPayload{
+		OrgID: "org:1", TeamID: "t9", Name: "ops", Role: types.RoleDeveloper,
+	})
+	if err := w.Handle(context.Background(), create); err != nil {
+		t.Fatalf("Handle create: %v", err)
+	}
+	del := event(t, types.EventTeamDeleted, types.TeamCreatedPayload{
+		OrgID: "org:1", TeamID: "t9", Name: "ops", Role: types.RoleDeveloper,
+	})
+	if err := w.Handle(context.Background(), del); err != nil {
+		t.Fatalf("Handle delete: %v", err)
+	}
+	want := Tuple{User: "team:t9#member", Relation: "developer", Object: "organization:1"}
+	if len(fs.written) != 1 || fs.written[0] != want {
+		t.Errorf("written = %+v", fs.written)
+	}
+	if len(fs.deleted) != 1 || fs.deleted[0] != want {
+		t.Errorf("deleted = %+v", fs.deleted)
+	}
+	// EventTypes must include team.deleted or the dispatcher skips it.
+	found := false
+	for _, et := range w.EventTypes() {
+		if et == types.EventTeamDeleted {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("EventTypes missing team.deleted")
 	}
 }
 

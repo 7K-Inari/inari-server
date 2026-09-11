@@ -37,6 +37,7 @@ type Team struct {
 	ID                string    `json:"id"`
 	OrgID             string    `json:"orgId"`
 	Name              string    `json:"name"`
+	Role              Role      `json:"role"`
 	KeycloakGroupPath string    `json:"keycloakGroupPath"`
 	CreatedAt         time.Time `json:"createdAt"`
 }
@@ -80,6 +81,7 @@ const (
 	EventTeamCreated       = "team.created"
 	EventMembershipAdded   = "membership.added"
 	EventMembershipRemoved = "membership.removed"
+	EventTeamDeleted       = "team.deleted"
 
 	EventClusterCreated        = "cluster.created"
 	EventClusterRegistered     = "cluster.registered"
@@ -90,15 +92,17 @@ const (
 	EventClusterDeleted        = "cluster.deleted"
 	EventCapabilitiesIngested  = "capabilities.ingested"
 
-	EventCatalogItemUpserted = "catalog.item_upserted"
-	EventApprovalRequested   = "approval.requested"
-	EventApprovalDecided     = "approval.decided"
-	EventApprovalCancelled   = "approval.cancelled"
-	EventApprovalExpired     = "approval.expired"
-	EventDeployRequested     = "deploy.requested"
-	EventInstanceCreated     = "instance.created"
-	EventInstanceStatus      = "instance.status"
-	EventInstanceUpgraded    = "instance.upgraded"
+	EventCatalogItemUpserted      = "catalog.item_upserted"
+	EventCatalogVisibilityChanged = "catalog.visibility.changed"
+	EventApprovalRequested        = "approval.requested"
+	EventApprovalDecided          = "approval.decided"
+	EventApprovalCancelled        = "approval.cancelled"
+	EventApprovalExpired          = "approval.expired"
+	EventApprovalConfigUpdated    = "approvals.config.updated"
+	EventDeployRequested          = "deploy.requested"
+	EventInstanceCreated          = "instance.created"
+	EventInstanceStatus           = "instance.status"
+	EventInstanceUpgraded         = "instance.upgraded"
 
 	EventCloudAccountRegistered   = "cloud_account.registered"
 	EventCloudAccountValidated    = "cloud_account.validated"
@@ -126,6 +130,12 @@ const (
 
 	EventDriftDetected = "drift.detected"
 	EventDriftResolved = "drift.resolved"
+
+	EventRBACMappingsUpdated = "rbac.mappings.updated"
+
+	EventSecretStoreCreated = "secretstore.created"
+	EventSecretStoreUpdated = "secretstore.updated"
+	EventSecretStoreDeleted = "secretstore.deleted"
 
 	EventPlatformResourceStatus = "platform_resource.status"
 )
@@ -299,6 +309,66 @@ const (
 	ApprovalPolicyPlatformAdmin ApprovalPolicy = "platform-admin"
 )
 
+func (p ApprovalPolicy) Valid() bool {
+	switch p {
+	case ApprovalPolicyAuto, ApprovalPolicyPeer, ApprovalPolicyPlatformAdmin:
+		return true
+	}
+	return false
+}
+
+// ApprovalThreshold escalates the effective approval policy when a numeric
+// condition (e.g. estimated cost) exceeds Gt.
+type ApprovalThreshold struct {
+	Kind   string         `json:"kind"` // e.g. "cost"
+	Gt     float64        `json:"gt"`
+	Policy ApprovalPolicy `json:"policy"`
+}
+
+// ApproverGroup names a set of subjects eligible to approve under the
+// group-scoped policies.
+type ApproverGroup struct {
+	Name     string   `json:"name"`
+	Subjects []string `json:"subjects"`
+}
+
+// AutoApproveRule exempts matching actions from approval entirely.
+type AutoApproveRule struct {
+	Kind    string   `json:"kind"` // e.g. "catalog_item"
+	ItemIDs []string `json:"itemIds"`
+}
+
+// ApprovalConfig is the per-org approval policy (Settings design §2),
+// persisted as a JSONB blob and consumed by the approvals lifecycle.
+type ApprovalConfig struct {
+	DefaultPolicy  ApprovalPolicy      `json:"defaultPolicy"`
+	ApprovalTTL    string              `json:"approvalTtl"` // Go duration string
+	Thresholds     []ApprovalThreshold `json:"thresholds,omitempty"`
+	ApproverGroups []ApproverGroup     `json:"approverGroups,omitempty"`
+	AutoApprove    []AutoApproveRule   `json:"autoApprove,omitempty"`
+}
+
+// TTLDuration parses ApprovalTTL as a Go duration.
+func (c *ApprovalConfig) TTLDuration() (time.Duration, error) {
+	return time.ParseDuration(c.ApprovalTTL)
+}
+
+// ApprovalConfigRecord is the effective per-org config; UpdatedAt is nil
+// when the org has no stored row and defaults apply.
+type ApprovalConfigRecord struct {
+	OrgID     string         `json:"orgId"`
+	Config    ApprovalConfig `json:"config"`
+	UpdatedAt *time.Time     `json:"updatedAt,omitempty"`
+}
+
+// ApprovalConfigPayload is the audit/outbox payload for
+// EventApprovalConfigUpdated, carrying the before/after effective configs.
+type ApprovalConfigPayload struct {
+	OrgID  string          `json:"orgId"`
+	Before *ApprovalConfig `json:"before"`
+	After  *ApprovalConfig `json:"after"`
+}
+
 // CapabilityRef points a discovered-source catalog item at its capability.
 type CapabilityRef struct {
 	Kind  CapabilityKind `json:"kind"`
@@ -343,6 +413,14 @@ type VersionPin struct {
 	OrgID   string `json:"orgId"`
 	ItemID  string `json:"itemId"`
 	Version string `json:"version"`
+}
+
+// CatalogVisibilityPayload is the audit payload for catalog.visibility.changed.
+type CatalogVisibilityPayload struct {
+	OrgID  string `json:"orgId"`
+	ItemID string `json:"itemId"`
+	Before bool   `json:"before"`
+	After  bool   `json:"after"`
 }
 
 // Approval states.
@@ -576,6 +654,88 @@ type MembershipPayload struct {
 	TeamID string `json:"teamId"`
 	UserID string `json:"userId"`
 	Role   Role   `json:"role"`
+}
+
+// Identity client types (Settings design §3.1). The client secret lives only
+// in Keycloak — it is returned exactly once at create/rotate and never
+// persisted server-side; the DB projection carries metadata only.
+const (
+	IdentityClientTypeService = "service"
+	IdentityClientTypePublic  = "public"
+
+	IdentityClientStatusActive   = "active"
+	IdentityClientStatusDisabled = "disabled"
+)
+
+// IdentityClient is the server-side metadata projection of a tenant-scoped
+// Keycloak OIDC client (clientId org-<org>-<name>).
+type IdentityClient struct {
+	ClientID     string    `json:"clientId"`
+	OrgID        string    `json:"-"`
+	Name         string    `json:"name"`
+	Type         string    `json:"type"`
+	Audiences    []string  `json:"audiences"`
+	Scopes       []string  `json:"scopes"`
+	RedirectURIs []string  `json:"redirectUris,omitempty"`
+	Status       string    `json:"status"`
+	CreatedAt    time.Time `json:"createdAt"`
+}
+
+// TeamRoleMapping is one team → org role assignment in the declarative RBAC
+// mapping set.
+type TeamRoleMapping struct {
+	Team string `json:"team"`
+	Role Role   `json:"role"`
+}
+
+// TeamRoleChange records one role transition applied by a mappings update.
+type TeamRoleChange struct {
+	TeamID  string `json:"teamId"`
+	Name    string `json:"name"`
+	OldRole Role   `json:"oldRole"`
+	NewRole Role   `json:"newRole"`
+}
+
+// RBACMappingsPayload is the outbox payload for EventRBACMappingsUpdated;
+// the tuple writer retracts old-role and writes new-role team tuples.
+type RBACMappingsPayload struct {
+	OrgID   string           `json:"orgId"`
+	Changes []TeamRoleChange `json:"changes"`
+}
+
+// IdP brokering types (Settings design §3.3, OIDC-only v1). The IdP client
+// secret lives only in Keycloak — it is write-only (masked on read) and
+// never persisted or returned server-side; the DB projection carries
+// metadata only.
+const (
+	EventIdPBrokerCreated = "idp.broker.created"
+	EventIdPBrokerUpdated = "idp.broker.updated"
+	EventIdPBrokerDeleted = "idp.broker.deleted"
+)
+
+// IdPClaimMapping names the brokered tokens' claims used for identity
+// attributes (email) and group attribution (groups).
+type IdPClaimMapping struct {
+	Email  string `json:"email,omitempty"`
+	Groups string `json:"groups,omitempty"`
+}
+
+// BrokeredIdP is the server-side metadata projection of a tenant's brokered
+// OIDC identity provider (KC alias org-<org>-<alias>); one per org in v1.
+type BrokeredIdP struct {
+	Alias        string          `json:"alias"`
+	OrgID        string          `json:"-"`
+	IssuerURL    string          `json:"issuerUrl"`
+	ClientID     string          `json:"clientId"`
+	ClaimMapping IdPClaimMapping `json:"claimMapping"`
+	DomainHints  []string        `json:"domainHints"`
+	CreatedAt    time.Time       `json:"createdAt"`
+}
+
+// IdPBrokerPayload is the outbox payload for the idp.broker.* events.
+type IdPBrokerPayload struct {
+	OrgID string `json:"orgId"`
+	Alias string `json:"alias"`
 }
 
 // Cloud account states (plan §5.7).
@@ -1072,6 +1232,105 @@ const (
 	EventTenantZoneDecommissionDenied    = "tenant_zone.decommission_denied"
 	EventTenantZoneClosed                = "tenant_zone.closed"
 )
+
+// Secret store scopes (Settings design §3.2): platform stores are managed by
+// the platform team and read-only for tenants; cluster stores are tenant-owned.
+const (
+	SecretStoreScopePlatform = "platform"
+	SecretStoreScopeCluster  = "cluster"
+)
+
+// Secret store agent command types (desired-state fan-out over the agent
+// command queue, same path as SecretDeliveryReference).
+const (
+	AgentCommandSecretStoreApply  = "inari.secrets.SecretStoreApply"
+	AgentCommandSecretStoreDelete = "inari.secrets.SecretStoreDelete"
+)
+
+// SecretRef references a cluster-side Kubernetes Secret holding the
+// provider credentials. The control plane only ever stores this reference —
+// credential values never transit or persist on the hub (plan §4.1/§5.10).
+type SecretRef struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+}
+
+// Provider configs. Exactly one field is set on a SecretStoreProvider.
+type AWSSMProvider struct {
+	Region        string    `json:"region"`
+	AuthSecretRef SecretRef `json:"authSecretRef"`
+}
+
+type VaultProvider struct {
+	Server        string    `json:"server"`
+	Path          string    `json:"path,omitempty"`
+	AuthSecretRef SecretRef `json:"authSecretRef"`
+}
+
+type GCPSMProvider struct {
+	ProjectID     string    `json:"projectId"`
+	AuthSecretRef SecretRef `json:"authSecretRef"`
+}
+
+type AzureKVProvider struct {
+	VaultURL      string    `json:"vaultUrl"`
+	TenantID      string    `json:"tenantId,omitempty"`
+	AuthSecretRef SecretRef `json:"authSecretRef"`
+}
+
+// SecretStoreProvider selects exactly one ESO backend. All credential
+// material stays cluster-side via AuthSecretRef.
+type SecretStoreProvider struct {
+	AWSSM   *AWSSMProvider   `json:"awsSM,omitempty"`
+	Vault   *VaultProvider   `json:"vault,omitempty"`
+	GCPSM   *GCPSMProvider   `json:"gcpsm,omitempty"`
+	AzureKV *AzureKVProvider `json:"azurekv,omitempty"`
+}
+
+// SecretStoreTargets selects the clusters a store is delivered to: exactly
+// one of ClusterSetRef or ClusterIDs.
+type SecretStoreTargets struct {
+	ClusterSetRef string   `json:"clusterSetRef,omitempty"`
+	ClusterIDs    []string `json:"clusterIds,omitempty"`
+}
+
+// SecretStore is one registered ESO SecretStore (Settings design §3.2). The
+// store name is the registry lookup key used by secret delivery (replacing
+// the hardcoded "inari-platform").
+type SecretStore struct {
+	ID        string              `json:"id"`
+	OrgID     string              `json:"orgId"`
+	Name      string              `json:"name"`
+	Scope     string              `json:"scope"`
+	Targets   SecretStoreTargets  `json:"targets"`
+	Provider  SecretStoreProvider `json:"provider"`
+	CreatedAt time.Time           `json:"createdAt"`
+	UpdatedAt time.Time           `json:"updatedAt"`
+}
+
+// SecretStoreCondition is one agent-reported delivery condition per cluster.
+type SecretStoreCondition struct {
+	ClusterID string `json:"clusterId"`
+	Type      string `json:"type"`   // e.g. "Ready"
+	Status    string `json:"status"` // "True" | "False"
+	Reason    string `json:"reason"` // "Delivered" | "Pending" | "Failed"
+	Message   string `json:"message,omitempty"`
+}
+
+// SecretStoreStatus is the delivery projection for one store (Settings
+// design §3.2): delivered is true once every target cluster acked.
+type SecretStoreStatus struct {
+	Delivered  bool                   `json:"delivered"`
+	Conditions []SecretStoreCondition `json:"conditions,omitempty"`
+}
+
+// SecretStorePayload is the outbox payload for secretstore lifecycle events.
+type SecretStorePayload struct {
+	OrgID   string `json:"orgId"`
+	StoreID string `json:"storeId"`
+	Name    string `json:"name"`
+	Scope   string `json:"scope"`
+}
 
 // TenantZonePayload is the outbox payload for tenant zone events. ZoneOrgID
 // is the zone's own (wired) organization, set once known; OrgID is the

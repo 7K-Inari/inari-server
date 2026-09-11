@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sort"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -42,6 +44,14 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 	}, h.list)
 
 	huma.Register(api, huma.Operation{
+		OperationID: "inboxApprovals",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/approvals/inbox",
+		Summary:     "List pending approvals across all orgs the caller belongs to",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.inbox)
+
+	huma.Register(api, huma.Operation{
 		OperationID: "getApproval",
 		Method:      http.MethodGet,
 		Path:        "/api/v1/tenants/{org}/approvals/{id}",
@@ -64,6 +74,22 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Summary:     "Withdraw a pending approval request (requester only)",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.cancel)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "getApprovalConfig",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/tenants/{org}/approval-config",
+		Summary:     "Get the org's effective approval policy config",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.getConfig)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "updateApprovalConfig",
+		Method:      http.MethodPut,
+		Path:        "/api/v1/tenants/{org}/approval-config",
+		Summary:     "Replace the org's approval policy config",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.updateConfig)
 }
 
 func (h *Handler) authorizeOrg(ctx context.Context, slug, relation string) (*types.Organization, *authn.Identity, error) {
@@ -126,6 +152,68 @@ type approvalPathInput struct {
 	ID  string `path:"id"`
 }
 
+// inboxListLimit bounds the caller-scoped inbox aggregate.
+const (
+	inboxDefaultLimit = 50
+	inboxMaxLimit     = 200
+)
+
+type inboxInput struct {
+	Limit int `query:"limit" doc:"Max items to return (default 50, max 200)"`
+}
+
+type inboxOutput struct {
+	Body struct {
+		Items []types.ApprovalRequest `json:"items"`
+	}
+}
+
+// inbox aggregates pending approvals across every org the caller belongs to
+// (JWT organization claim), guarded per org by the same viewer check as the
+// per-tenant list route. Orgs that fail resolution or authorization are
+// silently omitted — the inbox never 403s on partial access.
+func (h *Handler) inbox(ctx context.Context, in *inboxInput) (*inboxOutput, error) {
+	id := httpserver.IdentityFromContext(ctx)
+	if id == nil {
+		return nil, huma.Error401Unauthorized("unauthenticated")
+	}
+	limit := in.Limit
+	if limit <= 0 {
+		limit = inboxDefaultLimit
+	}
+	if limit > inboxMaxLimit {
+		limit = inboxMaxLimit
+	}
+	items := []types.ApprovalRequest{}
+	for _, slug := range id.Organizations {
+		org, err := h.tenants.GetTenant(ctx, slug)
+		if err != nil {
+			continue // claim/org drift — omit silently
+		}
+		ok, err := h.authz.Check(ctx, authz.UserObject(id.Subject), authz.RelationViewer, authz.OrgObject(org.ID))
+		if err != nil || !ok {
+			continue
+		}
+		reqs, err := h.svc.List(ctx, org.ID, string(types.ApprovalStatePending), "")
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, reqs...)
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].CreatedAt.Equal(items[j].CreatedAt) {
+			return items[i].ID < items[j].ID
+		}
+		return items[i].CreatedAt.After(items[j].CreatedAt)
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	out := &inboxOutput{}
+	out.Body.Items = items
+	return out, nil
+}
+
 type approvalOutput struct {
 	Body struct {
 		Approval types.ApprovalRequest `json:"approval"`
@@ -169,6 +257,63 @@ func (h *Handler) cancel(ctx context.Context, in *approvalPathInput) (*approvalO
 	}
 	out := &approvalOutput{}
 	out.Body.Approval = *req
+	return out, nil
+}
+
+type configPathInput struct {
+	Org string `path:"org"`
+}
+
+type configOutput struct {
+	Body struct {
+		Config types.ApprovalConfig `json:"config"`
+		OrgID  string               `json:"orgId"`
+		// UpdatedAt is null when the org has no stored row and defaults apply.
+		UpdatedAt *time.Time `json:"updatedAt"`
+	}
+}
+
+func configBody(out *configOutput, rec *types.ApprovalConfigRecord) {
+	out.Body.Config = rec.Config
+	out.Body.OrgID = rec.OrgID
+	out.Body.UpdatedAt = rec.UpdatedAt
+}
+
+func (h *Handler) getConfig(ctx context.Context, in *configPathInput) (*configOutput, error) {
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	if err != nil {
+		return nil, err
+	}
+	rec, err := h.svc.GetConfig(ctx, org.ID)
+	if err != nil {
+		return nil, err
+	}
+	out := &configOutput{}
+	configBody(out, rec)
+	return out, nil
+}
+
+type updateConfigInput struct {
+	Org  string `path:"org"`
+	Body struct {
+		Config types.ApprovalConfig `json:"config"`
+	}
+}
+
+func (h *Handler) updateConfig(ctx context.Context, in *updateConfigInput) (*configOutput, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	if err != nil {
+		return nil, err
+	}
+	rec, err := h.svc.UpdateConfig(ctx, "user:"+id.Subject, org.ID, in.Body.Config)
+	if errors.Is(err, ErrInvalidConfig) {
+		return nil, huma.Error422UnprocessableEntity(err.Error())
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := &configOutput{}
+	configBody(out, rec)
 	return out, nil
 }
 

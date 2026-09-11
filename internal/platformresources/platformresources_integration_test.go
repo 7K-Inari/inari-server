@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -156,23 +157,86 @@ func TestEnsureDesiredConcurrent(t *testing.T) {
 }
 
 func TestApplyStatusAndGet(t *testing.T) {
-	svc, _ := itSetup(t)
+	svc, database := itSetup(t)
 	ctx := context.Background()
 
 	r, err := svc.EnsureDesired(ctx, "org:1", types.PlatformKindTenantNamespace, "acme-apps", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// EnsureDesired emitted its own outbox event; the status update adds one.
+	before := countOutbox(t, database, types.EventPlatformResourceStatus)
 
-	got, err := svc.ApplyStatus(ctx, r.ID, types.PlatformStatusReady, "namespace provisioned")
+	observed := time.Date(2026, 9, 11, 10, 0, 0, 0, time.UTC)
+	matched, err := svc.ApplyStatus(ctx, "cluster-1", platformresources.StatusUpdate{
+		Resource:   types.ResourceRef{Kind: "TenantNamespace.platform.inari.io", Name: "acme-apps"},
+		Health:     "healthy",
+		Message:    "namespace provisioned",
+		ObservedAt: observed,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matched {
+		t.Fatal("ApplyStatus matched = false, want true")
+	}
+
+	got, err := svc.Get(ctx, "org:1", r.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.Status != types.PlatformStatusReady || got.Detail != "namespace provisioned" {
 		t.Errorf("status/detail = %q/%q, want ready/namespace provisioned", got.Status, got.Detail)
 	}
-	if got.ReportedAt == nil {
-		t.Error("reported_at is nil, want set")
+	if got.ReportedAt == nil || !got.ReportedAt.Equal(observed) {
+		t.Errorf("reported_at = %v, want %v", got.ReportedAt, observed)
+	}
+
+	// Audit + outbox from the agent update.
+	if n := countOutbox(t, database, types.EventPlatformResourceStatus); n != before+1 {
+		t.Errorf("outbox events = %d, want %d", n, before+1)
+	}
+	var actor, action string
+	if err := database.Pool.QueryRow(ctx,
+		`SELECT actor, action FROM audit_events WHERE object_id = $1 ORDER BY id DESC LIMIT 1`, r.ID).
+		Scan(&actor, &action); err != nil {
+		t.Fatal(err)
+	}
+	if actor != "agent:cluster-1" || action != "platform-resource.status" {
+		t.Errorf("audit actor/action = %q/%q, want agent:cluster-1/platform-resource.status", actor, action)
+	}
+
+	// Degraded health maps to failed.
+	if _, err := svc.ApplyStatus(ctx, "cluster-1", platformresources.StatusUpdate{
+		Resource: types.ResourceRef{Kind: "TenantNamespace.platform.inari.io", Name: "acme-apps"},
+		Health:   "degraded",
+		Message:  "quota exceeded",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = svc.Get(ctx, "org:1", r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.PlatformStatusFailed {
+		t.Errorf("status = %q, want failed", got.Status)
+	}
+
+	// Unmatched (kind, name) is drop-and-log: no error, matched=false, no
+	// audit/outbox rows.
+	events := countOutbox(t, database, types.EventPlatformResourceStatus)
+	matched, err = svc.ApplyStatus(ctx, "cluster-1", platformresources.StatusUpdate{
+		Resource: types.ResourceRef{Kind: "KeycloakRealm.platform.inari.io", Name: "never-desired"},
+		Health:   "healthy",
+	})
+	if err != nil {
+		t.Fatalf("unmatched update: %v", err)
+	}
+	if matched {
+		t.Error("ApplyStatus unmatched: matched = true, want false")
+	}
+	if n := countOutbox(t, database, types.EventPlatformResourceStatus); n != events {
+		t.Errorf("outbox events = %d, want still %d", n, events)
 	}
 
 	// Cross-tenant get must not leak.
@@ -186,10 +250,5 @@ func TestApplyStatusAndGet(t *testing.T) {
 	}
 	if len(list) != 1 || list[0].ID != r.ID {
 		t.Errorf("list = %+v, want single row %q", list, r.ID)
-	}
-
-	// Unknown id surfaces not-found.
-	if _, err := svc.ApplyStatus(ctx, "nope", types.PlatformStatusReady, ""); err == nil {
-		t.Error("ApplyStatus unknown id: want error, got nil")
 	}
 }

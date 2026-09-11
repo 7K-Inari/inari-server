@@ -1,6 +1,8 @@
 package agentgateway
 
 import (
+	"time"
+
 	"google.golang.org/protobuf/types/known/structpb"
 
 	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
@@ -66,6 +68,9 @@ type StatusUpdate struct {
 	Health   string
 	Sync     string
 	Message  string
+	// ObservedAt is the agent-side observation time (zero when the agent did
+	// not report one).
+	ObservedAt time.Time
 }
 
 func mapHealth(h agentv1.HealthStatus) string {
@@ -111,6 +116,9 @@ func mapStatusUpdate(upd *agentv1.StatusUpdate) StatusUpdate {
 			Name:      upd.Resource.Name,
 			Namespace: upd.Resource.Namespace,
 		}
+	}
+	if upd.ObservedAt != nil {
+		out.ObservedAt = upd.ObservedAt.AsTime()
 	}
 	return out
 }

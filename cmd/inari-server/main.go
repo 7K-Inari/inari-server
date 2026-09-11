@@ -33,6 +33,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/orchestrator"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
 	gitgithub "github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider/github"
+	"github.com/7K-Inari/inari-server/internal/platformresources"
 	"github.com/7K-Inari/inari-server/internal/policyservice"
 	"github.com/7K-Inari/inari-server/internal/secrets"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
@@ -212,6 +213,11 @@ func run() error {
 	inventoryHandler := inventory.NewHandler(inventorySvc, svc, authorizer)
 	gateway.SetStatusSink(agentgatewayStatusSink{inventorySvc})
 
+	// Platform resources (M7): desired-state skeleton; reconciler status
+	// sink and tenancy wiring land in follow-up tasks.
+	platformResourcesSvc := platformresources.NewService(database, platformresources.NewStore(), auditStore)
+	platformResourcesHandler := platformresources.NewHandler(platformResourcesSvc, svc, authorizer)
+
 	git, err := buildGitProvider(cfg)
 	if err != nil {
 		return err
@@ -310,6 +316,7 @@ func run() error {
 	catalogHandler.RegisterRoutes(api)
 	approvalsHandler.RegisterRoutes(api)
 	inventoryHandler.RegisterRoutes(api)
+	platformResourcesHandler.RegisterRoutes(api)
 	orchestratorHandler.RegisterRoutes(api)
 	cloudAccountsHandler.RegisterRoutes(api)
 	notificationsHandler.RegisterRoutes(api)

@@ -126,6 +126,8 @@ const (
 
 	EventDriftDetected = "drift.detected"
 	EventDriftResolved = "drift.resolved"
+
+	EventPlatformResourceStatus = "platform_resource.status"
 )
 
 // ClusterState is the cluster lifecycle state (plan §5.11).
@@ -483,6 +485,67 @@ type InstancePayload struct {
 	ClusterID  string `json:"clusterId"`
 	Version    string `json:"version,omitempty"`
 	Health     string `json:"health,omitempty"`
+}
+
+// PlatformResourceKind is one control-plane-owned platform object kind
+// (plan §5.2, M7): what the tenant zone factory provisions per tenant.
+type PlatformResourceKind string
+
+const (
+	PlatformKindKeycloakRealm   PlatformResourceKind = "keycloak-realm"
+	PlatformKindKeycloakClient  PlatformResourceKind = "keycloak-client"
+	PlatformKindDNSZone         PlatformResourceKind = "dns-zone"
+	PlatformKindTenantNamespace PlatformResourceKind = "tenant-namespace"
+)
+
+func (k PlatformResourceKind) Valid() bool {
+	switch k {
+	case PlatformKindKeycloakRealm, PlatformKindKeycloakClient, PlatformKindDNSZone, PlatformKindTenantNamespace:
+		return true
+	}
+	return false
+}
+
+// PlatformResourceStatus is the reconciler-reported state of a platform resource.
+type PlatformResourceStatus string
+
+const (
+	PlatformStatusReady       PlatformResourceStatus = "ready"
+	PlatformStatusReconciling PlatformResourceStatus = "reconciling"
+	PlatformStatusFailed      PlatformResourceStatus = "failed"
+)
+
+func (s PlatformResourceStatus) Valid() bool {
+	switch s {
+	case PlatformStatusReady, PlatformStatusReconciling, PlatformStatusFailed:
+		return true
+	}
+	return false
+}
+
+// PlatformResource is one per-tenant platform object tracked by the control
+// plane (M7). Desired state is written by provisioning; status is reported
+// by the platform reconciler.
+type PlatformResource struct {
+	ID         string                 `json:"id"`
+	OrgID      string                 `json:"orgId"`
+	Kind       PlatformResourceKind   `json:"kind"`
+	Name       string                 `json:"name"`
+	Desired    json.RawMessage        `json:"desired"`
+	Status     PlatformResourceStatus `json:"status"`
+	Detail     string                 `json:"detail"`
+	ReportedAt *time.Time             `json:"reportedAt,omitempty"`
+	CreatedAt  time.Time              `json:"createdAt"`
+	UpdatedAt  time.Time              `json:"updatedAt"`
+}
+
+// PlatformResourcePayload is the outbox payload for platform resource events.
+type PlatformResourcePayload struct {
+	OrgID      string                 `json:"orgId"`
+	ResourceID string                 `json:"resourceId"`
+	Kind       PlatformResourceKind   `json:"kind"`
+	Name       string                 `json:"name"`
+	Status     PlatformResourceStatus `json:"status,omitempty"`
 }
 
 // TeamSeed is one default team to create with a tenant and the org role it grants.

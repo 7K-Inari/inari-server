@@ -95,21 +95,34 @@ func (a tzfClusterLifecycle) Decommission(ctx context.Context, actor, clusterID 
 	return drained, err
 }
 
-// scaffoldTenantResolver adapts tenancy.Service to the scaffold
-// TenantContextResolver seam (M8.W3): scaffold runs carry the org ID, and
-// templates get the slug-derived namespace + members group path.
-type scaffoldTenantResolver struct{ tenants *tenancy.Service }
+// scaffoldTenantResolver adapts tenancy.Service + clusterregistry.Service
+// to the scaffold TenantContextResolver seam (M8.W3/W4): scaffold runs
+// carry the org ID, and templates get the slug-derived namespace + members
+// group path. ClusterID is the tenant's first registered cluster (slice 1
+// assumes one cluster per tenant) — the ArgoCD registration target.
+type scaffoldTenantResolver struct {
+	tenants  *tenancy.Service
+	clusters *clusterregistry.Service
+}
 
 func (a scaffoldTenantResolver) ResolveTenant(ctx context.Context, orgID string) (*scaffold.TenantContext, error) {
 	org, err := a.tenants.GetTenantByID(ctx, orgID)
 	if err != nil {
 		return nil, err
 	}
-	return &scaffold.TenantContext{
+	tc := &scaffold.TenantContext{
 		Slug: org.Slug, OrgID: org.ID,
 		Namespace: org.Slug, // TZF tenant-namespace convention
 		GroupPath: tenancy.GroupPath(org.Slug, "members"),
-	}, nil
+	}
+	clusters, err := a.clusters.ListClusters(ctx, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("list tenant clusters: %w", err)
+	}
+	if len(clusters) > 0 {
+		tc.ClusterID = clusters[0].ID
+	}
+	return tc, nil
 }
 
 // policyCheckerAdapter maps the orchestrator's policy seam onto the Policy
@@ -338,17 +351,19 @@ func run() error {
 	orchestratorSvc.WithPolicyChecker(policyCheckerAdapter{policySvc})
 
 	// Scaffolding / Software Templates (M8, plan §4/§10): template browsing
-	// + scaffold run lifecycle API. W3 adds the step engine: the reconcile
-	// loop drives runs against the template source; the remaining execution
-	// seams (git, catalog upsert, group binding, app registration) are
-	// wired with the W4 phase steps.
+	// + scaffold run lifecycle API. W3 added the step engine; W4 wires the
+	// git + pipeline execution seams (repo creation via the git provider,
+	// ArgoCD app registration via the agent queue).
 	scaffoldSvc := scaffold.NewService(database, scaffold.NewStore(), auditStore, catalogSvc,
 		scaffold.Config{MaxAttempts: int(cfg.ScaffoldStepMaxAttempts), GitOrg: cfg.ScaffoldGitOrg}, log)
 	scaffoldHandler := scaffold.NewHandler(scaffoldSvc, svc, authorizer)
 	if templatePuller != nil {
 		scaffoldSvc.WithExecEnv(&scaffold.ExecEnv{
+			Git:       git,
+			GitOrg:    cfg.ScaffoldGitOrg,
+			Registrar: gateway.Queue(),
 			Templates: templatePuller,
-			Tenants:   scaffoldTenantResolver{tenants: svc},
+			Tenants:   scaffoldTenantResolver{tenants: svc, clusters: registry},
 		})
 		go scaffoldSvc.RunReconcileLoop(ctx, cfg.ScaffoldReconcileInterval)
 	}

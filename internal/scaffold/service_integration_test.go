@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -24,8 +25,8 @@ func (r itTenantResolver) ResolveTenant(_ context.Context, orgID string) (*Tenan
 
 func itResolver() itTenantResolver {
 	return itTenantResolver{
-		"org:acme":  {Slug: "acme", OrgID: "org:acme", Namespace: "acme", GroupPath: "tenant-acme/members"},
-		"org:other": {Slug: "other", OrgID: "org:other", Namespace: "other", GroupPath: "tenant-other/members"},
+		"org:acme":  {Slug: "acme", OrgID: "org:acme", Namespace: "acme", GroupPath: "tenant-acme/members", ClusterID: "cluster:dev-1"},
+		"org:other": {Slug: "other", OrgID: "org:other", Namespace: "other", GroupPath: "tenant-other/members", ClusterID: "cluster:dev-2"},
 	}
 }
 
@@ -36,7 +37,12 @@ func TestReconcileDrivesRendering(t *testing.T) {
 	writeFixtureTemplate(t, dir, "go-service", "1.0.0", map[string]string{
 		"deploy/app.yaml.tmpl": "name: {{ .Values.name }}\nns: {{ .Tenant.Namespace }}\nrun: {{ .Run.ID }}\n",
 	})
-	f.svc.WithExecEnv(&ExecEnv{Templates: &FilePuller{Root: dir}, Tenants: itResolver()})
+	git := gitprovider.NewFake()
+	reg := &fakeRegistrar{}
+	f.svc.WithExecEnv(&ExecEnv{
+		Git: git, GitOrg: "acme-platform", Registrar: reg,
+		Templates: &FilePuller{Root: dir}, Tenants: itResolver(),
+	})
 
 	run, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "go-service", "", "", json.RawMessage(`{"name":"payments-api"}`))
 	if err != nil {
@@ -49,9 +55,10 @@ func TestReconcileDrivesRendering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Rendering completed; the run parks at the W4 placeholder.
-	if got.Phase != types.ScaffoldPhaseCreatingRepo {
-		t.Fatalf("phase = %q, want creating-repo", got.Phase)
+	// Rendering + the W4 git/pipeline steps completed; the run parks at the
+	// registering-catalog placeholder.
+	if got.Phase != types.ScaffoldPhaseRegisteringCatalog {
+		t.Fatalf("phase = %q, want registering-catalog", got.Phase)
 	}
 	if steps[0].Name != "rendering" || steps[0].State != types.ScaffoldStepCompleted {
 		t.Fatalf("rendering step = %+v", steps[0])
@@ -66,11 +73,28 @@ func TestReconcileDrivesRendering(t *testing.T) {
 		!strings.Contains(res.Files[0].Content, "run: "+run.ID) {
 		t.Fatalf("rendered content wrong: %+v", res.Files[0])
 	}
-	if steps[1].Name != "creating-repo" || steps[1].State != types.ScaffoldStepWaiting || steps[1].Attempts != 0 {
-		t.Fatalf("placeholder step = %+v", steps[1])
+	if steps[1].Name != "creating-repo" || steps[1].State != types.ScaffoldStepCompleted {
+		t.Fatalf("creating-repo step = %+v", steps[1])
+	}
+	var repoRes createRepoResult
+	if err := json.Unmarshal(steps[1].Result, &repoRes); err != nil || repoRes.RepoName != "acme-platform/acme-payments-api" || repoRes.RepoURL == "" {
+		t.Fatalf("creating-repo result = %s (%v)", steps[1].Result, err)
+	}
+	if committed := git.Files(repoRes.RepoName, "main"); committed["deploy/app.yaml"] == "" {
+		t.Fatalf("skeleton not committed: %v", committed)
+	}
+	if steps[2].Name != "creating-pipeline" || steps[2].State != types.ScaffoldStepCompleted {
+		t.Fatalf("creating-pipeline step = %+v", steps[2])
+	}
+	if len(reg.cmds) != 1 || reg.cmds[0].ClusterID != "cluster:dev-1" {
+		t.Fatalf("enqueued commands = %v", reg.cmds)
+	}
+	if steps[3].Name != "registering-catalog" || steps[3].State != types.ScaffoldStepWaiting || steps[3].Attempts != 0 {
+		t.Fatalf("placeholder step = %+v", steps[3])
 	}
 	var outputs map[string]any
-	if err := json.Unmarshal(got.Outputs, &outputs); err != nil || outputs["renderedFiles"] != float64(1) {
+	if err := json.Unmarshal(got.Outputs, &outputs); err != nil ||
+		outputs["renderedFiles"] != float64(1) || outputs["repoUrl"] != repoRes.RepoURL || outputs["pipelineUrl"] == "" {
 		t.Fatalf("outputs = %s (%v)", got.Outputs, err)
 	}
 

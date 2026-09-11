@@ -187,12 +187,17 @@ func (s *Service) driveRun(ctx context.Context, run *types.ScaffoldRun) error {
 	}
 }
 
-// execEnv tolerates a nil exec env (steps then fail on the missing seam).
+// execEnv tolerates a nil exec env (steps then fail on the missing seam)
+// and backfills GitOrg from the service config.
 func (s *Service) execEnv() *ExecEnv {
-	if s.exec != nil {
-		return s.exec
+	env := s.exec
+	if env == nil {
+		env = &ExecEnv{}
 	}
-	return &ExecEnv{}
+	if env.GitOrg == "" {
+		env.GitOrg = s.cfg.GitOrg
+	}
+	return env
 }
 
 // failedStep returns the first failed step in execution order, if any.

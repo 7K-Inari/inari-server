@@ -167,15 +167,18 @@ func TestRunStepsCancelMidRun(t *testing.T) {
 	}
 }
 
-func TestRunStepsPlaceholderRegistryParksAtCreatingRepo(t *testing.T) {
-	// Seed a run whose rendering step already completed; the real registry
-	// must park at the W4 placeholder without consuming attempts.
+func TestRunStepsPlaceholderRegistryParksAtRegisteringCatalog(t *testing.T) {
+	// Seed a run whose W3/W4-implemented steps already completed; the real
+	// registry must park at the remaining W4 placeholder without consuming
+	// attempts.
 	run := testRun()
 	steps := map[string]*types.ScaffoldRunStep{}
 	for _, n := range stepNames {
 		steps[n] = &types.ScaffoldRunStep{RunID: run.ID, Name: n, State: types.ScaffoldStepPending, MaxAttempts: 5}
 	}
 	steps["rendering"].State = types.ScaffoldStepCompleted
+	steps["creating-repo"].State = types.ScaffoldStepCompleted
+	steps["creating-pipeline"].State = types.ScaffoldStepCompleted
 	rc := &RunContext{Run: run, Steps: steps, Actor: "dev-1"}
 	onUpdate, _ := collectStepUpdates()
 
@@ -183,7 +186,7 @@ func TestRunStepsPlaceholderRegistryParksAtCreatingRepo(t *testing.T) {
 	if err != nil || complete {
 		t.Fatalf("complete=%v err=%v, want parked", complete, err)
 	}
-	st := steps["creating-repo"]
+	st := steps["registering-catalog"]
 	if st.State != types.ScaffoldStepWaiting || st.Attempts != 0 {
 		t.Fatalf("placeholder consumed attempts: %+v", st)
 	}

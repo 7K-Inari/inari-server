@@ -26,6 +26,9 @@ type TenantContext struct {
 	OrgID     string `json:"orgId"`
 	Namespace string `json:"namespace"`
 	GroupPath string `json:"groupPath"`
+	// ClusterID is the tenant's target cluster for ArgoCD app
+	// registration (slice 1: the tenant's first registered cluster).
+	ClusterID string `json:"clusterId,omitempty"`
 }
 
 // TenantContextResolver resolves a run's org into its render context
@@ -40,6 +43,7 @@ type TenantContextResolver interface {
 // depending step fail, not the engine.
 type ExecEnv struct {
 	Git       GitProvider
+	GitOrg    string // git organization/owner receiving scaffolded repos
 	Upsert    CatalogUpserter
 	Groups    GroupBinder
 	Registrar AppRegistrar
@@ -73,12 +77,12 @@ func stepWaitingPlaceholder(context.Context, *ExecEnv, *RunContext, *types.Scaff
 }
 
 // stepFuncs is the phase execution table (plan §3: phases map 1:1 to
-// steps). Only rendering is real in W3; the remaining entries are W4
-// placeholders.
+// steps). Rendering (W3), creating-repo and creating-pipeline (W4) are
+// real; the remaining entries are W4 placeholders from the sibling wave.
 var stepFuncs = map[string]StepFunc{
 	"rendering":           stepRendering,
-	"creating-repo":       stepWaitingPlaceholder,
-	"creating-pipeline":   stepWaitingPlaceholder,
+	"creating-repo":       stepCreatingRepo,
+	"creating-pipeline":   stepCreatingPipeline,
 	"registering-catalog": stepWaitingPlaceholder,
 	"binding-rbac":        stepWaitingPlaceholder,
 }

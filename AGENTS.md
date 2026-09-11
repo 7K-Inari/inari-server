@@ -5,7 +5,8 @@ Control plane for Inari: REST API/BFF, agent gRPC gateway, tenancy & identity, c
 Stack: Go, PostgreSQL, chi/Huma (REST/OpenAPI codegen), gRPC (agent gateway), NATS (event bus), OpenFGA (authz)
 
 ## Key architecture constraints
-- **Modular monolith**: one deployable binary; every module (Tenancy, Cluster Registry, Agent Gateway, Catalog, Orchestrator, Cloud Accounts, Resources Inventory, Audit, Approvals, Notifications, Extension Host, Fleet Manager, Policy Service, Tenant Zone Factory) behind a strict internal interface so it can be extracted later (§5.2).
+- **Modular monolith**: one deployable binary; every module (Tenancy, Cluster Registry, Agent Gateway, Catalog, Orchestrator, Cloud Accounts, Resources Inventory, Audit, Approvals, Notifications, Extension Host, Fleet Manager, Policy Service, Tenant Zone Factory, Scaffolding/Software Templates) behind a strict internal interface so it can be extracted later (§5.2).
+- The Scaffolding module (`internal/scaffold`) exposes two REST surfaces over the same service: the canonical API (`POST /tenants/{org}/templates/{name}/runs`, `GET/POST /tenants/{org}/scaffold-runs/{runId}[/cancel]`) and a UI-compat adapter (`POST/GET /tenants/{org}/scaffolds[/{runId}]`) whose JSON shapes are pinned to the hand-written inari-ui wizard client (`inari-ui/src/api/templates.ts`) — change that client contract only server-side.
 - Gateway = coarse PEP (valid JWT + org claim, route-level); services = fine PEP via OpenFGA `Check`/`ListObjects` behind an `Authorizer` interface (§5.4).
 - Never store tenant kubeconfigs or cloud keys — only role ARNs, external IDs, OIDC metadata (§4.1, §5.10).
 - Audit + events via the **outbox pattern** (append-only audit_events; outbox → NATS drives the OpenFGA tuple writer) (§5.2, §5.4).

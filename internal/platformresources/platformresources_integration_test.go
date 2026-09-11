@@ -74,6 +74,11 @@ func TestEnsureDesiredIdempotent(t *testing.T) {
 		t.Fatalf("outbox events = %d, want 1", got)
 	}
 
+	// Empty name is rejected before touching the database.
+	if _, err := svc.EnsureDesired(ctx, "org:1", types.PlatformKindKeycloakRealm, "", nil); err == nil {
+		t.Error("EnsureDesired empty name: want error, got nil")
+	}
+
 	// Same desired: no change, no new events.
 	r2, err := svc.EnsureDesired(ctx, "org:1", types.PlatformKindKeycloakRealm, "acme", json.RawMessage(`{"realm":"acme"}`))
 	if err != nil {

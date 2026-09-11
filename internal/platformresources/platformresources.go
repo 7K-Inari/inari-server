@@ -53,6 +53,9 @@ func (s *Service) EnsureDesired(ctx context.Context, orgID string, kind types.Pl
 	if !kind.Valid() {
 		return nil, fmt.Errorf("platformresources: invalid kind %q", kind)
 	}
+	if orgID == "" || name == "" {
+		return nil, fmt.Errorf("platformresources: orgID and name must not be empty")
+	}
 	if len(desired) == 0 {
 		desired = json.RawMessage(`{}`)
 	}

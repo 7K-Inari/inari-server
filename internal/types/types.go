@@ -380,11 +380,15 @@ type CapabilityRef struct {
 
 // CatalogItem is the normalized catalog entry (plan §5.9).
 type CatalogItem struct {
-	ID             string         `json:"id"`
-	Source         CatalogSource  `json:"source"`
-	Name           string         `json:"name"`
-	DisplayName    string         `json:"displayName"`
-	Description    string         `json:"description"`
+	ID          string        `json:"id"`
+	Source      CatalogSource `json:"source"`
+	Name        string        `json:"name"`
+	DisplayName string        `json:"displayName"`
+	Description string        `json:"description"`
+	// OrgID is the owning tenant for org-scoped items (e.g. scaffolded
+	// components); empty for global curated/platform items. The outbox
+	// payload carries it so the tuple writer grants the org parent tuple.
+	OrgID          string         `json:"orgId,omitempty"`
 	CapabilityRef  *CapabilityRef `json:"capabilityRef,omitempty"`
 	OCIRef         string         `json:"ociRef,omitempty"`
 	ApprovalPolicy ApprovalPolicy `json:"approvalPolicy"`
@@ -529,6 +533,9 @@ type TenantGitConfig struct {
 	Repo         string       `json:"repo"`
 	CommitPolicy CommitPolicy `json:"commitPolicy"`
 	BaseBranch   string       `json:"baseBranch"`
+	// ScaffoldGitOrg overrides the platform-wide scaffold git org for this
+	// tenant (M8.W6); empty falls back to INARI_SCAFFOLD_GIT_ORG.
+	ScaffoldGitOrg string `json:"scaffoldGitOrg,omitempty"`
 }
 
 // CatalogItemPayload is the outbox payload for EventCatalogItemUpserted.
@@ -1372,6 +1379,11 @@ const (
 	ScaffoldPhaseBindingRBAC        ScaffoldPhase = "binding-rbac"
 	ScaffoldPhaseCompleted          ScaffoldPhase = "completed"
 	ScaffoldPhaseFailed             ScaffoldPhase = "failed"
+	// ScaffoldPhasePendingApproval parks a run after rendering while its
+	// template's approval request awaits a decision (M8.W6, plan §5.3).
+	// Not in the reconcile claim allowlist — the approval.decided outbox
+	// event resumes (or fails) the run.
+	ScaffoldPhasePendingApproval ScaffoldPhase = "pending_approval"
 )
 
 // Scaffold run step states (mirrors the tenant-zone-step vocabulary;
@@ -1424,4 +1436,17 @@ const (
 	EventScaffoldRunCompleted   = "scaffold.completed"
 	EventScaffoldRunFailed      = "scaffold.failed"
 	EventScaffoldRunCancelled   = "scaffold.cancelled"
+	EventScaffoldRunRetried     = "scaffold.run_retried"
 )
+
+// ScaffoldRunPayload is the outbox payload for scaffold run lifecycle
+// events (created / cancelled / step-updated / completed / failed).
+type ScaffoldRunPayload struct {
+	OrgID        string `json:"orgId"`
+	RunID        string `json:"runId"`
+	TemplateName string `json:"templateName,omitempty"`
+	Version      string `json:"version,omitempty"`
+	Phase        string `json:"phase,omitempty"`
+	Step         string `json:"step,omitempty"`
+	StepStatus   string `json:"stepStatus,omitempty"`
+}

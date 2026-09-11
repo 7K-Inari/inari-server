@@ -50,6 +50,8 @@ var subscribedEvents = []string{
 	types.EventRolloutCompleted,
 	types.EventRolloutRolledBack,
 	types.EventExtensionStateChanged,
+	types.EventScaffoldRunCompleted,
+	types.EventScaffoldRunFailed,
 }
 
 func knownEvent(t string) bool {
@@ -584,6 +586,16 @@ func formatMessage(ev *types.OutboxEvent) string {
 		var pl types.InstancePayload
 		if unmarshalPayload(p, &pl) {
 			return fmt.Sprintf("Instance %s on cluster %s upgraded to version %s", pl.InstanceID, pl.ClusterID, pl.Version)
+		}
+	case types.EventScaffoldRunCompleted:
+		var pl types.ScaffoldRunPayload
+		if unmarshalPayload(p, &pl) {
+			return fmt.Sprintf("Scaffold run %s completed (template version %s)", pl.RunID, pl.Version)
+		}
+	case types.EventScaffoldRunFailed:
+		var pl types.ScaffoldRunPayload
+		if unmarshalPayload(p, &pl) {
+			return fmt.Sprintf("Scaffold run %s failed in phase %s (template version %s)", pl.RunID, pl.Phase, pl.Version)
 		}
 	}
 	return fmt.Sprintf("Inari event %s", ev.EventType)

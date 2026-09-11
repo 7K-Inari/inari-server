@@ -1,0 +1,15 @@
+name: go-service
+displayName: Go HTTP Service
+description: Skeleton Go HTTP service with Dockerfile, CI workflow, and Kubernetes manifests.
+tags: [go, service, backend]
+version: 0.1.0
+channel: stable
+scaffold:
+  createRepo:
+    visibility: private
+    defaultBranch: main
+  createPipeline:
+    provider: github-actions
+  registerCatalog:
+    kind: service
+    lifecycle: experimental

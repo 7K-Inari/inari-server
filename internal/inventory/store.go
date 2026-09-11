@@ -142,19 +142,30 @@ func (s *Store) MarkDeployed(ctx context.Context, q db.Querier, id, version, com
 // GitConfig reads the tenant's git target.
 func (s *Store) GitConfig(ctx context.Context, q db.Querier, orgID string) (*types.TenantGitConfig, error) {
 	var c types.TenantGitConfig
-	err := q.QueryRow(ctx, `SELECT org_id, repo, commit_policy, base_branch FROM tenant_git_configs WHERE org_id = $1`, orgID).
-		Scan(&c.OrgID, &c.Repo, &c.CommitPolicy, &c.BaseBranch)
+	var scaffoldOrg *string
+	err := q.QueryRow(ctx, `SELECT org_id, repo, commit_policy, base_branch, scaffold_git_org FROM tenant_git_configs WHERE org_id = $1`, orgID).
+		Scan(&c.OrgID, &c.Repo, &c.CommitPolicy, &c.BaseBranch, &scaffoldOrg)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
+	}
+	if scaffoldOrg != nil {
+		c.ScaffoldGitOrg = *scaffoldOrg
 	}
 	return &c, err
 }
 
 // UpsertGitConfig sets the tenant's git target + commit policy.
 func (s *Store) UpsertGitConfig(ctx context.Context, q db.Querier, c *types.TenantGitConfig) error {
-	const sql = `INSERT INTO tenant_git_configs (org_id, repo, commit_policy, base_branch) VALUES ($1,$2,$3,$4)
+	var scaffoldOrg *string
+	if c.ScaffoldGitOrg != "" {
+		scaffoldOrg = &c.ScaffoldGitOrg
+	}
+	const sql = `INSERT INTO tenant_git_configs (org_id, repo, commit_policy, base_branch, scaffold_git_org) VALUES ($1,$2,$3,$4,$5)
 	             ON CONFLICT (org_id) DO UPDATE SET repo = EXCLUDED.repo, commit_policy = EXCLUDED.commit_policy,
-	               base_branch = EXCLUDED.base_branch`
-	_, err := q.Exec(ctx, sql, c.OrgID, c.Repo, c.CommitPolicy, c.BaseBranch)
+	               base_branch = EXCLUDED.base_branch,
+	               -- A writer that doesn't know the override (e.g. the
+	               -- tenant zone factory) must not wipe it.
+	               scaffold_git_org = COALESCE(EXCLUDED.scaffold_git_org, tenant_git_configs.scaffold_git_org)`
+	_, err := q.Exec(ctx, sql, c.OrgID, c.Repo, c.CommitPolicy, c.BaseBranch, scaffoldOrg)
 	return err
 }

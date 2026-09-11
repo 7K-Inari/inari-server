@@ -90,6 +90,19 @@ func (s *Store) GetOrganizationBySlug(ctx context.Context, q db.Querier, slug st
 	return &org, nil
 }
 
+func (s *Store) GetOrganizationByID(ctx context.Context, q db.Querier, id string) (*types.Organization, error) {
+	const sql = `SELECT id, slug, display_name, keycloak_org_id, created_at FROM organizations WHERE id = $1`
+	var org types.Organization
+	err := q.QueryRow(ctx, sql, id).Scan(&org.ID, &org.Slug, &org.DisplayName, &org.KeycloakOrgID, &org.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrOrgNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &org, nil
+}
+
 func (s *Store) ListOrganizations(ctx context.Context, q db.Querier) ([]types.Organization, error) {
 	const sql = `SELECT id, slug, display_name, keycloak_org_id, created_at FROM organizations ORDER BY created_at`
 	rows, err := q.Query(ctx, sql)
@@ -560,6 +573,13 @@ func (s *Service) GetTenant(ctx context.Context, slug string) (*types.Organizati
 	return s.store.GetOrganizationBySlug(ctx, s.db.Pool, slug)
 }
 
+// GetTenantByID resolves an org by its stable ID (org:<id>) — used by
+// modules whose records carry the org ID rather than the slug (scaffold
+// runs, M8.W3).
+func (s *Service) GetTenantByID(ctx context.Context, id string) (*types.Organization, error) {
+	return s.store.GetOrganizationByID(ctx, s.db.Pool, id)
+}
+
 func (s *Service) ListTeams(ctx context.Context, orgID string) ([]types.Team, error) {
 	return s.store.ListTeams(ctx, s.db.Pool, orgID)
 }
@@ -651,6 +671,19 @@ func (s *Service) CreateTeam(ctx context.Context, actor, slug, name string, role
 		return nil, err
 	}
 	return team, nil
+}
+
+// EnsureTeam returns the named team, creating it (Keycloak group + DB row
+// + audit/outbox) with the given role when missing — the scaffold
+// binding-rbac seam (M8.W4, plan §6): component maintainer teams follow
+// the same KC group → DB role → outbox → OpenFGA tuple model as every
+// other team.
+func (s *Service) EnsureTeam(ctx context.Context, actor, slug, name string, role types.Role) (*types.Team, error) {
+	org, err := s.store.GetOrganizationBySlug(ctx, s.db.Pool, slug)
+	if err != nil {
+		return nil, err
+	}
+	return s.ensureTeam(ctx, actor, org, name, role)
 }
 
 // ensureTeam returns the team with the given name, creating it (with audit

@@ -56,7 +56,7 @@ func (s *Service) UpsertItem(ctx context.Context, item *types.CatalogItem, versi
 			return err
 		}
 		return audit.AppendOutbox(ctx, tx, "platform", types.EventCatalogItemUpserted, types.CatalogItemPayload{
-			ItemID: item.ID, Source: string(item.Source),
+			OrgID: item.OrgID, ItemID: item.ID, Source: string(item.Source),
 		})
 	})
 	if err != nil {

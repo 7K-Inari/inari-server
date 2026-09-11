@@ -245,6 +245,9 @@ type gitConfigInput struct {
 		Repo         string `json:"repo" minLength:"1" doc:"owner/name or https URL of the <tenant>-inari-state repo"`
 		CommitPolicy string `json:"commitPolicy" enum:"direct,pull_request"`
 		BaseBranch   string `json:"baseBranch,omitempty"`
+		// ScaffoldGitOrg optionally overrides the platform scaffold git
+		// org for this tenant (M8.W6); empty keeps the global default.
+		ScaffoldGitOrg string `json:"scaffoldGitOrg,omitempty"`
 	}
 }
 
@@ -269,6 +272,7 @@ func (h *Handler) setGitConfig(ctx context.Context, in *gitConfigInput) (*struct
 	}
 	return nil, h.svc.SetGitConfig(ctx, "user:"+id.Subject, &types.TenantGitConfig{
 		OrgID: org.ID, Repo: in.Body.Repo, CommitPolicy: policy, BaseBranch: branch,
+		ScaffoldGitOrg: in.Body.ScaffoldGitOrg,
 	})
 }
 

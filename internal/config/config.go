@@ -106,6 +106,16 @@ type Config struct {
 	ScaffoldGitOrg            string
 	ScaffoldTemplateDir       string
 	ScaffoldRunTTL            time.Duration
+	// ScaffoldTemplateOCIIndexRef switches template ingestion from the
+	// local dir to the OCI registry index (application/vnd.inari.template.v1
+	// artifacts); ScaffoldTemplateCacheDir receives the extracted packages.
+	ScaffoldTemplateOCIIndexRef string
+	ScaffoldTemplateCacheDir    string
+	// ScaffoldTemplateVerify enables cosign keyless signature verification
+	// of template artifacts (same trust model as the server images).
+	ScaffoldTemplateVerify         bool
+	ScaffoldTemplateCosignIdentity string
+	ScaffoldTemplateCosignIssuer   string
 
 	// PlatformGitOpsRepo is the platform GitOps repository receiving
 	// per-tenant CR manifests (tenants/<slug>/, docs/platform-gitops.md);
@@ -172,11 +182,16 @@ func Load() (*Config, error) {
 		TZFReconcileInterval: durEnv("INARI_TZF_RECONCILE_INTERVAL", 30*time.Second),
 		TZFStepMaxAttempts:   intEnv("INARI_TZF_STEP_MAX_ATTEMPTS", 5),
 
-		ScaffoldReconcileInterval: durEnv("INARI_SCAFFOLD_RECONCILE_INTERVAL", 30*time.Second),
-		ScaffoldStepMaxAttempts:   intEnv("INARI_SCAFFOLD_STEP_MAX_ATTEMPTS", 5),
-		ScaffoldGitOrg:            env("INARI_SCAFFOLD_GIT_ORG", ""),
-		ScaffoldTemplateDir:       env("INARI_SCAFFOLD_TEMPLATE_DIR", ""),
-		ScaffoldRunTTL:            durEnv("INARI_SCAFFOLD_RUN_TTL", 7*24*time.Hour),
+		ScaffoldReconcileInterval:      durEnv("INARI_SCAFFOLD_RECONCILE_INTERVAL", 30*time.Second),
+		ScaffoldStepMaxAttempts:        intEnv("INARI_SCAFFOLD_STEP_MAX_ATTEMPTS", 5),
+		ScaffoldGitOrg:                 env("INARI_SCAFFOLD_GIT_ORG", ""),
+		ScaffoldTemplateDir:            env("INARI_SCAFFOLD_TEMPLATE_DIR", ""),
+		ScaffoldRunTTL:                 durEnv("INARI_SCAFFOLD_RUN_TTL", 7*24*time.Hour),
+		ScaffoldTemplateOCIIndexRef:    env("INARI_SCAFFOLD_TEMPLATE_OCI_INDEX_REF", ""),
+		ScaffoldTemplateCacheDir:       env("INARI_SCAFFOLD_TEMPLATE_CACHE_DIR", ""),
+		ScaffoldTemplateVerify:         boolEnv("INARI_SCAFFOLD_TEMPLATE_VERIFY", false),
+		ScaffoldTemplateCosignIdentity: env("INARI_SCAFFOLD_TEMPLATE_COSIGN_IDENTITY", ""),
+		ScaffoldTemplateCosignIssuer:   env("INARI_SCAFFOLD_TEMPLATE_COSIGN_ISSUER", ""),
 
 		PlatformGitOpsRepo: env("INARI_PLATFORM_GITOPS_REPO", ""),
 

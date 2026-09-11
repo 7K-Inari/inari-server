@@ -35,6 +35,7 @@ import (
 	gitgithub "github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider/github"
 	"github.com/7K-Inari/inari-server/internal/platformresources"
 	"github.com/7K-Inari/inari-server/internal/policyservice"
+	"github.com/7K-Inari/inari-server/internal/scaffold"
 	"github.com/7K-Inari/inari-server/internal/secrets"
 	"github.com/7K-Inari/inari-server/internal/secretstores"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
@@ -92,6 +93,47 @@ func (a tzfClusterLifecycle) Cordon(ctx context.Context, actor, clusterID string
 func (a tzfClusterLifecycle) Decommission(ctx context.Context, actor, clusterID string, force bool) ([]string, error) {
 	_, drained, err := a.reg.DecommissionCluster(ctx, actor, clusterID, force)
 	return drained, err
+}
+
+// scaffoldGitConfigResolver adapts inventory.Store to the scaffold
+// GitConfigResolver seam (M8.W6): per-tenant scaffold git org override.
+type scaffoldGitConfigResolver struct {
+	d     *db.DB
+	store *inventory.Store
+}
+
+func (a scaffoldGitConfigResolver) GitConfigForOrg(ctx context.Context, orgID string) (*types.TenantGitConfig, error) {
+	return a.store.GitConfig(ctx, a.d.Pool, orgID)
+}
+
+// scaffoldTenantResolver adapts tenancy.Service + clusterregistry.Service
+// to the scaffold TenantContextResolver seam (M8.W3/W4): scaffold runs
+// carry the org ID, and templates get the slug-derived namespace + members
+// group path. ClusterID is the tenant's first registered cluster (slice 1
+// assumes one cluster per tenant) — the ArgoCD registration target.
+type scaffoldTenantResolver struct {
+	tenants  *tenancy.Service
+	clusters *clusterregistry.Service
+}
+
+func (a scaffoldTenantResolver) ResolveTenant(ctx context.Context, orgID string) (*scaffold.TenantContext, error) {
+	org, err := a.tenants.GetTenantByID(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	tc := &scaffold.TenantContext{
+		Slug: org.Slug, OrgID: org.ID,
+		Namespace: org.Slug, // TZF tenant-namespace convention
+		GroupPath: tenancy.GroupPath(org.Slug, "members"),
+	}
+	clusters, err := a.clusters.ListClusters(ctx, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("list tenant clusters: %w", err)
+	}
+	if len(clusters) > 0 {
+		tc.ClusterID = clusters[0].ID
+	}
+	return tc, nil
 }
 
 // policyCheckerAdapter maps the orchestrator's policy seam onto the Policy
@@ -272,6 +314,37 @@ func run() error {
 		}
 	}
 
+	// M8.W2: software templates ship in a local dir (baked into the image);
+	// sync them into the catalog as source=template items. M8.W6: setting
+	// INARI_SCAFFOLD_TEMPLATE_OCI_INDEX_REF switches ingestion to the OCI
+	// registry (application/vnd.inari.template.v1 artifacts, cosign-verified
+	// when INARI_SCAFFOLD_TEMPLATE_VERIFY=true). Best-effort like the
+	// catalog sync above; a startup sync suffices for the file source, and
+	// the OCI source re-pulls lazily via Get on cache miss.
+	var templateSource scaffold.TemplateSource
+	if cfg.ScaffoldTemplateOCIIndexRef != "" {
+		ociPuller := &scaffold.OCIRegistryPuller{
+			IndexRef: cfg.ScaffoldTemplateOCIIndexRef,
+			CacheDir: cfg.ScaffoldTemplateCacheDir,
+		}
+		if cfg.ScaffoldTemplateVerify {
+			ociPuller.Verifier = &scaffold.CosignVerifier{
+				CertIdentityRegexp:   cfg.ScaffoldTemplateCosignIdentity,
+				CertOidcIssuerRegexp: cfg.ScaffoldTemplateCosignIssuer,
+			}
+		}
+		templateSource = ociPuller
+	} else if cfg.ScaffoldTemplateDir != "" {
+		templateSource = &scaffold.FilePuller{Root: cfg.ScaffoldTemplateDir}
+	}
+	if templateSource != nil {
+		if n, err := scaffold.SyncTemplates(ctx, templateSource, catalogSvc); err != nil {
+			slog.Error("template sync failed", "error", err)
+		} else {
+			slog.Info("template sync complete", "templates", n)
+		}
+	}
+
 	approvalsSvc := approvals.NewService(database, approvals.NewStore(database), auditStore, svc, catalogSvc)
 	approvalsHandler := approvals.NewHandler(approvalsSvc, svc, authorizer)
 	go approvalsSvc.RunExpiryLoop(ctx, time.Minute)
@@ -304,6 +377,30 @@ func run() error {
 		policyservice.NewOPAEvaluator(), registry, gateway.Queue(), auditStore)
 	policyHandler := policyservice.NewHandler(policySvc, svc, authorizer)
 	orchestratorSvc.WithPolicyChecker(policyCheckerAdapter{policySvc})
+
+	// Scaffolding / Software Templates (M8, plan §4/§10): template browsing
+	// + scaffold run lifecycle API. W3 added the step engine; W4 wires the
+	// execution seams: repo creation via the git provider, ArgoCD app
+	// registration via the agent queue, component records via the catalog,
+	// and maintainer-team binding via tenancy (KC group → DB role → outbox
+	// → OpenFGA tuple).
+	scaffoldSvc := scaffold.NewService(database, scaffold.NewStore(), auditStore, catalogSvc,
+		scaffold.Config{MaxAttempts: int(cfg.ScaffoldStepMaxAttempts), GitOrg: cfg.ScaffoldGitOrg, RunTTL: cfg.ScaffoldRunTTL}, log)
+	scaffoldHandler := scaffold.NewHandler(scaffoldSvc, svc, authorizer)
+	if templateSource != nil {
+		scaffoldSvc.WithExecEnv(&scaffold.ExecEnv{
+			Git:        git,
+			GitOrg:     cfg.ScaffoldGitOrg,
+			Upsert:     catalogSvc,
+			RBAC:       svc,
+			Registrar:  gateway.Queue(),
+			Templates:  templateSource,
+			Tenants:    scaffoldTenantResolver{tenants: svc, clusters: registry},
+			Gate:       approvalsSvc,
+			GitConfigs: scaffoldGitConfigResolver{d: database, store: inventory.NewStore()},
+		})
+		go scaffoldSvc.RunReconcileLoop(ctx, cfg.ScaffoldReconcileInterval)
+	}
 
 	// Fleet Manager (plan §5.11): owns ClusterSets (policy service consumes
 	// them via the SetResolver seam), staged rollouts, agent channels,
@@ -383,6 +480,7 @@ func run() error {
 		policyservice.NewDistributeHandler(policySvc, log),
 		tenantzonefactory.NewResumeHandler(tzfSvc, approvalsSvc, log),
 		fleetmanager.NewResumeHandler(fleetSvc, approvalsSvc, log),
+		scaffold.NewResumeHandler(scaffoldSvc, approvalsSvc, log),
 	)
 	go dispatcher.Run(ctx)
 
@@ -398,6 +496,7 @@ func run() error {
 	cloudAccountsHandler.RegisterRoutes(api)
 	notificationsHandler.RegisterRoutes(api)
 	policyHandler.RegisterRoutes(api)
+	scaffoldHandler.RegisterRoutes(api)
 	tzfHandler.RegisterRoutes(api)
 	fleetHandler.RegisterRoutes(api)
 	secretStoresHandler.RegisterRoutes(api)

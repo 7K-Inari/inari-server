@@ -38,6 +38,10 @@ func TestFormatMessage(t *testing.T) {
 			"Deploy of catalog item postgres (version 1.2.0) requested on cluster cluster:1"},
 		{types.EventInstanceUpgraded, mustJSON(t, types.InstancePayload{InstanceID: "inst-1", ClusterID: "cluster:1", Version: "1.3.0"}),
 			"Instance inst-1 on cluster cluster:1 upgraded to version 1.3.0"},
+		{types.EventScaffoldRunCompleted, mustJSON(t, types.ScaffoldRunPayload{RunID: "run:1", Version: "1.0.0"}),
+			"Scaffold run run:1 completed (template version 1.0.0)"},
+		{types.EventScaffoldRunFailed, mustJSON(t, types.ScaffoldRunPayload{RunID: "run:1", Version: "1.0.0", Phase: "creating-repo"}),
+			"Scaffold run run:1 failed in phase creating-repo (template version 1.0.0)"},
 	}
 	for _, tc := range cases {
 		got := formatMessage(&types.OutboxEvent{EventType: tc.eventType, Payload: tc.payload})
@@ -58,6 +62,11 @@ func TestMatchesEvents(t *testing.T) {
 	}
 	if matchesEvents(sub, types.EventInstanceStatus) {
 		t.Fatal("expected no match for unsubscribed event")
+	}
+	// Scaffold events are subscribable endpoint filters (M8.W6).
+	scaffoldSub := &types.NotificationEndpoint{Events: []string{types.EventScaffoldRunCompleted}}
+	if !matchesEvents(scaffoldSub, types.EventScaffoldRunCompleted) || matchesEvents(scaffoldSub, types.EventScaffoldRunFailed) {
+		t.Fatal("scaffold event filter mismatch")
 	}
 }
 

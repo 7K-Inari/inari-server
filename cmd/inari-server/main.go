@@ -319,6 +319,14 @@ func run() error {
 	policyHandler := policyservice.NewHandler(policySvc, svc, authorizer)
 	orchestratorSvc.WithPolicyChecker(policyCheckerAdapter{policySvc})
 
+	// Scaffolding / Software Templates (M8, plan §4/§10): template browsing
+	// + scaffold run lifecycle API. The step engine / reconcile loop is W3;
+	// execution seams (git, catalog upsert, group binding, app registration)
+	// are wired there, so the service tolerates them being nil here.
+	scaffoldSvc := scaffold.NewService(database, scaffold.NewStore(), auditStore, catalogSvc,
+		scaffold.Config{MaxAttempts: int(cfg.ScaffoldStepMaxAttempts), GitOrg: cfg.ScaffoldGitOrg}, log)
+	scaffoldHandler := scaffold.NewHandler(scaffoldSvc, svc, authorizer)
+
 	// Fleet Manager (plan §5.11): owns ClusterSets (policy service consumes
 	// them via the SetResolver seam), staged rollouts, agent channels,
 	// drift detection and bulk ops.
@@ -412,6 +420,7 @@ func run() error {
 	cloudAccountsHandler.RegisterRoutes(api)
 	notificationsHandler.RegisterRoutes(api)
 	policyHandler.RegisterRoutes(api)
+	scaffoldHandler.RegisterRoutes(api)
 	tzfHandler.RegisterRoutes(api)
 	fleetHandler.RegisterRoutes(api)
 	secretStoresHandler.RegisterRoutes(api)

@@ -1425,3 +1425,15 @@ const (
 	EventScaffoldRunFailed      = "scaffold.failed"
 	EventScaffoldRunCancelled   = "scaffold.cancelled"
 )
+
+// ScaffoldRunPayload is the outbox payload for scaffold run lifecycle
+// events (created / cancelled / step-updated / completed / failed).
+type ScaffoldRunPayload struct {
+	OrgID        string `json:"orgId"`
+	RunID        string `json:"runId"`
+	TemplateName string `json:"templateName,omitempty"`
+	Version      string `json:"version,omitempty"`
+	Phase        string `json:"phase,omitempty"`
+	Step         string `json:"step,omitempty"`
+	StepStatus   string `json:"stepStatus,omitempty"`
+}

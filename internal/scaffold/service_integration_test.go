@@ -93,7 +93,7 @@ func TestReconcileDrivesRendering(t *testing.T) {
 	if steps[3].Name != "registering-catalog" || steps[3].State != types.ScaffoldStepCompleted {
 		t.Fatalf("registering-catalog step = %+v", steps[3])
 	}
-	if len(up.items) != 1 || up.items[0].ID != "component:acme-payments-api" || up.items[0].OrgID != "org:acme" {
+	if len(up.items) != 1 || up.items[0].ID != "component:acme--payments-api" || up.items[0].OrgID != "org:acme" {
 		t.Fatalf("catalog upserts = %+v", up.items)
 	}
 	if steps[4].Name != "binding-rbac" || steps[4].State != types.ScaffoldStepCompleted {
@@ -106,7 +106,7 @@ func TestReconcileDrivesRendering(t *testing.T) {
 	var outputs map[string]any
 	if err := json.Unmarshal(got.Outputs, &outputs); err != nil ||
 		outputs["renderedFiles"] != float64(1) || outputs["repoUrl"] != repoRes.RepoURL ||
-		outputs["pipelineUrl"] == "" || outputs["catalogItemId"] != "component:acme-payments-api" {
+		outputs["pipelineUrl"] == "" || outputs["catalogItemId"] != "component:acme--payments-api" {
 		t.Fatalf("outputs = %s (%v)", got.Outputs, err)
 	}
 

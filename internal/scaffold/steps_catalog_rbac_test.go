@@ -24,6 +24,28 @@ func catalogFixture(t *testing.T, values string) (*RunContext, *types.ScaffoldRu
 	return rc, cat, rbac
 }
 
+// The item ID uses a double dash so (<slug>, <component>) decomposes
+// unambiguously: org "acme"+component "payments-api" must not collide
+// with org "acme-payments"+component "api" (cross-tenant upsert).
+func TestCatalogItemIDIsUnambiguousAcrossTenants(t *testing.T) {
+	rc, _, _ := catalogFixture(t, `{"name":"payments-api"}`)
+	item, _, err := componentCatalogPlan(rc, "payments-api", "https://fake.git/x.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := *rc
+	otherTenant := *rc.Tenant
+	otherTenant.Slug = "acme-payments"
+	other.Tenant = &otherTenant
+	otherItem, _, err := componentCatalogPlan(&other, "api", "https://fake.git/y.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.ID == otherItem.ID {
+		t.Fatalf("tenant collision: both map to %q", item.ID)
+	}
+}
+
 func TestRegisteringCatalogHappyPath(t *testing.T) {
 	rc, cat, _ := catalogFixture(t, `{"name":"payments-api"}`)
 	up := &fakeUpserter{}
@@ -36,7 +58,7 @@ func TestRegisteringCatalogHappyPath(t *testing.T) {
 		t.Fatalf("upserts: items=%d versions=%d", len(up.items), len(up.versions))
 	}
 	item := up.items[0]
-	if item.ID != "component:acme-payments-api" {
+	if item.ID != "component:acme--payments-api" {
 		t.Fatalf("item ID = %q", item.ID)
 	}
 	if item.Source != types.CatalogSourcePlatform {
@@ -77,7 +99,7 @@ func TestRegisteringCatalogHappyPath(t *testing.T) {
 
 func TestRegisteringCatalogIdempotentReentry(t *testing.T) {
 	rc, cat, _ := catalogFixture(t, `{"name":"payments-api"}`)
-	cat.Result = json.RawMessage(`{"catalogItemId":"component:acme-payments-api","repoUrl":"https://fake.git/x.git"}`)
+	cat.Result = json.RawMessage(`{"catalogItemId":"component:acme--payments-api","repoUrl":"https://fake.git/x.git"}`)
 	up := &fakeUpserter{}
 
 	done, err := stepRegisteringCatalog(context.Background(), &ExecEnv{Upsert: up}, rc, cat)
@@ -363,7 +385,7 @@ func TestRBACOutboxPayloadsFeedTupleWriter(t *testing.T) {
 		t.Fatalf("membership.added: %v", err)
 	}
 	catalogRaw, err := json.Marshal(types.CatalogItemPayload{
-		OrgID: "org:acme", ItemID: "component:acme-payments-api", Source: string(types.CatalogSourcePlatform),
+		OrgID: "org:acme", ItemID: "component:acme--payments-api", Source: string(types.CatalogSourcePlatform),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -375,7 +397,7 @@ func TestRBACOutboxPayloadsFeedTupleWriter(t *testing.T) {
 	want := []authz.Tuple{
 		{User: authz.TeamMemberUserset("team:payments-api-maintainers"), Relation: authz.RelationDeveloper, Object: authz.OrgObject("org:acme")},
 		{User: authz.UserObject("user:dev-1"), Relation: authz.RelationMember, Object: authz.TeamObject("team:payments-api-maintainers")},
-		{User: authz.OrgObject("org:acme"), Relation: authz.RelationParent, Object: authz.CatalogItemObject("component:acme-payments-api")},
+		{User: authz.OrgObject("org:acme"), Relation: authz.RelationParent, Object: authz.CatalogItemObject("component:acme--payments-api")},
 	}
 	for _, tuple := range want {
 		if !hasTuple(rec.written, tuple) {

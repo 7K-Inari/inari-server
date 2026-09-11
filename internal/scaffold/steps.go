@@ -59,13 +59,16 @@ func componentMaintainersTeam(component string) string {
 }
 
 // componentCatalogPlan maps a scaffold run onto the catalog component
-// record (Source=platform): item ID "component:<org-slug>-<component>",
-// the owning org on the item (the outbox payload feeds the OpenFGA tuple
-// writer's org→catalog_item parent grant), and a version payload carrying
-// the tenant labels + repo attribution. Pure — kept separate from
+// record (Source=platform): item ID "component:<org-slug>--<component>"
+// (double dash, same unambiguous decomposition as componentNamespace — a
+// single dash would let org "acme"+component "payments-api" collide with
+// org "acme-payments"+component "api", a cross-tenant upsert), the owning
+// org on the item (the outbox payload feeds the OpenFGA tuple writer's
+// org→catalog_item parent grant), and a version payload carrying the
+// tenant labels + repo attribution. Pure — kept separate from
 // stepRegisteringCatalog so tests assert the mapping without seams.
 func componentCatalogPlan(rc *RunContext, component, repoURL string) (*types.CatalogItem, *types.CatalogItemVersion, error) {
-	itemID := "component:" + rc.Tenant.Slug + "-" + component
+	itemID := "component:" + rc.Tenant.Slug + "--" + component
 	payload, err := json.Marshal(map[string]any{
 		"orgId":      rc.Tenant.OrgID,
 		"orgSlug":    rc.Tenant.Slug,

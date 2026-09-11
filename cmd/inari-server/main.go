@@ -244,6 +244,10 @@ func run() error {
 		CurrentAgentVersion: cfg.CurrentAgentVersion,
 	}).WithSecretWriter(secretWriter).WithPlatformResources(platformResourcesSvc)
 
+	// M7.W4: the ops reconcile endpoint enqueues platform-cluster resyncs
+	// through the durable agent command queue.
+	platformResourcesSvc.WithCommandQueue(gateway.Queue()).WithClusterLister(registry).WithTenantResolver(svc)
+
 	var puller catalog.OCIPuller
 	if cfg.CatalogOCIIndexRef != "" {
 		puller = &catalog.RegistryPuller{IndexRef: cfg.CatalogOCIIndexRef}

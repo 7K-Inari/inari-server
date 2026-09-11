@@ -48,6 +48,26 @@ func (t fakeTenants) GetTenant(_ context.Context, slug string) (*types.Organizat
 	return nil, tenancy.ErrOrgNotFound
 }
 
+func TestPlatformResourcesCascadeOnOrgDelete(t *testing.T) {
+	svc, database := itSetup(t)
+	ctx := context.Background()
+	org := &types.Organization{ID: "org:1", Slug: "acme"}
+	if err := svc.EnsureBaseResources(ctx, org); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Pool.Exec(ctx, `DELETE FROM organizations WHERE id = 'org:1'`); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := database.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM platform_resources WHERE org_id = 'org:1'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("platform_resources rows after org delete = %d, want 0 (ON DELETE CASCADE)", n)
+	}
+}
+
 func TestRequestReconcile(t *testing.T) {
 	svc, database := itSetup(t)
 	ctx := context.Background()

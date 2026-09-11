@@ -180,6 +180,21 @@ func (w *ModuleWiring) WireZone(ctx context.Context, zone *types.TenantZone, rol
 	}, nil
 }
 
+// DeleteTenantManifests removes the tenant's platform CR manifests
+// (tenants/<slug>/) from the platform GitOps repo (M7.W4 teardown step).
+// Idempotent: deleting paths that no longer exist is a no-op.
+func (w *ModuleWiring) DeleteTenantManifests(ctx context.Context, orgSlug string) error {
+	if w.Git == nil || w.PlatformGitOpsRepo == "" {
+		return nil
+	}
+	if _, err := w.Git.DeleteFiles(ctx, w.PlatformGitOpsRepo, "main",
+		platformresources.TenantManifestPaths(orgSlug),
+		"chore: remove tenant platform resources for "+orgSlug); err != nil {
+		return fmt.Errorf("tzf: delete tenant platform manifests: %w", err)
+	}
+	return nil
+}
+
 // UnwireZone implements Wiring: revoke the zone's identities (Keycloak
 // Organization removal; the cluster client was already disabled by the
 // drain step's cluster decommission).

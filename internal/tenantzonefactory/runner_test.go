@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
+	"github.com/7K-Inari/inari-server/internal/platformresources"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -262,8 +264,104 @@ func TestDecommissionReverses(t *testing.T) {
 	}
 }
 
-func TestDecommissionOwnershipBlockStopsChain(t *testing.T) {
-	env, _, _, _, _, cl := testEnv()
+// manifestDeletingWiring records platform-manifest deletions.
+type manifestDeletingWiring struct {
+	fakeWiring
+	deleted []string
+}
+
+func (m *manifestDeletingWiring) DeleteTenantManifests(_ context.Context, orgSlug string) error {
+	m.deleted = append(m.deleted, orgSlug)
+	return nil
+}
+
+func TestDecommissionDeletesPlatformManifests(t *testing.T) {
+	env, _, _, _, _, _ := testEnv()
+	w := &manifestDeletingWiring{}
+	env.Wiring = w
+	zone := testZone()
+	zone.State = types.ZoneStateDecommissioning
+	rc := &RunContext{Zone: zone, Steps: map[string]*types.TenantZoneStep{}, Actor: "user-1"}
+	onUpdate, _ := collectUpdates()
+
+	var complete bool
+	var err error
+	for i := 0; i < 8 && !complete; i++ {
+		complete, err = RunSteps(context.Background(), env, DecommissionOrder, decommissionSteps, rc, onUpdate)
+		if err != nil {
+			t.Fatalf("run %d: %v", i, err)
+		}
+	}
+	if !complete {
+		t.Fatal("decommission did not complete")
+	}
+	if len(w.deleted) != 1 || w.deleted[0] != zone.Slug {
+		t.Errorf("deleted manifests = %v, want [%s]", w.deleted, zone.Slug)
+	}
+	step := rc.Steps[types.ZoneStepPlatformManifestsDelete]
+	if step == nil || step.Status != types.ZoneStepSucceeded {
+		t.Errorf("platform_manifests_delete step = %+v, want succeeded", step)
+	}
+}
+
+func TestDecommissionSkipsManifestDeleteWithoutSeam(t *testing.T) {
+	env, _, _, _, _, _ := testEnv() // fakeWiring has no DeleteTenantManifests
+	zone := testZone()
+	zone.State = types.ZoneStateDecommissioning
+	rc := &RunContext{Zone: zone, Steps: map[string]*types.TenantZoneStep{}, Actor: "user-1"}
+	onUpdate, _ := collectUpdates()
+
+	var complete bool
+	var err error
+	for i := 0; i < 8 && !complete; i++ {
+		complete, err = RunSteps(context.Background(), env, DecommissionOrder, decommissionSteps, rc, onUpdate)
+		if err != nil {
+			t.Fatalf("run %d: %v", i, err)
+		}
+	}
+	if !complete {
+		t.Fatal("decommission did not complete")
+	}
+	step := rc.Steps[types.ZoneStepPlatformManifestsDelete]
+	if step == nil || step.Status != types.ZoneStepSucceeded {
+		t.Errorf("platform_manifests_delete step = %+v, want succeeded (no-op without the seam)", step)
+	}
+}
+
+func TestModuleWiringDeleteTenantManifests(t *testing.T) {
+	ctx := context.Background()
+	git := gitprovider.NewFake()
+	w := &ModuleWiring{Git: git, PlatformGitOpsRepo: "org/platform-gitops"}
+	org := &types.Organization{ID: "org:1", Slug: "acme-dev"}
+
+	// Seed the repo the way WireZone does.
+	if _, err := git.EnsureRepo(ctx, "org/platform-gitops"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.CommitFiles(ctx, "org/platform-gitops", "main",
+		platformresources.RenderTenantManifests(org), "seed"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.DeleteTenantManifests(ctx, org.Slug); err != nil {
+		t.Fatal(err)
+	}
+	if got := git.Files("org/platform-gitops", "main"); len(got) != 0 {
+		t.Errorf("remaining files = %+v, want none", got)
+	}
+	// Idempotent: a repeat delete is a no-op success.
+	if err := w.DeleteTenantManifests(ctx, org.Slug); err != nil {
+		t.Fatalf("repeat delete: %v", err)
+	}
+
+	// No platform repo configured: no-op.
+	bare := &ModuleWiring{}
+	if err := bare.DeleteTenantManifests(ctx, org.Slug); err != nil {
+		t.Errorf("unconfigured wiring: %v", err)
+	}
+}
+
+func TestDecommissionOwnershipBlockStopsChain(t *testing.T) {	env, _, _, _, _, cl := testEnv()
 	cl.decommissionErr = errors.New("shared resources present")
 	zone := testZone()
 	zone.State = types.ZoneStateDecommissioning

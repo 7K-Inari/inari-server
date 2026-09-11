@@ -60,6 +60,17 @@ func (s *Service) EnsureBaseResources(ctx context.Context, org *types.Organizati
 	return nil
 }
 
+// TenantManifestPaths returns the repo-relative paths of the tenant CR
+// manifests in the platform GitOps repo — the single source of truth shared
+// by RenderTenantManifests (commit) and zone teardown (delete).
+func TenantManifestPaths(slug string) []string {
+	return []string{
+		"tenants/" + slug + "/keycloak-realm.yaml",
+		"tenants/" + slug + "/dns-record.yaml",
+		"tenants/" + slug + "/tenant-namespace.yaml",
+	}
+}
+
 // RenderTenantManifests renders the tenant CR manifests (inari-operator
 // api/v1alpha1) for the platform GitOps repo. Layout: one directory per
 // tenant at tenants/<slug>/, synced by a single ArgoCD ApplicationSet with a
@@ -95,9 +106,10 @@ metadata:
 spec:
   namespace: tenant-%s
 `, org.Slug, org.ID, org.Slug)
+	paths := TenantManifestPaths(org.Slug)
 	return []gitprovider.File{
-		{Path: "tenants/" + org.Slug + "/keycloak-realm.yaml", Content: []byte(realm)},
-		{Path: "tenants/" + org.Slug + "/dns-record.yaml", Content: []byte(dns)},
-		{Path: "tenants/" + org.Slug + "/tenant-namespace.yaml", Content: []byte(ns)},
+		{Path: paths[0], Content: []byte(realm)},
+		{Path: paths[1], Content: []byte(dns)},
+		{Path: paths[2], Content: []byte(ns)},
 	}
 }

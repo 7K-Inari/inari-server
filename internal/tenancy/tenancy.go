@@ -673,6 +673,19 @@ func (s *Service) CreateTeam(ctx context.Context, actor, slug, name string, role
 	return team, nil
 }
 
+// EnsureTeam returns the named team, creating it (Keycloak group + DB row
+// + audit/outbox) with the given role when missing — the scaffold
+// binding-rbac seam (M8.W4, plan §6): component maintainer teams follow
+// the same KC group → DB role → outbox → OpenFGA tuple model as every
+// other team.
+func (s *Service) EnsureTeam(ctx context.Context, actor, slug, name string, role types.Role) (*types.Team, error) {
+	org, err := s.store.GetOrganizationBySlug(ctx, s.db.Pool, slug)
+	if err != nil {
+		return nil, err
+	}
+	return s.ensureTeam(ctx, actor, org, name, role)
+}
+
 // ensureTeam returns the team with the given name, creating it (with audit
 // + outbox) when missing. Used to lazily materialize role anchor teams such
 // as org-admins.

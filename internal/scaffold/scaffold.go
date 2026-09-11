@@ -70,11 +70,13 @@ type GitProvider interface {
 // (CatalogUpserter is declared in template_source.go — the template sync
 // and the run engine share it.)
 
-// GroupBinder ensures the component's tenant team group and membership
-// (tenancy.IdentityProvider subset).
-type GroupBinder interface {
-	EnsureGroup(ctx context.Context, path string) (groupID string, err error)
-	AddGroupMember(ctx context.Context, groupID, userID string) error
+// RBACBinder ensures the component's maintainers team (Keycloak group +
+// DB role row + audit/outbox) and joins the run creator — the established
+// KC group → DB role → outbox → OpenFGA tuple model (tenancy.Service
+// subset; plan §6). Never direct Keycloak role assignments.
+type RBACBinder interface {
+	EnsureTeam(ctx context.Context, actor, slug, name string, role types.Role) (*types.Team, error)
+	AddMember(ctx context.Context, actor, slug, teamName, userID string) error
 }
 
 // AppRegistrar enqueues agent commands (agentgateway.Queue subset) — the

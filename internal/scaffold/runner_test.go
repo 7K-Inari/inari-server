@@ -167,27 +167,11 @@ func TestRunStepsCancelMidRun(t *testing.T) {
 	}
 }
 
-func TestRunStepsPlaceholderRegistryParksAtRegisteringCatalog(t *testing.T) {
-	// Seed a run whose W3/W4-implemented steps already completed; the real
-	// registry must park at the remaining W4 placeholder without consuming
-	// attempts.
-	run := testRun()
-	steps := map[string]*types.ScaffoldRunStep{}
+func TestRunStepsRegistryHasRealStepsForEveryPhase(t *testing.T) {
+	// W4 completed the registry: every phase maps to a real StepFunc.
 	for _, n := range stepNames {
-		steps[n] = &types.ScaffoldRunStep{RunID: run.ID, Name: n, State: types.ScaffoldStepPending, MaxAttempts: 5}
-	}
-	steps["rendering"].State = types.ScaffoldStepCompleted
-	steps["creating-repo"].State = types.ScaffoldStepCompleted
-	steps["creating-pipeline"].State = types.ScaffoldStepCompleted
-	rc := &RunContext{Run: run, Steps: steps, Actor: "dev-1"}
-	onUpdate, _ := collectStepUpdates()
-
-	complete, err := RunSteps(context.Background(), &ExecEnv{}, rc, stepNames, stepFuncs, onUpdate, nil)
-	if err != nil || complete {
-		t.Fatalf("complete=%v err=%v, want parked", complete, err)
-	}
-	st := steps["registering-catalog"]
-	if st.State != types.ScaffoldStepWaiting || st.Attempts != 0 {
-		t.Fatalf("placeholder consumed attempts: %+v", st)
+		if stepFuncs[n] == nil {
+			t.Fatalf("no StepFunc registered for phase %q", n)
+		}
 	}
 }

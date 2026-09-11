@@ -45,6 +45,101 @@ type createPipelineResult struct {
 	Application     string `json:"application"`
 }
 
+// registerCatalogResult is the shape persisted for the registering-catalog
+// step; its presence (with catalogItemId) short-circuits re-entry.
+type registerCatalogResult struct {
+	CatalogItemID string `json:"catalogItemId"`
+	RepoURL       string `json:"repoUrl"`
+}
+
+// componentMaintainersTeam is the tenant team (Keycloak group
+// tenant-<slug>/<team>) that owns the scaffolded component (plan §6).
+func componentMaintainersTeam(component string) string {
+	return component + "-maintainers"
+}
+
+// componentCatalogPlan maps a scaffold run onto the catalog component
+// record (Source=platform): item ID "component:<org-slug>-<component>",
+// the owning org on the item (the outbox payload feeds the OpenFGA tuple
+// writer's org→catalog_item parent grant), and a version payload carrying
+// the tenant labels + repo attribution. Pure — kept separate from
+// stepRegisteringCatalog so tests assert the mapping without seams.
+func componentCatalogPlan(rc *RunContext, component, repoURL string) (*types.CatalogItem, *types.CatalogItemVersion, error) {
+	itemID := "component:" + rc.Tenant.Slug + "-" + component
+	payload, err := json.Marshal(map[string]any{
+		"orgId":      rc.Tenant.OrgID,
+		"orgSlug":    rc.Tenant.Slug,
+		"component":  component,
+		"repoUrl":    repoURL,
+		"owningTeam": componentMaintainersTeam(component),
+		"template":   strings.TrimPrefix(rc.Run.TemplateItemID, "template:"),
+		"runId":      rc.Run.ID,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	item := &types.CatalogItem{
+		ID:          itemID,
+		Source:      types.CatalogSourcePlatform,
+		Name:        component,
+		DisplayName: rc.Run.DisplayName,
+		Description: fmt.Sprintf("Scaffolded from template %s %s (run %s)", rc.Run.TemplateItemID, rc.Run.TemplateVersion, rc.Run.ID),
+		OrgID:       rc.Tenant.OrgID,
+	}
+	version := &types.CatalogItemVersion{
+		ItemID:  itemID,
+		Version: "0.1.0",
+		Channel: "stable",
+		Payload: payload,
+	}
+	return item, version, nil
+}
+
+// stepRegisteringCatalog upserts the scaffolded component's catalog record
+// (plan §5.2 step 4). Idempotent: the upsert is a natural upsert and a
+// persisted result with catalogItemId skips the call entirely.
+func stepRegisteringCatalog(ctx context.Context, env *ExecEnv, rc *RunContext, step *types.ScaffoldRunStep) (bool, error) {
+	var prev registerCatalogResult
+	if len(step.Result) > 0 {
+		if err := json.Unmarshal(step.Result, &prev); err == nil && prev.CatalogItemID != "" {
+			return true, nil
+		}
+	}
+	if env == nil || env.Upsert == nil {
+		return false, errors.New("scaffold: no catalog upserter configured")
+	}
+	if rc.Tenant == nil || rc.Tenant.Slug == "" {
+		return false, errors.New("scaffold: tenant context required for catalog registration")
+	}
+	repoStep := rc.Steps["creating-repo"]
+	var repo createRepoResult
+	if repoStep == nil || len(repoStep.Result) == 0 ||
+		json.Unmarshal(repoStep.Result, &repo) != nil || repo.RepoURL == "" {
+		return false, errors.New("scaffold: creating-repo step result missing")
+	}
+	component, err := componentName(rc)
+	if err != nil {
+		return false, err
+	}
+	item, version, err := componentCatalogPlan(rc, component, repo.RepoURL)
+	if err != nil {
+		return false, err
+	}
+	if err := env.Upsert.UpsertItem(ctx, item, version); err != nil {
+		return false, fmt.Errorf("scaffold: register catalog item %s: %w", item.ID, err)
+	}
+	raw, err := json.Marshal(registerCatalogResult{CatalogItemID: item.ID, RepoURL: repo.RepoURL})
+	if err != nil {
+		return false, err
+	}
+	step.Result = raw
+	if err := mergeOutputs(rc, "catalogItemId", item.ID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+
 // componentSlug allows letters, digits and dashes (k8s/DNS-safe repo and
 // app names).
 var componentSlug = regexp.MustCompile(`[^a-z0-9-]+`)
@@ -272,6 +367,84 @@ func stepCreatingPipeline(ctx context.Context, env *ExecEnv, rc *RunContext, ste
 	if err := mergeOutputs(rc, "pipelineUrl", pipelineURL); err != nil {
 		return false, err
 	}
+	return true, nil
+}
+
+// bindRBACResult is the shape persisted for the binding-rbac step; its
+// presence (with teamId) short-circuits re-entry.
+type bindRBACResult struct {
+	TeamID    string `json:"teamId"`
+	TeamName  string `json:"teamName"`
+	GroupPath string `json:"groupPath"`
+	Role      string `json:"role"`
+	Member    string `json:"member,omitempty"`
+}
+
+// rbacRole validates a manifest bindRbac.role value against the tenancy
+// org-role vocabulary.
+func rbacRole(raw string) (types.Role, error) {
+	switch types.Role(raw) {
+	case types.RoleOrgAdmin, types.RolePlatformEngineer, types.RoleDeveloper, types.RoleViewer:
+		return types.Role(raw), nil
+	}
+	return "", fmt.Errorf("scaffold: invalid bindRbac.role %q", raw)
+}
+
+// stepBindingRBAC binds the tenant context into the scaffolded component
+// (plan §5.2 step 5, §6): ensures the <component>-maintainers team
+// (Keycloak group tenant-<slug>/<team> + DB role row + outbox events via
+// the RBACBinder seam), then joins the run creator. The existing OpenFGA
+// tuple writer consumes those outbox events — no direct Keycloak role
+// assignments. Idempotent: a persisted result with teamId skips both
+// calls; EnsureTeam/AddMember are themselves idempotent, so a retry after
+// a crash between them is safe.
+func stepBindingRBAC(ctx context.Context, env *ExecEnv, rc *RunContext, step *types.ScaffoldRunStep) (bool, error) {
+	var prev bindRBACResult
+	if len(step.Result) > 0 {
+		if err := json.Unmarshal(step.Result, &prev); err == nil && prev.TeamID != "" {
+			return true, nil
+		}
+	}
+	if env == nil || env.RBAC == nil {
+		return false, errors.New("scaffold: no RBAC binder configured")
+	}
+	if rc.Tenant == nil || rc.Tenant.Slug == "" {
+		return false, errors.New("scaffold: tenant context required for RBAC binding")
+	}
+	component, err := componentName(rc)
+	if err != nil {
+		return false, err
+	}
+	role := types.RoleDeveloper
+	if env.Templates != nil {
+		pkg, err := templatePackage(env, rc)
+		if err != nil {
+			return false, err
+		}
+		if role, err = rbacRole(manifestParam(&pkg.Manifest, "bindRbac", "role", string(types.RoleDeveloper))); err != nil {
+			return false, err
+		}
+	}
+	teamName := componentMaintainersTeam(component)
+	team, err := env.RBAC.EnsureTeam(ctx, rc.Actor, rc.Tenant.Slug, teamName, role)
+	if err != nil {
+		return false, fmt.Errorf("scaffold: ensure team %s: %w", teamName, err)
+	}
+	member := ""
+	if rc.Run.CreatedBy != "" {
+		if err := env.RBAC.AddMember(ctx, rc.Actor, rc.Tenant.Slug, teamName, rc.Run.CreatedBy); err != nil {
+			return false, fmt.Errorf("scaffold: add creator to %s: %w", teamName, err)
+		}
+		member = rc.Run.CreatedBy
+	}
+	raw, err := json.Marshal(bindRBACResult{
+		TeamID: team.ID, TeamName: teamName, GroupPath: team.KeycloakGroupPath,
+		Role: string(role), Member: member,
+	})
+	if err != nil {
+		return false, err
+	}
+	step.Result = raw
 	return true, nil
 }
 

@@ -38,14 +38,14 @@ type TenantContextResolver interface {
 }
 
 // ExecEnv bundles the backend seams the steps run against. Git, Upsert,
-// Groups and Registrar are consumed by the W4 phase steps; Templates and
+// RBAC and Registrar are consumed by the W4 phase steps; Templates and
 // Tenants by the rendering step. All are optional — a nil seam makes the
 // depending step fail, not the engine.
 type ExecEnv struct {
 	Git       GitProvider
 	GitOrg    string // git organization/owner receiving scaffolded repos
 	Upsert    CatalogUpserter
-	Groups    GroupBinder
+	RBAC      RBACBinder
 	Registrar AppRegistrar
 	Templates *FilePuller
 	Tenants   TenantContextResolver
@@ -69,22 +69,14 @@ type RunContext struct {
 // the Service supplies TX + audit + outbox.
 type OnUpdate func(ctx context.Context, rc *RunContext, step *types.ScaffoldRunStep) error
 
-// stepWaitingPlaceholder parks a run at a phase whose executor ships in W4
-// (plan Decision 2): waiting consumes no attempt budget, so replacing the
-// placeholder lets parked runs proceed on the next reconcile tick.
-func stepWaitingPlaceholder(context.Context, *ExecEnv, *RunContext, *types.ScaffoldRunStep) (bool, error) {
-	return false, nil
-}
-
 // stepFuncs is the phase execution table (plan §3: phases map 1:1 to
-// steps). Rendering (W3), creating-repo and creating-pipeline (W4) are
-// real; the remaining entries are W4 placeholders from the sibling wave.
+// steps). Rendering (W3) and the four phase steps (W4) are all real.
 var stepFuncs = map[string]StepFunc{
 	"rendering":           stepRendering,
 	"creating-repo":       stepCreatingRepo,
 	"creating-pipeline":   stepCreatingPipeline,
-	"registering-catalog": stepWaitingPlaceholder,
-	"binding-rbac":        stepWaitingPlaceholder,
+	"registering-catalog": stepRegisteringCatalog,
+	"binding-rbac":        stepBindingRBAC,
 }
 
 // RunSteps executes the remaining steps of order. It stops at the first

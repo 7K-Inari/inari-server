@@ -385,6 +385,10 @@ type CatalogItem struct {
 	Name           string         `json:"name"`
 	DisplayName    string         `json:"displayName"`
 	Description    string         `json:"description"`
+	// OrgID is the owning tenant for org-scoped items (e.g. scaffolded
+	// components); empty for global curated/platform items. The outbox
+	// payload carries it so the tuple writer grants the org parent tuple.
+	OrgID          string         `json:"orgId,omitempty"`
 	CapabilityRef  *CapabilityRef `json:"capabilityRef,omitempty"`
 	OCIRef         string         `json:"ociRef,omitempty"`
 	ApprovalPolicy ApprovalPolicy `json:"approvalPolicy"`

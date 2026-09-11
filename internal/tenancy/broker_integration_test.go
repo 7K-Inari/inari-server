@@ -130,6 +130,21 @@ func TestBrokeredIdPLifecycle(t *testing.T) {
 	if bm.idps["org-acme-sso"].OrgGroupPath != "tenant-acme/members" {
 		t.Errorf("org group path = %q", bm.idps["org-acme-sso"].OrgGroupPath)
 	}
+	// The viewer "members" team is materialized so the org-team reconciler
+	// (ADR-0004) can converge tuples for brokered managed members.
+	teams, err := svc.ListTeams(ctx, org.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var membersTeam *types.Team
+	for i := range teams {
+		if teams[i].Name == "members" {
+			membersTeam = &teams[i]
+		}
+	}
+	if membersTeam == nil || membersTeam.Role != types.RoleViewer || membersTeam.KeycloakGroupPath != "tenant-acme/members" {
+		t.Errorf("members team = %+v, want viewer team at tenant-acme/members", membersTeam)
+	}
 	if bm.linked[org.KeycloakOrgID] != "org-acme-sso" {
 		t.Errorf("linked = %v", bm.linked)
 	}

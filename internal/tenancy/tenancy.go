@@ -150,6 +150,26 @@ func (s *Store) ListTeams(ctx context.Context, q db.Querier, orgID string) ([]ty
 	return out, rows.Err()
 }
 
+// ListAllTeams returns every team across all orgs (the authz org-team
+// reconciler enumerates team groups without an org scope).
+func (s *Store) ListAllTeams(ctx context.Context, q db.Querier) ([]types.Team, error) {
+	const sql = `SELECT id, org_id, name, role, keycloak_group_path, created_at FROM teams ORDER BY org_id, name`
+	rows, err := q.Query(ctx, sql)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []types.Team
+	for rows.Next() {
+		var t types.Team
+		if err := rows.Scan(&t.ID, &t.OrgID, &t.Name, &t.Role, &t.KeycloakGroupPath, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) UpsertUser(ctx context.Context, q db.Querier, u *types.User) error {
 	const sql = `INSERT INTO users (id, email, display_name) VALUES ($1,$2,$3)
 	             ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email, display_name = EXCLUDED.display_name`
@@ -512,6 +532,11 @@ func (s *Service) GetTenant(ctx context.Context, slug string) (*types.Organizati
 
 func (s *Service) ListTeams(ctx context.Context, orgID string) ([]types.Team, error) {
 	return s.store.ListTeams(ctx, s.db.Pool, orgID)
+}
+
+// ListAllTeams returns every team across all orgs (authz.OrgTeamSync seam).
+func (s *Service) ListAllTeams(ctx context.Context) ([]types.Team, error) {
+	return s.store.ListAllTeams(ctx, s.db.Pool)
 }
 
 // UpdateTenantProfile updates the org display name in Keycloak and in the

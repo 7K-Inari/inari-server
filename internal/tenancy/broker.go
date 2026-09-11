@@ -114,6 +114,12 @@ func (s *Service) CreateBrokeredIdP(ctx context.Context, actor, slug string, in 
 		DomainHints:  in.DomainHints,
 	}
 	kcAlias := brokeredIdPAlias(slug, broker.Alias)
+	// The Hardcoded Group mapper lands brokered managed members in
+	// tenant-<slug>/members; materialize the matching viewer team so the
+	// org-team reconciler (ADR-0004) has a team object to converge tuples on.
+	if _, err := s.ensureTeam(ctx, actor, org, "members", types.RoleViewer); err != nil {
+		return nil, fmt.Errorf("tenancy: ensure members team: %w", err)
+	}
 	if err := s.brokers.CreateIdP(ctx, s.brokerSpec(slug, broker, clientSecret)); err != nil {
 		return nil, fmt.Errorf("tenancy: create keycloak identity provider: %w", err)
 	}

@@ -78,6 +78,26 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Summary:     "Cooperatively cancel a scaffold run (retains already-created outputs)",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.cancelRun)
+
+	// UI-compat adapter (M8.W5): the inari-ui /templates wizard client is
+	// hand-written (inari-ui/src/api/templates.ts) and addresses scaffold
+	// runs as /scaffolds with a flatter shape. These routes delegate to the
+	// same service methods as the canonical API above.
+	huma.Register(api, huma.Operation{
+		OperationID: "createScaffold",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/tenants/{org}/scaffolds",
+		Summary:     "Create a scaffold run (UI wizard contract)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.createScaffold)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "getScaffold",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/tenants/{org}/scaffolds/{runId}",
+		Summary:     "Get a scaffold run (UI wizard polling contract)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.getScaffold)
 }
 
 // stepView is one step in the UI polling contract (plan §3).
@@ -261,6 +281,137 @@ func (h *Handler) cancelRun(ctx context.Context, in *runPathInput) (*struct{}, e
 		return nil, huma.Error409Conflict("run is already terminal")
 	}
 	return nil, err
+}
+
+// --- UI wizard contract (inari-ui/src/api/templates.ts) ------------------
+
+// scaffoldOutputs mirrors the UI client's ScaffoldOutputs: always an object
+// with the three keys, null when the phase has not produced the output yet.
+type scaffoldOutputs struct {
+	RepoURL       *string `json:"repoUrl"`
+	PipelineURL   *string `json:"pipelineUrl"`
+	CatalogItemID *string `json:"catalogItemId"`
+}
+
+// scaffoldView mirrors the UI client's ScaffoldRun interface field-for-field.
+type scaffoldView struct {
+	ID           string          `json:"id"`
+	TemplateID   string          `json:"templateId"`
+	TemplateName string          `json:"templateName"`
+	Name         string          `json:"name"`
+	Tenant       string          `json:"tenant"`
+	Phase        string          `json:"phase"`
+	Message      *string         `json:"message"`
+	Outputs      scaffoldOutputs `json:"outputs"`
+	CreatedAt    time.Time       `json:"createdAt"`
+}
+
+// toScaffoldView projects a run onto the UI contract. The run's outputs
+// jsonb carries the three UI keys among internal ones (e.g. renderedFiles);
+// only the UI keys are surfaced, null when absent.
+func (h *Handler) toScaffoldView(ctx context.Context, run *types.ScaffoldRun, orgSlug string) scaffoldView {
+	v := scaffoldView{
+		ID: run.ID, TemplateID: run.TemplateItemID,
+		TemplateName: h.svc.TemplateNameForRun(ctx, run),
+		Name:         run.DisplayName, Tenant: orgSlug, Phase: string(run.Phase),
+		CreatedAt: run.CreatedAt,
+	}
+	if run.Error != "" {
+		msg := run.Error
+		v.Message = &msg
+	}
+	var raw map[string]json.RawMessage
+	if json.Unmarshal(run.Outputs, &raw) == nil {
+		v.Outputs.RepoURL = outputString(raw, "repoUrl")
+		v.Outputs.PipelineURL = outputString(raw, "pipelineUrl")
+		v.Outputs.CatalogItemID = outputString(raw, "catalogItemId")
+	}
+	return v
+}
+
+func outputString(raw map[string]json.RawMessage, key string) *string {
+	var s string
+	if b, ok := raw[key]; ok && json.Unmarshal(b, &s) == nil && s != "" {
+		return &s
+	}
+	return nil
+}
+
+type createScaffoldInput struct {
+	Org  string `path:"org"`
+	Body struct {
+		TemplateID string         `json:"templateId" doc:"Catalog item ID (or name) of the template"`
+		Name       string         `json:"name" doc:"Component name; becomes the run display name"`
+		Parameters map[string]any `json:"parameters" doc:"Wizard answers, validated against the template schema"`
+	}
+}
+
+type createScaffoldOutput struct {
+	Status int
+	Body   struct {
+		Scaffold scaffoldView `json:"scaffold"`
+	}
+}
+
+func (h *Handler) createScaffold(ctx context.Context, in *createScaffoldInput) (*createScaffoldOutput, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	if err != nil {
+		return nil, err
+	}
+	values, err := json.Marshal(in.Body.Parameters)
+	if err != nil {
+		return nil, huma.Error400BadRequest("parameters must be a JSON object")
+	}
+	run, _, existed, err := h.svc.CreateRun(ctx, id.Subject, org.ID, in.Body.TemplateID, "", in.Body.Name, values)
+	var valErr *ValidationError
+	switch {
+	case errors.As(err, &valErr):
+		errs := make([]error, 0, len(valErr.Fields))
+		for _, f := range valErr.Fields {
+			errs = append(errs, fmt.Errorf("%s: %s", f.Path, f.Message))
+		}
+		return nil, huma.Error422UnprocessableEntity("parameters failed template schema validation", errs...)
+	case errors.Is(err, ErrTemplateNotFound):
+		return nil, huma.Error404NotFound("template not found")
+	case errors.Is(err, ErrVersionNotFound):
+		return nil, huma.Error400BadRequest("unknown template version")
+	case err != nil:
+		return nil, err
+	}
+	out := &createScaffoldOutput{Status: http.StatusCreated}
+	if existed {
+		out.Status = http.StatusOK
+	}
+	out.Body.Scaffold = h.toScaffoldView(ctx, run, org.Slug)
+	return out, nil
+}
+
+type scaffoldPathInput struct {
+	Org   string `path:"org"`
+	RunID string `path:"runId"`
+}
+
+type getScaffoldOutput struct {
+	Body struct {
+		Scaffold scaffoldView `json:"scaffold"`
+	}
+}
+
+func (h *Handler) getScaffold(ctx context.Context, in *scaffoldPathInput) (*getScaffoldOutput, error) {
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	if err != nil {
+		return nil, err
+	}
+	run, _, err := h.svc.GetRun(ctx, org.ID, in.RunID)
+	if errors.Is(err, ErrRunNotFound) {
+		return nil, huma.Error404NotFound("scaffold run not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := &getScaffoldOutput{}
+	out.Body.Scaffold = h.toScaffoldView(ctx, run, org.Slug)
+	return out, nil
 }
 
 // authorizeOrg performs coarse PEP (org claim) + fine PEP (OpenFGA Check).

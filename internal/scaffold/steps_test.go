@@ -199,6 +199,82 @@ func TestCreatingRepoGuards(t *testing.T) {
 	}
 }
 
+func TestComponentNameFallbackAndSanitization(t *testing.T) {
+	cases := []struct {
+		name        string
+		values      string
+		displayName string
+		want        string
+		wantErr     bool
+	}{
+		{name: "values.name wins", values: `{"name":"Payments API","serviceName":"other"}`, displayName: "disp", want: "payments-api"},
+		{name: "serviceName fallback", values: `{"serviceName":"Orders.API"}`, displayName: "disp", want: "orders-api"},
+		{name: "empty name falls through", values: `{"name":""}`, displayName: "My Comp!", want: "my-comp"},
+		{name: "display name fallback", values: `{}`, displayName: "Widget", want: "widget"},
+		{name: "non-string name ignored", values: `{"name":42}`, displayName: "widget", want: "widget"},
+		{name: "unslugifiable name errors", values: `{"name":"!!!"}`, wantErr: true},
+		{name: "no name anywhere errors", values: `{}`, wantErr: true},
+		{name: "invalid values json falls back", values: `{`, displayName: "widget", want: "widget"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			run := testRun()
+			run.DisplayName = tc.displayName
+			run.Values = json.RawMessage(tc.values)
+			got, err := componentName(&RunContext{Run: run})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("want error, got %q", got)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("got %q err %v, want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestCreatingRepoManifestNameOverride(t *testing.T) {
+	dir := t.TempDir()
+	writeScaffoldTemplate(t, dir, "go-service", "1.0.0",
+		"  createRepo:\n    name: custom-repo\n    defaultBranch: trunk\n", map[string]string{"a.txt": "x"})
+	rc, repo, _ := stepsFixture(t, `{"name":"payments-api"}`)
+	git := &countingGit{Fake: gitprovider.NewFake()}
+
+	done, err := stepCreatingRepo(context.Background(), testEnv(dir, git, nil), rc, repo)
+	if err != nil || !done {
+		t.Fatalf("done=%v err=%v", done, err)
+	}
+	var res createRepoResult
+	if err := json.Unmarshal(repo.Result, &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.RepoName != "inari-apps/custom-repo" || res.Branch != "trunk" {
+		t.Fatalf("result = %+v", res)
+	}
+	if files := git.Fake.Files(res.RepoName, "trunk"); len(files) != 2 {
+		t.Fatalf("committed files on trunk = %v", files)
+	}
+}
+
+func TestCreatingRepoRejectsUnsafeManifestName(t *testing.T) {
+	for _, bad := range []string{"..", ".", "a/b", "/abs", `a\b`} {
+		dir := t.TempDir()
+		writeScaffoldTemplate(t, dir, "go-service", "1.0.0",
+			"  createRepo:\n    name: "+bad+"\n", map[string]string{"a.txt": "x"})
+		rc, repo, _ := stepsFixture(t, `{"name":"payments-api"}`)
+		git := &countingGit{Fake: gitprovider.NewFake()}
+
+		if _, err := stepCreatingRepo(context.Background(), testEnv(dir, git, nil), rc, repo); err == nil {
+			t.Fatalf("createRepo.name %q must fail", bad)
+		}
+		if git.ensures != 0 {
+			t.Fatalf("createRepo.name %q hit git before validation", bad)
+		}
+	}
+}
+
 func TestCreatingPipelineHappyPath(t *testing.T) {
 	dir := t.TempDir()
 	writeScaffoldTemplate(t, dir, "go-service", "1.0.0", testScaffoldBlock, map[string]string{"a.txt": "x"})

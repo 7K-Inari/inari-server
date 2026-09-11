@@ -163,7 +163,7 @@ func stepCreatingRepo(ctx context.Context, env *ExecEnv, rc *RunContext, step *t
 	}
 	branch := manifestParam(&pkg.Manifest, "createRepo", "defaultBranch", "main")
 	segment := manifestParam(&pkg.Manifest, "createRepo", "name", rc.Tenant.Slug+"-"+component)
-	if segment != filepath.Base(segment) || segment == "." || segment == ".." {
+	if segment != filepath.Base(segment) || segment == "." || segment == ".." || strings.Contains(segment, `\`) {
 		return false, fmt.Errorf("scaffold: invalid createRepo.name %q", segment)
 	}
 	repo := env.GitOrg + "/" + segment

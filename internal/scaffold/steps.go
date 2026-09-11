@@ -235,10 +235,35 @@ func mergeOutputs(rc *RunContext, key string, value any) error {
 	return nil
 }
 
+// gitTargetFor resolves the repo's owning git org + fallback branch for
+// the run's tenant (M8.W6): the tenant's scaffold_git_org override beats
+// the platform-wide GitOrg; the tenant's baseBranch is the fallback when
+// the manifest doesn't pin createRepo.defaultBranch.
+func gitTargetFor(ctx context.Context, env *ExecEnv, rc *RunContext) (gitOrg, tenantBaseBranch string, err error) {
+	gitOrg = env.GitOrg
+	if env.GitConfigs != nil {
+		cfg, err := env.GitConfigs.GitConfigForOrg(ctx, rc.Run.OrgID)
+		if err != nil {
+			return "", "", fmt.Errorf("scaffold: resolve tenant git config: %w", err)
+		}
+		if cfg != nil {
+			if cfg.ScaffoldGitOrg != "" {
+				gitOrg = cfg.ScaffoldGitOrg
+			}
+			tenantBaseBranch = cfg.BaseBranch
+		}
+	}
+	if gitOrg == "" {
+		return "", "", errors.New("scaffold: no git org configured (INARI_SCAFFOLD_GIT_ORG)")
+	}
+	return gitOrg, tenantBaseBranch, nil
+}
+
 // stepCreatingRepo creates the component repository under the platform git
-// org (<GitOrg>/<tenant-slug>-<component>, overridable via the manifest's
-// createRepo.name) and commits the rendered skeleton tree. Idempotent: a
-// step result with repoUrl skips EnsureRepo/CommitFiles entirely.
+// org (<GitOrg>/<tenant-slug>-<component>, overridable per-tenant via
+// TenantGitConfig.scaffold_git_org and via the manifest's createRepo.name)
+// and commits the rendered skeleton tree. Idempotent: a step result with
+// repoUrl skips EnsureRepo/CommitFiles entirely.
 func stepCreatingRepo(ctx context.Context, env *ExecEnv, rc *RunContext, step *types.ScaffoldRunStep) (bool, error) {
 	var prev createRepoResult
 	if len(step.Result) > 0 {
@@ -249,11 +274,12 @@ func stepCreatingRepo(ctx context.Context, env *ExecEnv, rc *RunContext, step *t
 	if env == nil || env.Git == nil {
 		return false, errors.New("scaffold: no git provider configured")
 	}
-	if env.GitOrg == "" {
-		return false, errors.New("scaffold: no git org configured (INARI_SCAFFOLD_GIT_ORG)")
-	}
 	if rc.Tenant == nil || rc.Tenant.Slug == "" {
 		return false, errors.New("scaffold: tenant context required for repo naming")
+	}
+	gitOrg, tenantBaseBranch, err := gitTargetFor(ctx, env, rc)
+	if err != nil {
+		return false, err
 	}
 	rendering := rc.Steps["rendering"]
 	var rendered renderResult
@@ -269,12 +295,19 @@ func stepCreatingRepo(ctx context.Context, env *ExecEnv, rc *RunContext, step *t
 	if err != nil {
 		return false, err
 	}
-	branch := manifestParam(&pkg.Manifest, "createRepo", "defaultBranch", "main")
+	// Branch precedence: manifest defaultBranch → tenant baseBranch → main.
+	branch := manifestParam(&pkg.Manifest, "createRepo", "defaultBranch", "")
+	if branch == "" {
+		branch = tenantBaseBranch
+	}
+	if branch == "" {
+		branch = "main"
+	}
 	segment := manifestParam(&pkg.Manifest, "createRepo", "name", rc.Tenant.Slug+"-"+component)
 	if segment != filepath.Base(segment) || segment == "." || segment == ".." || strings.Contains(segment, `\`) {
 		return false, fmt.Errorf("scaffold: invalid createRepo.name %q", segment)
 	}
-	repo := env.GitOrg + "/" + segment
+	repo := gitOrg + "/" + segment
 	cloneURL, err := env.Git.EnsureRepo(ctx, repo)
 	if err != nil {
 		return false, fmt.Errorf("scaffold: ensure repo %s: %w", repo, err)
@@ -296,6 +329,29 @@ func stepCreatingRepo(ctx context.Context, env *ExecEnv, rc *RunContext, step *t
 		return false, err
 	}
 	return true, nil
+}
+
+// PipelineKind is a CI/pipeline variant selected by the manifest's
+// createPipeline.provider (M8.W6 plumbing, parent plan §8): the CI file
+// itself ships in the skeleton commit, so a kind only owns the
+// provider-specific output conventions. github-actions is the only
+// implemented kind; new providers register here without touching the step.
+type PipelineKind interface {
+	// PipelineURL is the user-facing pipeline URL surfaced in run outputs.
+	PipelineURL(repoURL string) string
+}
+
+// githubActionsKind is the GitHub Actions pipeline variant.
+type githubActionsKind struct{}
+
+// PipelineURL implements PipelineKind.
+func (githubActionsKind) PipelineURL(repoURL string) string {
+	return strings.TrimSuffix(repoURL, ".git") + "/actions"
+}
+
+// pipelineKinds is the provider registry (createPipeline.provider → kind).
+var pipelineKinds = map[string]PipelineKind{
+	"github-actions": githubActionsKind{},
 }
 
 // stepCreatingPipeline registers the component's ArgoCD Application with
@@ -334,7 +390,9 @@ func stepCreatingPipeline(ctx context.Context, env *ExecEnv, rc *RunContext, ste
 	if err != nil {
 		return false, err
 	}
-	if provider := manifestParam(&pkg.Manifest, "createPipeline", "provider", "github-actions"); provider != "github-actions" {
+	provider := manifestParam(&pkg.Manifest, "createPipeline", "provider", "github-actions")
+	kind, ok := pipelineKinds[provider]
+	if !ok {
 		return false, fmt.Errorf("scaffold: unsupported pipeline provider %q (only github-actions)", provider)
 	}
 	path := manifestParam(&pkg.Manifest, "createPipeline", "path", "k8s")
@@ -371,7 +429,7 @@ func stepCreatingPipeline(ctx context.Context, env *ExecEnv, rc *RunContext, ste
 	if err := enqueueRegisterApp(ctx, env.Registrar, rc.Tenant.ClusterID, rc.Run.ID, cmd); err != nil {
 		return false, err
 	}
-	pipelineURL := strings.TrimSuffix(repo.RepoURL, ".git") + "/actions"
+	pipelineURL := kind.PipelineURL(repo.RepoURL)
 	raw, err := json.Marshal(createPipelineResult{
 		ApplicationName: appName, PipelineURL: pipelineURL,
 		ClusterID: rc.Tenant.ClusterID, Application: string(manifest),

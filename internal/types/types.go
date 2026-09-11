@@ -533,6 +533,9 @@ type TenantGitConfig struct {
 	Repo         string       `json:"repo"`
 	CommitPolicy CommitPolicy `json:"commitPolicy"`
 	BaseBranch   string       `json:"baseBranch"`
+	// ScaffoldGitOrg overrides the platform-wide scaffold git org for this
+	// tenant (M8.W6); empty falls back to INARI_SCAFFOLD_GIT_ORG.
+	ScaffoldGitOrg string `json:"scaffoldGitOrg,omitempty"`
 }
 
 // CatalogItemPayload is the outbox payload for EventCatalogItemUpserted.

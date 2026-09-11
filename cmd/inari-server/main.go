@@ -95,6 +95,17 @@ func (a tzfClusterLifecycle) Decommission(ctx context.Context, actor, clusterID 
 	return drained, err
 }
 
+// scaffoldGitConfigResolver adapts inventory.Store to the scaffold
+// GitConfigResolver seam (M8.W6): per-tenant scaffold git org override.
+type scaffoldGitConfigResolver struct {
+	d     *db.DB
+	store *inventory.Store
+}
+
+func (a scaffoldGitConfigResolver) GitConfigForOrg(ctx context.Context, orgID string) (*types.TenantGitConfig, error) {
+	return a.store.GitConfig(ctx, a.d.Pool, orgID)
+}
+
 // scaffoldTenantResolver adapts tenancy.Service + clusterregistry.Service
 // to the scaffold TenantContextResolver seam (M8.W3/W4): scaffold runs
 // carry the org ID, and templates get the slug-derived namespace + members
@@ -378,14 +389,15 @@ func run() error {
 	scaffoldHandler := scaffold.NewHandler(scaffoldSvc, svc, authorizer)
 	if templateSource != nil {
 		scaffoldSvc.WithExecEnv(&scaffold.ExecEnv{
-			Git:       git,
-			GitOrg:    cfg.ScaffoldGitOrg,
-			Upsert:    catalogSvc,
-			RBAC:      svc,
-			Registrar: gateway.Queue(),
-			Templates: templateSource,
-			Tenants:   scaffoldTenantResolver{tenants: svc, clusters: registry},
-			Gate:      approvalsSvc,
+			Git:        git,
+			GitOrg:     cfg.ScaffoldGitOrg,
+			Upsert:     catalogSvc,
+			RBAC:       svc,
+			Registrar:  gateway.Queue(),
+			Templates:  templateSource,
+			Tenants:    scaffoldTenantResolver{tenants: svc, clusters: registry},
+			Gate:       approvalsSvc,
+			GitConfigs: scaffoldGitConfigResolver{d: database, store: inventory.NewStore()},
 		})
 		go scaffoldSvc.RunReconcileLoop(ctx, cfg.ScaffoldReconcileInterval)
 	}

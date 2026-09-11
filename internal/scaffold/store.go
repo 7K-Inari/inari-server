@@ -257,6 +257,18 @@ func (s *Store) ResetForRetry(ctx context.Context, q db.Querier, id string, next
 	return err
 }
 
+// DeleteTerminalRuns reaps completed/failed runs whose last update is
+// older than cutoff (M8.W6 run retention, INARI_SCAFFOLD_RUN_TTL). Steps
+// cascade with the run row. Returns the number of runs deleted.
+func (s *Store) DeleteTerminalRuns(ctx context.Context, q db.Querier, cutoff time.Time) (int64, error) {
+	const sql = `DELETE FROM scaffold_runs WHERE phase IN ('completed','failed') AND updated_at < $1`
+	tag, err := q.Exec(ctx, sql, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 // SetCancelled raises the cooperative cancel flag. Only non-terminal runs
 // can be cancelled; the reconcile loop (W3) observes cancelled_at before
 // starting each step.

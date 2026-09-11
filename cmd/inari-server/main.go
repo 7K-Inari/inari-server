@@ -374,7 +374,7 @@ func run() error {
 	// and maintainer-team binding via tenancy (KC group → DB role → outbox
 	// → OpenFGA tuple).
 	scaffoldSvc := scaffold.NewService(database, scaffold.NewStore(), auditStore, catalogSvc,
-		scaffold.Config{MaxAttempts: int(cfg.ScaffoldStepMaxAttempts), GitOrg: cfg.ScaffoldGitOrg}, log)
+		scaffold.Config{MaxAttempts: int(cfg.ScaffoldStepMaxAttempts), GitOrg: cfg.ScaffoldGitOrg, RunTTL: cfg.ScaffoldRunTTL}, log)
 	scaffoldHandler := scaffold.NewHandler(scaffoldSvc, svc, authorizer)
 	if templateSource != nil {
 		scaffoldSvc.WithExecEnv(&scaffold.ExecEnv{

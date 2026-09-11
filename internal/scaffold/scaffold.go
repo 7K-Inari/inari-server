@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -54,6 +55,9 @@ func newUUID() string {
 type Config struct {
 	MaxAttempts int    // per-step attempt budget (default 5)
 	GitOrg      string // git organization/owner receiving scaffolded repos
+	// RunTTL is the retention for terminal (completed/failed) runs; the
+	// reconcile loop reaps older ones (M8.W6). <= 0 disables the reaper.
+	RunTTL time.Duration
 }
 
 // --- Consumer-side seams (parent plan §10). Declared narrow here, wired

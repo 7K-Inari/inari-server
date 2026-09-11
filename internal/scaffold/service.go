@@ -75,15 +75,34 @@ func (s *Service) reconcileOnce(ctx context.Context, backoffBase time.Duration) 
 		run, err := s.claimNext(ctx, backoffBase)
 		if err != nil {
 			s.log.Warn("scaffold: reconcile claim failed", "error", err)
-			return
+			break
 		}
 		if run == nil || seen[run.ID] {
-			return
+			break
 		}
 		seen[run.ID] = true
 		if err := s.driveRun(ctx, run); err != nil && ctx.Err() == nil {
 			s.log.Warn("scaffold: drive run failed", "run", run.ID, "error", err)
 		}
+	}
+	s.reapExpired(ctx)
+}
+
+// reapExpired deletes terminal runs older than the configured TTL (M8.W6
+// retention). Best-effort: a reaper failure never blocks the drive loop.
+func (s *Service) reapExpired(ctx context.Context) {
+	if s.cfg.RunTTL <= 0 {
+		return
+	}
+	n, err := s.store.DeleteTerminalRuns(ctx, s.db.Pool, time.Now().Add(-s.cfg.RunTTL))
+	if err != nil {
+		if ctx.Err() == nil {
+			s.log.Warn("scaffold: run reaper failed", "error", err)
+		}
+		return
+	}
+	if n > 0 {
+		s.log.Info("scaffold: reaped expired runs", "count", n)
 	}
 }
 

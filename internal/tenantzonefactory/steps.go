@@ -177,7 +177,8 @@ func stepPlatformManifestsDelete(ctx context.Context, env *Env, rc *RunContext, 
 	return true, nil
 }
 
-func stepEKSDelete(ctx context.Context, env *Env, rc *RunContext, step *types.TenantZoneStep) (bool, error) {	prov := rc.Steps[types.ZoneStepEKSProvision]
+func stepEKSDelete(ctx context.Context, env *Env, rc *RunContext, step *types.TenantZoneStep) (bool, error) {
+	prov := rc.Steps[types.ZoneStepEKSProvision]
 	if prov == nil || prov.ExternalRef == "" {
 		step.Status = types.ZoneStepSkipped
 		return true, nil

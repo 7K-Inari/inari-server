@@ -361,7 +361,8 @@ func TestModuleWiringDeleteTenantManifests(t *testing.T) {
 	}
 }
 
-func TestDecommissionOwnershipBlockStopsChain(t *testing.T) {	env, _, _, _, _, cl := testEnv()
+func TestDecommissionOwnershipBlockStopsChain(t *testing.T) {
+	env, _, _, _, _, cl := testEnv()
 	cl.decommissionErr = errors.New("shared resources present")
 	zone := testZone()
 	zone.State = types.ZoneStateDecommissioning

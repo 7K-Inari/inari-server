@@ -1175,15 +1175,15 @@ const (
 	ZoneStepEKSProvision   = "eks_provision"
 	ZoneStepInariWiring    = "inari_wiring"
 
-	ZoneStepCordon         = "cordon"
-	ZoneStepDrain          = "drain"
+	ZoneStepCordon = "cordon"
+	ZoneStepDrain  = "drain"
 	// ZoneStepPlatformManifestsDelete removes the tenant's platform CR
 	// manifests from the platform GitOps repo (M7.W4 teardown).
 	ZoneStepPlatformManifestsDelete = "platform_manifests_delete"
 	ZoneStepEKSDelete               = "eks_delete"
-	ZoneStepAccountClose   = "account_close"
-	ZoneStepIdentityRevoke = "identity_revoke"
-	ZoneStepAuditArchive   = "audit_archive"
+	ZoneStepAccountClose            = "account_close"
+	ZoneStepIdentityRevoke          = "identity_revoke"
+	ZoneStepAuditArchive            = "audit_archive"
 )
 
 // TenantZone step statuses.

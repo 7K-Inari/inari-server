@@ -493,7 +493,8 @@ func TestResyncResponseRetiresQueuedResync(t *testing.T) {
 	}
 }
 
-func TestRevokedClusterCannotReconnect(t *testing.T) {	r := newRig(t, false)
+func TestRevokedClusterCannotReconnect(t *testing.T) {
+	r := newRig(t, false)
 	ctx := context.Background()
 	cluster, _ := r.registry.CreateCluster(ctx, "user-1", "org:1", "kind-dev", nil)
 	token, _, _ := r.registry.IssueToken(ctx, "user-1", cluster.ID)

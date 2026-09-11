@@ -410,19 +410,34 @@ func (s *Store) HighestRole(ctx context.Context, q db.Querier, orgID, userID str
 	return best, best != "", rows.Err()
 }
 
+// PlatformResourceEnsurer upserts the tenant's base platform resources
+// (platformresources.Service seam, M7.W2).
+type PlatformResourceEnsurer interface {
+	EnsureBaseResources(ctx context.Context, org *types.Organization) error
+}
+
 // Service orchestrates tenant creation across Keycloak and PostgreSQL,
 // emitting audit + outbox events in the same DB transaction.
 type Service struct {
-	db      *db.DB
-	idp     IdentityProvider
-	clients ClientManager
-	brokers IdentityProviderManager
-	store   *Store
-	audit   *audit.Store
+	db       *db.DB
+	idp      IdentityProvider
+	clients  ClientManager
+	brokers  IdentityProviderManager
+	platform PlatformResourceEnsurer
+	store    *Store
+	audit    *audit.Store
 }
 
 func NewService(d *db.DB, idp IdentityProvider, store *Store, auditStore *audit.Store) *Service {
 	return &Service{db: d, idp: idp, store: store, audit: auditStore}
+}
+
+// WithPlatformResources wires the platform-resources module so new tenants
+// get their base desired-state rows (keycloak-realm, dns-zone,
+// tenant-namespace).
+func (s *Service) WithPlatformResources(e PlatformResourceEnsurer) *Service {
+	s.platform = e
+	return s
 }
 
 // CreateTenant creates the Keycloak org + default groups, the DB projection,
@@ -483,6 +498,13 @@ func (s *Service) CreateTenant(ctx context.Context, actor, slug, displayName str
 	for _, tm := range teams {
 		if _, err := s.idp.CreateGroup(ctx, tm.KeycloakGroupPath); err != nil {
 			return nil, nil, fmt.Errorf("tenancy: create group %s: %w", tm.KeycloakGroupPath, err)
+		}
+	}
+	// Base platform resources after commit (idempotent upserts); failures
+	// are surfaced but leave the org consistent, like group creation above.
+	if s.platform != nil {
+		if err := s.platform.EnsureBaseResources(ctx, org); err != nil {
+			return nil, nil, fmt.Errorf("tenancy: ensure base platform resources: %w", err)
 		}
 	}
 	// Creator auto-membership: the creating user joins the Keycloak

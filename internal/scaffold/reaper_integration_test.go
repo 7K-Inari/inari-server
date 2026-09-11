@@ -40,10 +40,10 @@ func TestRunRetentionReaper(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	oldCompleted := mkRun("old-completed")   // terminal, past TTL → reaped
+	oldCompleted := mkRun("old-completed")     // terminal, past TTL → reaped
 	freshCompleted := mkRun("fresh-completed") // terminal, fresh → kept
-	oldFailed := mkRun("old-failed")         // terminal, past TTL → reaped
-	oldPending := mkRun("old-pending")        // non-terminal, past TTL → kept
+	oldFailed := mkRun("old-failed")           // terminal, past TTL → reaped
+	oldPending := mkRun("old-pending")         // non-terminal, past TTL → kept
 	setPhase(oldCompleted, "completed", 2*time.Hour)
 	setPhase(freshCompleted, "completed", time.Minute)
 	setPhase(oldFailed, "failed", 48*time.Hour)

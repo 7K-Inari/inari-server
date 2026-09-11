@@ -16,11 +16,11 @@ type qaTenantCreator struct{ calls int }
 
 func (f *qaTenantCreator) CreateTenant(_ context.Context, _, slug, _ string) (*types.Organization, []types.Team, error) {
 	f.calls++
-	return &types.Organization{ID: "org-" + slug, KeycloakOrgID: "kc-" + slug}, nil, nil
+	return &types.Organization{ID: "org-" + slug, Slug: slug, KeycloakOrgID: "kc-" + slug}, nil, nil
 }
 
 func (f *qaTenantCreator) GetTenant(_ context.Context, slug string) (*types.Organization, error) {
-	return &types.Organization{ID: "org-" + slug, KeycloakOrgID: "kc-" + slug}, nil
+	return &types.Organization{ID: "org-" + slug, Slug: slug, KeycloakOrgID: "kc-" + slug}, nil
 }
 
 type qaAccounts struct{ failFirst bool }

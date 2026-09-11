@@ -96,6 +96,17 @@ type Config struct {
 	TZFReconcileInterval time.Duration
 	TZFStepMaxAttempts   int64
 
+	// Scaffolding / Software Templates (M8, plan §4/§10).
+	// ScaffoldGitOrg is the git organization/owner receiving scaffolded
+	// repos; ScaffoldTemplateDir is the local dir holding template
+	// definitions; ScaffoldRunTTL is the retention for completed/failed
+	// runs before they are swept.
+	ScaffoldReconcileInterval time.Duration
+	ScaffoldStepMaxAttempts   int64
+	ScaffoldGitOrg            string
+	ScaffoldTemplateDir       string
+	ScaffoldRunTTL            time.Duration
+
 	// PlatformGitOpsRepo is the platform GitOps repository receiving
 	// per-tenant CR manifests (tenants/<slug>/, docs/platform-gitops.md);
 	// empty disables manifest commits.
@@ -160,6 +171,12 @@ func Load() (*Config, error) {
 		TZFRequiredTags:      listEnv("INARI_TZF_REQUIRED_TAGS", nil),
 		TZFReconcileInterval: durEnv("INARI_TZF_RECONCILE_INTERVAL", 30*time.Second),
 		TZFStepMaxAttempts:   intEnv("INARI_TZF_STEP_MAX_ATTEMPTS", 5),
+
+		ScaffoldReconcileInterval: durEnv("INARI_SCAFFOLD_RECONCILE_INTERVAL", 30*time.Second),
+		ScaffoldStepMaxAttempts:   intEnv("INARI_SCAFFOLD_STEP_MAX_ATTEMPTS", 5),
+		ScaffoldGitOrg:            env("INARI_SCAFFOLD_GIT_ORG", ""),
+		ScaffoldTemplateDir:       env("INARI_SCAFFOLD_TEMPLATE_DIR", ""),
+		ScaffoldRunTTL:            durEnv("INARI_SCAFFOLD_RUN_TTL", 7*24*time.Hour),
 
 		PlatformGitOpsRepo: env("INARI_PLATFORM_GITOPS_REPO", ""),
 

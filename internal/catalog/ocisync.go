@@ -51,7 +51,10 @@ type Package struct {
 // itemIDForPackage maps a pulled package to its catalog item ID. Platform
 // apps reconcile with the items seeded by SeedPlatformApps
 // ("platform:<name>", e.g. platform:external-secrets); all other curated
-// packages keep the "curated:<name>" prefix.
+// packages keep the "curated:<name>" prefix. Software-template items (M8
+// scaffolding) use the "template:<name>" prefix with the
+// types.CatalogSourceTemplate source; they are not written by this sync
+// path.
 func itemIDForPackage(p Package) string {
 	if p.Type == "platform-app" {
 		return "platform:" + p.Name

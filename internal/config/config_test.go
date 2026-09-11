@@ -23,6 +23,21 @@ func TestLoadDefaults(t *testing.T) {
 	if c.OrgGroupSyncInterval.Seconds() != 30 {
 		t.Errorf("OrgGroupSyncInterval = %v, want 30s", c.OrgGroupSyncInterval)
 	}
+	if c.ScaffoldReconcileInterval.Seconds() != 30 {
+		t.Errorf("ScaffoldReconcileInterval = %v, want 30s", c.ScaffoldReconcileInterval)
+	}
+	if c.ScaffoldStepMaxAttempts != 5 {
+		t.Errorf("ScaffoldStepMaxAttempts = %d, want 5", c.ScaffoldStepMaxAttempts)
+	}
+	if c.ScaffoldGitOrg != "" {
+		t.Errorf("ScaffoldGitOrg = %q, want empty", c.ScaffoldGitOrg)
+	}
+	if c.ScaffoldTemplateDir != "" {
+		t.Errorf("ScaffoldTemplateDir = %q, want empty", c.ScaffoldTemplateDir)
+	}
+	if c.ScaffoldRunTTL.Hours() != 168 {
+		t.Errorf("ScaffoldRunTTL = %v, want 168h", c.ScaffoldRunTTL)
+	}
 }
 
 func TestLoadEnvOverride(t *testing.T) {
@@ -49,6 +64,33 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 	if c.OrgGroupSyncInterval.Seconds() != 15 {
 		t.Errorf("OrgGroupSyncInterval = %v, want 15s", c.OrgGroupSyncInterval)
+	}
+}
+
+func TestScaffoldEnvOverride(t *testing.T) {
+	t.Setenv("INARI_SCAFFOLD_RECONCILE_INTERVAL", "10s")
+	t.Setenv("INARI_SCAFFOLD_STEP_MAX_ATTEMPTS", "3")
+	t.Setenv("INARI_SCAFFOLD_GIT_ORG", "inari-apps")
+	t.Setenv("INARI_SCAFFOLD_TEMPLATE_DIR", "/srv/templates")
+	t.Setenv("INARI_SCAFFOLD_RUN_TTL", "24h")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.ScaffoldReconcileInterval.Seconds() != 10 {
+		t.Errorf("ScaffoldReconcileInterval = %v, want 10s", c.ScaffoldReconcileInterval)
+	}
+	if c.ScaffoldStepMaxAttempts != 3 {
+		t.Errorf("ScaffoldStepMaxAttempts = %d, want 3", c.ScaffoldStepMaxAttempts)
+	}
+	if c.ScaffoldGitOrg != "inari-apps" {
+		t.Errorf("ScaffoldGitOrg = %q, want inari-apps", c.ScaffoldGitOrg)
+	}
+	if c.ScaffoldTemplateDir != "/srv/templates" {
+		t.Errorf("ScaffoldTemplateDir = %q, want /srv/templates", c.ScaffoldTemplateDir)
+	}
+	if c.ScaffoldRunTTL.Hours() != 24 {
+		t.Errorf("ScaffoldRunTTL = %v, want 24h", c.ScaffoldRunTTL)
 	}
 }
 

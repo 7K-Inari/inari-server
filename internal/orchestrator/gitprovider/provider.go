@@ -31,6 +31,9 @@ type Provider interface {
 	EnsureRepo(ctx context.Context, repo string) (cloneURL string, err error)
 	// CommitFiles writes files directly to a branch.
 	CommitFiles(ctx context.Context, repo, branch string, files []File, message string) (*Result, error)
+	// DeleteFiles removes files from a branch. Deleting a path that does
+	// not exist is a no-op (idempotent retries).
+	DeleteFiles(ctx context.Context, repo, branch string, paths []string, message string) (*Result, error)
 	// OpenPR writes files on a fresh branch and opens a pull request against
 	// base. Returns the PR URL.
 	OpenPR(ctx context.Context, repo, base, title, body string, files []File) (*Result, error)
@@ -45,6 +48,14 @@ type Fake struct {
 	repos map[string]*fakeRepo
 	// PRs records every OpenPR call for assertions.
 	PRs []PRRecord
+	// Deletions records every DeleteFiles call for assertions.
+	Deletions []DeleteRecord
+}
+
+// DeleteRecord captures one DeleteFiles invocation.
+type DeleteRecord struct {
+	Repo, Branch, Message string
+	Paths                 []string
 }
 
 // PRRecord captures one OpenPR invocation.
@@ -98,6 +109,20 @@ func (f *Fake) OpenPR(_ context.Context, repo, base, title, body string, files [
 		CommitSHA: fakeSHA(repo, "pr", n),
 		PRURL:     fmt.Sprintf("https://fake.git/%s/pull/%d", repo, n),
 	}, nil
+}
+
+func (f *Fake) DeleteFiles(_ context.Context, repo, branch string, paths []string, message string) (*Result, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r, err := f.repo(repo)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range paths {
+		delete(r.branches[branch], p)
+	}
+	f.Deletions = append(f.Deletions, DeleteRecord{Repo: repo, Branch: branch, Message: message, Paths: paths})
+	return &Result{CommitSHA: fakeSHA(repo, branch, len(r.branches[branch]))}, nil
 }
 
 func (f *Fake) ReadFile(_ context.Context, repo, branch, path string) (string, error) {

@@ -96,6 +96,11 @@ type Config struct {
 	TZFReconcileInterval time.Duration
 	TZFStepMaxAttempts   int64
 
+	// PlatformGitOpsRepo is the platform GitOps repository receiving
+	// per-tenant CR manifests (tenants/<slug>/, docs/platform-gitops.md);
+	// empty disables manifest commits.
+	PlatformGitOpsRepo string
+
 	// M4: Extension Host + Fleet Manager (plan §5.8, §5.11).
 	// CurrentAgentVersion is the supported agent version (N); agents at N
 	// and N−1 are admitted (§11/5).
@@ -155,6 +160,8 @@ func Load() (*Config, error) {
 		TZFRequiredTags:      listEnv("INARI_TZF_REQUIRED_TAGS", nil),
 		TZFReconcileInterval: durEnv("INARI_TZF_RECONCILE_INTERVAL", 30*time.Second),
 		TZFStepMaxAttempts:   intEnv("INARI_TZF_STEP_MAX_ATTEMPTS", 5),
+
+		PlatformGitOpsRepo: env("INARI_PLATFORM_GITOPS_REPO", ""),
 
 		CurrentAgentVersion:  env("INARI_AGENT_VERSION", ""),
 		FleetAdvanceInterval: durEnv("INARI_FLEET_ADVANCE_INTERVAL", 10*time.Second),

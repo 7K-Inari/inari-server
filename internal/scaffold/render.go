@@ -106,7 +106,7 @@ func renderSkeleton(pkgDir string, data *RenderData) ([]RenderedFile, error) {
 // stepRendering renders the run's template skeleton into step.Result.
 // Idempotent: a step whose Result already holds a rendered file list (a
 // crash between step persist and the next step) returns done immediately.
-func stepRendering(_ context.Context, env *ExecEnv, rc *RunContext, step *types.ScaffoldRunStep) (bool, error) {
+func stepRendering(ctx context.Context, env *ExecEnv, rc *RunContext, step *types.ScaffoldRunStep) (bool, error) {
 	if len(step.Result) > 0 && !bytes.Equal(bytes.TrimSpace(step.Result), []byte(`{}`)) {
 		return true, nil
 	}
@@ -114,19 +114,9 @@ func stepRendering(_ context.Context, env *ExecEnv, rc *RunContext, step *types.
 		return false, errors.New("scaffold: no template source configured")
 	}
 	name := strings.TrimPrefix(rc.Run.TemplateItemID, "template:")
-	// Defensive: the name becomes a filesystem path under the template
-	// root. The file source enforces the dir↔name invariant at sync time,
-	// but never join an unchecked catalog value onto a path.
-	if name == "" || name != filepath.Base(name) {
-		return false, fmt.Errorf("scaffold: invalid template name %q", name)
-	}
-	pkg, err := readTemplateDir(filepath.Join(env.Templates.Root, name), name)
+	pkg, err := env.Templates.Get(ctx, name, rc.Run.TemplateVersion)
 	if err != nil {
 		return false, err
-	}
-	if pkg.Manifest.Version != rc.Run.TemplateVersion {
-		return false, fmt.Errorf("scaffold: template %s version %s not found on disk (have %s)",
-			name, rc.Run.TemplateVersion, pkg.Manifest.Version)
 	}
 	var values map[string]any
 	if len(rc.Run.Values) > 0 {

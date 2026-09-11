@@ -47,7 +47,7 @@ type ExecEnv struct {
 	Upsert    CatalogUpserter
 	RBAC      RBACBinder
 	Registrar AppRegistrar
-	Templates *FilePuller
+	Templates TemplateSource
 	Tenants   TenantContextResolver
 }
 

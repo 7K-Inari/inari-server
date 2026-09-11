@@ -193,26 +193,15 @@ func componentName(rc *RunContext) (string, error) {
 	return slug, nil
 }
 
-// templatePackage re-reads the run's template package from the file source
-// (same defensive pattern as stepRendering: name must be a single safe
-// path segment and the on-disk version must match the run).
-func templatePackage(env *ExecEnv, rc *RunContext) (*TemplatePackage, error) {
+// templatePackage re-reads the run's template package from the configured
+// source (same defensive pattern as stepRendering: name must be a single
+// safe path segment and the source must hold the run's exact version).
+func templatePackage(ctx context.Context, env *ExecEnv, rc *RunContext) (*TemplatePackage, error) {
 	if env == nil || env.Templates == nil {
 		return nil, errors.New("scaffold: no template source configured")
 	}
 	name := strings.TrimPrefix(rc.Run.TemplateItemID, "template:")
-	if name == "" || name != filepath.Base(name) {
-		return nil, fmt.Errorf("scaffold: invalid template name %q", name)
-	}
-	pkg, err := readTemplateDir(filepath.Join(env.Templates.Root, name), name)
-	if err != nil {
-		return nil, err
-	}
-	if pkg.Manifest.Version != rc.Run.TemplateVersion {
-		return nil, fmt.Errorf("scaffold: template %s version %s not found on disk (have %s)",
-			name, rc.Run.TemplateVersion, pkg.Manifest.Version)
-	}
-	return pkg, nil
+	return env.Templates.Get(ctx, name, rc.Run.TemplateVersion)
 }
 
 // manifestParam reads one string param from a manifest scaffold block
@@ -276,7 +265,7 @@ func stepCreatingRepo(ctx context.Context, env *ExecEnv, rc *RunContext, step *t
 	if err != nil {
 		return false, err
 	}
-	pkg, err := templatePackage(env, rc)
+	pkg, err := templatePackage(ctx, env, rc)
 	if err != nil {
 		return false, err
 	}
@@ -341,7 +330,7 @@ func stepCreatingPipeline(ctx context.Context, env *ExecEnv, rc *RunContext, ste
 	if err != nil {
 		return false, err
 	}
-	pkg, err := templatePackage(env, rc)
+	pkg, err := templatePackage(ctx, env, rc)
 	if err != nil {
 		return false, err
 	}
@@ -444,7 +433,7 @@ func stepBindingRBAC(ctx context.Context, env *ExecEnv, rc *RunContext, step *ty
 	}
 	role := types.RoleDeveloper
 	if env.Templates != nil {
-		pkg, err := templatePackage(env, rc)
+		pkg, err := templatePackage(ctx, env, rc)
 		if err != nil {
 			return false, err
 		}

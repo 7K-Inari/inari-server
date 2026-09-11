@@ -4,17 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
 
 	"github.com/google/go-containerregistry/pkg/authn"
-	"github.com/google/go-containerregistry/pkg/name"
-	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"gopkg.in/yaml.v3"
 
+	"github.com/7K-Inari/inari-server/internal/oci"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -195,12 +192,8 @@ type RegistryPuller struct {
 	Insecure bool
 }
 
-func (p *RegistryPuller) remoteOpts(ctx context.Context) []remote.Option {
-	kc := p.Keychain
-	if kc == nil {
-		kc = authn.DefaultKeychain
-	}
-	return []remote.Option{remote.WithAuthFromKeychain(kc), remote.WithContext(ctx)}
+func (p *RegistryPuller) fetcher() *oci.Fetcher {
+	return &oci.Fetcher{Keychain: p.Keychain, Insecure: p.Insecure}
 }
 
 func (p *RegistryPuller) Pull(ctx context.Context) ([]Package, error) {
@@ -248,63 +241,9 @@ func (p *RegistryPuller) fetchFile(ctx context.Context, ref, filename string) ([
 	return raw, nil
 }
 
-// fetchDir pulls an oras directory-push artifact: every layer carries its
-// file name in the org.opencontainers.image.title annotation.
+// fetchDir pulls an oras directory-push artifact (shared helper).
 func (p *RegistryPuller) fetchDir(ctx context.Context, ref string) (map[string][]byte, error) {
-	opts := []name.Option{}
-	if p.Insecure {
-		opts = append(opts, name.Insecure)
-	}
-	r, err := name.ParseReference(ref, opts...)
-	if err != nil {
-		return nil, fmt.Errorf("catalog: parse ref %q: %w", ref, err)
-	}
-	desc, err := remote.Get(r, p.remoteOpts(ctx)...)
-	if err != nil {
-		return nil, err
-	}
-	img, err := desc.Image()
-	if err != nil {
-		return nil, err
-	}
-	manifest, err := img.Manifest()
-	if err != nil {
-		return nil, err
-	}
-	layers, err := img.Layers()
-	if err != nil {
-		return nil, err
-	}
-	byDigest := map[v1.Hash]v1.Layer{}
-	for _, l := range layers {
-		d, err := l.Digest()
-		if err != nil {
-			return nil, err
-		}
-		byDigest[d] = l
-	}
-	files := map[string][]byte{}
-	for _, ld := range manifest.Layers {
-		title := ld.Annotations["org.opencontainers.image.title"]
-		if title == "" {
-			continue
-		}
-		l, ok := byDigest[ld.Digest]
-		if !ok {
-			return nil, fmt.Errorf("catalog: %s: layer %s not found", ref, ld.Digest)
-		}
-		rc, err := l.Uncompressed()
-		if err != nil {
-			return nil, err
-		}
-		raw, err := io.ReadAll(rc)
-		_ = rc.Close()
-		if err != nil {
-			return nil, err
-		}
-		files[title] = raw
-	}
-	return files, nil
+	return p.fetcher().FetchDir(ctx, ref)
 }
 
 // packageFromFiles builds Packages from one pulled package artifact.

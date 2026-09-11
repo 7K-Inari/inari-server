@@ -49,6 +49,18 @@ type TemplatePackage struct {
 	Dir string
 }
 
+// TemplateSource is the template-package seam shared by the sync
+// (Pull) and the run engine (Get). FilePuller serves the file:// source
+// (INARI_SCAFFOLD_TEMPLATE_DIR); the OCI registry puller (oci_source.go)
+// serves application/vnd.inari.template.v1 artifacts (M8.W6).
+type TemplateSource interface {
+	// Pull reads every template package the source offers (sync path).
+	Pull(ctx context.Context) ([]TemplatePackage, error)
+	// Get resolves one template package at an exact version (run engine
+	// path); the name must be a single safe path segment.
+	Get(ctx context.Context, name, version string) (*TemplatePackage, error)
+}
+
 // FilePuller reads template packages from a local directory (the
 // INARI_SCAFFOLD_TEMPLATE_DIR layout):
 //
@@ -81,6 +93,25 @@ func (p *FilePuller) Pull(_ context.Context) ([]TemplatePackage, error) {
 		out = append(out, *pkg)
 	}
 	return out, nil
+}
+
+// Get resolves one template by name + exact version from the on-disk
+// root. The name becomes a filesystem path under Root: the sync enforces
+// the dir↔name invariant, but never join an unchecked catalog value onto
+// a path (same defensive checks the run engine previously inlined).
+func (p *FilePuller) Get(_ context.Context, name, version string) (*TemplatePackage, error) {
+	if name == "" || name != filepath.Base(name) {
+		return nil, fmt.Errorf("scaffold: invalid template name %q", name)
+	}
+	pkg, err := readTemplateDir(filepath.Join(p.Root, name), name)
+	if err != nil {
+		return nil, err
+	}
+	if pkg.Manifest.Version != version {
+		return nil, fmt.Errorf("scaffold: template %s version %s not found on disk (have %s)",
+			name, version, pkg.Manifest.Version)
+	}
+	return pkg, nil
 }
 
 func readTemplateDir(dir, dirName string) (*TemplatePackage, error) {
@@ -238,7 +269,7 @@ func templateSyncPlan(pkgs []TemplatePackage) ([]*types.CatalogItem, []*types.Ca
 
 // SyncTemplates pulls template packages and upserts them into the catalog
 // (one item per template, one version row per package). Idempotent.
-func SyncTemplates(ctx context.Context, puller *FilePuller, up CatalogUpserter) (int, error) {
+func SyncTemplates(ctx context.Context, puller TemplateSource, up CatalogUpserter) (int, error) {
 	pkgs, err := puller.Pull(ctx)
 	if err != nil {
 		return 0, err

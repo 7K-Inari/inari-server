@@ -148,10 +148,9 @@ func TestRegisteringCatalogGuards(t *testing.T) {
 // fakeRBACBinder records EnsureTeam/AddMember calls and can fail the next
 // AddMember (transient error retry tests).
 type fakeRBACBinder struct {
-	teams      []ensureTeamCall
-	members    []addMemberCall
-	failNext   bool
-	teamExists bool
+	teams    []ensureTeamCall
+	members  []addMemberCall
+	failNext bool
 }
 
 type ensureTeamCall struct {

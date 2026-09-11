@@ -69,6 +69,11 @@ ADR 0003).
   same window; no stale `team#member` tuples persist for deleted users.
 - The admin service account needs group-read on every `tenant-*` group
   (already required for tenancy group management).
+- Group membership reads must page the full member list: the reconciler
+  diffs the whole set, so any truncation revokes members beyond the first
+  page.
+- The `members` team backs the brokered IdP's Hardcoded Group mapper and
+  cannot be deleted while a brokered IdP exists for the org.
 - Membership **DB rows** remain invite-projection only; console member
   lists are unaffected. FGA tuples are the authz-relevant state.
 - SAML brokering (W8) reuses this reconciler unchanged — its mappers land

@@ -50,10 +50,18 @@ var (
 	ErrTeamNotFound  = errors.New("team not found")
 	ErrTeamNameTaken = errors.New("team name already exists in tenant")
 	ErrDefaultTeam   = errors.New("default teams cannot be deleted")
+	// ErrMembersTeamInUse rejects deleting the "members" team while a
+	// brokered IdP exists: its Hardcoded Group mapper targets the team's
+	// Keycloak group, so deletion would break brokered logins (ADR-0004).
+	ErrMembersTeamInUse = errors.New("members team is required by the brokered identity provider")
 )
 
 // PlatformTeamName is the default team that receives the tenant creator.
 const PlatformTeamName = "platform-team"
+
+// membersTeamName is the team materialized for a brokered IdP's Hardcoded
+// Group mapper target (tenant-<slug>/members), granting org viewer.
+const membersTeamName = "members"
 
 // Store is the PostgreSQL projection of tenancy state.
 type Store struct{}
@@ -634,7 +642,12 @@ func (s *Service) ensureTeam(ctx context.Context, actor string, org *types.Organ
 	if !errors.Is(err, ErrTeamNotFound) {
 		return nil, err
 	}
-	return s.CreateTeam(ctx, actor, org.Slug, name, role)
+	team, err = s.CreateTeam(ctx, actor, org.Slug, name, role)
+	if errors.Is(err, ErrTeamNameTaken) {
+		// Lost a concurrent create race: the team now exists.
+		return s.store.GetTeamByName(ctx, s.db.Pool, org.ID, name)
+	}
+	return team, err
 }
 
 // DeleteTeam removes a non-default team: membership rows, the DB row, and
@@ -649,6 +662,17 @@ func (s *Service) DeleteTeam(ctx context.Context, actor, slug, name string) erro
 	org, err := s.store.GetOrganizationBySlug(ctx, s.db.Pool, slug)
 	if err != nil {
 		return err
+	}
+	// The members team backs the brokered IdP's Hardcoded Group mapper;
+	// deleting it would break brokered logins for the whole tenant.
+	if name == membersTeamName {
+		brokers, err := s.store.ListIdPBrokers(ctx, s.db.Pool, org.ID)
+		if err != nil {
+			return err
+		}
+		if len(brokers) > 0 {
+			return ErrMembersTeamInUse
+		}
 	}
 	// Resolve the role the team grants before deletion (needed for the
 	// outbox payload that retracts the OpenFGA tuple).

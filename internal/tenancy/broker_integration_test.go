@@ -145,6 +145,11 @@ func TestBrokeredIdPLifecycle(t *testing.T) {
 	if membersTeam == nil || membersTeam.Role != types.RoleViewer || membersTeam.KeycloakGroupPath != "tenant-acme/members" {
 		t.Errorf("members team = %+v, want viewer team at tenant-acme/members", membersTeam)
 	}
+	// While the brokered IdP exists, the members team (its Hardcoded Group
+	// mapper target) must be undeletable.
+	if err := svc.DeleteTeam(ctx, "user-1", "acme", "members"); !errors.Is(err, tenancy.ErrMembersTeamInUse) {
+		t.Errorf("DeleteTeam(members) = %v, want ErrMembersTeamInUse", err)
+	}
 	if bm.linked[org.KeycloakOrgID] != "org-acme-sso" {
 		t.Errorf("linked = %v", bm.linked)
 	}

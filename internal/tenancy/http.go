@@ -409,6 +409,8 @@ func (h *Handler) deleteTeam(ctx context.Context, in *teamPathInput) (*struct{},
 	switch {
 	case errors.Is(err, ErrDefaultTeam):
 		return nil, huma.Error409Conflict("default teams cannot be deleted")
+	case errors.Is(err, ErrMembersTeamInUse):
+		return nil, huma.Error409Conflict("members team is required by the brokered identity provider")
 	case errors.Is(err, ErrTeamNotFound):
 		return nil, huma.Error404NotFound("team not found")
 	case errors.Is(err, ErrOrgNotFound):

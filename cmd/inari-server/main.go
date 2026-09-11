@@ -148,6 +148,24 @@ func run() error {
 	platformSync := authz.NewPlatformGroupSync(fgaStore, idp, cfg.PlatformAdminGroup)
 	go platformSync.Run(ctx, cfg.PlatformGroupSyncInterval)
 
+	// Org team group sync (M6.W7, ADR-0004): every tenant's team groups
+	// (tenant-<slug>/<team>) → team:<id>#member tuples, both directions.
+	// This is the convergence mechanism for IdP-brokered managed members,
+	// who never pass through the inline invite path.
+	teamSync := authz.NewOrgTeamSync(fgaStore, idp, authz.TeamGroupListerFunc(
+		func(ctx context.Context) ([]authz.TeamGroupRef, error) {
+			teams, err := svc.ListAllTeams(ctx)
+			if err != nil {
+				return nil, err
+			}
+			refs := make([]authz.TeamGroupRef, 0, len(teams))
+			for _, t := range teams {
+				refs = append(refs, authz.TeamGroupRef{TeamID: t.ID, GroupPath: t.KeycloakGroupPath})
+			}
+			return refs, nil
+		}))
+	go teamSync.Run(ctx, cfg.OrgGroupSyncInterval)
+
 	registry := clusterregistry.NewService(database, idp, clusterregistry.NewStore(), auditStore,
 		cfg.RegistrationTokenTTL, cfg.EnrollmentApprovalRequired)
 	invStore := inventory.NewStore()

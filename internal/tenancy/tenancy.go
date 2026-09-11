@@ -50,10 +50,18 @@ var (
 	ErrTeamNotFound  = errors.New("team not found")
 	ErrTeamNameTaken = errors.New("team name already exists in tenant")
 	ErrDefaultTeam   = errors.New("default teams cannot be deleted")
+	// ErrMembersTeamInUse rejects deleting the "members" team while a
+	// brokered IdP exists: its Hardcoded Group mapper targets the team's
+	// Keycloak group, so deletion would break brokered logins (ADR-0004).
+	ErrMembersTeamInUse = errors.New("members team is required by the brokered identity provider")
 )
 
 // PlatformTeamName is the default team that receives the tenant creator.
 const PlatformTeamName = "platform-team"
+
+// membersTeamName is the team materialized for a brokered IdP's Hardcoded
+// Group mapper target (tenant-<slug>/members), granting org viewer.
+const membersTeamName = "members"
 
 // Store is the PostgreSQL projection of tenancy state.
 type Store struct{}
@@ -135,6 +143,26 @@ func (s *Store) DeleteTeam(ctx context.Context, q db.Querier, orgID, name string
 func (s *Store) ListTeams(ctx context.Context, q db.Querier, orgID string) ([]types.Team, error) {
 	const sql = `SELECT id, org_id, name, role, keycloak_group_path, created_at FROM teams WHERE org_id = $1 ORDER BY name`
 	rows, err := q.Query(ctx, sql, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []types.Team
+	for rows.Next() {
+		var t types.Team
+		if err := rows.Scan(&t.ID, &t.OrgID, &t.Name, &t.Role, &t.KeycloakGroupPath, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ListAllTeams returns every team across all orgs (the authz org-team
+// reconciler enumerates team groups without an org scope).
+func (s *Store) ListAllTeams(ctx context.Context, q db.Querier) ([]types.Team, error) {
+	const sql = `SELECT id, org_id, name, role, keycloak_group_path, created_at FROM teams ORDER BY org_id, name`
+	rows, err := q.Query(ctx, sql)
 	if err != nil {
 		return nil, err
 	}
@@ -514,6 +542,11 @@ func (s *Service) ListTeams(ctx context.Context, orgID string) ([]types.Team, er
 	return s.store.ListTeams(ctx, s.db.Pool, orgID)
 }
 
+// ListAllTeams returns every team across all orgs (authz.OrgTeamSync seam).
+func (s *Service) ListAllTeams(ctx context.Context) ([]types.Team, error) {
+	return s.store.ListAllTeams(ctx, s.db.Pool)
+}
+
 // UpdateTenantProfile updates the org display name in Keycloak and in the
 // DB projection, recording the change in the audit log.
 func (s *Service) UpdateTenantProfile(ctx context.Context, actor, slug, displayName string) (*types.Organization, error) {
@@ -609,7 +642,12 @@ func (s *Service) ensureTeam(ctx context.Context, actor string, org *types.Organ
 	if !errors.Is(err, ErrTeamNotFound) {
 		return nil, err
 	}
-	return s.CreateTeam(ctx, actor, org.Slug, name, role)
+	team, err = s.CreateTeam(ctx, actor, org.Slug, name, role)
+	if errors.Is(err, ErrTeamNameTaken) {
+		// Lost a concurrent create race: the team now exists.
+		return s.store.GetTeamByName(ctx, s.db.Pool, org.ID, name)
+	}
+	return team, err
 }
 
 // DeleteTeam removes a non-default team: membership rows, the DB row, and
@@ -624,6 +662,17 @@ func (s *Service) DeleteTeam(ctx context.Context, actor, slug, name string) erro
 	org, err := s.store.GetOrganizationBySlug(ctx, s.db.Pool, slug)
 	if err != nil {
 		return err
+	}
+	// The members team backs the brokered IdP's Hardcoded Group mapper;
+	// deleting it would break brokered logins for the whole tenant.
+	if name == membersTeamName {
+		brokers, err := s.store.ListIdPBrokers(ctx, s.db.Pool, org.ID)
+		if err != nil {
+			return err
+		}
+		if len(brokers) > 0 {
+			return ErrMembersTeamInUse
+		}
 	}
 	// Resolve the role the team grants before deletion (needed for the
 	// outbox payload that retracts the OpenFGA tuple).

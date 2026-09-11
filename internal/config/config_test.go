@@ -20,6 +20,9 @@ func TestLoadDefaults(t *testing.T) {
 	if c.PlatformGroupSyncInterval.Seconds() != 30 {
 		t.Errorf("PlatformGroupSyncInterval = %v, want 30s", c.PlatformGroupSyncInterval)
 	}
+	if c.OrgGroupSyncInterval.Seconds() != 30 {
+		t.Errorf("OrgGroupSyncInterval = %v, want 30s", c.OrgGroupSyncInterval)
+	}
 }
 
 func TestLoadEnvOverride(t *testing.T) {
@@ -27,6 +30,7 @@ func TestLoadEnvOverride(t *testing.T) {
 	t.Setenv("INARI_OUTBOX_POLL_INTERVAL", "5s")
 	t.Setenv("INARI_PLATFORM_ADMIN_GROUP", "root-admins")
 	t.Setenv("INARI_PLATFORM_GROUP_SYNC_INTERVAL", "10s")
+	t.Setenv("INARI_ORG_GROUP_SYNC_INTERVAL", "15s")
 	c, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -42,6 +46,9 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 	if c.PlatformGroupSyncInterval.Seconds() != 10 {
 		t.Errorf("PlatformGroupSyncInterval = %v, want 10s", c.PlatformGroupSyncInterval)
+	}
+	if c.OrgGroupSyncInterval.Seconds() != 15 {
+		t.Errorf("OrgGroupSyncInterval = %v, want 15s", c.OrgGroupSyncInterval)
 	}
 }
 

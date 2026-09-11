@@ -815,32 +815,42 @@ func (k *KeycloakAdmin) DeleteGroup(ctx context.Context, groupPath string) error
 	return nil
 }
 
-// ListGroupMembers returns the Keycloak user ids of the group at path a/b/c.
+// ListGroupMembers returns the Keycloak user ids of the group at path
+// a/b/c, paging through the full membership. Truncation is not an option:
+// the org-team reconciler (ADR-0004) diffs this set against FGA tuples and
+// would revoke members beyond the first page.
 func (k *KeycloakAdmin) ListGroupMembers(ctx context.Context, groupPath string) ([]string, error) {
 	gid, err := k.resolveGroupID(ctx, groupPath)
 	if err != nil {
 		return nil, err
 	}
-	// Dev-scale: a single page is plenty; paginate when the group outgrows it.
-	resp, err := k.do(ctx, http.MethodGet, "/groups/"+gid+"/members?max=500", nil)
-	if err != nil {
-		return nil, err
+	const pageSize = 500
+	var out []string
+	for first := 0; ; first += pageSize {
+		resp, err := k.do(ctx, http.MethodGet,
+			fmt.Sprintf("/groups/%s/members?first=%d&max=%d", gid, first, pageSize), nil)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("keycloak: list group members: status %d", resp.StatusCode)
+		}
+		var users []struct {
+			ID string `json:"id"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&users)
+		_ = resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		for _, u := range users {
+			out = append(out, u.ID)
+		}
+		if len(users) < pageSize {
+			return out, nil
+		}
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("keycloak: list group members: status %d", resp.StatusCode)
-	}
-	var users []struct {
-		ID string `json:"id"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&users); err != nil {
-		return nil, err
-	}
-	out := make([]string, 0, len(users))
-	for _, u := range users {
-		out = append(out, u.ID)
-	}
-	return out, nil
 }
 
 // resolveGroupID walks a/b/c one level at a time to the leaf group id.

@@ -45,8 +45,12 @@ type Config struct {
 	// PlatformGroupSyncInterval is the platform group → tuple reconciliation
 	// period; it bounds the consistency window for grants/revocations.
 	PlatformGroupSyncInterval time.Duration
-	OutboxPollInterval        time.Duration
-	ShutdownTimeout           time.Duration
+	// OrgGroupSyncInterval is the org team group → tuple reconciliation
+	// period (ADR-0004); it bounds the convergence window for IdP-brokered
+	// managed members.
+	OrgGroupSyncInterval time.Duration
+	OutboxPollInterval   time.Duration
+	ShutdownTimeout      time.Duration
 
 	RegistrationTokenTTL       time.Duration
 	EnrollmentApprovalRequired bool
@@ -120,6 +124,7 @@ func Load() (*Config, error) {
 		OpenFGAStoreName:          env("INARI_OPENFGA_STORE_NAME", "inari"),
 		PlatformAdminGroup:        env("INARI_PLATFORM_ADMIN_GROUP", "platform-admins"),
 		PlatformGroupSyncInterval: durEnv("INARI_PLATFORM_GROUP_SYNC_INTERVAL", 30*time.Second),
+		OrgGroupSyncInterval:      durEnv("INARI_ORG_GROUP_SYNC_INTERVAL", 30*time.Second),
 		OutboxPollInterval:        durEnv("INARI_OUTBOX_POLL_INTERVAL", time.Second),
 		ShutdownTimeout:           durEnv("INARI_SHUTDOWN_TIMEOUT", 10*time.Second),
 

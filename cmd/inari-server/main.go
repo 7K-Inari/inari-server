@@ -144,6 +144,13 @@ func run() error {
 	handler := tenancy.NewHandler(svc, authorizer).WithScopesCatalog(cfg.IdentityScopes)
 	meHandler := tenancy.NewMeHandler(authorizer)
 
+	// Platform pseudo-org (ADR-0005, D1): seed the reserved "platform" org so
+	// the 7kgroup platform cluster registers through the standard org-scoped
+	// cluster registry flow. Idempotent; mirrors SeedPlatformApps below.
+	if err := svc.SeedPlatformOrg(ctx); err != nil {
+		return fmt.Errorf("seed platform org: %w", err)
+	}
+
 	// Platform group sync (M1.W2, ADR-0003): Keycloak realm group →
 	// platform:inari org_creator tuples. Single writer for those tuples.
 	platformSync := authz.NewPlatformGroupSync(fgaStore, idp, cfg.PlatformAdminGroup)

@@ -12,6 +12,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/cloudaccounts"
 	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
+	"github.com/7K-Inari/inari-server/internal/platformresources"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -51,6 +52,12 @@ type GitConfigSetter interface {
 	SetGitConfig(ctx context.Context, actor string, cfg *types.TenantGitConfig) error
 }
 
+// PlatformResourceEnsurer upserts the tenant's base platform resources
+// (platformresources.Service seam, M7.W2).
+type PlatformResourceEnsurer interface {
+	EnsureBaseResources(ctx context.Context, org *types.Organization) error
+}
+
 // ModuleWiring is the production Wiring implementation.
 type ModuleWiring struct {
 	Tenants  TenantCreator
@@ -59,7 +66,14 @@ type ModuleWiring struct {
 	Accounts AccountRegistrar
 	Git      gitprovider.Provider
 	GitCfg   GitConfigSetter
-	Manifest clusterregistry.ManifestParams
+	// PlatformResources ensures the base platform-resource rows; nil skips
+	// the platform-resources bootstrap.
+	PlatformResources PlatformResourceEnsurer
+	// PlatformGitOpsRepo is the platform GitOps repository receiving the
+	// tenant CR manifests (tenants/<slug>/, see docs/platform-gitops.md);
+	// empty skips the manifest commit.
+	PlatformGitOpsRepo string
+	Manifest           clusterregistry.ManifestParams
 }
 
 // WireZone implements Wiring: Keycloak Organization → CloudAccount record
@@ -75,6 +89,23 @@ func (w *ModuleWiring) WireZone(ctx context.Context, zone *types.TenantZone, rol
 	}
 	if err != nil {
 		return nil, fmt.Errorf("tzf: wiring keycloak org: %w", err)
+	}
+	// Base platform resources (desired-state rows + GitOps CR manifests).
+	// Idempotent, so zone retries re-run them safely.
+	if w.PlatformResources != nil {
+		if err := w.PlatformResources.EnsureBaseResources(ctx, org); err != nil {
+			return nil, fmt.Errorf("tzf: wiring platform resources: %w", err)
+		}
+	}
+	if w.PlatformGitOpsRepo != "" {
+		if _, err := w.Git.EnsureRepo(ctx, w.PlatformGitOpsRepo); err != nil {
+			return nil, fmt.Errorf("tzf: wiring platform gitops repo: %w", err)
+		}
+		files := platformresources.RenderTenantManifests(org)
+		if _, err := w.Git.CommitFiles(ctx, w.PlatformGitOpsRepo, "main", files,
+			"feat: tenant platform resources for "+org.Slug); err != nil {
+			return nil, fmt.Errorf("tzf: wiring platform gitops commit: %w", err)
+		}
 	}
 	acct, err := w.Accounts.Register(ctx, actor, org.ID, cloudaccounts.RegisterInput{
 		AccountID: zone.AWSAccountID, RoleARN: roleARN, IssuerURL: "",

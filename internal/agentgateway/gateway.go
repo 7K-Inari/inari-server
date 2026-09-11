@@ -7,6 +7,7 @@ package agentgateway
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/secrets"
+	"github.com/7K-Inari/inari-server/internal/types"
 )
 
 // Config tunes the gateway runtime behavior.
@@ -81,6 +83,9 @@ type Gateway struct {
 	// secret-stores registry (M6.W4); nil means fall back to
 	// cfg.ESOSecretStore.
 	storeLookup SecretStoreLookup
+	// platform records per-cluster keycloak-client desired state (M7.W2);
+	// nil means platform-resource tracking is disabled.
+	platform PlatformResourceEnsurer
 }
 
 // SecretStoreLookup resolves platform-scoped SecretStore names from the
@@ -88,6 +93,19 @@ type Gateway struct {
 // "keep the configured default".
 type SecretStoreLookup interface {
 	PlatformStoreName(ctx context.Context, name string) (string, error)
+}
+
+// PlatformResourceEnsurer records the desired state of the per-cluster OIDC
+// client as a platform-resource row (platformresources.Service seam, M7.W2).
+type PlatformResourceEnsurer interface {
+	EnsureDesired(ctx context.Context, orgID string, kind types.PlatformResourceKind, name string, desired json.RawMessage) (*types.PlatformResource, error)
+}
+
+// WithPlatformResources wires the platform-resources module so cluster
+// registration tracks the keycloak-client desired state.
+func (g *Gateway) WithPlatformResources(e PlatformResourceEnsurer) *Gateway {
+	g.platform = e
+	return g
 }
 
 // WithSecretStoreLookup wires the registry lookup for the ESO store name

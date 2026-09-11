@@ -138,11 +138,26 @@ func run() error {
 	auditStore := audit.NewStore()
 
 	idp := tenancy.NewKeycloakAdmin(cfg.KeycloakBaseURL, cfg.KeycloakRealm, cfg.KeycloakClientID, cfg.KeycloakClientSecret)
+	platformResourcesSvc := platformresources.NewService(database, platformresources.NewStore(), auditStore)
 	svc := tenancy.NewService(database, idp, tenancy.NewStore(), auditStore).
 		WithClientManager(idp).
-		WithIdentityProviderManager(idp)
+		WithIdentityProviderManager(idp).
+		WithPlatformResources(platformResourcesSvc)
 	handler := tenancy.NewHandler(svc, authorizer).WithScopesCatalog(cfg.IdentityScopes)
 	meHandler := tenancy.NewMeHandler(authorizer)
+
+	// Startup backfill (M7.W2): ensure base platform-resource rows for
+	// pre-existing tenants. Idempotent and best-effort — a transient failure
+	// must not crashloop the control plane; the next boot retries.
+	if orgs, err := svc.ListTenants(ctx); err != nil {
+		slog.Error("platform resources backfill: list tenants", "error", err)
+	} else {
+		for _, org := range orgs {
+			if err := platformResourcesSvc.EnsureBaseResources(ctx, &org); err != nil {
+				slog.Error("platform resources backfill failed", "org", org.Slug, "error", err)
+			}
+		}
+	}
 
 	// Platform group sync (M1.W2, ADR-0003): Keycloak realm group →
 	// platform:inari org_creator tuples. Single writer for those tuples.
@@ -200,7 +215,7 @@ func run() error {
 		OIDCIssuerURL:       cfg.OIDCIssuerURL,
 		ESOSecretStore:      cfg.ESOSecretStore,
 		CurrentAgentVersion: cfg.CurrentAgentVersion,
-	}).WithSecretWriter(secretWriter)
+	}).WithSecretWriter(secretWriter).WithPlatformResources(platformResourcesSvc)
 
 	var puller catalog.OCIPuller
 	if cfg.CatalogOCIIndexRef != "" {
@@ -234,9 +249,8 @@ func run() error {
 	inventoryHandler := inventory.NewHandler(inventorySvc, svc, authorizer)
 	gateway.SetStatusSink(agentgatewayStatusSink{inventorySvc})
 
-	// Platform resources (M7): desired-state skeleton; reconciler status
-	// sink and tenancy wiring land in follow-up tasks.
-	platformResourcesSvc := platformresources.NewService(database, platformresources.NewStore(), auditStore)
+	// Platform resources handler (M7); the service is constructed with the
+	// tenancy module above and wired into tenancy/agentgateway/tzf.
 	platformResourcesHandler := platformresources.NewHandler(platformResourcesSvc, svc, authorizer)
 
 	git, err := buildGitProvider(cfg)
@@ -318,7 +332,9 @@ func run() error {
 	tzfEnv.Wiring = &tenantzonefactory.ModuleWiring{
 		Tenants: svc, IDP: idp, Clusters: registry, Accounts: cloudAccountsSvc,
 		Git: git, GitCfg: orchestratorSvc,
-		Manifest: manifestParams,
+		PlatformResources:  platformResourcesSvc,
+		PlatformGitOpsRepo: cfg.PlatformGitOpsRepo,
+		Manifest:           manifestParams,
 	}
 	tzfEnv.Clusters = tzfClusterLifecycle{registry}
 	tzfSvc := tenantzonefactory.NewService(database, tenantzonefactory.NewStore(), auditStore, tzfEnv, approvalsSvc, log)

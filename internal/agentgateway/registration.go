@@ -2,6 +2,7 @@ package agentgateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -33,6 +34,14 @@ func (g *Gateway) RegisterCluster(ctx context.Context, req *connect.Request[agen
 	clientID, err := g.clients.CreateClusterClient(ctx, cluster.ID)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("provision identity: %w", err))
+	}
+	// Track the client's desired state as a platform resource. Pre-token-burn
+	// so a failure keeps the token consumable and the agent retries.
+	if g.platform != nil {
+		desired, _ := json.Marshal(map[string]string{"clientId": clientID, "clusterId": cluster.ID})
+		if _, err := g.platform.EnsureDesired(ctx, cluster.OrgID, types.PlatformKindKeycloakClient, clientID, desired); err != nil {
+			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("track client platform resource: %w", err))
+		}
 	}
 	if g.secrets == nil {
 		return nil, connect.NewError(connect.CodeUnavailable,

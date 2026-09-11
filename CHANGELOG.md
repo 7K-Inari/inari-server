@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.8.0](https://github.com/7K-Inari/inari-server/compare/v1.7.0...v1.8.0) (2026-09-11)
+
+
+### Features
+
+* bootstrap per-tenant platform resources (M7.W2) ([#51](https://github.com/7K-Inari/inari-server/issues/51)) ([91b5ca1](https://github.com/7K-Inari/inari-server/commit/91b5ca1a056a1652045eb52f2b7f437bba15fb55))
+* platform resources server skeleton (M7) ([#49](https://github.com/7K-Inari/inari-server/issues/49)) ([c744b87](https://github.com/7K-Inari/inari-server/commit/c744b87b317839c5110f850b49092dcd14c11534))
+* **platformresources:** ops reconcile endpoint + tzf platform-manifest teardown (M7.W4) ([#54](https://github.com/7K-Inari/inari-server/issues/54)) ([3fe3011](https://github.com/7K-Inari/inari-server/commit/3fe3011e59b4eca27af68868424e1feb190d0fde))
+* **platformresources:** route agent platform CRD status updates to platform_resources (M7.W3) ([#53](https://github.com/7K-Inari/inari-server/issues/53)) ([f466ffc](https://github.com/7K-Inari/inari-server/commit/f466ffc7a439ed46ba5e5fe631f62d5d9df90b9f))
+* **scaffold:** M8 software templates — engine, OCI sources, approval gates, and hardening ([#56](https://github.com/7K-Inari/inari-server/issues/56)) ([f46856b](https://github.com/7K-Inari/inari-server/commit/f46856b6ccb8201e6009f49923b08cdbcb54b966))
+* **scaffold:** M8 wave 1 foundation — scaffold run schema, types, and config knobs ([#55](https://github.com/7K-Inari/inari-server/issues/55)) ([1fa6f21](https://github.com/7K-Inari/inari-server/commit/1fa6f21196e53262723da2217cf1de08ed51ab27))
+* seed reserved platform pseudo-org for platform cluster registration ([#52](https://github.com/7K-Inari/inari-server/issues/52)) ([db767ec](https://github.com/7K-Inari/inari-server/commit/db767ec460935941e4fcb3c1f8451880d72ec7b0))
+
 ## [1.7.0](https://github.com/7K-Inari/inari-server/compare/v1.6.0...v1.7.0) (2026-09-11)
 
 

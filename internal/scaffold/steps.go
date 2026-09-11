@@ -141,9 +141,24 @@ func stepRegisteringCatalog(ctx context.Context, env *ExecEnv, rc *RunContext, s
 
 // componentNamespace is the tenant-scoped k8s namespace every scaffolded
 // component deploys into (plan §6): <org-slug>--<component-name>. Both
-// inputs are already DNS-safe slugs.
+// inputs are already DNS-safe slugs. Namespaces are DNS-1123 labels (max
+// 63 chars): the component segment is truncated to fit, so a long slug +
+// component can't produce a namespace ArgoCD would reject at apply time.
+// Ownership attribution is unaffected — the catalog item ID and labels
+// carry the full untruncated names.
+const maxNamespaceLen = 63
+
 func componentNamespace(slug, component string) string {
-	return slug + "--" + component
+	ns := slug + "--" + component
+	if len(ns) <= maxNamespaceLen {
+		return ns
+	}
+	keep := maxNamespaceLen - len(slug) - 2
+	if keep < 1 {
+		// Pathological: the org slug alone fills the label.
+		return strings.TrimRight(slug[:maxNamespaceLen], "-")
+	}
+	return slug + "--" + strings.TrimRight(component[:keep], "-")
 }
 
 // componentSlug allows letters, digits and dashes (k8s/DNS-safe repo and

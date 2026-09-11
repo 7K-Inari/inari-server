@@ -235,6 +235,39 @@ func TestComponentNameFallbackAndSanitization(t *testing.T) {
 	}
 }
 
+func TestComponentNamespaceClamp(t *testing.T) {
+	long40 := strings.Repeat("a", 40)
+	cases := []struct {
+		name      string
+		slug      string
+		component string
+		want      string
+	}{
+		{name: "short stays", slug: "acme", component: "payments-api", want: "acme--payments-api"},
+		{name: "exactly 63 stays", slug: strings.Repeat("a", 21), component: long40, want: strings.Repeat("a", 21) + "--" + long40},
+		{name: "long component truncated to 63", slug: long40, component: long40,
+			want: long40 + "--" + strings.Repeat("a", 21)},
+		{name: "trailing dash trimmed", slug: "acme", component: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-c",
+			want: "acme--" + strings.Repeat("b", 57)},
+		{name: "slug alone overflows", slug: strings.Repeat("a", 70) + "-", component: "x",
+			want: strings.Repeat("a", 63)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := componentNamespace(tc.slug, tc.component)
+			if got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+			if len(got) > maxNamespaceLen {
+				t.Fatalf("namespace %q exceeds %d chars", got, maxNamespaceLen)
+			}
+			if strings.HasSuffix(got, "-") {
+				t.Fatalf("namespace %q ends on a dash (not DNS-1123)", got)
+			}
+		})
+	}
+}
+
 func TestCreatingRepoManifestNameOverride(t *testing.T) {
 	dir := t.TempDir()
 	writeScaffoldTemplate(t, dir, "go-service", "1.0.0",

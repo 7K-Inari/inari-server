@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -143,10 +144,38 @@ func (s *Store) ListRuns(ctx context.Context, q db.Querier, orgID string) ([]typ
 // should drive (non-terminal phase, not cancelled). Must be called inside
 // an open transaction so the SKIP LOCKED row lock is held while the runner
 // works. Returns (nil, nil) when nothing is runnable.
-func (s *Store) ClaimNextRunnable(ctx context.Context, q db.Querier) (*types.ScaffoldRun, error) {
-	const sql = `SELECT ` + runCols + ` FROM scaffold_runs
+//
+// Backoff (plan Decision 4): a run whose latest failed step is still
+// inside its retry window — backoff * 2^(attempts-1) since the failure —
+// is skipped. Exponential in attempts, naturally capped by MaxAttempts; no
+// schema change (uses updated_at/attempts).
+func (s *Store) ClaimNextRunnable(ctx context.Context, q db.Querier, backoff time.Duration) (*types.ScaffoldRun, error) {
+	if backoff <= 0 {
+		backoff = 30 * time.Second
+	}
+	const sql = `SELECT ` + runCols + ` FROM scaffold_runs r
 	             WHERE phase IN ('pending','rendering','creating-repo','creating-pipeline','registering-catalog','binding-rbac')
 	               AND cancelled_at IS NULL
+	               AND NOT EXISTS (
+	                 SELECT 1 FROM scaffold_run_steps st
+	                 WHERE st.run_id = r.id AND st.state = 'failed'
+	                   AND st.updated_at + ($2::interval * power(2, greatest(st.attempts - 1, 0))) > now()
+	               )
+	             ORDER BY created_at LIMIT 1 FOR UPDATE OF r SKIP LOCKED`
+	r, err := scanRun(q.QueryRow(ctx, sql, backoff))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	return r, err
+}
+
+// ClaimNextCancelled locks and returns the oldest run that was cancelled
+// but never settled to a terminal phase (e.g. cancelled while idle), so
+// the reconcile loop can finalize it. Same TX/lock contract as
+// ClaimNextRunnable. Returns (nil, nil) when none is pending.
+func (s *Store) ClaimNextCancelled(ctx context.Context, q db.Querier) (*types.ScaffoldRun, error) {
+	const sql = `SELECT ` + runCols + ` FROM scaffold_runs
+	             WHERE cancelled_at IS NOT NULL AND phase NOT IN ('completed','failed')
 	             ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED`
 	r, err := scanRun(q.QueryRow(ctx, sql))
 	if errors.Is(err, pgx.ErrNoRows) {

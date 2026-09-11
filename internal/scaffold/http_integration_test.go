@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/testcontainers/testcontainers-go"
@@ -205,7 +206,7 @@ func TestStoreRoundTrip(t *testing.T) {
 
 	// ClaimNextRunnable returns the pending run inside a tx.
 	err = f.db.WithTx(ctx, func(tx pgx.Tx) error {
-		claimed, err := f.svc.store.ClaimNextRunnable(ctx, tx)
+		claimed, err := f.svc.store.ClaimNextRunnable(ctx, tx, time.Minute)
 		if err != nil || claimed == nil || claimed.ID != run.ID {
 			return fmt.Errorf("claim: %v (%v)", claimed, err)
 		}
@@ -237,7 +238,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 	// Cancelled runs are no longer claimable.
 	err = f.db.WithTx(ctx, func(tx pgx.Tx) error {
-		claimed, err := f.svc.store.ClaimNextRunnable(ctx, tx)
+		claimed, err := f.svc.store.ClaimNextRunnable(ctx, tx, time.Minute)
 		if claimed != nil || err != nil {
 			return fmt.Errorf("cancelled run must not be claimable: %v", claimed)
 		}

@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -93,7 +94,7 @@ type TemplateCatalog interface {
 
 // Service orchestrates template browsing and scaffold run lifecycle: DB
 // projection + audit + outbox in TXs, schema validation, idempotent
-// creation.
+// creation. The reconcile engine (service.go) drives run execution.
 type Service struct {
 	db      *db.DB
 	store   *Store
@@ -103,10 +104,10 @@ type Service struct {
 	log     *slog.Logger
 	newID   func() string
 
-	git       GitProvider
-	upsert    CatalogUpserter
-	groups    GroupBinder
-	registrar AppRegistrar
+	exec *ExecEnv // W3/W4 step-engine seams (wired via WithExecEnv)
+
+	locksMu sync.Mutex
+	locks   map[string]*sync.Mutex // per-run driver serialization
 }
 
 // NewService builds the module service.
@@ -117,13 +118,7 @@ func NewService(d *db.DB, store *Store, auditStore *audit.Store, cat TemplateCat
 	if cfg.MaxAttempts <= 0 {
 		cfg.MaxAttempts = 5
 	}
-	return &Service{db: d, store: store, audit: auditStore, catalog: cat, cfg: cfg, log: log, newID: newUUID}
-}
-
-// WithExecutionSeams wires the backends the W3/W4 step engine consumes.
-func (s *Service) WithExecutionSeams(git GitProvider, up CatalogUpserter, gb GroupBinder, ar AppRegistrar) *Service {
-	s.git, s.upsert, s.groups, s.registrar = git, up, gb, ar
-	return s
+	return &Service{db: d, store: store, audit: auditStore, catalog: cat, cfg: cfg, log: log, newID: newUUID, locks: map[string]*sync.Mutex{}}
 }
 
 // TemplateSummary is the list-row view of a template (UI wizard browse).

@@ -95,6 +95,23 @@ func (a tzfClusterLifecycle) Decommission(ctx context.Context, actor, clusterID 
 	return drained, err
 }
 
+// scaffoldTenantResolver adapts tenancy.Service to the scaffold
+// TenantContextResolver seam (M8.W3): scaffold runs carry the org ID, and
+// templates get the slug-derived namespace + members group path.
+type scaffoldTenantResolver struct{ tenants *tenancy.Service }
+
+func (a scaffoldTenantResolver) ResolveTenant(ctx context.Context, orgID string) (*scaffold.TenantContext, error) {
+	org, err := a.tenants.GetTenantByID(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	return &scaffold.TenantContext{
+		Slug: org.Slug, OrgID: org.ID,
+		Namespace: org.Slug, // TZF tenant-namespace convention
+		GroupPath: tenancy.GroupPath(org.Slug, "members"),
+	}, nil
+}
+
 // policyCheckerAdapter maps the orchestrator's policy seam onto the Policy
 // Service (plan §5.11).
 type policyCheckerAdapter struct{ ps *policyservice.Service }
@@ -277,9 +294,10 @@ func run() error {
 	// sync them into the catalog as source=template items. Best-effort like
 	// the catalog sync above; the dir only changes on redeploy, so a startup
 	// sync suffices.
+	var templatePuller *scaffold.FilePuller
 	if cfg.ScaffoldTemplateDir != "" {
-		puller := &scaffold.FilePuller{Root: cfg.ScaffoldTemplateDir}
-		if n, err := scaffold.SyncTemplates(ctx, puller, catalogSvc); err != nil {
+		templatePuller = &scaffold.FilePuller{Root: cfg.ScaffoldTemplateDir}
+		if n, err := scaffold.SyncTemplates(ctx, templatePuller, catalogSvc); err != nil {
 			slog.Error("template sync failed", "error", err)
 		} else {
 			slog.Info("template sync complete", "templates", n)
@@ -320,12 +338,20 @@ func run() error {
 	orchestratorSvc.WithPolicyChecker(policyCheckerAdapter{policySvc})
 
 	// Scaffolding / Software Templates (M8, plan §4/§10): template browsing
-	// + scaffold run lifecycle API. The step engine / reconcile loop is W3;
-	// execution seams (git, catalog upsert, group binding, app registration)
-	// are wired there, so the service tolerates them being nil here.
+	// + scaffold run lifecycle API. W3 adds the step engine: the reconcile
+	// loop drives runs against the template source; the remaining execution
+	// seams (git, catalog upsert, group binding, app registration) are
+	// wired with the W4 phase steps.
 	scaffoldSvc := scaffold.NewService(database, scaffold.NewStore(), auditStore, catalogSvc,
 		scaffold.Config{MaxAttempts: int(cfg.ScaffoldStepMaxAttempts), GitOrg: cfg.ScaffoldGitOrg}, log)
 	scaffoldHandler := scaffold.NewHandler(scaffoldSvc, svc, authorizer)
+	if templatePuller != nil {
+		scaffoldSvc.WithExecEnv(&scaffold.ExecEnv{
+			Templates: templatePuller,
+			Tenants:   scaffoldTenantResolver{tenants: svc},
+		})
+		go scaffoldSvc.RunReconcileLoop(ctx, cfg.ScaffoldReconcileInterval)
+	}
 
 	// Fleet Manager (plan §5.11): owns ClusterSets (policy service consumes
 	// them via the SetResolver seam), staged rollouts, agent channels,

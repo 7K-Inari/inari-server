@@ -8,6 +8,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -87,21 +89,81 @@ func (s *Service) EnsureDesired(ctx context.Context, orgID string, kind types.Pl
 	return out, nil
 }
 
-// ApplyStatus records a reconciler status report for one resource. Stub for
-// now: the status sink wiring is a separate task.
-func (s *Service) ApplyStatus(ctx context.Context, id string, status types.PlatformResourceStatus, detail string) (*types.PlatformResource, error) {
-	if !status.Valid() {
-		return nil, fmt.Errorf("platformresources: invalid status %q", status)
+// platformKindSuffix marks agent-reported CRDs owned by the platform
+// reconciler (ResourceRef.kind = "<Kind>.platform.inari.io").
+const platformKindSuffix = ".platform.inari.io"
+
+// StatusUpdate is the internal form of an agent status-update event for one
+// platform CRD (mirrors the inventory seam's shape).
+type StatusUpdate struct {
+	Resource   types.ResourceRef
+	Health     string
+	Message    string
+	ObservedAt time.Time
+}
+
+// IsPlatformKind reports whether an agent resource kind belongs to the
+// platform CRD group (routing predicate for the status sink).
+func IsPlatformKind(kind string) bool {
+	return strings.HasSuffix(kind, platformKindSuffix) && len(kind) > len(platformKindSuffix)
+}
+
+// KindForCRD maps an agent CRD kind to the platform resource kind recorded
+// at EnsureDesired time. DNSZone and DNSRecord both report against the
+// dns-zone row (records live under their zone's name).
+func KindForCRD(crd string) (types.PlatformResourceKind, bool) {
+	if !IsPlatformKind(crd) {
+		return "", false
 	}
-	var out *types.PlatformResource
+	switch strings.TrimSuffix(crd, platformKindSuffix) {
+	case "KeycloakRealm":
+		return types.PlatformKindKeycloakRealm, true
+	case "KeycloakClient":
+		return types.PlatformKindKeycloakClient, true
+	case "DNSZone", "DNSRecord":
+		return types.PlatformKindDNSZone, true
+	case "TenantNamespace":
+		return types.PlatformKindTenantNamespace, true
+	}
+	return "", false
+}
+
+// deriveStatus maps agent health to the platform resource status.
+func deriveStatus(health string) types.PlatformResourceStatus {
+	switch health {
+	case "healthy":
+		return types.PlatformStatusReady
+	case "degraded":
+		return types.PlatformStatusFailed
+	default: // progressing, unknown
+		return types.PlatformStatusReconciling
+	}
+}
+
+// ApplyStatus folds one agent status-update into the matching platform
+// resource row (matched on kind+name; CR names embed the tenant slug and are
+// recorded at EnsureDesired time). Unknown or unmatched updates are ignored
+// without error, mirroring inventory's drop-and-log contract.
+func (s *Service) ApplyStatus(ctx context.Context, clusterID string, upd StatusUpdate) (bool, error) {
+	kind, ok := KindForCRD(upd.Resource.Kind)
+	if !ok {
+		return false, nil
+	}
+	status := deriveStatus(upd.Health)
+	var matched bool
+	var r *types.PlatformResource
 	err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
-		r, err := s.store.ApplyStatus(ctx, tx, id, status, detail)
-		if err != nil {
+		var err error
+		var observedAt *time.Time
+		if !upd.ObservedAt.IsZero() {
+			observedAt = &upd.ObservedAt
+		}
+		r, matched, err = s.store.ApplyStatus(ctx, tx, kind, upd.Resource.Name, status, upd.Message, observedAt)
+		if err != nil || !matched {
 			return err
 		}
-		out = r
 		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
-			OrgID: r.OrgID, Actor: "reconciler", Action: "platform_resource.status",
+			OrgID: r.OrgID, Actor: "agent:" + clusterID, Action: "platform-resource.status",
 			ObjectType: "platform_resource", ObjectID: r.ID,
 		}); err != nil {
 			return err
@@ -111,7 +173,7 @@ func (s *Service) ApplyStatus(ctx context.Context, id string, status types.Platf
 		})
 	})
 	if err != nil {
-		return nil, fmt.Errorf("platformresources: apply status: %w", err)
+		return false, fmt.Errorf("platformresources: apply status: %w", err)
 	}
-	return out, nil
+	return matched, nil
 }

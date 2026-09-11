@@ -3,6 +3,7 @@ package platformresources
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -85,15 +86,20 @@ func (s *Store) UpsertDesired(ctx context.Context, q db.Querier, r *types.Platfo
 	return got, false, nil
 }
 
-// ApplyStatus records the reconciler-reported status for one resource.
-func (s *Store) ApplyStatus(ctx context.Context, q db.Querier, id string, status types.PlatformResourceStatus, detail string) (*types.PlatformResource, error) {
+// ApplyStatus records the agent-reported status for the (kind, name) row.
+// Returns the updated resource and whether it matched an existing row.
+func (s *Store) ApplyStatus(ctx context.Context, q db.Querier, kind types.PlatformResourceKind, name string,
+	status types.PlatformResourceStatus, detail string, reportedAt *time.Time) (*types.PlatformResource, bool, error) {
 	const sql = `UPDATE platform_resources
-	             SET status = $2, detail = $3, reported_at = now(), updated_at = now()
-	             WHERE id = $1
+	             SET status = $3, detail = $4, reported_at = COALESCE($5, now()), updated_at = now()
+	             WHERE kind = $1 AND name = $2
 	             RETURNING ` + resourceCols
-	r, err := scanResource(q.QueryRow(ctx, sql, id, status, detail))
+	r, err := scanResource(q.QueryRow(ctx, sql, kind, name, status, detail, reportedAt))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrResourceNotFound
+		return nil, false, nil
 	}
-	return r, err
+	if err != nil {
+		return nil, false, err
+	}
+	return r, true, nil
 }

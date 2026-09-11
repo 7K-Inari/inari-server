@@ -42,3 +42,55 @@ func TestPlatformResourceStatusValid(t *testing.T) {
 		}
 	}
 }
+
+func TestIsPlatformKind(t *testing.T) {
+	for _, kind := range []string{
+		"KeycloakRealm.platform.inari.io",
+		"DNSRecord.platform.inari.io",
+	} {
+		if !IsPlatformKind(kind) {
+			t.Errorf("IsPlatformKind(%q) = false, want true", kind)
+		}
+	}
+	for _, kind := range []string{"", "Deployment", "apps/Deployment", "platform.inari.io"} {
+		if IsPlatformKind(kind) {
+			t.Errorf("IsPlatformKind(%q) = true, want false", kind)
+		}
+	}
+}
+
+func TestKindForCRD(t *testing.T) {
+	cases := map[string]types.PlatformResourceKind{
+		"KeycloakRealm.platform.inari.io":   types.PlatformKindKeycloakRealm,
+		"KeycloakClient.platform.inari.io":  types.PlatformKindKeycloakClient,
+		"DNSZone.platform.inari.io":         types.PlatformKindDNSZone,
+		"DNSRecord.platform.inari.io":       types.PlatformKindDNSZone,
+		"TenantNamespace.platform.inari.io": types.PlatformKindTenantNamespace,
+	}
+	for crd, want := range cases {
+		got, ok := KindForCRD(crd)
+		if !ok || got != want {
+			t.Errorf("KindForCRD(%q) = %q,%v, want %q,true", crd, got, ok, want)
+		}
+	}
+	for _, crd := range []string{"", "Deployment", "Unknown.platform.inari.io"} {
+		if got, ok := KindForCRD(crd); ok {
+			t.Errorf("KindForCRD(%q) = %q,true, want false", crd, got)
+		}
+	}
+}
+
+func TestDeriveStatus(t *testing.T) {
+	cases := map[string]types.PlatformResourceStatus{
+		"healthy":     types.PlatformStatusReady,
+		"progressing": types.PlatformStatusReconciling,
+		"degraded":    types.PlatformStatusFailed,
+		"unknown":     types.PlatformStatusReconciling,
+		"":            types.PlatformStatusReconciling,
+	}
+	for health, want := range cases {
+		if got := deriveStatus(health); got != want {
+			t.Errorf("deriveStatus(%q) = %q, want %q", health, got, want)
+		}
+	}
+}

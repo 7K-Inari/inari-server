@@ -52,11 +52,30 @@ func main() {
 	}
 }
 
-// agentgatewayStatusSink adapts inventory.Service to the gateway StatusSink.
-type agentgatewayStatusSink struct{ inv *inventory.Service }
+// Narrow seams so the router is unit-testable without a database.
+type inventoryStatusSink interface {
+	ApplyStatus(ctx context.Context, clusterID string, upd inventory.StatusUpdate) (bool, error)
+}
 
-func (s agentgatewayStatusSink) ApplyStatus(ctx context.Context, clusterID string, upd agentgateway.StatusUpdate) (bool, error) {
-	return s.inv.ApplyStatus(ctx, clusterID, inventory.StatusUpdate{
+type platformStatusSink interface {
+	ApplyStatus(ctx context.Context, clusterID string, upd platformresources.StatusUpdate) (bool, error)
+}
+
+// statusSinkRouter is the composite agentgateway StatusSink: platform CRD
+// updates ("<Kind>.platform.inari.io") go to the platformresources module,
+// everything else to the Resources Inventory.
+type statusSinkRouter struct {
+	inv  inventoryStatusSink
+	plat platformStatusSink
+}
+
+func (r statusSinkRouter) ApplyStatus(ctx context.Context, clusterID string, upd agentgateway.StatusUpdate) (bool, error) {
+	if platformresources.IsPlatformKind(upd.Resource.Kind) {
+		return r.plat.ApplyStatus(ctx, clusterID, platformresources.StatusUpdate{
+			Resource: upd.Resource, Health: upd.Health, Message: upd.Message, ObservedAt: upd.ObservedAt,
+		})
+	}
+	return r.inv.ApplyStatus(ctx, clusterID, inventory.StatusUpdate{
 		Resource: upd.Resource, Health: upd.Health, Sync: upd.Sync, Message: upd.Message,
 	})
 }
@@ -255,11 +274,12 @@ func run() error {
 
 	inventorySvc := inventory.NewService(database, inventory.NewStore(), auditStore, catalogSvc)
 	inventoryHandler := inventory.NewHandler(inventorySvc, svc, authorizer)
-	gateway.SetStatusSink(agentgatewayStatusSink{inventorySvc})
 
-	// Platform resources handler (M7); the service is constructed with the
-	// tenancy module above and wired into tenancy/agentgateway/tzf.
+	// Platform resources (M7): the composite status sink routes platform CRD
+	// updates to platformresources and everything else to the inventory. The
+	// service itself is constructed with the tenancy module above.
 	platformResourcesHandler := platformresources.NewHandler(platformResourcesSvc, svc, authorizer)
+	gateway.SetStatusSink(statusSinkRouter{inv: inventorySvc, plat: platformResourcesSvc})
 
 	git, err := buildGitProvider(cfg)
 	if err != nil {

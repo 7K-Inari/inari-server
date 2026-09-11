@@ -79,6 +79,14 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Security:    httpserver.SecurityRequirement(),
 	}, h.cancelRun)
 
+	huma.Register(api, huma.Operation{
+		OperationID: "retryScaffoldRun",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/tenants/{org}/scaffold-runs/{runId}/retry",
+		Summary:     "Resume a failed scaffold run from its first non-completed step",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.retryRun)
+
 	// UI-compat adapter (M8.W5): the inari-ui /templates wizard client is
 	// hand-written (inari-ui/src/api/templates.ts) and addresses scaffold
 	// runs as /scaffolds with a flatter shape. These routes delegate to the
@@ -281,6 +289,32 @@ func (h *Handler) cancelRun(ctx context.Context, in *runPathInput) (*struct{}, e
 		return nil, huma.Error409Conflict("run is already terminal")
 	}
 	return nil, err
+}
+
+type retryRunOutput struct {
+	Body struct {
+		Run runView `json:"run"`
+	}
+}
+
+func (h *Handler) retryRun(ctx context.Context, in *runPathInput) (*retryRunOutput, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	if err != nil {
+		return nil, err
+	}
+	run, steps, err := h.svc.RetryRun(ctx, id.Subject, org.ID, in.RunID)
+	if errors.Is(err, ErrRunNotFound) {
+		return nil, huma.Error404NotFound("scaffold run not found")
+	}
+	if errors.Is(err, ErrInvalidState) {
+		return nil, huma.Error409Conflict("only a failed run can be retried")
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := &retryRunOutput{}
+	out.Body.Run = h.toRunView(ctx, run, steps)
+	return out, nil
 }
 
 // --- UI wizard contract (inari-ui/src/api/templates.ts) ------------------

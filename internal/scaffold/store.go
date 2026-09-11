@@ -235,6 +235,28 @@ func (s *Store) UpdateRunPhase(ctx context.Context, q db.Querier, id string, pha
 	return nil
 }
 
+// ResetForRetry resumes a failed run from its first non-completed step
+// (M8.W6): phase → the given next phase, error/cancelled_at cleared,
+// outputs replaced (the caller drops the approval hold), and every
+// non-completed step reset to pending with a fresh attempt budget. Must be
+// called inside an open transaction. Returns ErrInvalidState when the run
+// is not failed.
+func (s *Store) ResetForRetry(ctx context.Context, q db.Querier, id string, next types.ScaffoldPhase, outputs json.RawMessage) error {
+	const runSQL = `UPDATE scaffold_runs SET phase=$2, error='', outputs=$3, cancelled_at=NULL, updated_at=now()
+	             WHERE id=$1 AND phase='failed'`
+	tag, err := q.Exec(ctx, runSQL, id, next, outputs)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrInvalidState
+	}
+	const stepsSQL = `UPDATE scaffold_run_steps SET state='pending', attempts=0, error='', updated_at=now()
+	             WHERE run_id=$1 AND state != 'completed'`
+	_, err = q.Exec(ctx, stepsSQL, id)
+	return err
+}
+
 // SetCancelled raises the cooperative cancel flag. Only non-terminal runs
 // can be cancelled; the reconcile loop (W3) observes cancelled_at before
 // starting each step.

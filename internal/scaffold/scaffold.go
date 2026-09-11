@@ -441,6 +441,64 @@ func (s *Service) TemplateNameForRun(ctx context.Context, run *types.ScaffoldRun
 	return item.Name
 }
 
+// RetryRun resumes a failed run from its first non-completed step (M8.W6,
+// parent plan §5.3): completed steps keep their results, everything else
+// resets with a fresh attempt budget, and the approval hold (if any) is
+// dropped so a requiresApproval template re-gates. Retrying a non-failed
+// run is a conflict; the reconcile loop claims the reset run on its next
+// tick.
+func (s *Service) RetryRun(ctx context.Context, actor, orgID, runID string) (*types.ScaffoldRun, []types.ScaffoldRunStep, error) {
+	run, err := s.store.GetRun(ctx, s.db.Pool, orgID, runID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if run.Phase != types.ScaffoldPhaseFailed {
+		return nil, nil, ErrInvalidState
+	}
+	steps, err := s.store.ListSteps(ctx, s.db.Pool, run.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	next := types.ScaffoldPhasePending
+	for _, st := range steps {
+		if st.State != types.ScaffoldStepCompleted {
+			next = types.ScaffoldPhase(st.Name)
+			break
+		}
+	}
+	outputs, err := deleteOutput(run.Outputs, approvalHoldKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		if err := s.store.ResetForRetry(ctx, tx, run.ID, next, outputs); err != nil {
+			return err
+		}
+		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
+			OrgID: orgID, Actor: actor, Action: "scaffold.run_retried",
+			ObjectType: "scaffold_run", ObjectID: run.ID,
+			Payload: json.RawMessage(fmt.Sprintf(`{"phase":%q}`, next)),
+		}); err != nil {
+			return err
+		}
+		return audit.AppendOutbox(ctx, tx, orgID, types.EventScaffoldRunRetried, types.ScaffoldRunPayload{
+			OrgID: orgID, RunID: run.ID, Version: run.TemplateVersion, Phase: string(next),
+		})
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	run, err = s.store.GetRun(ctx, s.db.Pool, orgID, runID)
+	if err != nil {
+		return nil, nil, err
+	}
+	steps, err = s.store.ListSteps(ctx, s.db.Pool, run.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return run, steps, nil
+}
+
 // CancelRun raises the cooperative cancel flag (plan §5.4): the reconcile
 // loop checks it before each step; already-created outputs are retained.
 // Cancelling a terminal run is a conflict; cancelling twice is a no-op.

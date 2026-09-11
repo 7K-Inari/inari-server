@@ -61,7 +61,25 @@ func (t itTenants) GetTenant(_ context.Context, slug string) (*types.Organizatio
 	return nil, tenancy.ErrOrgNotFound
 }
 
+type itQueue struct{ cmds []*types.AgentCommand }
+
+func (q *itQueue) Enqueue(_ context.Context, cmd *types.AgentCommand) error {
+	q.cmds = append(q.cmds, cmd)
+	return nil
+}
+
+type itClusters struct{ clusters []types.Cluster }
+
+func (c itClusters) ListClusters(context.Context, string) ([]types.Cluster, error) {
+	return c.clusters, nil
+}
+
 func itServer(t *testing.T, az itAuthorizer) (*httptest.Server, *Service) {
+	t.Helper()
+	return itServerWithQueue(t, az, &itQueue{})
+}
+
+func itServerWithQueue(t *testing.T, az itAuthorizer, queue *itQueue) (*httptest.Server, *Service) {
 	t.Helper()
 	ctx := context.Background()
 	pg, err := postgres.Run(ctx, "postgres:16-alpine",
@@ -91,7 +109,10 @@ func itServer(t *testing.T, az itAuthorizer) (*httptest.Server, *Service) {
 		 ('org:1','acme','Acme','kc-1'), ('org:2','acme2','Acme2','kc-2')`); err != nil {
 		t.Fatal(err)
 	}
-	svc := NewService(database, NewStore(), audit.NewStore())
+	svc := NewService(database, NewStore(), audit.NewStore()).
+		WithCommandQueue(queue).
+		WithClusterLister(itClusters{clusters: []types.Cluster{{ID: "cluster:p1"}}}).
+		WithTenantResolver(itTenants{"platform": {ID: "org:platform", Slug: "platform"}})
 	h := NewHandler(svc, itTenants{
 		"acme":  {ID: "org:1", Slug: "acme"},
 		"acme2": {ID: "org:2", Slug: "acme2"},
@@ -103,7 +124,12 @@ func itServer(t *testing.T, az itAuthorizer) (*httptest.Server, *Service) {
 
 func itGet(t *testing.T, srv *httptest.Server, path, token string) (int, map[string]any) {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+	return itDo(t, srv, http.MethodGet, path, token)
+}
+
+func itDo(t *testing.T, srv *httptest.Server, method, path, token string) (int, map[string]any) {
+	t.Helper()
+	req, err := http.NewRequest(method, srv.URL+path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,6 +242,46 @@ func TestPlatformResourcesHTTPEndToEnd(t *testing.T) {
 	// Unknown id: 404.
 	if code, _ := itGet(t, srv, listPath+"/nope", "good"); code != http.StatusNotFound {
 		t.Errorf("unknown id: status = %d, want 404", code)
+	}
+}
+
+func TestPlatformResourcesReconcileEndpoint(t *testing.T) {
+	queue := &itQueue{}
+	srv, svc := itServerWithQueue(t, itAuthorizer{allow: true}, queue)
+	const path = "/api/v1/tenants/acme/platform-resources/reconcile"
+	ctx := context.Background()
+
+	if err := svc.EnsureBaseResources(ctx, &types.Organization{ID: "org:1", Slug: "acme"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Unauthenticated: 401; non-member: 403; authz-denied covered by
+	// itAuthorizer{allow:false} below.
+	if code, _ := itDo(t, srv, http.MethodPost, path, ""); code != http.StatusUnauthorized {
+		t.Errorf("no token: status = %d, want 401", code)
+	}
+	if code, _ := itDo(t, srv, http.MethodPost, path, "outsider"); code != http.StatusForbidden {
+		t.Errorf("outsider: status = %d, want 403", code)
+	}
+
+	code, body := itDo(t, srv, http.MethodPost, path, "good")
+	if code != http.StatusAccepted {
+		t.Fatalf("reconcile: status = %d, want 202 (body %v)", code, body)
+	}
+	if got := body["resourcesReRequested"]; got != float64(3) {
+		t.Errorf("resourcesReRequested = %v, want 3", got)
+	}
+	if got := body["clustersNotified"]; got != float64(1) {
+		t.Errorf("clustersNotified = %v, want 1", got)
+	}
+	if len(queue.cmds) != 1 || queue.cmds[0].ClusterID != "cluster:p1" {
+		t.Fatalf("enqueued = %+v, want one resync for cluster:p1", queue.cmds)
+	}
+
+	// Authz denial → 403.
+	srvDenied, _ := itServer(t, itAuthorizer{allow: false})
+	if code, _ := itDo(t, srvDenied, http.MethodPost, path, "good"); code != http.StatusForbidden {
+		t.Errorf("authz denied: status = %d, want 403", code)
 	}
 }
 

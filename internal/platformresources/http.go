@@ -49,6 +49,14 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Summary:     "Get one tenant platform resource",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.get)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "reconcilePlatformResources",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/tenants/{org}/platform-resources/reconcile",
+		Summary:     "Force re-reconciliation of tenant platform resources (ops)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.reconcile)
 }
 
 func (h *Handler) authorizeOrg(ctx context.Context, slug, relation string) (*types.Organization, *authn.Identity, error) {
@@ -146,5 +154,32 @@ func (h *Handler) get(ctx context.Context, in *getInput) (*getOutput, error) {
 	}
 	out := &getOutput{}
 	out.Body.Resource = toView(r)
+	return out, nil
+}
+
+type reconcileInput struct {
+	Org string `path:"org"`
+}
+
+type reconcileOutput struct {
+	Status int
+	Body   struct {
+		ResourcesReRequested int `json:"resourcesReRequested"`
+		ClustersNotified     int `json:"clustersNotified"`
+	}
+}
+
+func (h *Handler) reconcile(ctx context.Context, in *reconcileInput) (*reconcileOutput, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	if err != nil {
+		return nil, err
+	}
+	count, notified, err := h.svc.RequestReconcile(ctx, id.Subject, org)
+	if err != nil {
+		return nil, err
+	}
+	out := &reconcileOutput{Status: http.StatusAccepted}
+	out.Body.ResourcesReRequested = count
+	out.Body.ClustersNotified = notified
 	return out, nil
 }

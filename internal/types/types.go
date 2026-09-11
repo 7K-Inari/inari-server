@@ -137,7 +137,8 @@ const (
 	EventSecretStoreUpdated = "secretstore.updated"
 	EventSecretStoreDeleted = "secretstore.deleted"
 
-	EventPlatformResourceStatus = "platform_resource.status"
+	EventPlatformResourceStatus    = "platform_resource.status"
+	EventPlatformResourceReconcile = "platform_resource.reconcile_requested"
 )
 
 // ClusterState is the cluster lifecycle state (plan §5.11).
@@ -624,6 +625,15 @@ type PlatformResourcePayload struct {
 	Kind       PlatformResourceKind   `json:"kind"`
 	Name       string                 `json:"name"`
 	Status     PlatformResourceStatus `json:"status,omitempty"`
+}
+
+// PlatformResourceReconcilePayload is the outbox payload for an
+// ops-triggered platform resource reconcile (M7.W4).
+type PlatformResourceReconcilePayload struct {
+	OrgID                string `json:"orgId"`
+	Actor                string `json:"actor"`
+	ResourcesReRequested int    `json:"resourcesReRequested"`
+	ClustersNotified     int    `json:"clustersNotified"`
 }
 
 // TeamSeed is one default team to create with a tenant and the org role it grants.

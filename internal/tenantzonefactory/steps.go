@@ -153,6 +153,30 @@ func stepDrain(ctx context.Context, env *Env, rc *RunContext, step *types.Tenant
 	return true, nil
 }
 
+// PlatformManifestDeleter is the optional Wiring seam that removes the
+// tenant's platform CR manifests from the platform GitOps repo (M7.W4).
+// Wiring implementations without it skip the step.
+type PlatformManifestDeleter interface {
+	DeleteTenantManifests(ctx context.Context, orgSlug string) error
+}
+
+// stepPlatformManifestsDelete removes the tenant's platform CR manifests
+// (tenants/<slug>/) from the platform GitOps repo so the platform operator
+// stops reconciling the torn-down tenant. The zone slug doubles as the org
+// slug (WireZone creates the tenant with zone.Slug). Idempotent — manifest
+// deletion of missing paths is a no-op, so step retries are safe.
+func stepPlatformManifestsDelete(ctx context.Context, env *Env, rc *RunContext, step *types.TenantZoneStep) (bool, error) {
+	deleter, ok := env.Wiring.(PlatformManifestDeleter)
+	if !ok {
+		step.Status = types.ZoneStepSkipped
+		return true, nil
+	}
+	if err := deleter.DeleteTenantManifests(ctx, rc.Zone.Slug); err != nil {
+		return false, fmt.Errorf("tzf: platform manifests delete: %w", err)
+	}
+	return true, nil
+}
+
 func stepEKSDelete(ctx context.Context, env *Env, rc *RunContext, step *types.TenantZoneStep) (bool, error) {
 	prov := rc.Steps[types.ZoneStepEKSProvision]
 	if prov == nil || prov.ExternalRef == "" {

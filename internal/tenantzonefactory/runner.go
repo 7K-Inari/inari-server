@@ -84,6 +84,7 @@ var ProvisionOrder = []string{
 var DecommissionOrder = []string{
 	types.ZoneStepCordon,
 	types.ZoneStepDrain,
+	types.ZoneStepPlatformManifestsDelete,
 	types.ZoneStepEKSDelete,
 	types.ZoneStepAccountClose,
 	types.ZoneStepIdentityRevoke,
@@ -116,12 +117,13 @@ var provisionSteps = map[string]StepFunc{
 }
 
 var decommissionSteps = map[string]StepFunc{
-	types.ZoneStepCordon:         stepCordon,
-	types.ZoneStepDrain:          stepDrain,
-	types.ZoneStepEKSDelete:      stepEKSDelete,
-	types.ZoneStepAccountClose:   stepAccountClose,
-	types.ZoneStepIdentityRevoke: stepIdentityRevoke,
-	types.ZoneStepAuditArchive:   stepAuditArchive,
+	types.ZoneStepCordon:                  stepCordon,
+	types.ZoneStepDrain:                   stepDrain,
+	types.ZoneStepPlatformManifestsDelete: stepPlatformManifestsDelete,
+	types.ZoneStepEKSDelete:               stepEKSDelete,
+	types.ZoneStepAccountClose:            stepAccountClose,
+	types.ZoneStepIdentityRevoke:          stepIdentityRevoke,
+	types.ZoneStepAuditArchive:            stepAuditArchive,
 }
 
 // RunSteps executes the remaining steps of order against env. It stops at

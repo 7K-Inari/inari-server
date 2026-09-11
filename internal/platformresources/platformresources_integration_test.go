@@ -5,6 +5,7 @@ package platformresources_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,11 +13,167 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
+
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/platformresources"
+	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
+
+type fakeQueue struct{ cmds []*types.AgentCommand }
+
+func (f *fakeQueue) Enqueue(_ context.Context, cmd *types.AgentCommand) error {
+	for _, existing := range f.cmds {
+		if existing.ID == cmd.ID {
+			return nil // mirrors Queue.Enqueue idempotent re-enqueue
+		}
+	}
+	f.cmds = append(f.cmds, cmd)
+	return nil
+}
+
+type fakeClusterLister struct{ clusters []types.Cluster }
+
+func (f fakeClusterLister) ListClusters(context.Context, string) ([]types.Cluster, error) {
+	return f.clusters, nil
+}
+
+type fakeTenants map[string]*types.Organization
+
+func (t fakeTenants) GetTenant(_ context.Context, slug string) (*types.Organization, error) {
+	if o, ok := t[slug]; ok {
+		return o, nil
+	}
+	return nil, tenancy.ErrOrgNotFound
+}
+
+func TestPlatformResourcesCascadeOnOrgDelete(t *testing.T) {
+	svc, database := itSetup(t)
+	ctx := context.Background()
+	org := &types.Organization{ID: "org:1", Slug: "acme"}
+	if err := svc.EnsureBaseResources(ctx, org); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Pool.Exec(ctx, `DELETE FROM organizations WHERE id = 'org:1'`); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := database.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM platform_resources WHERE org_id = 'org:1'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("platform_resources rows after org delete = %d, want 0 (ON DELETE CASCADE)", n)
+	}
+}
+
+func TestRequestReconcile(t *testing.T) {
+	svc, database := itSetup(t)
+	ctx := context.Background()
+	if _, err := database.Pool.Exec(ctx,
+		`INSERT INTO organizations (id, slug, display_name, keycloak_org_id) VALUES ('org:platform','platform','Platform','kc-p')`); err != nil {
+		t.Fatal(err)
+	}
+	org := &types.Organization{ID: "org:1", Slug: "acme"}
+	if err := svc.EnsureBaseResources(ctx, org); err != nil {
+		t.Fatal(err)
+	}
+
+	queue := &fakeQueue{}
+	svc.
+		WithCommandQueue(queue).
+		WithClusterLister(fakeClusterLister{clusters: []types.Cluster{{ID: "cluster:p1"}, {ID: "cluster:p2"}}}).
+		WithTenantResolver(fakeTenants{tenancy.PlatformOrgSlug: {ID: "org:platform", Slug: "platform"}})
+
+	count, notified, err := svc.RequestReconcile(ctx, "user-ops", org)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Errorf("resources re-requested = %d, want 3 (base resources)", count)
+	}
+	if notified != 2 {
+		t.Errorf("clusters notified = %d, want 2", notified)
+	}
+	if len(queue.cmds) != 2 {
+		t.Fatalf("enqueued commands = %d, want 2", len(queue.cmds))
+	}
+	seen := map[string]bool{}
+	ids := map[string]bool{}
+	for _, cmd := range queue.cmds {
+		seen[cmd.ClusterID] = true
+		if cmd.Type != agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_RESYNC_REQUEST) {
+			t.Errorf("command type = %q, want resync-request", cmd.Type)
+		}
+		wantPrefix := "platform-resync:" + cmd.ClusterID + ":org:1:"
+		if !strings.HasPrefix(cmd.ID, wantPrefix) {
+			t.Errorf("command id = %q, want prefix %q", cmd.ID, wantPrefix)
+		}
+		if ids[cmd.ID] {
+			t.Errorf("duplicate command id %q — nonce must make every enqueue unique", cmd.ID)
+		}
+		ids[cmd.ID] = true
+	}
+	if !seen["cluster:p1"] || !seen["cluster:p2"] {
+		t.Errorf("commands = %+v, want one per platform cluster", queue.cmds)
+	}
+
+	// Audit + outbox recorded.
+	if n := countOutbox(t, database, types.EventPlatformResourceReconcile); n != 1 {
+		t.Errorf("reconcile outbox events = %d, want 1", n)
+	}
+	var actor string
+	if err := database.Pool.QueryRow(ctx,
+		`SELECT actor FROM audit_events WHERE object_id = 'org:1' AND action = 'platform_resource.reconcile'`).Scan(&actor); err != nil {
+		t.Fatal(err)
+	}
+	if actor != "user-ops" {
+		t.Errorf("audit actor = %q, want user-ops", actor)
+	}
+
+	// Repeat call: nonce-keyed IDs enqueue fresh commands every time — a
+	// deterministic ID would be silently dropped by ON CONFLICT once the
+	// previous resync row is retired (acked rows are never deleted).
+	if _, _, err := svc.RequestReconcile(ctx, "user-ops", org); err != nil {
+		t.Fatal(err)
+	}
+	if len(queue.cmds) != 4 {
+		t.Errorf("after repeat: commands = %d, want 4 (fresh resync per call)", len(queue.cmds))
+	}
+	for _, cmd := range queue.cmds[2:] {
+		if ids[cmd.ID] {
+			t.Errorf("repeat reconcile reused command id %q", cmd.ID)
+		}
+	}
+}
+
+func TestRequestReconcileNoPlatformOrg(t *testing.T) {
+	svc, _ := itSetup(t)
+	ctx := context.Background()
+	org := &types.Organization{ID: "org:1", Slug: "acme"}
+	if err := svc.EnsureBaseResources(ctx, org); err != nil {
+		t.Fatal(err)
+	}
+	queue := &fakeQueue{}
+	svc.
+		WithCommandQueue(queue).
+		WithClusterLister(fakeClusterLister{}).
+		WithTenantResolver(fakeTenants{})
+
+	// Platform org absent: count is still reported, nothing enqueued, no error.
+	count, notified, err := svc.RequestReconcile(ctx, "user-ops", org)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 || notified != 0 {
+		t.Errorf("count/notified = %d/%d, want 3/0", count, notified)
+	}
+	if len(queue.cmds) != 0 {
+		t.Errorf("commands = %d, want 0", len(queue.cmds))
+	}
+}
 
 func itSetup(t *testing.T) (*platformresources.Service, *db.DB) {
 	t.Helper()

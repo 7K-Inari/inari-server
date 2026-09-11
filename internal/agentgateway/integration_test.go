@@ -439,6 +439,60 @@ func TestCommandDispatchAtLeastOnce(t *testing.T) {
 	}
 }
 
+func TestResyncResponseRetiresQueuedResync(t *testing.T) {
+	r := newRig(t, false)
+	ctx := context.Background()
+	cluster, _ := r.registry.CreateCluster(ctx, "user-1", "org:1", "kind-dev", nil)
+	token, _, _ := r.registry.IssueToken(ctx, "user-1", cluster.ID)
+	if _, err := r.gw.RegisterCluster(ctx, registerReq(token)); err != nil {
+		t.Fatal(err)
+	}
+
+	any, err := anypb.New(&agentv1.ResyncRequest{Reason: "ops reconcile acme"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := protojson.Marshal(any)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.gw.Queue().Enqueue(ctx, &types.AgentCommand{
+		ID: "platform-resync:" + cluster.ID + ":org:9", ClusterID: cluster.ID,
+		Type:    agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_RESYNC_REQUEST),
+		Payload: raw,
+	}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	conn := &fakeConn{}
+	sess := r.gw.newSession(mustCluster(t, r, cluster.ID))
+	if err := sess.dispatchDue(ctx, conn); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if len(conn.sent) != 1 ||
+		conn.sent[0].Event.Type != agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_RESYNC_REQUEST) {
+		t.Fatalf("sent = %+v, want one resync-request", conn.sent)
+	}
+
+	respAny, _ := anypb.New(&agentv1.ResyncResponse{StateChecksum: "sum-1"})
+	if _, err := sess.handleEvent(ctx, &agentv1.Event{
+		EventId: "rs-1",
+		Type:    agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_RESYNC_RESPONSE),
+		Payload: respAny,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The resync command is retired — no redelivery past the retry window.
+	r.gw.queue.retryAfter = 0
+	if err := sess.dispatchDue(ctx, conn); err != nil {
+		t.Fatal(err)
+	}
+	if len(conn.sent) != 1 {
+		t.Errorf("retired resync redelivered: sent = %d", len(conn.sent))
+	}
+}
+
 func TestRevokedClusterCannotReconnect(t *testing.T) {
 	r := newRig(t, false)
 	ctx := context.Background()

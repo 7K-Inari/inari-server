@@ -235,6 +235,57 @@ func (p *Provider) OpenPR(ctx context.Context, repo, base, title, body string, f
 	return &gitprovider.Result{CommitSHA: sha, PRURL: pr.HTMLURL}, nil
 }
 
+// DeleteFiles removes paths via a tree whose entries carry a null SHA
+// (GitHub tree API deletion semantics). Missing paths are silently ignored
+// by the API, so retries are idempotent.
+func (p *Provider) DeleteFiles(ctx context.Context, repo, branch string, paths []string, message string) (*gitprovider.Result, error) {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return nil, err
+	}
+	base := fmt.Sprintf("/repos/%s/%s", owner, name)
+	var ref struct {
+		Object struct {
+			SHA string `json:"sha"`
+		} `json:"object"`
+	}
+	if _, err := p.do(ctx, http.MethodGet, base+"/git/ref/heads/"+branch, nil, &ref); err != nil {
+		return nil, err
+	}
+	type treeEntry struct {
+		Path string  `json:"path"`
+		Mode string  `json:"mode"`
+		Type string  `json:"type"`
+		SHA  *string `json:"sha"`
+	}
+	entries := make([]treeEntry, 0, len(paths))
+	for _, path := range paths {
+		entries = append(entries, treeEntry{Path: path, Mode: "100644", Type: "blob", SHA: nil})
+	}
+	var tree struct {
+		SHA string `json:"sha"`
+	}
+	if _, err := p.do(ctx, http.MethodPost, base+"/git/trees", map[string]any{
+		"base_tree": ref.Object.SHA, "tree": entries,
+	}, &tree); err != nil {
+		return nil, err
+	}
+	var commit struct {
+		SHA string `json:"sha"`
+	}
+	if _, err := p.do(ctx, http.MethodPost, base+"/git/commits", map[string]any{
+		"message": message, "tree": tree.SHA, "parents": []string{ref.Object.SHA},
+	}, &commit); err != nil {
+		return nil, err
+	}
+	if _, err := p.do(ctx, http.MethodPatch, base+"/git/refs/heads/"+branch, map[string]any{
+		"sha": commit.SHA, "force": true,
+	}, nil); err != nil {
+		return nil, err
+	}
+	return &gitprovider.Result{CommitSHA: commit.SHA}, nil
+}
+
 func (p *Provider) ReadFile(ctx context.Context, repo, branch, path string) (string, error) {
 	owner, name, err := splitRepo(repo)
 	if err != nil {

@@ -51,7 +51,7 @@ func testRenderData() *RenderData {
 func TestRenderSkeletonContexts(t *testing.T) {
 	dir := t.TempDir()
 	writeFixtureTemplate(t, dir, "go-service", "1.0.0", map[string]string{
-		"README.md":           "# {{ .Values.name }}\nrun: {{ .Run.ID }} ({{ .Run.Name }})\n",
+		"README.md":            "# {{ .Values.name }}\nrun: {{ .Run.ID }} ({{ .Run.Name }})\n",
 		"deploy/app.yaml.tmpl": "namespace: {{ .Tenant.Namespace }}\nslug: {{ .Tenant.Slug }}\norg: {{ .Tenant.OrgID }}\ngroup: {{ .Tenant.GroupPath }}\n",
 	})
 	files, err := renderSkeleton(filepath.Join(dir, "go-service"), testRenderData())

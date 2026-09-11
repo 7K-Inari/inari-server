@@ -62,19 +62,23 @@ func (s *Service) RunReconcileLoop(ctx context.Context, interval time.Duration) 
 	}
 }
 
-// reconcileOnce drains the runnable queue: runnable runs first, then
+// reconcileOnce drives every claimable run once: runnable runs first, then
 // cancelled-but-unsettled runs (idle cancels that must still settle to
-// failed). backoffBase doubles as the backoff unit for failed steps.
+// failed). backoffBase doubles as the backoff unit for failed steps. A run
+// parked in waiting (or skipped by backoff) remains claimable, so the
+// drain loop stops when the claim repeats a run already driven this tick.
 func (s *Service) reconcileOnce(ctx context.Context, backoffBase time.Duration) {
+	seen := map[string]bool{}
 	for {
 		run, err := s.claimNext(ctx, backoffBase)
 		if err != nil {
 			s.log.Warn("scaffold: reconcile claim failed", "error", err)
 			return
 		}
-		if run == nil {
+		if run == nil || seen[run.ID] {
 			return
 		}
+		seen[run.ID] = true
 		if err := s.driveRun(ctx, run); err != nil && ctx.Err() == nil {
 			s.log.Warn("scaffold: drive run failed", "run", run.ID, "error", err)
 		}

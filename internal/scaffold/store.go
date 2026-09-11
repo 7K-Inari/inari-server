@@ -159,10 +159,10 @@ func (s *Store) ClaimNextRunnable(ctx context.Context, q db.Querier, backoff tim
 	               AND NOT EXISTS (
 	                 SELECT 1 FROM scaffold_run_steps st
 	                 WHERE st.run_id = r.id AND st.state = 'failed'
-	                   AND st.updated_at + ($2::interval * power(2, greatest(st.attempts - 1, 0))) > now()
+	                   AND st.updated_at + (make_interval(secs => $1::float8) * power(2, greatest(st.attempts - 1, 0))) > now()
 	               )
 	             ORDER BY created_at LIMIT 1 FOR UPDATE OF r SKIP LOCKED`
-	r, err := scanRun(q.QueryRow(ctx, sql, backoff))
+	r, err := scanRun(q.QueryRow(ctx, sql, backoff.Seconds()))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

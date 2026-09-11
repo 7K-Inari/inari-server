@@ -139,6 +139,12 @@ func stepRegisteringCatalog(ctx context.Context, env *ExecEnv, rc *RunContext, s
 	return true, nil
 }
 
+// componentNamespace is the tenant-scoped k8s namespace every scaffolded
+// component deploys into (plan §6): <org-slug>--<component-name>. Both
+// inputs are already DNS-safe slugs.
+func componentNamespace(slug, component string) string {
+	return slug + "--" + component
+}
 
 // componentSlug allows letters, digits and dashes (k8s/DNS-safe repo and
 // app names).
@@ -331,13 +337,16 @@ func stepCreatingPipeline(ctx context.Context, env *ExecEnv, rc *RunContext, ste
 		branch = "main"
 	}
 	appName := "inari-" + component
+	// The component deploys into its tenant-scoped namespace (plan §6) —
+	// same convention as the rendering step injects into the manifests.
+	destNamespace := componentNamespace(rc.Tenant.Slug, component)
 	manifest := orchestrator.RenderArgoCDApplication(orchestrator.ApplicationParams{
 		Name:           appName,
 		Project:        project,
 		RepoURL:        repo.RepoURL,
 		Path:           path,
 		TargetRevision: branch,
-		DestNamespace:  rc.Tenant.Namespace,
+		DestNamespace:  destNamespace,
 	})
 	cmd := &agentv1.RegisterArgoCDApp{
 		CommandId: rc.Run.ID,
@@ -349,7 +358,7 @@ func stepCreatingPipeline(ctx context.Context, env *ExecEnv, rc *RunContext, ste
 			TargetRevision: branch,
 		},
 		DestinationServer:    "https://kubernetes.default.svc",
-		DestinationNamespace: rc.Tenant.Namespace,
+		DestinationNamespace: destNamespace,
 		SyncPolicy:           &agentv1.SyncPolicy{Automated: true, SelfHeal: true, Prune: true},
 	}
 	if err := enqueueRegisterApp(ctx, env.Registrar, rc.Tenant.ClusterID, rc.Run.ID, cmd); err != nil {

@@ -140,6 +140,17 @@ func stepRendering(_ context.Context, env *ExecEnv, rc *RunContext, step *types.
 	if rc.Tenant != nil {
 		tenant = *rc.Tenant
 	}
+	// Tenant-context binding (plan §6): manifests land in the component's
+	// tenant-scoped namespace <org-slug>--<component-name>, never a shared
+	// one. Deriving the component here (not per-skeleton) keeps every
+	// rendered file on the same namespace.
+	if tenant.Slug != "" {
+		component, err := componentName(rc)
+		if err != nil {
+			return false, err
+		}
+		tenant.Namespace = componentNamespace(tenant.Slug, component)
+	}
 	data := &RenderData{Values: values, Tenant: tenant, Run: RunRef{ID: rc.Run.ID, Name: rc.Run.DisplayName}}
 	files, err := renderSkeleton(pkg.Dir, data)
 	if err != nil {

@@ -123,7 +123,7 @@ func TestStepRenderingRendersAndIsIdempotent(t *testing.T) {
 	if len(res.Files) != 1 || res.Files[0].Path != "deploy/app.yaml" {
 		t.Fatalf("unexpected result: %s", step.Result)
 	}
-	if !strings.Contains(res.Files[0].Content, "name: payments-api") || !strings.Contains(res.Files[0].Content, "ns: acme") {
+	if !strings.Contains(res.Files[0].Content, "name: payments-api") || !strings.Contains(res.Files[0].Content, "ns: acme--payments-api") {
 		t.Fatalf("content not rendered: %q", res.Files[0].Content)
 	}
 	var outputs map[string]any

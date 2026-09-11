@@ -352,8 +352,10 @@ func run() error {
 
 	// Scaffolding / Software Templates (M8, plan §4/§10): template browsing
 	// + scaffold run lifecycle API. W3 added the step engine; W4 wires the
-	// git + pipeline execution seams (repo creation via the git provider,
-	// ArgoCD app registration via the agent queue).
+	// execution seams: repo creation via the git provider, ArgoCD app
+	// registration via the agent queue, component records via the catalog,
+	// and maintainer-team binding via tenancy (KC group → DB role → outbox
+	// → OpenFGA tuple).
 	scaffoldSvc := scaffold.NewService(database, scaffold.NewStore(), auditStore, catalogSvc,
 		scaffold.Config{MaxAttempts: int(cfg.ScaffoldStepMaxAttempts), GitOrg: cfg.ScaffoldGitOrg}, log)
 	scaffoldHandler := scaffold.NewHandler(scaffoldSvc, svc, authorizer)
@@ -361,6 +363,8 @@ func run() error {
 		scaffoldSvc.WithExecEnv(&scaffold.ExecEnv{
 			Git:       git,
 			GitOrg:    cfg.ScaffoldGitOrg,
+			Upsert:    catalogSvc,
+			RBAC:      svc,
 			Registrar: gateway.Queue(),
 			Templates: templatePuller,
 			Tenants:   scaffoldTenantResolver{tenants: svc, clusters: registry},

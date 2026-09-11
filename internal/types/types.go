@@ -380,11 +380,11 @@ type CapabilityRef struct {
 
 // CatalogItem is the normalized catalog entry (plan §5.9).
 type CatalogItem struct {
-	ID             string         `json:"id"`
-	Source         CatalogSource  `json:"source"`
-	Name           string         `json:"name"`
-	DisplayName    string         `json:"displayName"`
-	Description    string         `json:"description"`
+	ID          string        `json:"id"`
+	Source      CatalogSource `json:"source"`
+	Name        string        `json:"name"`
+	DisplayName string        `json:"displayName"`
+	Description string        `json:"description"`
 	// OrgID is the owning tenant for org-scoped items (e.g. scaffolded
 	// components); empty for global curated/platform items. The outbox
 	// payload carries it so the tuple writer grants the org parent tuple.

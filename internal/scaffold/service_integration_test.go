@@ -39,8 +39,10 @@ func TestReconcileDrivesRendering(t *testing.T) {
 	})
 	git := gitprovider.NewFake()
 	reg := &fakeRegistrar{}
+	up := &fakeUpserter{}
+	rbac := &fakeRBACBinder{}
 	f.svc.WithExecEnv(&ExecEnv{
-		Git: git, GitOrg: "acme-platform", Registrar: reg,
+		Git: git, GitOrg: "acme-platform", Registrar: reg, Upsert: up, RBAC: rbac,
 		Templates: &FilePuller{Root: dir}, Tenants: itResolver(),
 	})
 
@@ -55,10 +57,9 @@ func TestReconcileDrivesRendering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Rendering + the W4 git/pipeline steps completed; the run parks at the
-	// registering-catalog placeholder.
-	if got.Phase != types.ScaffoldPhaseRegisteringCatalog {
-		t.Fatalf("phase = %q, want registering-catalog", got.Phase)
+	// All five phase steps completed; the run settled.
+	if got.Phase != types.ScaffoldPhaseCompleted {
+		t.Fatalf("phase = %q, want completed", got.Phase)
 	}
 	if steps[0].Name != "rendering" || steps[0].State != types.ScaffoldStepCompleted {
 		t.Fatalf("rendering step = %+v", steps[0])
@@ -69,7 +70,7 @@ func TestReconcileDrivesRendering(t *testing.T) {
 	}
 	if res.Files[0].Path != "deploy/app.yaml" ||
 		!strings.Contains(res.Files[0].Content, "name: payments-api") ||
-		!strings.Contains(res.Files[0].Content, "ns: acme") ||
+		!strings.Contains(res.Files[0].Content, "ns: acme--payments-api") ||
 		!strings.Contains(res.Files[0].Content, "run: "+run.ID) {
 		t.Fatalf("rendered content wrong: %+v", res.Files[0])
 	}
@@ -89,12 +90,23 @@ func TestReconcileDrivesRendering(t *testing.T) {
 	if len(reg.cmds) != 1 || reg.cmds[0].ClusterID != "cluster:dev-1" {
 		t.Fatalf("enqueued commands = %v", reg.cmds)
 	}
-	if steps[3].Name != "registering-catalog" || steps[3].State != types.ScaffoldStepWaiting || steps[3].Attempts != 0 {
-		t.Fatalf("placeholder step = %+v", steps[3])
+	if steps[3].Name != "registering-catalog" || steps[3].State != types.ScaffoldStepCompleted {
+		t.Fatalf("registering-catalog step = %+v", steps[3])
+	}
+	if len(up.items) != 1 || up.items[0].ID != "component:acme-payments-api" || up.items[0].OrgID != "org:acme" {
+		t.Fatalf("catalog upserts = %+v", up.items)
+	}
+	if steps[4].Name != "binding-rbac" || steps[4].State != types.ScaffoldStepCompleted {
+		t.Fatalf("binding-rbac step = %+v", steps[4])
+	}
+	if len(rbac.teams) != 1 || rbac.teams[0].Name != "payments-api-maintainers" ||
+		rbac.teams[0].Role != types.RoleDeveloper || len(rbac.members) != 1 || rbac.members[0].UserID != "dev-1" {
+		t.Fatalf("rbac binding = teams %+v members %+v", rbac.teams, rbac.members)
 	}
 	var outputs map[string]any
 	if err := json.Unmarshal(got.Outputs, &outputs); err != nil ||
-		outputs["renderedFiles"] != float64(1) || outputs["repoUrl"] != repoRes.RepoURL || outputs["pipelineUrl"] == "" {
+		outputs["renderedFiles"] != float64(1) || outputs["repoUrl"] != repoRes.RepoURL ||
+		outputs["pipelineUrl"] == "" || outputs["catalogItemId"] != "component:acme-payments-api" {
 		t.Fatalf("outputs = %s (%v)", got.Outputs, err)
 	}
 

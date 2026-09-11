@@ -309,7 +309,7 @@ func TestCreatingPipelineHappyPath(t *testing.T) {
 		app.Source.Path != "k8s" || app.Source.TargetRevision != "main" {
 		t.Fatalf("source = %+v", app.Source)
 	}
-	if app.DestinationNamespace != "acme" || app.SyncPolicy == nil || !app.SyncPolicy.Automated {
+	if app.DestinationNamespace != "acme--payments-api" || app.SyncPolicy == nil || !app.SyncPolicy.Automated {
 		t.Fatalf("dest/sync = %q %+v", app.DestinationNamespace, app.SyncPolicy)
 	}
 	var res createPipelineResult

@@ -5,6 +5,8 @@ metadata:
   namespace: {{ .Tenant.Namespace }}
   labels:
     app.kubernetes.io/name: {{ .Values.serviceName }}
+    inari.io/org-id: {{ .Tenant.OrgID }}
+    inari.io/tenant: {{ .Tenant.Slug }}
     inari.io/run: {{ .Run.Name }}
 spec:
   replicas: 1

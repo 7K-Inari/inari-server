@@ -6,6 +6,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -270,5 +271,92 @@ func TestBindingRBACRejectsInvalidManifestRole(t *testing.T) {
 	}
 	if len(b.teams) != 0 {
 		t.Fatal("invalid role hit the binder before validation")
+	}
+}
+
+// recordingTuples is an authz.Store fake capturing written tuples.
+type recordingTuples struct {
+	written []authz.Tuple
+}
+
+func (r *recordingTuples) Check(context.Context, string, string, string) (bool, error) {
+	return false, nil
+}
+func (r *recordingTuples) ListObjects(context.Context, string, string, string) ([]string, error) {
+	return nil, nil
+}
+func (r *recordingTuples) ReadTuples(context.Context, string, string) ([]authz.Tuple, error) {
+	return nil, nil
+}
+func (r *recordingTuples) WriteTuples(_ context.Context, t []authz.Tuple) error {
+	r.written = append(r.written, t...)
+	return nil
+}
+func (r *recordingTuples) DeleteTuples(context.Context, []authz.Tuple) error { return nil }
+
+func hasTuple(tuples []authz.Tuple, t authz.Tuple) bool {
+	for _, x := range tuples {
+		if x == t {
+			return true
+		}
+	}
+	return false
+}
+
+// TestRBACOutboxPayloadsFeedTupleWriter pins the contract between the
+// tenancy outbox events binding-rbac relies on (EventTeamCreated +
+// EventMembershipAdded) and the OpenFGA tuple writer: the maintainers team
+// grants its org role, and the creator joins the team. Combined with the
+// catalog item's org parent tuple (EventCatalogItemUpserted with OrgID,
+// emitted by catalog.UpsertItem for the component record), the team gets
+// deployer/viewer on the component's catalog item via the FGA model's
+// "from parent" relations.
+func TestRBACOutboxPayloadsFeedTupleWriter(t *testing.T) {
+	rec := &recordingTuples{}
+	w := authz.NewTupleWriter(rec)
+	ctx := context.Background()
+
+	teamEvent := func() *types.OutboxEvent {
+		raw, err := json.Marshal(types.TeamCreatedPayload{
+			OrgID: "org:acme", TeamID: "team:payments-api-maintainers",
+			Name: "payments-api-maintainers", Role: types.RoleDeveloper,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &types.OutboxEvent{EventType: types.EventTeamCreated, Payload: raw}
+	}()
+	if err := w.Handle(ctx, teamEvent); err != nil {
+		t.Fatalf("team.created: %v", err)
+	}
+	memberRaw, err := json.Marshal(types.MembershipPayload{
+		OrgID: "org:acme", TeamID: "team:payments-api-maintainers",
+		UserID: "user:dev-1", Role: types.RoleDeveloper,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Handle(ctx, &types.OutboxEvent{EventType: types.EventMembershipAdded, Payload: memberRaw}); err != nil {
+		t.Fatalf("membership.added: %v", err)
+	}
+	catalogRaw, err := json.Marshal(types.CatalogItemPayload{
+		OrgID: "org:acme", ItemID: "component:acme-payments-api", Source: string(types.CatalogSourcePlatform),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Handle(ctx, &types.OutboxEvent{EventType: types.EventCatalogItemUpserted, Payload: catalogRaw}); err != nil {
+		t.Fatalf("catalog.item_upserted: %v", err)
+	}
+
+	want := []authz.Tuple{
+		{User: authz.TeamMemberUserset("team:payments-api-maintainers"), Relation: authz.RelationDeveloper, Object: authz.OrgObject("org:acme")},
+		{User: authz.UserObject("user:dev-1"), Relation: authz.RelationMember, Object: authz.TeamObject("team:payments-api-maintainers")},
+		{User: authz.OrgObject("org:acme"), Relation: authz.RelationParent, Object: authz.CatalogItemObject("component:acme-payments-api")},
+	}
+	for _, tuple := range want {
+		if !hasTuple(rec.written, tuple) {
+			t.Fatalf("missing tuple %+v in %+v", tuple, rec.written)
+		}
 	}
 }

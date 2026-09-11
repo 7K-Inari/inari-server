@@ -1019,3 +1019,26 @@ func TestTenantSettingsHTTP(t *testing.T) {
 		t.Errorf("admin DELETE member: got %d", code)
 	}
 }
+
+type fakePlatformEnsurer struct{ orgs []string }
+
+func (f *fakePlatformEnsurer) EnsureBaseResources(_ context.Context, org *types.Organization) error {
+	f.orgs = append(f.orgs, org.ID)
+	return nil
+}
+
+func TestCreateTenantEnsuresBasePlatformResources(t *testing.T) {
+	database := setupDB(t)
+	ctx := context.Background()
+	ensurer := &fakePlatformEnsurer{}
+	svc := tenancy.NewService(database, newFakeIdP(), tenancy.NewStore(), audit.NewStore()).
+		WithPlatformResources(ensurer)
+
+	org, _, err := svc.CreateTenant(ctx, "user-1", "acme", "Acme Corp")
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	if len(ensurer.orgs) != 1 || ensurer.orgs[0] != org.ID {
+		t.Errorf("EnsureBaseResources calls = %v, want [%s]", ensurer.orgs, org.ID)
+	}
+}

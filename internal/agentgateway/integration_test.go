@@ -4,6 +4,7 @@ package agentgateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -473,4 +474,42 @@ func mustCluster(t *testing.T, r *rig, id string) *types.Cluster {
 		t.Fatal(err)
 	}
 	return c
+}
+
+type fakePlatformEnsurer struct {
+	calls []platformEnsureCall
+}
+
+type platformEnsureCall struct {
+	orgID string
+	kind  types.PlatformResourceKind
+	name  string
+}
+
+func (f *fakePlatformEnsurer) EnsureDesired(_ context.Context, orgID string, kind types.PlatformResourceKind, name string, _ json.RawMessage) (*types.PlatformResource, error) {
+	f.calls = append(f.calls, platformEnsureCall{orgID: orgID, kind: kind, name: name})
+	return &types.PlatformResource{}, nil
+}
+
+func TestRegistrationEnsuresKeycloakClientResource(t *testing.T) {
+	r := newRig(t, false)
+	ensurer := &fakePlatformEnsurer{}
+	r.gw.WithPlatformResources(ensurer)
+	ctx := context.Background()
+
+	cluster, err := r.registry.CreateCluster(ctx, "user-1", "org:1", "kind-dev", nil)
+	if err != nil {
+		t.Fatalf("CreateCluster: %v", err)
+	}
+	token, _, err := r.registry.IssueToken(ctx, "user-1", cluster.ID)
+	if err != nil {
+		t.Fatalf("IssueToken: %v", err)
+	}
+	if _, err := r.gw.RegisterCluster(ctx, registerReq(token)); err != nil {
+		t.Fatalf("RegisterCluster: %v", err)
+	}
+	want := platformEnsureCall{orgID: "org:1", kind: types.PlatformKindKeycloakClient, name: "cluster-" + cluster.ID}
+	if len(ensurer.calls) != 1 || ensurer.calls[0] != want {
+		t.Errorf("EnsureDesired calls = %+v, want [%+v]", ensurer.calls, want)
+	}
 }

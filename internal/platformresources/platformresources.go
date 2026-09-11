@@ -122,9 +122,12 @@ func (s *Service) EnsureDesired(ctx context.Context, orgID string, kind types.Pl
 
 // RequestReconcile force re-reconciliation of a tenant's platform resources
 // (M7.W4 ops flow): every platform cluster's agent gets a durable resync
-// request, so the reconciler re-reports status for all platform CRDs. The
-// command ID is deterministic, so repeat calls are idempotent. Returns the
-// number of resources re-requested and the number of clusters notified.
+// request, so the reconciler re-reports status for all platform CRDs. Every
+// call enqueues a fresh command (nonce-keyed ID): a deterministic ID would
+// collide with the retired (acked) row from the previous reconcile, which
+// ON CONFLICT DO NOTHING would silently drop — making the endpoint one-shot.
+// Returns the number of resources re-requested and the number of clusters
+// notified.
 func (s *Service) RequestReconcile(ctx context.Context, actor string, org *types.Organization) (int, int, error) {
 	resources, err := s.List(ctx, org.ID)
 	if err != nil {
@@ -170,6 +173,9 @@ func (s *Service) RequestReconcile(ctx context.Context, actor string, org *types
 // enqueueResync queues a durable resync request for one platform cluster's
 // agent (same wrap pattern as orchestrator.enqueueAppRegistration). The
 // agent answers with EVENT_TYPE_RESYNC_RESPONSE, which retires the command.
+// The command ID carries a nonce (secretstores precedent) so repeat
+// reconciles always enqueue — at-least-once delivery makes a duplicate
+// resync harmless.
 func (s *Service) enqueueResync(ctx context.Context, clusterID string, org *types.Organization) error {
 	cmd := &agentv1.ResyncRequest{Reason: "ops reconcile " + org.Slug}
 	any, err := anypb.New(cmd)
@@ -181,7 +187,7 @@ func (s *Service) enqueueResync(ctx context.Context, clusterID string, org *type
 		return err
 	}
 	return s.queue.Enqueue(ctx, &types.AgentCommand{
-		ID:        "platform-resync:" + clusterID + ":" + org.ID,
+		ID:        fmt.Sprintf("platform-resync:%s:%s:%d", clusterID, org.ID, time.Now().UnixNano()),
 		ClusterID: clusterID,
 		Type:      agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_RESYNC_REQUEST),
 		Payload:   raw,

@@ -5,6 +5,7 @@ package platformresources_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,15 +101,20 @@ func TestRequestReconcile(t *testing.T) {
 		t.Fatalf("enqueued commands = %d, want 2", len(queue.cmds))
 	}
 	seen := map[string]bool{}
+	ids := map[string]bool{}
 	for _, cmd := range queue.cmds {
 		seen[cmd.ClusterID] = true
 		if cmd.Type != agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_RESYNC_REQUEST) {
 			t.Errorf("command type = %q, want resync-request", cmd.Type)
 		}
-		wantID := "platform-resync:" + cmd.ClusterID + ":org:1"
-		if cmd.ID != wantID {
-			t.Errorf("command id = %q, want %q", cmd.ID, wantID)
+		wantPrefix := "platform-resync:" + cmd.ClusterID + ":org:1:"
+		if !strings.HasPrefix(cmd.ID, wantPrefix) {
+			t.Errorf("command id = %q, want prefix %q", cmd.ID, wantPrefix)
 		}
+		if ids[cmd.ID] {
+			t.Errorf("duplicate command id %q — nonce must make every enqueue unique", cmd.ID)
+		}
+		ids[cmd.ID] = true
 	}
 	if !seen["cluster:p1"] || !seen["cluster:p2"] {
 		t.Errorf("commands = %+v, want one per platform cluster", queue.cmds)
@@ -127,12 +133,19 @@ func TestRequestReconcile(t *testing.T) {
 		t.Errorf("audit actor = %q, want user-ops", actor)
 	}
 
-	// Repeat call: same deterministic command IDs → no duplicates.
+	// Repeat call: nonce-keyed IDs enqueue fresh commands every time — a
+	// deterministic ID would be silently dropped by ON CONFLICT once the
+	// previous resync row is retired (acked rows are never deleted).
 	if _, _, err := svc.RequestReconcile(ctx, "user-ops", org); err != nil {
 		t.Fatal(err)
 	}
-	if len(queue.cmds) != 2 {
-		t.Errorf("after repeat: commands = %d, want still 2", len(queue.cmds))
+	if len(queue.cmds) != 4 {
+		t.Errorf("after repeat: commands = %d, want 4 (fresh resync per call)", len(queue.cmds))
+	}
+	for _, cmd := range queue.cmds[2:] {
+		if ids[cmd.ID] {
+			t.Errorf("repeat reconcile reused command id %q", cmd.ID)
+		}
 	}
 }
 

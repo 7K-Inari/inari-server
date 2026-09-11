@@ -291,14 +291,15 @@ type CapabilitiesIngestedPayload struct {
 	StateChecksum string `json:"stateChecksum"`
 }
 
-// CatalogSource identifies which of the three catalog sources an item came
-// from (plan §5.5).
+// CatalogSource identifies which catalog source an item came from
+// (plan §5.5); "template" marks software-template items (M8 scaffolding).
 type CatalogSource string
 
 const (
 	CatalogSourceDiscovered CatalogSource = "discovered"
 	CatalogSourceCurated    CatalogSource = "curated"
 	CatalogSourcePlatform   CatalogSource = "platform"
+	CatalogSourceTemplate   CatalogSource = "template"
 )
 
 // ApprovalPolicy gates deploy requests per catalog item (plan §5.2).
@@ -1357,3 +1358,70 @@ type TenantZonePayload struct {
 	Step       string `json:"step,omitempty"`
 	StepStatus string `json:"stepStatus,omitempty"`
 }
+
+// ScaffoldPhase is the coarse lifecycle state of a scaffold run (M8
+// scaffolding, plan §4/§10).
+type ScaffoldPhase string
+
+const (
+	ScaffoldPhasePending            ScaffoldPhase = "pending"
+	ScaffoldPhaseRendering          ScaffoldPhase = "rendering"
+	ScaffoldPhaseCreatingRepo       ScaffoldPhase = "creating-repo"
+	ScaffoldPhaseCreatingPipeline   ScaffoldPhase = "creating-pipeline"
+	ScaffoldPhaseRegisteringCatalog ScaffoldPhase = "registering-catalog"
+	ScaffoldPhaseBindingRBAC        ScaffoldPhase = "binding-rbac"
+	ScaffoldPhaseCompleted          ScaffoldPhase = "completed"
+	ScaffoldPhaseFailed             ScaffoldPhase = "failed"
+)
+
+// Scaffold run step states (mirrors the tenant-zone-step vocabulary;
+// "waiting" means an async operation is in flight).
+const (
+	ScaffoldStepPending   = "pending"
+	ScaffoldStepRunning   = "running"
+	ScaffoldStepWaiting   = "waiting"
+	ScaffoldStepCompleted = "completed"
+	ScaffoldStepFailed    = "failed"
+)
+
+// ScaffoldRun is one execution of a software template for a tenant (M8
+// scaffolding, plan §4/§10).
+type ScaffoldRun struct {
+	ID              string          `json:"id"`
+	OrgID           string          `json:"orgId"`
+	TemplateItemID  string          `json:"templateItemId"`
+	TemplateVersion string          `json:"templateVersion"`
+	DisplayName     string          `json:"displayName"`
+	Values          json.RawMessage `json:"values,omitempty"`
+	Phase           ScaffoldPhase   `json:"phase"`
+	Error           string          `json:"error,omitempty"`
+	Outputs         json.RawMessage `json:"outputs,omitempty"`
+	IdempotencyKey  string          `json:"idempotencyKey,omitempty"`
+	CreatedBy       string          `json:"createdBy"`
+	CreatedAt       time.Time       `json:"createdAt"`
+	UpdatedAt       time.Time       `json:"updatedAt"`
+	CancelledAt     *time.Time      `json:"cancelledAt,omitempty"`
+}
+
+// ScaffoldRunStep tracks one resumable step of a scaffold run. Attempts and
+// Result persist progress so restarts resume instead of re-executing (same
+// pattern as TenantZoneStep).
+type ScaffoldRunStep struct {
+	RunID       string          `json:"runId"`
+	Name        string          `json:"name"`
+	State       string          `json:"state"`
+	Attempts    int             `json:"attempts"`
+	MaxAttempts int             `json:"maxAttempts"`
+	Error       string          `json:"error,omitempty"`
+	Result      json.RawMessage `json:"result,omitempty"`
+	UpdatedAt   time.Time       `json:"updatedAt"`
+}
+
+// Scaffold outbox events.
+const (
+	EventScaffoldRunCreated     = "scaffold.run_created"
+	EventScaffoldRunStepUpdated = "scaffold.step_updated"
+	EventScaffoldRunCompleted   = "scaffold.completed"
+	EventScaffoldRunFailed      = "scaffold.failed"
+	EventScaffoldRunCancelled   = "scaffold.cancelled"
+)

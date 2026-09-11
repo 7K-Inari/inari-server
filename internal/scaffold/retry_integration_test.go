@@ -152,3 +152,103 @@ func TestRetryRejectsNonFailedRun(t *testing.T) {
 		t.Fatalf("unknown run retry = %d, want 404", code)
 	}
 }
+
+// TestRetryRejectedGatedRunReGates covers the retry↔approval interplay:
+// a requiresApproval run rejected by the approver settles failed; retrying
+// it drops the approval hold, so the next reconcile tick gates it again
+// with a FRESH approval request (not silently bypassing the gate).
+func TestRetryRejectedGatedRunReGates(t *testing.T) {
+	f := newITFixture(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	writeScaffoldTemplate(t, dir, "go-service", "1.0.0", "  requiresApproval: true\n",
+		map[string]string{"a.txt.tmpl": "{{ .Values.name }}"})
+	ap, resume := approvalEnv(t, f)
+	f.svc.WithExecEnv(&ExecEnv{
+		Git: gitprovider.NewFake(), GitOrg: "acme-platform", Registrar: &fakeRegistrar{},
+		Upsert: &fakeUpserter{}, RBAC: &fakeRBACBinder{},
+		Templates: &FilePuller{Root: dir}, Tenants: itResolver(), Gate: ap,
+	})
+	if _, err := f.db.Pool.Exec(ctx,
+		`UPDATE catalog_items SET approval_policy = 'platform-admin' WHERE id = 'template:go-service'`); err != nil {
+		t.Fatal(err)
+	}
+
+	run, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "go-service", "", "", json.RawMessage(`{"name":"payments-api"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.svc.reconcileOnce(ctx, time.Minute)
+	got, _, err := f.svc.GetRun(ctx, "org:acme", run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Phase != types.ScaffoldPhasePendingApproval {
+		t.Fatalf("phase = %q, want pending_approval", got.Phase)
+	}
+	firstApprovalID := pendingApprovalID(t, f, "org:acme")
+
+	// Rejection settles the run failed with the hold marker still set.
+	if _, err := ap.Decide(ctx, "org:acme", firstApprovalID, "admin-1", false, "not now"); err != nil {
+		t.Fatal(err)
+	}
+	if err := resume.Handle(ctx, decidedEvent(t, "org:acme", firstApprovalID, types.ApprovalStateRejected)); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err = f.svc.GetRun(ctx, "org:acme", run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Phase != types.ScaffoldPhaseFailed {
+		t.Fatalf("phase after rejection = %q, want failed", got.Phase)
+	}
+
+	// Retry: the hold marker must be dropped so the run re-gates.
+	if code, body := f.req(t, "POST", "/api/v1/tenants/acme/scaffold-runs/"+run.ID+"/retry", "good", ""); code != 200 {
+		t.Fatalf("retry = %d: %s", code, body)
+	}
+	got, _, err = f.svc.GetRun(ctx, "org:acme", run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outputValue(got.Outputs, approvalHoldKey) != "" {
+		t.Fatalf("approval hold not dropped on retry: %s", got.Outputs)
+	}
+
+	f.svc.reconcileOnce(ctx, time.Minute)
+	got, _, err = f.svc.GetRun(ctx, "org:acme", run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Phase != types.ScaffoldPhasePendingApproval {
+		t.Fatalf("phase after retried drive = %q, want pending_approval (re-gated)", got.Phase)
+	}
+	secondApprovalID := pendingApprovalID(t, f, "org:acme")
+	if secondApprovalID == firstApprovalID {
+		t.Fatalf("re-gate reused approval %s, want a fresh request", secondApprovalID)
+	}
+	var reqCount int
+	if err := f.db.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM approval_requests WHERE org_id = 'org:acme'`).Scan(&reqCount); err != nil {
+		t.Fatal(err)
+	}
+	if reqCount != 2 {
+		t.Fatalf("approval requests = %d, want 2 (rejected + re-gated)", reqCount)
+	}
+
+	// Approving the fresh request lets the retried run complete.
+	if _, err := ap.Decide(ctx, "org:acme", secondApprovalID, "admin-1", true, "go"); err != nil {
+		t.Fatal(err)
+	}
+	if err := resume.Handle(ctx, decidedEvent(t, "org:acme", secondApprovalID, types.ApprovalStateApproved)); err != nil {
+		t.Fatal(err)
+	}
+	f.svc.reconcileOnce(ctx, time.Minute)
+	got, _, err = f.svc.GetRun(ctx, "org:acme", run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Phase != types.ScaffoldPhaseCompleted {
+		t.Fatalf("final phase = %q (error=%q), want completed", got.Phase, got.Error)
+	}
+}

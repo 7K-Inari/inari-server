@@ -191,6 +191,72 @@ func TestSkeletonDigestDeterministic(t *testing.T) {
 	}
 }
 
+// TestRequiresApprovalSyncMapping covers the W6 approval-gate plumbing:
+// scaffold.requiresApproval parses from the manifest, maps onto the
+// catalog item's platform-admin approval policy in templateSyncPlan, and
+// the custom MarshalJSON keeps requiresApproval alongside the flattened
+// phase keys in the version payload (the shape the UI wizard reads).
+func TestRequiresApprovalSyncMapping(t *testing.T) {
+	root := t.TempDir()
+	writeTemplate(t, root, "gated", func(dir string) {
+		manifest := "name: gated\n" +
+			"version: 0.1.0\n" +
+			"scaffold:\n" +
+			"  requiresApproval: true\n" +
+			"  createRepo:\n" +
+			"    visibility: private\n"
+		if err := os.WriteFile(filepath.Join(dir, "template.yaml"), []byte(manifest), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+	pkgs, err := (&FilePuller{Root: root}).Pull(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pkgs[0].Manifest.Scaffold.requiresApproval() {
+		t.Fatalf("requiresApproval not parsed: %+v", pkgs[0].Manifest.Scaffold)
+	}
+	if pkgs[0].Manifest.Scaffold.Phases["createRepo"]["visibility"] != "private" {
+		t.Fatalf("phase params lost to the inline map: %+v", pkgs[0].Manifest.Scaffold.Phases)
+	}
+	items, versions, err := templateSyncPlan(pkgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if items[0].ApprovalPolicy != types.ApprovalPolicyPlatformAdmin {
+		t.Errorf("approval policy = %q, want platform-admin", items[0].ApprovalPolicy)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(versions[0].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	scaffold, ok := payload["manifest"].(map[string]any)["scaffold"].(map[string]any)
+	if !ok {
+		t.Fatalf("payload scaffold block = %s", versions[0].Payload)
+	}
+	if scaffold["requiresApproval"] != true {
+		t.Errorf("payload requiresApproval = %v", scaffold["requiresApproval"])
+	}
+	if _, ok := scaffold["createRepo"].(map[string]any); !ok {
+		t.Errorf("phase keys not flattened alongside requiresApproval: %v", scaffold)
+	}
+
+	// An ungated template carries no approval policy.
+	root2 := t.TempDir()
+	writeTemplate(t, root2, "plain", nil)
+	pkgs2, err := (&FilePuller{Root: root2}).Pull(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	items2, _, err := templateSyncPlan(pkgs2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if items2[0].ApprovalPolicy != "" {
+		t.Errorf("ungated approval policy = %q, want empty", items2[0].ApprovalPolicy)
+	}
+}
+
 func TestTemplateSyncPlan(t *testing.T) {
 	root := t.TempDir()
 	writeTemplate(t, root, "go-service", nil)

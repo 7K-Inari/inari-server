@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -294,6 +295,43 @@ func TestCreateRunIdempotent(t *testing.T) {
 	if err := f.db.Pool.QueryRow(ctx,
 		`SELECT count(*) FROM outbox WHERE event_type=$1`, types.EventScaffoldRunCreated).Scan(&events); err != nil || events != 2 {
 		t.Fatalf("want 2 run_created outbox events, got %d (%v)", events, err)
+	}
+}
+
+// Concurrent identical submits must collapse to one run: losers of the
+// unique-index race take the ErrIdempotencyConflict replay path.
+func TestCreateRunConcurrentIdempotent(t *testing.T) {
+	f := newITFixture(t)
+	ctx := context.Background()
+	values := json.RawMessage(`{"name":"payments-api"}`)
+
+	const n = 8
+	ids := make([]string, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			r, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "go-service", "", "", values)
+			ids[i], errs[i] = "", err
+			if r != nil {
+				ids[i] = r.ID
+			}
+		}(i)
+	}
+	wg.Wait()
+	for i := 0; i < n; i++ {
+		if errs[i] != nil {
+			t.Fatalf("concurrent create %d failed: %v", i, errs[i])
+		}
+		if ids[i] != ids[0] {
+			t.Fatalf("concurrent creates diverged: %q vs %q", ids[i], ids[0])
+		}
+	}
+	var count int
+	if err := f.db.Pool.QueryRow(ctx, `SELECT count(*) FROM scaffold_runs WHERE org_id='org:acme'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("want exactly 1 run row, got %d (%v)", count, err)
 	}
 }
 

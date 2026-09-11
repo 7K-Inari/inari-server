@@ -32,9 +32,28 @@ func (f *Fetcher) remoteOpts(ctx context.Context) []remote.Option {
 	return []remote.Option{remote.WithAuthFromKeychain(kc), remote.WithContext(ctx)}
 }
 
+// Artifact is one pulled oras directory-push artifact: the resolved
+// content digest, the manifest artifact type (empty for legacy pushes
+// that don't set it), and every layer keyed by its title-annotation file
+// name.
+type Artifact struct {
+	MediaType string
+	Digest    string // "sha256:..."
+	Files     map[string][]byte
+}
+
 // FetchDir pulls an oras directory-push artifact and returns every layer
 // keyed by its title-annotation file name.
 func (f *Fetcher) FetchDir(ctx context.Context, ref string) (map[string][]byte, error) {
+	a, err := f.Fetch(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	return a.Files, nil
+}
+
+// Fetch pulls an oras directory-push artifact with its metadata.
+func (f *Fetcher) Fetch(ctx context.Context, ref string) (*Artifact, error) {
 	opts := []name.Option{}
 	if f.Insecure {
 		opts = append(opts, name.Insecure)
@@ -88,5 +107,5 @@ func (f *Fetcher) FetchDir(ctx context.Context, ref string) (map[string][]byte, 
 		}
 		files[title] = raw
 	}
-	return files, nil
+	return &Artifact{MediaType: string(manifest.ArtifactType), Digest: desc.Digest.String(), Files: files}, nil
 }

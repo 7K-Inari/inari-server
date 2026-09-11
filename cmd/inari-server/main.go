@@ -304,13 +304,30 @@ func run() error {
 	}
 
 	// M8.W2: software templates ship in a local dir (baked into the image);
-	// sync them into the catalog as source=template items. Best-effort like
-	// the catalog sync above; the dir only changes on redeploy, so a startup
-	// sync suffices.
-	var templatePuller *scaffold.FilePuller
-	if cfg.ScaffoldTemplateDir != "" {
-		templatePuller = &scaffold.FilePuller{Root: cfg.ScaffoldTemplateDir}
-		if n, err := scaffold.SyncTemplates(ctx, templatePuller, catalogSvc); err != nil {
+	// sync them into the catalog as source=template items. M8.W6: setting
+	// INARI_SCAFFOLD_TEMPLATE_OCI_INDEX_REF switches ingestion to the OCI
+	// registry (application/vnd.inari.template.v1 artifacts, cosign-verified
+	// when INARI_SCAFFOLD_TEMPLATE_VERIFY=true). Best-effort like the
+	// catalog sync above; a startup sync suffices for the file source, and
+	// the OCI source re-pulls lazily via Get on cache miss.
+	var templateSource scaffold.TemplateSource
+	if cfg.ScaffoldTemplateOCIIndexRef != "" {
+		ociPuller := &scaffold.OCIRegistryPuller{
+			IndexRef: cfg.ScaffoldTemplateOCIIndexRef,
+			CacheDir: cfg.ScaffoldTemplateCacheDir,
+		}
+		if cfg.ScaffoldTemplateVerify {
+			ociPuller.Verifier = &scaffold.CosignVerifier{
+				CertIdentityRegexp:   cfg.ScaffoldTemplateCosignIdentity,
+				CertOidcIssuerRegexp: cfg.ScaffoldTemplateCosignIssuer,
+			}
+		}
+		templateSource = ociPuller
+	} else if cfg.ScaffoldTemplateDir != "" {
+		templateSource = &scaffold.FilePuller{Root: cfg.ScaffoldTemplateDir}
+	}
+	if templateSource != nil {
+		if n, err := scaffold.SyncTemplates(ctx, templateSource, catalogSvc); err != nil {
 			slog.Error("template sync failed", "error", err)
 		} else {
 			slog.Info("template sync complete", "templates", n)
@@ -359,14 +376,14 @@ func run() error {
 	scaffoldSvc := scaffold.NewService(database, scaffold.NewStore(), auditStore, catalogSvc,
 		scaffold.Config{MaxAttempts: int(cfg.ScaffoldStepMaxAttempts), GitOrg: cfg.ScaffoldGitOrg}, log)
 	scaffoldHandler := scaffold.NewHandler(scaffoldSvc, svc, authorizer)
-	if templatePuller != nil {
+	if templateSource != nil {
 		scaffoldSvc.WithExecEnv(&scaffold.ExecEnv{
 			Git:       git,
 			GitOrg:    cfg.ScaffoldGitOrg,
 			Upsert:    catalogSvc,
 			RBAC:      svc,
 			Registrar: gateway.Queue(),
-			Templates: templatePuller,
+			Templates: templateSource,
 			Tenants:   scaffoldTenantResolver{tenants: svc, clusters: registry},
 		})
 		go scaffoldSvc.RunReconcileLoop(ctx, cfg.ScaffoldReconcileInterval)

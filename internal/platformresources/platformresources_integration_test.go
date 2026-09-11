@@ -108,6 +108,48 @@ func TestEnsureDesiredIdempotent(t *testing.T) {
 	}
 }
 
+func TestEnsureDesiredConcurrent(t *testing.T) {
+	svc, database := itSetup(t)
+	ctx := context.Background()
+
+	// Simultaneous upserts of the same (org, kind, name) must not error or
+	// create duplicate rows.
+	const workers = 8
+	errs := make(chan error, workers)
+	ids := make(chan string, workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			r, err := svc.EnsureDesired(ctx, "org:1", types.PlatformKindDNSZone, "acme.example.com", nil)
+			if err != nil {
+				errs <- err
+				return
+			}
+			ids <- r.ID
+		}()
+	}
+	var firstID string
+	for i := 0; i < workers; i++ {
+		select {
+		case err := <-errs:
+			t.Fatalf("concurrent EnsureDesired: %v", err)
+		case id := <-ids:
+			if firstID == "" {
+				firstID = id
+			} else if id != firstID {
+				t.Errorf("id = %q, want stable id %q", id, firstID)
+			}
+		}
+	}
+	var n int
+	if err := database.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM platform_resources WHERE org_id = 'org:1'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("rows = %d, want 1", n)
+	}
+}
+
 func TestApplyStatusAndGet(t *testing.T) {
 	svc, _ := itSetup(t)
 	ctx := context.Background()

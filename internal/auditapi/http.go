@@ -186,11 +186,11 @@ func (h *Handler) listUI(ctx context.Context, in *listAuditUIInput) (*listAuditU
 	return out, nil
 }
 
-// exportCSV streams the same events as CSV. Returned via a huma stream
-// response with text/csv content type.
+// exportCSV returns the same events as a text/csv download (raw body,
+// same pattern as the cluster install-manifest endpoint).
 func (h *Handler) exportCSV(ctx context.Context, in *listAuditUIInput) (*struct {
 	ContentType string `header:"Content-Type"`
-	Body        string
+	Body        []byte
 }, error) {
 	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
 	if err != nil {
@@ -211,6 +211,6 @@ func (h *Handler) exportCSV(ctx context.Context, in *listAuditUIInput) (*struct 
 	cw.Flush()
 	return &struct {
 		ContentType string `header:"Content-Type"`
-		Body        string
-	}{ContentType: "text/csv; charset=utf-8", Body: b.String()}, nil
+		Body        []byte
+	}{ContentType: "text/csv; charset=utf-8", Body: []byte(b.String())}, nil
 }

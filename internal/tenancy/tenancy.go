@@ -34,10 +34,15 @@ type IdentityProvider interface {
 }
 
 // DefaultTeams are created with every tenant; each grants its org role.
+// org-admins is the anchor team for the tenant's first administrator —
+// without it no one could ever reach the org-admin role (every
+// admin-granting route is org-admin gated, and the deletion/RBAC routes
+// require it), which the live e2e run proved makes tenants unmanageable.
 var DefaultTeams = []struct {
 	Name string
 	Role types.Role
 }{
+	{"org-admins", types.RoleOrgAdmin},
 	{"platform-team", types.RolePlatformEngineer},
 	{"developers", types.RoleDeveloper},
 	{"viewers", types.RoleViewer},
@@ -58,6 +63,11 @@ var (
 
 // PlatformTeamName is the default team that receives the tenant creator.
 const PlatformTeamName = "platform-team"
+
+// OrgAdminsTeamName is the anchor team granting the org-admin role; it is
+// also created with every tenant and receives the tenant creator so the
+// first administrator exists without a circular admin-gated grant.
+const OrgAdminsTeamName = "org-admins"
 
 // membersTeamName is the team materialized for a brokered IdP's Hardcoded
 // Group mapper target (tenant-<slug>/members), granting org viewer.
@@ -567,41 +577,59 @@ func (s *Service) CreateTenant(ctx context.Context, actor, slug, displayName str
 		}
 	}
 	// Creator auto-membership: the creating user joins the Keycloak
-	// Organization (drives the org token claim) and the platform-team group;
-	// the DB row + outbox event seed OpenFGA via the tuple writer.
+	// Organization (drives the org token claim), the org-admins group
+	// (tenant's first administrator — the only non-circular path to the
+	// org-admin role) and the platform-team group; the DB rows + outbox
+	// events seed OpenFGA via the tuple writer.
 	if actor != "" {
 		if err := s.idp.AddOrganizationMember(ctx, kcOrgID, actor); err != nil {
 			return nil, nil, fmt.Errorf("tenancy: add creator to org: %w", err)
 		}
-		if err := s.idp.AddGroupMember(ctx, GroupPath(slug, PlatformTeamName), actor); err != nil {
-			return nil, nil, fmt.Errorf("tenancy: add creator to %s: %w", PlatformTeamName, err)
-		}
-		var platformTeam *types.Team
-		for i := range teams {
-			if teams[i].Name == PlatformTeamName {
-				platformTeam = &teams[i]
+		findTeam := func(name string) *types.Team {
+			for i := range teams {
+				if teams[i].Name == name {
+					return &teams[i]
+				}
 			}
+			return nil
 		}
-		if platformTeam == nil {
-			return nil, nil, fmt.Errorf("tenancy: %s not among default teams", PlatformTeamName)
+		joins := []struct {
+			team *types.Team
+			role types.Role
+		}{
+			{findTeam(OrgAdminsTeamName), types.RoleOrgAdmin},
+			{findTeam(PlatformTeamName), types.RolePlatformEngineer},
+		}
+		for _, j := range joins {
+			if j.team == nil {
+				return nil, nil, fmt.Errorf("tenancy: default team not found for role %s", j.role)
+			}
+			if err := s.idp.AddGroupMember(ctx, j.team.KeycloakGroupPath, actor); err != nil {
+				return nil, nil, fmt.Errorf("tenancy: add creator to %s: %w", j.team.Name, err)
+			}
 		}
 		err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
 			if err := s.store.UpsertUser(ctx, tx, &types.User{ID: actor}); err != nil {
 				return err
 			}
-			if _, err := s.store.AddMembership(ctx, tx, &types.Membership{
-				UserID: actor, OrgID: org.ID, TeamID: platformTeam.ID, Role: types.RolePlatformEngineer,
-			}); err != nil {
-				return err
+			for _, j := range joins {
+				if _, err := s.store.AddMembership(ctx, tx, &types.Membership{
+					UserID: actor, OrgID: org.ID, TeamID: j.team.ID, Role: j.role,
+				}); err != nil {
+					return err
+				}
+				if err := s.audit.Record(ctx, tx, &types.AuditEvent{
+					OrgID: org.ID, Actor: actor, Action: "membership.added", ObjectType: "user", ObjectID: actor,
+				}); err != nil {
+					return err
+				}
+				if err := audit.AppendOutbox(ctx, tx, org.ID, types.EventMembershipAdded, types.MembershipPayload{
+					OrgID: org.ID, TeamID: j.team.ID, UserID: actor, Role: j.role,
+				}); err != nil {
+					return err
+				}
 			}
-			if err := s.audit.Record(ctx, tx, &types.AuditEvent{
-				OrgID: org.ID, Actor: actor, Action: "membership.added", ObjectType: "user", ObjectID: actor,
-			}); err != nil {
-				return err
-			}
-			return audit.AppendOutbox(ctx, tx, org.ID, types.EventMembershipAdded, types.MembershipPayload{
-				OrgID: org.ID, TeamID: platformTeam.ID, UserID: actor, Role: types.RolePlatformEngineer,
-			})
+			return nil
 		})
 		if err != nil {
 			return nil, nil, err

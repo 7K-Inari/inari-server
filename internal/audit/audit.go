@@ -41,10 +41,14 @@ func (s *Store) List(ctx context.Context, q db.Querier, orgID string, limit int)
 }
 
 // EventFilter narrows an audit listing; empty fields match everything.
+// From/To are RFC3339 bounds on created_at (inclusive).
 type EventFilter struct {
-	Action string
-	Actor  string
-	Limit  int
+	Action     string
+	Actor      string
+	ObjectType string
+	From       string
+	To         string
+	Limit      int
 }
 
 // ListFiltered returns audit events for an org matching f, newest first.
@@ -58,8 +62,11 @@ func (s *Store) ListFiltered(ctx context.Context, q db.Querier, orgID string, f 
 	             WHERE org_id = $1
 	               AND ($2 = '' OR action = $2)
 	               AND ($3 = '' OR actor = $3)
-	             ORDER BY created_at DESC LIMIT $4`
-	rows, err := q.Query(ctx, sql, orgID, f.Action, f.Actor, limit)
+	               AND ($4 = '' OR object_type = $4)
+	               AND ($5 = '' OR created_at >= $5::timestamptz)
+	               AND ($6 = '' OR created_at <= $6::timestamptz)
+	             ORDER BY created_at DESC LIMIT $7`
+	rows, err := q.Query(ctx, sql, orgID, f.Action, f.Actor, f.ObjectType, f.From, f.To, limit)
 	if err != nil {
 		return nil, fmt.Errorf("audit: list: %w", err)
 	}

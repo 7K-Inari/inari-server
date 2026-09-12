@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -327,6 +328,14 @@ func syncPlan(pkgs []Package) ([]*types.CatalogItem, []*types.CatalogItemVersion
 	items := make([]*types.CatalogItem, 0, len(pkgs))
 	versions := make([]*types.CatalogItemVersion, 0, len(pkgs))
 	for _, p := range pkgs {
+		// Defense against unusable rows: a package without a version can
+		// never be deployed and renders as an empty '' row in every view
+		// (live incident, 2026-09-12). Skip it rather than poison the
+		// catalog — the sync summary still reports the other packages.
+		if p.Version == "" {
+			slog.Warn("catalog sync: skipping package with empty version", "name", p.Name, "ref", p.OCIRef)
+			continue
+		}
 		itemID := itemIDForPackage(p)
 		payload := map[string]any{}
 		if len(p.RGD) > 0 {

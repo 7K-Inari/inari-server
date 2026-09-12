@@ -196,6 +196,16 @@ func (s *Service) RotateIdentityClientSecret(ctx context.Context, actor, slug, c
 	return secret, nil
 }
 
+// GroupMemberCount returns the number of Keycloak users in a group path,
+// best-effort for the RBAC matrix view.
+func (s *Service) GroupMemberCount(ctx context.Context, groupPath string) (int, error) {
+	ids, err := s.idp.ListGroupMembers(ctx, groupPath)
+	if err != nil {
+		return 0, err
+	}
+	return len(ids), nil
+}
+
 // SetRBACMappings applies the declarative team → role mapping set
 // atomically: every mapping is validated first, then all role changes land
 // in one TX with a single audit row and one outbox event driving the

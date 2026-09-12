@@ -94,6 +94,14 @@ func (h *Handler) registerIdentityRoutes(api huma.API) {
 	}, h.listIdentityScopes)
 
 	huma.Register(api, huma.Operation{
+		OperationID: "getRBACMatrix",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/tenants/{org}/rbac",
+		Summary:     "RBAC matrix: tenant Keycloak groups × cluster roles with current mappings",
+		Security:    sec,
+	}, h.getRBACMatrix)
+
+	huma.Register(api, huma.Operation{
 		OperationID: "putRBACMappings",
 		Method:      http.MethodPut,
 		Path:        "/api/v1/tenants/{org}/rbac/mappings",
@@ -330,6 +338,76 @@ type putRBACMappingsOutput struct {
 	Body struct {
 		Changes []types.TeamRoleChange `json:"changes"`
 	}
+}
+
+// RBAC matrix response shapes — pinned to the console's hand-written client
+// (inari-ui src/api/rbac.ts); change only together with that contract.
+type rbacGroup struct {
+	Path        string `json:"path"`
+	Team        string `json:"team"`
+	MemberCount int    `json:"memberCount"`
+}
+
+type rbacClusterRole struct {
+	Name        string `json:"name"`
+	Kind        string `json:"kind"` // operator | viewer
+	Description string `json:"description"`
+}
+
+type rbacMapping struct {
+	GroupPath   string `json:"groupPath"`
+	ClusterRole string `json:"clusterRole"`
+}
+
+type rbacMatrix struct {
+	Groups   []rbacGroup       `json:"groups"`
+	Roles    []rbacClusterRole `json:"roles"`
+	Mappings []rbacMapping     `json:"mappings"`
+}
+
+type getRBACMatrixInput struct {
+	Org string `path:"org"`
+}
+
+type getRBACMatrixOutput struct {
+	Body struct {
+		RBAC rbacMatrix `json:"rbac"`
+	}
+}
+
+func (h *Handler) getRBACMatrix(ctx context.Context, in *getRBACMatrixInput) (*getRBACMatrixOutput, error) {
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	if err != nil {
+		return nil, err
+	}
+	roles := []rbacClusterRole{
+		{Name: "tenant-" + org.Slug + "-admin", Kind: "operator", Description: "Full tenant administration (org-admin)"},
+		{Name: "tenant-" + org.Slug + "-operator", Kind: "operator", Description: "Operate tenant resources (platform-engineer)"},
+		{Name: "tenant-" + org.Slug + "-editor", Kind: "operator", Description: "Deploy and edit resources (developer)"},
+		{Name: "tenant-" + org.Slug + "-viewer", Kind: "viewer", Description: "Read-only access (viewer)"},
+	}
+	roleName := map[types.Role]string{
+		types.RoleOrgAdmin:         roles[0].Name,
+		types.RolePlatformEngineer: roles[1].Name,
+		types.RoleDeveloper:        roles[2].Name,
+		types.RoleViewer:           roles[3].Name,
+	}
+	teams, err := h.svc.ListTeams(ctx, org.ID)
+	if err != nil {
+		return nil, err
+	}
+	matrix := rbacMatrix{Roles: roles, Groups: []rbacGroup{}, Mappings: []rbacMapping{}}
+	for _, t := range teams {
+		count := 0
+		if ids, err := h.svc.GroupMemberCount(ctx, t.KeycloakGroupPath); err == nil {
+			count = ids
+		}
+		matrix.Groups = append(matrix.Groups, rbacGroup{Path: t.KeycloakGroupPath, Team: t.Name, MemberCount: count})
+		matrix.Mappings = append(matrix.Mappings, rbacMapping{GroupPath: t.KeycloakGroupPath, ClusterRole: roleName[t.Role]})
+	}
+	out := &getRBACMatrixOutput{}
+	out.Body.RBAC = matrix
+	return out, nil
 }
 
 func (h *Handler) putRBACMappings(ctx context.Context, in *putRBACMappingsInput) (*putRBACMappingsOutput, error) {

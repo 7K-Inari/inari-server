@@ -6,8 +6,10 @@ package auditapi
 
 import (
 	"context"
+	"encoding/csv"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -46,6 +48,22 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Summary:     "List org audit events, newest first (filterable by action and actor)",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.list)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "listAuditLog",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/tenants/{org}/audit",
+		Summary:     "Org audit log in the console's shape (filterable by actor/action/objectType/from/to)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.listUI)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "exportAuditLog",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/tenants/{org}/audit/export",
+		Summary:     "Org audit log as CSV (same filters as the list)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.exportCSV)
 }
 
 func (h *Handler) authorizeOrg(ctx context.Context, slug, relation string) (*types.Organization, *authn.Identity, error) {
@@ -103,4 +121,96 @@ func (h *Handler) list(ctx context.Context, in *listEventsInput) (*listEventsOut
 		out.Body.Events = []types.AuditEvent{}
 	}
 	return out, nil
+}
+
+// --- Console-compat surface (inari-ui src/api/audit.ts contract) ----------
+
+// uiAuditEvent mirrors the console's AuditEvent shape exactly.
+type uiAuditEvent struct {
+	ID         string `json:"id"`
+	Tenant     string `json:"tenant"`
+	Actor      string `json:"actor"`
+	Action     string `json:"action"`
+	ObjectType string `json:"objectType"`
+	ObjectName string `json:"objectName"`
+	Detail     string `json:"detail"`
+	At         string `json:"at"`
+}
+
+type listAuditUIInput struct {
+	Org        string `path:"org"`
+	Actor      string `query:"actor"`
+	Action     string `query:"action"`
+	ObjectType string `query:"objectType"`
+	From       string `query:"from"`
+	To         string `query:"to"`
+	Limit      int    `query:"limit"`
+}
+
+type listAuditUIOutput struct {
+	Body struct {
+		Events []uiAuditEvent `json:"events"`
+	}
+}
+
+func toUIEvents(slug string, events []types.AuditEvent) []uiAuditEvent {
+	out := make([]uiAuditEvent, 0, len(events))
+	for _, ev := range events {
+		out = append(out, uiAuditEvent{
+			ID:         ev.ID,
+			Tenant:     slug,
+			Actor:      ev.Actor,
+			Action:     ev.Action,
+			ObjectType: ev.ObjectType,
+			ObjectName: ev.ObjectID,
+			Detail:     string(ev.Payload),
+			At:         ev.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		})
+	}
+	return out
+}
+
+func (h *Handler) listUI(ctx context.Context, in *listAuditUIInput) (*listAuditUIOutput, error) {
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	if err != nil {
+		return nil, err
+	}
+	events, err := h.store.ListFiltered(ctx, h.db.Pool, org.ID, audit.EventFilter{
+		Action: in.Action, Actor: in.Actor, ObjectType: in.ObjectType, From: in.From, To: in.To, Limit: in.Limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := &listAuditUIOutput{}
+	out.Body.Events = toUIEvents(org.Slug, events)
+	return out, nil
+}
+
+// exportCSV streams the same events as CSV. Returned via a huma stream
+// response with text/csv content type.
+func (h *Handler) exportCSV(ctx context.Context, in *listAuditUIInput) (*struct {
+	ContentType string `header:"Content-Type"`
+	Body        string
+}, error) {
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	if err != nil {
+		return nil, err
+	}
+	events, err := h.store.ListFiltered(ctx, h.db.Pool, org.ID, audit.EventFilter{
+		Action: in.Action, Actor: in.Actor, ObjectType: in.ObjectType, From: in.From, To: in.To, Limit: in.Limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var b strings.Builder
+	b.WriteString("id,tenant,actor,action,objectType,objectName,detail,at\n")
+	cw := csv.NewWriter(&b)
+	for _, ev := range toUIEvents(org.Slug, events) {
+		_ = cw.Write([]string{ev.ID, ev.Tenant, ev.Actor, ev.Action, ev.ObjectType, ev.ObjectName, ev.Detail, ev.At})
+	}
+	cw.Flush()
+	return &struct {
+		ContentType string `header:"Content-Type"`
+		Body        string
+	}{ContentType: "text/csv; charset=utf-8", Body: b.String()}, nil
 }

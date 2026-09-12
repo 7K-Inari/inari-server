@@ -183,8 +183,21 @@ func (s *OpenFGAStore) WriteTuples(ctx context.Context, tuples []Tuple) error {
 		keys = append(keys, openfga.TupleKey{User: t.User, Relation: t.Relation, Object: t.Object})
 	}
 	_, err := s.client.Write(ctx).Body(client.ClientWriteRequest{Writes: keys}).Execute()
-	if err != nil {
+	if err == nil {
+		return nil
+	}
+	// Tuple sync must be idempotent: reconcilers (Keycloak group sync) and the
+	// outbox tuple writer race to the same tuples, and OpenFGA fails the whole
+	// batch when any tuple already exists. Fall back to per-tuple writes and
+	// treat "already exists" as success.
+	if !isTupleExistsErr(err) {
 		return fmt.Errorf("authz: write tuples: %w", err)
+	}
+	for i, k := range keys {
+		_, err := s.client.Write(ctx).Body(client.ClientWriteRequest{Writes: []client.ClientTupleKey{k}}).Execute()
+		if err != nil && !isTupleExistsErr(err) {
+			return fmt.Errorf("authz: write tuple %d (%s#%s@%s): %w", i, tuples[i].Object, tuples[i].Relation, tuples[i].User, err)
+		}
 	}
 	return nil
 }
@@ -195,10 +208,32 @@ func (s *OpenFGAStore) DeleteTuples(ctx context.Context, tuples []Tuple) error {
 		keys = append(keys, openfga.TupleKeyWithoutCondition{User: t.User, Relation: t.Relation, Object: t.Object})
 	}
 	_, err := s.client.Write(ctx).Body(client.ClientWriteRequest{Deletes: keys}).Execute()
-	if err != nil {
+	if err == nil {
+		return nil
+	}
+	// Idempotent deletes: a missing tuple is the desired end state.
+	if !isTupleMissingErr(err) {
 		return fmt.Errorf("authz: delete tuples: %w", err)
 	}
+	for i, k := range keys {
+		_, err := s.client.Write(ctx).Body(client.ClientWriteRequest{Deletes: []client.ClientTupleKeyWithoutCondition{k}}).Execute()
+		if err != nil && !isTupleMissingErr(err) {
+			return fmt.Errorf("authz: delete tuple %d (%s#%s@%s): %w", i, tuples[i].Object, tuples[i].Relation, tuples[i].User, err)
+		}
+	}
 	return nil
+}
+
+// isTupleExistsErr reports whether err is OpenFGA's "tuple already exists"
+// validation failure (write_failed_due_to_invalid_input).
+func isTupleExistsErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "already exists")
+}
+
+// isTupleMissingErr reports whether err is OpenFGA's "tuple does not exist"
+// validation failure on delete.
+func isTupleMissingErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "does not exist")
 }
 
 // ModelV1 is the authorization model: organization roles derive from team

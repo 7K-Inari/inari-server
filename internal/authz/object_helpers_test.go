@@ -1,6 +1,7 @@
 package authz
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -54,5 +55,20 @@ func TestStripTypePrefixStripsExactlyOnePrefix(t *testing.T) {
 	}
 	if got := stripTypePrefix("plain", "cluster"); got != "plain" {
 		t.Fatalf("unprefixed id changed: %q", got)
+	}
+}
+
+func TestTupleErrorClassifiers(t *testing.T) {
+	exists := errors.New(`authz: write tuples: POST validation error: {"code":"write_failed_due_to_invalid_input","message":"cannot write a tuple which already exists"}`)
+	if !isTupleExistsErr(exists) || isTupleMissingErr(exists) {
+		t.Fatal("already-exists error misclassified")
+	}
+	missing := errors.New(`authz: delete tuples: POST validation error: {"code":"write_failed_due_to_invalid_input","message":"cannot delete a tuple which does not exist"}`)
+	if !isTupleMissingErr(missing) || isTupleExistsErr(missing) {
+		t.Fatal("does-not-exist error misclassified")
+	}
+	other := errors.New("connection refused")
+	if isTupleExistsErr(other) || isTupleMissingErr(other) {
+		t.Fatal("unrelated error must not be classified as idempotent")
 	}
 }

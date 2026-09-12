@@ -69,8 +69,8 @@ type Store struct{}
 func NewStore() *Store { return &Store{} }
 
 func (s *Store) CreateOrganization(ctx context.Context, q db.Querier, org *types.Organization) error {
-	const sql = `INSERT INTO organizations (id, slug, display_name, keycloak_org_id) VALUES ($1,$2,$3,$4) RETURNING created_at`
-	err := q.QueryRow(ctx, sql, org.ID, org.Slug, org.DisplayName, org.KeycloakOrgID).Scan(&org.CreatedAt)
+	const sql = `INSERT INTO organizations (id, slug, display_name, keycloak_org_id) VALUES ($1,$2,$3,$4) RETURNING status, created_at`
+	err := q.QueryRow(ctx, sql, org.ID, org.Slug, org.DisplayName, org.KeycloakOrgID).Scan(&org.Status, &org.CreatedAt)
 	if isUniqueViolation(err) {
 		return ErrSlugTaken
 	}
@@ -78,9 +78,9 @@ func (s *Store) CreateOrganization(ctx context.Context, q db.Querier, org *types
 }
 
 func (s *Store) GetOrganizationBySlug(ctx context.Context, q db.Querier, slug string) (*types.Organization, error) {
-	const sql = `SELECT id, slug, display_name, keycloak_org_id, created_at FROM organizations WHERE slug = $1`
+	const sql = `SELECT id, slug, display_name, keycloak_org_id, status, created_at FROM organizations WHERE slug = $1`
 	var org types.Organization
-	err := q.QueryRow(ctx, sql, slug).Scan(&org.ID, &org.Slug, &org.DisplayName, &org.KeycloakOrgID, &org.CreatedAt)
+	err := q.QueryRow(ctx, sql, slug).Scan(&org.ID, &org.Slug, &org.DisplayName, &org.KeycloakOrgID, &org.Status, &org.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrOrgNotFound
 	}
@@ -91,9 +91,9 @@ func (s *Store) GetOrganizationBySlug(ctx context.Context, q db.Querier, slug st
 }
 
 func (s *Store) GetOrganizationByID(ctx context.Context, q db.Querier, id string) (*types.Organization, error) {
-	const sql = `SELECT id, slug, display_name, keycloak_org_id, created_at FROM organizations WHERE id = $1`
+	const sql = `SELECT id, slug, display_name, keycloak_org_id, status, created_at FROM organizations WHERE id = $1`
 	var org types.Organization
-	err := q.QueryRow(ctx, sql, id).Scan(&org.ID, &org.Slug, &org.DisplayName, &org.KeycloakOrgID, &org.CreatedAt)
+	err := q.QueryRow(ctx, sql, id).Scan(&org.ID, &org.Slug, &org.DisplayName, &org.KeycloakOrgID, &org.Status, &org.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrOrgNotFound
 	}
@@ -103,8 +103,25 @@ func (s *Store) GetOrganizationByID(ctx context.Context, q db.Querier, id string
 	return &org, nil
 }
 
+// SetOrgStatus flips the organization lifecycle status (ADR-0006).
+func (s *Store) SetOrgStatus(ctx context.Context, q db.Querier, orgID, status string) error {
+	const sql = `UPDATE organizations SET status = $2 WHERE id = $1`
+	_, err := q.Exec(ctx, sql, orgID, status)
+	return err
+}
+
+// DeleteOrganization removes the org row; FK-cascading children go with it.
+// Tables without an organizations FK (secret_stores, scaffold_runs,
+// tenant_zones, approval_config) must be deleted explicitly first — see the
+// tenant deleter.
+func (s *Store) DeleteOrganization(ctx context.Context, q db.Querier, orgID string) error {
+	const sql = `DELETE FROM organizations WHERE id = $1`
+	_, err := q.Exec(ctx, sql, orgID)
+	return err
+}
+
 func (s *Store) ListOrganizations(ctx context.Context, q db.Querier) ([]types.Organization, error) {
-	const sql = `SELECT id, slug, display_name, keycloak_org_id, created_at FROM organizations ORDER BY created_at`
+	const sql = `SELECT id, slug, display_name, keycloak_org_id, status, created_at FROM organizations ORDER BY created_at`
 	rows, err := q.Query(ctx, sql)
 	if err != nil {
 		return nil, err
@@ -113,7 +130,7 @@ func (s *Store) ListOrganizations(ctx context.Context, q db.Querier) ([]types.Or
 	var out []types.Organization
 	for rows.Next() {
 		var o types.Organization
-		if err := rows.Scan(&o.ID, &o.Slug, &o.DisplayName, &o.KeycloakOrgID, &o.CreatedAt); err != nil {
+		if err := rows.Scan(&o.ID, &o.Slug, &o.DisplayName, &o.KeycloakOrgID, &o.Status, &o.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, o)
@@ -175,7 +192,21 @@ func (s *Store) ListTeams(ctx context.Context, q db.Querier, orgID string) ([]ty
 // reconciler enumerates team groups without an org scope).
 func (s *Store) ListAllTeams(ctx context.Context, q db.Querier) ([]types.Team, error) {
 	const sql = `SELECT id, org_id, name, role, keycloak_group_path, created_at FROM teams ORDER BY org_id, name`
-	rows, err := q.Query(ctx, sql)
+	return s.scanTeams(ctx, q, sql)
+}
+
+// ListActiveTeams returns teams of active orgs only — the OrgTeamSync seam.
+// Teams of a deleting tenant are excluded so the reconciler cannot
+// resurrect tuples the teardown is retracting (ADR-0006).
+func (s *Store) ListActiveTeams(ctx context.Context, q db.Querier) ([]types.Team, error) {
+	const sql = `SELECT t.id, t.org_id, t.name, t.role, t.keycloak_group_path, t.created_at
+	             FROM teams t JOIN organizations o ON o.id = t.org_id
+	             WHERE o.status = 'active' ORDER BY t.org_id, t.name`
+	return s.scanTeams(ctx, q, sql)
+}
+
+func (s *Store) scanTeams(ctx context.Context, q db.Querier, sql string, args ...any) ([]types.Team, error) {
+	rows, err := q.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -437,6 +468,8 @@ type Service struct {
 	clients  ClientManager
 	brokers  IdentityProviderManager
 	platform PlatformResourceEnsurer
+	gate     DeletionApprovalGate
+	deleter  *Deleter
 	store    *Store
 	audit    *audit.Store
 }
@@ -450,6 +483,19 @@ func NewService(d *db.DB, idp IdentityProvider, store *Store, auditStore *audit.
 // tenant-namespace).
 func (s *Service) WithPlatformResources(e PlatformResourceEnsurer) *Service {
 	s.platform = e
+	return s
+}
+
+// WithDeletionApprovalGate wires the approvals module so tenant deletion can
+// open a platform-admin lifecycle approval (ADR-0006).
+func (s *Service) WithDeletionApprovalGate(g DeletionApprovalGate) *Service {
+	s.gate = g
+	return s
+}
+
+// WithDeleter wires the teardown state machine for the retry endpoint.
+func (s *Service) WithDeleter(d *Deleter) *Service {
+	s.deleter = d
 	return s
 }
 
@@ -587,6 +633,12 @@ func (s *Service) ListTeams(ctx context.Context, orgID string) ([]types.Team, er
 // ListAllTeams returns every team across all orgs (authz.OrgTeamSync seam).
 func (s *Service) ListAllTeams(ctx context.Context) ([]types.Team, error) {
 	return s.store.ListAllTeams(ctx, s.db.Pool)
+}
+
+// ListActiveTeams returns teams of active orgs only (authz.OrgTeamSync
+// seam, ADR-0006).
+func (s *Service) ListActiveTeams(ctx context.Context) ([]types.Team, error) {
+	return s.store.ListActiveTeams(ctx, s.db.Pool)
 }
 
 // UpdateTenantProfile updates the org display name in Keycloak and in the

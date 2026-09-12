@@ -33,6 +33,7 @@ func NewTupleWriter(s Store) *TupleWriter { return &TupleWriter{store: s} }
 func (w *TupleWriter) EventTypes() []string {
 	return []string{
 		types.EventTenantCreated,
+		types.EventTenantDeleting,
 		types.EventTeamCreated,
 		types.EventTeamDeleted,
 		types.EventMembershipAdded,
@@ -65,6 +66,22 @@ func (w *TupleWriter) Handle(ctx context.Context, ev *types.OutboxEvent) error {
 			return err
 		}
 		return w.writeOrgRoleTuples(ctx, p.OrgID, p.Teams, false)
+	case types.EventTenantDeleting:
+		// Defensive sweep (ADR-0006): the Deleter retracts these tuples
+		// synchronously; this catches any drift between the snapshot and
+		// the live store. Deletes of absent tuples are no-ops.
+		var p types.TenantDeletingPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		tuples, err := TuplesForTenantDeletion(&p)
+		if err != nil {
+			return err
+		}
+		if len(tuples) == 0 {
+			return nil
+		}
+		return w.store.DeleteTuples(ctx, tuples)
 	case types.EventTeamCreated:
 		var p types.TeamCreatedPayload
 		if err := json.Unmarshal(ev.Payload, &p); err != nil {

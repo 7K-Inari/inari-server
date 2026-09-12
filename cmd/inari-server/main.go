@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -240,7 +241,10 @@ func run() error {
 	// who never pass through the inline invite path.
 	teamSync := authz.NewOrgTeamSync(fgaStore, idp, authz.TeamGroupListerFunc(
 		func(ctx context.Context) ([]authz.TeamGroupRef, error) {
-			teams, err := svc.ListAllTeams(ctx)
+			// Active orgs only (ADR-0006): teams of a deleting tenant are
+			// excluded so the reconciler cannot resurrect tuples the
+			// teardown is retracting.
+			teams, err := svc.ListActiveTeams(ctx)
 			if err != nil {
 				return nil, err
 			}
@@ -349,6 +353,13 @@ func run() error {
 	approvalsSvc := approvals.NewService(database, approvals.NewStore(database), auditStore, svc, catalogSvc)
 	approvalsHandler := approvals.NewHandler(approvalsSvc, svc, authorizer)
 	go approvalsSvc.RunExpiryLoop(ctx, time.Minute)
+
+	// Tenant deletion (ADR-0006): approval-gated, resumable teardown state
+	// machine. FGA tuple cleanup is a synchronous Deleter step; the
+	// clusterregistry provides the force-revoke seam.
+	tenantDeleter := tenancy.NewDeleter(database, idp, tenancy.NewStore(), auditStore, fgaStore, registry, log)
+	svc.WithDeletionApprovalGate(deletionApprovalGate{approvalsSvc}).WithDeleter(tenantDeleter)
+	go tenantDeleter.ResumePendingDeletions(ctx)
 
 	inventorySvc := inventory.NewService(database, inventory.NewStore(), auditStore, catalogSvc)
 	inventoryHandler := inventory.NewHandler(inventorySvc, svc, authorizer)
@@ -480,6 +491,7 @@ func run() error {
 		orchestrator.NewResumeHandler(orchestratorSvc, approvalsSvc, log),
 		policyservice.NewDistributeHandler(policySvc, log),
 		tenantzonefactory.NewResumeHandler(tzfSvc, approvalsSvc, log),
+		tenancy.NewDeletionResumeHandler(svc, tenantDeleter, approvalsSvc, log),
 		fleetmanager.NewResumeHandler(fleetSvc, approvalsSvc, log),
 		scaffold.NewResumeHandler(scaffoldSvc, approvalsSvc, log),
 	)
@@ -549,6 +561,20 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// deletionApprovalGate adapts approvals.Service to the tenancy
+// DeletionApprovalGate seam (tenancy cannot import approvals — cycle).
+type deletionApprovalGate struct{ svc *approvals.Service }
+
+func (g deletionApprovalGate) RequestLifecycleApproval(ctx context.Context, orgID, action, requester string, approvalCtx json.RawMessage) (string, error) {
+	req, err := g.svc.RequestLifecycleApproval(ctx, approvals.LifecycleApprovalInput{
+		OrgID: orgID, Action: action, Requester: requester, Context: approvalCtx,
+	})
+	if err != nil {
+		return "", err
+	}
+	return req.ID, nil
 }
 
 // runCatalogSyncLoop re-pulls the curated catalog on the configured

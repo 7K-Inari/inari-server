@@ -25,11 +25,21 @@ func (r Role) Valid() bool {
 	return false
 }
 
+// Organization lifecycle statuses (ADR-0006): a deleting tenant is frozen
+// (write paths and reconcilers skip it) until teardown completes and the row
+// is removed.
+const (
+	OrgStatusActive   = "active"
+	OrgStatusDeleting = "deleting"
+	OrgStatusDeleted  = "deleted"
+)
+
 type Organization struct {
 	ID            string    `json:"id"`
 	Slug          string    `json:"slug"`
 	DisplayName   string    `json:"displayName"`
 	KeycloakOrgID string    `json:"keycloakOrgId"`
+	Status        string    `json:"status"`
 	CreatedAt     time.Time `json:"createdAt"`
 }
 
@@ -79,6 +89,8 @@ type OutboxEvent struct {
 
 const (
 	EventTenantCreated     = "tenant.created"
+	EventTenantDeleting    = "tenant.deleting"
+	EventTenantDeleted     = "tenant.deleted"
 	EventTeamCreated       = "team.created"
 	EventMembershipAdded   = "membership.added"
 	EventMembershipRemoved = "membership.removed"
@@ -445,6 +457,7 @@ const (
 	ApprovalActionTenantZoneVend         = "tenant_zone.vend"
 	ApprovalActionTenantZoneDecommission = "tenant_zone.decommission"
 	ApprovalActionRolloutStageGate       = "rollout.stage_gate"
+	ApprovalActionTenantDecommission     = "tenant.decommission"
 )
 
 // ApprovalRequest gates one deploy request (plan §5.2). Name, Namespace,
@@ -657,6 +670,49 @@ type TenantCreatedPayload struct {
 	OrgID string     `json:"orgId"`
 	Slug  string     `json:"slug"`
 	Teams []TeamSeed `json:"teams"`
+}
+
+// TenantDeletingPayload is the outbox payload for EventTenantDeleting. It
+// carries the full snapshot of OpenFGA tuples to retract (org role tuples
+// per team, team member tuples, and org parent tuples per child object) so
+// consumers never need FGA Reads. Objects maps an FGA object type
+// (cluster, cloud_account, cluster_set, policy_pack, extension, rollout,
+// drift_event, tenant_zone) to the org's object ids of that type.
+type TenantDeletingPayload struct {
+	OrgID   string              `json:"orgId"`
+	Slug    string              `json:"slug"`
+	Teams   []TeamSeed          `json:"teams"`
+	Members []MembershipPayload `json:"members"`
+	Objects map[string][]string `json:"objects"`
+}
+
+// TenantDeletedPayload is the outbox payload for EventTenantDeleted.
+type TenantDeletedPayload struct {
+	OrgID string `json:"orgId"`
+	Slug  string `json:"slug"`
+}
+
+// Tenant deletion state machine states (tenant_deletions.state).
+const (
+	TenantDeletionStateDeleting = "deleting"
+	TenantDeletionStateFailed   = "delete_failed"
+)
+
+// TenantDeletion is one tenant teardown in flight (ADR-0006). Step is the
+// last completed teardown step; the runner resumes after it. Snapshot is the
+// stored TenantDeletingPayload used for the synchronous FGA cleanup step.
+type TenantDeletion struct {
+	OrgID       string          `json:"orgId"`
+	State       string          `json:"state"`
+	Step        string          `json:"step"`
+	Force       bool            `json:"force"`
+	Reason      string          `json:"reason,omitempty"`
+	RequestedBy string          `json:"requestedBy"`
+	ApprovalID  string          `json:"approvalId,omitempty"`
+	LastError   string          `json:"lastError,omitempty"`
+	Snapshot    json.RawMessage `json:"-"`
+	CreatedAt   time.Time       `json:"createdAt"`
+	UpdatedAt   time.Time       `json:"updatedAt"`
 }
 
 // TeamCreatedPayload is the outbox payload for EventTeamCreated.

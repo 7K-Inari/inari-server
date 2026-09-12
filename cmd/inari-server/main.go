@@ -16,6 +16,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/agentgateway"
 	"github.com/7K-Inari/inari-server/internal/approvals"
 	"github.com/7K-Inari/inari-server/internal/audit"
+	"github.com/7K-Inari/inari-server/internal/auditapi"
 	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/capabilities"
@@ -501,6 +502,7 @@ func run() error {
 	fleetHandler.RegisterRoutes(api)
 	secretStoresHandler.RegisterRoutes(api)
 	extHandler.RegisterRoutes(api)
+	auditapi.NewHandler(database, auditStore, svc, authorizer).RegisterRoutes(api)
 
 	// Agent-facing Connect-RPC services mount on chi directly, outside the
 	// huma bearer middleware: registration is token-authenticated, the event

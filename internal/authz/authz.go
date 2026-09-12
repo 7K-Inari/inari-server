@@ -323,28 +323,61 @@ func ModelV1() client.ClientWriteAuthorizationModelRequest {
 func ptr[T any](v T) *T { return &v }
 
 // Helpers to build fully-qualified FGA object/user strings. OpenFGA object
-// IDs may not contain ':' or '#', so the "org:" prefix used by Inari tenant
-// IDs (plan §5.2) is stripped here — the mapping must stay consistent for
-// both tuple writes and checks.
+// IDs may not contain ':' or '#', while several Inari entities persist their
+// IDs with a "<type>:" marker prefix (plan §5.2, e.g. "cluster:<uuid>").
+// The mapping must produce valid, collision-free object IDs and stay
+// consistent for both tuple writes and checks.
+//
+// stripTypePrefix removes one of the known stored type prefixes so the
+// helper never emits a double-prefixed (invalid) object like
+// "cluster:cluster:<uuid>". Unknown/unprefixed IDs pass through unchanged.
+func stripTypePrefix(id string, prefixes ...string) string {
+	for _, p := range prefixes {
+		if rest, ok := strings.CutPrefix(id, p+":"); ok {
+			return rest
+		}
+	}
+	return id
+}
+
 func OrgObject(orgID string) string {
 	return TypeOrganization + ":" + strings.TrimPrefix(orgID, "org:")
 }
-func TeamObject(teamID string) string       { return TypeTeam + ":" + teamID }
-func ClusterObject(clusterID string) string { return TypeCluster + ":" + clusterID }
-func UserObject(subject string) string      { return "user:" + subject }
+func TeamObject(teamID string) string { return TypeTeam + ":" + teamID }
+func ClusterObject(clusterID string) string {
+	return TypeCluster + ":" + stripTypePrefix(clusterID, "cluster")
+}
+func UserObject(subject string) string { return "user:" + subject }
 func CatalogItemObject(itemID string) string {
-	return TypeCatalogItem + ":" + itemID
+	// Catalog item IDs are composite ("platform:keycloak",
+	// "discovered:<cluster>:<kind>/<name>") and must keep every segment to
+	// stay unique, so ':' is rewritten instead of stripped.
+	return TypeCatalogItem + ":" + strings.ReplaceAll(itemID, ":", "/")
 }
 func ResourceInstanceObject(instanceID string) string {
 	return TypeResourceInstance + ":" + instanceID
 }
-func CloudAccountObject(id string) string { return TypeCloudAccount + ":" + id }
-func PolicyPackObject(id string) string   { return TypePolicyPack + ":" + id }
-func ClusterSetObject(id string) string   { return TypeClusterSet + ":" + id }
-func TenantZoneObject(id string) string   { return TypeTenantZone + ":" + id }
-func ExtensionObject(id string) string    { return TypeExtension + ":" + id }
-func RolloutObject(id string) string      { return TypeRollout + ":" + id }
-func DriftEventObject(id string) string   { return TypeDriftEvent + ":" + id }
+func CloudAccountObject(id string) string {
+	return TypeCloudAccount + ":" + stripTypePrefix(id, "cloudaccount")
+}
+func PolicyPackObject(id string) string {
+	return TypePolicyPack + ":" + stripTypePrefix(id, "policypack")
+}
+func ClusterSetObject(id string) string {
+	return TypeClusterSet + ":" + stripTypePrefix(id, "clusterset")
+}
+func TenantZoneObject(id string) string {
+	return TypeTenantZone + ":" + stripTypePrefix(id, "zone")
+}
+func ExtensionObject(id string) string {
+	return TypeExtension + ":" + stripTypePrefix(id, "extension")
+}
+func RolloutObject(id string) string {
+	return TypeRollout + ":" + stripTypePrefix(id, "rollout")
+}
+func DriftEventObject(id string) string {
+	return TypeDriftEvent + ":" + stripTypePrefix(id, "drift")
+}
 
 // ObjectPlatform is the single global platform object used for platform-wide permission
 // checks (M1). Tuples are written as e.g. "platform:inari org_creator user:<id>".

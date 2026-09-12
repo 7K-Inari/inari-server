@@ -174,7 +174,7 @@ func TestTupleWriterTenantZoneLifecycle(t *testing.T) {
 	if err := w.Handle(context.Background(), act); err != nil {
 		t.Fatalf("Handle active: %v", err)
 	}
-	want := Tuple{User: "organization:z1", Relation: "parent", Object: "tenant_zone:zone:1"}
+	want := Tuple{User: "organization:z1", Relation: "parent", Object: "tenant_zone:1"}
 	if len(fs.written) != 1 || fs.written[0] != want {
 		t.Fatalf("written = %+v, want [%+v]", fs.written, want)
 	}

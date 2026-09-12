@@ -350,7 +350,7 @@ func run() error {
 		}
 	}
 
-	approvalsSvc := approvals.NewService(database, approvals.NewStore(database), auditStore, svc, catalogSvc)
+	approvalsSvc := approvals.NewService(database, approvals.NewStore(database), auditStore, svc, catalogSvc).WithPlatformChecker(authorizer)
 	approvalsHandler := approvals.NewHandler(approvalsSvc, svc, authorizer)
 	go approvalsSvc.RunExpiryLoop(ctx, time.Minute)
 

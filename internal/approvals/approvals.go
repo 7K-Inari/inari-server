@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/7K-Inari/inari-server/internal/audit"
+	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -185,10 +186,27 @@ type Service struct {
 	items ItemResolver
 	ttl   time.Duration
 	now   func() time.Time
+	// platform, when set, authorizes platform-level actors (org_creator on
+	// platform:inari) to decide lifecycle approvals. Required because a
+	// tenant freeze sweeps the org's FGA tuples before the decision, so the
+	// org-role check alone makes lifecycle approvals undecidable (live
+	// finding, 2026-09-12).
+	platform PlatformChecker
+}
+
+// PlatformChecker checks a platform-level permission (authz.Authorizer seam).
+type PlatformChecker interface {
+	Check(ctx context.Context, user, relation, object string) (bool, error)
 }
 
 func NewService(d *db.DB, store *Store, auditStore *audit.Store, roles RoleResolver, items ItemResolver) *Service {
 	return &Service{db: d, store: store, audit: auditStore, roles: roles, items: items, ttl: DefaultTTL, now: time.Now}
+}
+
+// WithPlatformChecker wires the platform-permission seam for lifecycle approvals.
+func (s *Service) WithPlatformChecker(p PlatformChecker) *Service {
+	s.platform = p
+	return s
 }
 
 // DefaultTTL is how long a pending request waits for a decision.
@@ -384,16 +402,36 @@ func (s *Service) Decide(ctx context.Context, orgID, approvalID, approver string
 	if req.State != types.ApprovalStatePending {
 		return nil, ErrAlreadyDecided
 	}
-	role, err := s.roles.RoleOf(ctx, req.OrgID, approver)
-	if err != nil {
-		return nil, err
-	}
 	if req.Action != "" {
-		// Lifecycle approval: platform-admin policy, no catalog item.
-		if err := checkLifecycleApprover(req, approver, role); err != nil {
-			return nil, err
+		// Lifecycle approval: platform-admin policy. Prefer the platform
+		// org_creator check — a tenant freeze sweeps org tuples, so org
+		// roles may already be gone by decision time. Fall back to the
+		// org-role check when the platform seam is not wired.
+		if s.platform != nil {
+			ok, err := s.platform.Check(ctx, authz.UserObject(approver), authz.RelationOrgCreator, authz.ObjectPlatform)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				return nil, ErrApproverRole
+			}
+			if sameActor(req.Requester, approver) {
+				return nil, ErrSelfApproval
+			}
+		} else {
+			role, err := s.roles.RoleOf(ctx, req.OrgID, approver)
+			if err != nil {
+				return nil, err
+			}
+			if err := checkLifecycleApprover(req, approver, role); err != nil {
+				return nil, err
+			}
 		}
 	} else {
+		role, err := s.roles.RoleOf(ctx, req.OrgID, approver)
+		if err != nil {
+			return nil, err
+		}
 		item, err := s.items.GetItemByID(ctx, req.ItemID)
 		if err != nil {
 			return nil, err

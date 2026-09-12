@@ -103,6 +103,27 @@ func setupFakeCatalog(t *testing.T) *RegistryPuller {
 	return &RegistryPuller{IndexRef: host + "/catalog/index:latest", Insecure: true}
 }
 
+func TestFileByNameBasenameFallback(t *testing.T) {
+	files := map[string][]byte{
+		"packages/web-service/package.yaml":  []byte("version: 1.0.0\nchannel: stable\n"),
+		"packages/web-service/rgd.yaml":      []byte("apiVersion: kro.run/v1alpha1\n"),
+		"packages/web-service/ui-hints.json": []byte("{}"),
+		"README.md":                          []byte("flat wins"),
+	}
+	if _, ok := fileByName(files, "package.yaml"); !ok {
+		t.Fatal("path-prefixed package.yaml not found")
+	}
+	if _, ok := fileByName(files, "rgd.yaml"); !ok {
+		t.Fatal("path-prefixed rgd.yaml not found")
+	}
+	if v, ok := fileByName(files, "README.md"); !ok || string(v) != "flat wins" {
+		t.Fatal("exact match must win")
+	}
+	if _, ok := fileByName(files, "chart.yaml"); ok {
+		t.Fatal("missing file must not match")
+	}
+}
+
 func TestRegistryPuller(t *testing.T) {
 	p := setupFakeCatalog(t)
 	pkgs, err := p.Pull(context.Background())

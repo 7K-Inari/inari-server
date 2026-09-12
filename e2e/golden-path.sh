@@ -177,7 +177,7 @@ admin_token() {
 user_token() {
   xcurl "http://keycloak-service:8080/realms/inari/protocol/openid-connect/token" \
     -d grant_type=password -d client_id=inari-server \
-    -d username=dev-admin -d password=dev-admin -d scope="openid organization" \
+    -d username=dev-admin -d password=dev-admin -d scope="openid organization:*" \
     | jq -r .access_token
 }
 

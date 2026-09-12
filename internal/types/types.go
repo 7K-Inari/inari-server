@@ -74,6 +74,7 @@ type OutboxEvent struct {
 	Payload     json.RawMessage `json:"payload"`
 	OccurredAt  time.Time       `json:"occurredAt"`
 	PublishedAt *time.Time      `json:"publishedAt,omitempty"`
+	Attempts    int             `json:"attempts"`
 }
 
 const (

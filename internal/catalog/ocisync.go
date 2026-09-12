@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"log/slog"
 	"sort"
+	"strings"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"gopkg.in/yaml.v3"
@@ -234,11 +236,27 @@ func (p *RegistryPuller) fetchFile(ctx context.Context, ref, filename string) ([
 	if err != nil {
 		return nil, err
 	}
-	raw, ok := files[filename]
+	raw, ok := fileByName(files, filename)
 	if !ok {
 		return nil, fmt.Errorf("catalog: %s: no layer named %q", ref, filename)
 	}
 	return raw, nil
+}
+
+// fileByName finds a file in an oras directory-push artifact by exact key or
+// by basename: oras preserves the pushed path in the layer title (e.g.
+// "packages/web-service/package.yaml"), while callers ask for the basename.
+func fileByName(files map[string][]byte, name string) ([]byte, bool) {
+	if raw, ok := files[name]; ok {
+		return raw, true
+	}
+	suffix := "/" + name
+	for k, v := range files {
+		if strings.HasSuffix(k, suffix) {
+			return v, true
+		}
+	}
+	return nil, false
 }
 
 // fetchDir pulls an oras directory-push artifact (shared helper).
@@ -252,7 +270,7 @@ func (p *RegistryPuller) fetchDir(ctx context.Context, ref string) (map[string][
 // single Package at their package.yaml version/channel.
 func packageFromFiles(name, typ, indexDesc, ref string, files map[string][]byte) ([]Package, error) {
 	base := Package{Name: name, Type: typ, Description: indexDesc, OCIRef: ref}
-	if raw, ok := files["package.yaml"]; ok {
+	if raw, ok := fileByName(files, "package.yaml"); ok {
 		var py packageYAML
 		if err := yaml.Unmarshal(raw, &py); err != nil {
 			return nil, fmt.Errorf("catalog: %s: package.yaml: %w", ref, err)
@@ -266,9 +284,9 @@ func packageFromFiles(name, typ, indexDesc, ref string, files map[string][]byte)
 		base.Version = py.Version
 		base.Channel = py.Channel
 	}
-	base.Schema = files["schema.json"]
-	base.UIHints = files["ui-hints.json"]
-	if raw, ok := files["chart.yaml"]; ok {
+	base.Schema, _ = fileByName(files, "schema.json")
+	base.UIHints, _ = fileByName(files, "ui-hints.json")
+	if raw, ok := fileByName(files, "chart.yaml"); ok {
 		var cy chartYAML
 		if err := yaml.Unmarshal(raw, &cy); err != nil {
 			return nil, fmt.Errorf("catalog: %s: chart.yaml: %w", ref, err)
@@ -291,7 +309,7 @@ func packageFromFiles(name, typ, indexDesc, ref string, files map[string][]byte)
 		}
 		return out, nil
 	}
-	if raw, ok := files["rgd.yaml"]; ok {
+	if raw, ok := fileByName(files, "rgd.yaml"); ok {
 		base.RGD = raw
 	}
 	if base.Channel == "" {
@@ -310,6 +328,14 @@ func syncPlan(pkgs []Package) ([]*types.CatalogItem, []*types.CatalogItemVersion
 	items := make([]*types.CatalogItem, 0, len(pkgs))
 	versions := make([]*types.CatalogItemVersion, 0, len(pkgs))
 	for _, p := range pkgs {
+		// Defense against unusable rows: a package without a version can
+		// never be deployed and renders as an empty '' row in every view
+		// (live incident, 2026-09-12). Skip it rather than poison the
+		// catalog — the sync summary still reports the other packages.
+		if p.Version == "" {
+			slog.Warn("catalog sync: skipping package with empty version", "name", p.Name, "ref", p.OCIRef)
+			continue
+		}
 		itemID := itemIDForPackage(p)
 		payload := map[string]any{}
 		if len(p.RGD) > 0 {

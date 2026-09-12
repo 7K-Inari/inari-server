@@ -110,8 +110,10 @@ func (s *Store) ListItems(ctx context.Context, q db.Querier) ([]types.CatalogIte
 }
 
 func (s *Store) ListVersions(ctx context.Context, q db.Querier, itemID string) ([]types.CatalogItemVersion, error) {
+	// Empty-version rows are legacy residue from a sync bug (fixed): they
+	// can never be deployed, so hide them everywhere.
 	const sql = `SELECT item_id, version, channel, schema, ui_hints, payload
-	             FROM catalog_item_versions WHERE item_id = $1 ORDER BY version`
+	             FROM catalog_item_versions WHERE item_id = $1 AND version <> '' ORDER BY version`
 	rows, err := q.Query(ctx, sql, itemID)
 	if err != nil {
 		return nil, err
@@ -131,7 +133,7 @@ func (s *Store) ListVersions(ctx context.Context, q db.Querier, itemID string) (
 // ListVersionsForItems returns versions grouped by item ID in one query.
 func (s *Store) ListVersionsForItems(ctx context.Context, q db.Querier, itemIDs []string) (map[string][]types.CatalogItemVersion, error) {
 	const sql = `SELECT item_id, version, channel, schema, ui_hints, payload
-	             FROM catalog_item_versions WHERE item_id = ANY($1) ORDER BY version`
+	             FROM catalog_item_versions WHERE item_id = ANY($1) AND version <> '' ORDER BY version`
 	rows, err := q.Query(ctx, sql, itemIDs)
 	if err != nil {
 		return nil, err

@@ -33,9 +33,9 @@ func TestTuplesForTenantDeletion(t *testing.T) {
 		{User: "team:t2#member", Relation: "viewer", Object: "organization:kc-1"}:                false,
 		{User: "user:u1", Relation: "member", Object: "team:t1"}:                                 false,
 		{User: "organization:kc-1", Relation: "parent", Object: "cluster:c1"}:                    false,
-		{User: "organization:kc-1", Relation: "parent", Object: "cloud_account:cloudaccount:a1"}: false,
-		{User: "organization:kc-1", Relation: "parent", Object: "tenant_zone:zone:z1"}:           false,
-		{User: "organization:kc-1", Relation: "parent", Object: "drift_event:drift:d1"}:          false,
+		{User: "organization:kc-1", Relation: "parent", Object: "cloud_account:a1"}:              false,
+		{User: "organization:kc-1", Relation: "parent", Object: "tenant_zone:z1"}:                false,
+		{User: "organization:kc-1", Relation: "parent", Object: "drift_event:d1"}:                false,
 	}
 	if len(tuples) != len(want) {
 		t.Fatalf("tuples = %d, want %d: %+v", len(tuples), len(want), tuples)

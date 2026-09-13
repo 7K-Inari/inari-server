@@ -164,11 +164,6 @@ func (h *Handler) deploy(ctx context.Context, in *deployInput) (*deployOutput, e
 	return out, nil
 }
 
-type instancePathInput struct {
-	Org string `path:"org"`
-	ID  string `path:"id"`
-}
-
 type upgradeInput struct {
 	Org  string `path:"org"`
 	ID   string `path:"id"`

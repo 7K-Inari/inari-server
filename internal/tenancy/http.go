@@ -614,7 +614,16 @@ type putMemberInput struct {
 func (h *Handler) putMember(ctx context.Context, in *putMemberInput) (*struct{}, error) {
 	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
 	if err != nil {
-		return nil, err
+		// Platform org_creators may repair the admin chain of tenants that
+		// predate the org-admin bootstrap (no org-admin exists, so the
+		// org-gated route alone can never appoint one).
+		if perr := h.authorizePlatform(ctx); perr != nil {
+			return nil, err
+		}
+		org, err = h.svc.GetTenant(ctx, in.Org)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if err := ensureOrgActive(org); err != nil {
 		return nil, err

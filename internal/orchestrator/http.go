@@ -164,11 +164,6 @@ func (h *Handler) deploy(ctx context.Context, in *deployInput) (*deployOutput, e
 	return out, nil
 }
 
-type instancePathInput struct {
-	Org string `path:"org"`
-	ID  string `path:"id"`
-}
-
 type upgradeInput struct {
 	Org  string `path:"org"`
 	ID   string `path:"id"`
@@ -276,7 +271,11 @@ func (h *Handler) setGitConfig(ctx context.Context, in *gitConfigInput) (*struct
 	})
 }
 
-func (h *Handler) getGitConfig(ctx context.Context, in *instancePathInput) (*gitConfigOutput, error) {
+type gitConfigGetInput struct {
+	Org string `path:"org"`
+}
+
+func (h *Handler) getGitConfig(ctx context.Context, in *gitConfigGetInput) (*gitConfigOutput, error) {
 	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
 	if err != nil {
 		return nil, err

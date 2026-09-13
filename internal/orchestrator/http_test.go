@@ -64,3 +64,20 @@ func TestValidateGitHubAppAllowlist(t *testing.T) {
 		t.Fatal("non-allowlisted host accepted")
 	}
 }
+
+func TestValidateGitHubAppAllowlistForms(t *testing.T) {
+	// host:port entries must match an apiBase on that port (Hostname()
+	// strips ports, so a naive comparison can never match).
+	h := NewHandler(nil, nil, nil).WithAllowedAPIBases([]string{"ghe.corp.example:8443"})
+	if err := h.validateGitHubApp(byo(1, 2, "https://ghe.corp.example:8443/api/v3")); err != nil {
+		t.Fatalf("host:port allowlist entry rejected: %v", err)
+	}
+	if err := h.validateGitHubApp(byo(1, 2, "https://ghe.corp.example/api/v3")); err == nil {
+		t.Fatal("wrong port accepted against host:port allowlist entry")
+	}
+	// URL-form entries normalize to their host (path ignored).
+	h = NewHandler(nil, nil, nil).WithAllowedAPIBases([]string{"https://ghe.corp.example/api/v3"})
+	if err := h.validateGitHubApp(byo(1, 2, "https://ghe.corp.example/api/v3")); err != nil {
+		t.Fatalf("URL-form allowlist entry rejected: %v", err)
+	}
+}

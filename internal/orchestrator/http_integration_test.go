@@ -356,7 +356,8 @@ func TestDeployGitAuthFailureMapping(t *testing.T) {
 	}
 }
 
-func keysOf(m map[string]string) []string {	var out []string
+func keysOf(m map[string]string) []string {
+	var out []string
 	for k := range m {
 		out = append(out, k)
 	}

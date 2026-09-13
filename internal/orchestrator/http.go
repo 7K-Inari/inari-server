@@ -304,7 +304,13 @@ func (h *Handler) validateGitHubApp(app *types.GitHubAppConfig) error {
 		if len(h.allowedAPIBases) > 0 {
 			allowed := false
 			for _, base := range h.allowedAPIBases {
-				if strings.EqualFold(u.Hostname(), base) || strings.EqualFold(strings.TrimSuffix(app.APIBase, "/api/v3"), strings.TrimSuffix(base, "/")) {
+				// Entries may be bare hosts, host:port, or full URLs
+				// (path ignored). Normalize URL forms to their host.
+				b := base
+				if bu, err := url.Parse(base); err == nil && bu.Host != "" {
+					b = bu.Host
+				}
+				if strings.EqualFold(u.Host, b) || strings.EqualFold(u.Hostname(), b) {
 					allowed = true
 					break
 				}

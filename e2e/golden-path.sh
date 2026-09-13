@@ -440,6 +440,7 @@ fi
 
 log "kubelogin-style check: group membership maps to real RBAC"
 # A user in the viewers team group must read but not write.
+log "ensuring the rbac-viewer Keycloak user"
 VIEWER_UID=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/users?username=rbac-viewer" | jq -r '.[0].id // empty')
 if [ -z "$VIEWER_UID" ]; then
   xcurl -X POST -H "Authorization: Bearer $AT" -H "Content-Type: application/json" \
@@ -447,14 +448,16 @@ if [ -z "$VIEWER_UID" ]; then
     -o /dev/null "http://keycloak-service:8080/admin/realms/inari/users"
   VIEWER_UID=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/users?username=rbac-viewer" | jq -r '.[0].id')
 fi
+log "adding rbac-viewer to the viewers team group"
 VIEWERS_GRP=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/group-by-path/tenant-$TENANT/viewers" | jq -r '.id // empty')
 [ -n "$VIEWERS_GRP" ] || die "Keycloak group tenant-$TENANT/viewers not found (tenant seeding broken?)"
 xcurl -o /dev/null -X PUT -H "Authorization: Bearer $AT" \
   "http://keycloak-service:8080/admin/realms/inari/users/$VIEWER_UID/groups/$VIEWERS_GRP" || true
 
+log "fetching the rbac-viewer token (groups claim only — the viewer is a group member, not a Keycloak Organization member, so the organization:* scope would be rejected)"
 VIEWER_TOKEN=$(xcurl "http://keycloak-service:8080/realms/inari/protocol/openid-connect/token" \
   -d grant_type=password -d client_id=inari-server \
-  -d username=rbac-viewer -d password=rbac-viewer -d scope="openid organization:*" \
+  -d username=rbac-viewer -d password=rbac-viewer -d scope="openid" \
   | jq -r .access_token)
 PAYLOAD=$(cut -d. -f2 <<<"$VIEWER_TOKEN"); PAYLOAD="${PAYLOAD}$(printf '=%.0s' $(seq 1 $(( (4 - ${#PAYLOAD} % 4) % 4 ))))"
 CLAIMS=$(base64 -d <<<"$PAYLOAD" 2>/dev/null || base64 -D <<<"$PAYLOAD")

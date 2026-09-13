@@ -270,7 +270,7 @@ func writeBillyFile(fs billy.Filesystem, path string, content []byte) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	_, err = f.Write(content)
 	return err
 }

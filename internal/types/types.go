@@ -121,11 +121,13 @@ const (
 	EventCloudAccountValidated    = "cloud_account.validated"
 	EventCloudAccountDeregistered = "cloud_account.deregistered"
 
-	EventPolicyPackAssigned = "policy_pack.assigned"
-	EventClusterSetCreated  = "cluster_set.created"
-	EventClusterSetDeleted  = "cluster_set.deleted"
-	EventExemptionRequested = "exemption.requested"
-	EventExemptionDecided   = "exemption.decided"
+	EventPolicyPackAssigned   = "policy_pack.assigned"
+	EventPolicyPackUnassigned = "policy_pack.unassigned"
+	EventPolicyPackDeleted    = "policy_pack.deleted"
+	EventClusterSetCreated    = "cluster_set.created"
+	EventClusterSetDeleted    = "cluster_set.deleted"
+	EventExemptionRequested   = "exemption.requested"
+	EventExemptionDecided     = "exemption.decided"
 
 	EventExtensionRegistered   = "extension.registered"
 	EventExtensionUnregistered = "extension.unregistered"

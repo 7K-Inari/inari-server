@@ -48,6 +48,8 @@ func (w *TupleWriter) EventTypes() []string {
 		types.EventClusterSetCreated,
 		types.EventClusterSetDeleted,
 		types.EventPolicyPackAssigned,
+		types.EventPolicyPackUnassigned,
+		types.EventPolicyPackDeleted,
 		types.EventTenantZoneActive,
 		types.EventTenantZoneClosed,
 		types.EventExtensionRegistered,
@@ -208,6 +210,17 @@ func (w *TupleWriter) Handle(ctx context.Context, ev *types.OutboxEvent) error {
 			return err
 		}
 		return w.store.WriteTuples(ctx, []Tuple{{
+			User: OrgObject(p.OrgID), Relation: RelationParent, Object: PolicyPackObject(p.PackID),
+		}})
+	case types.EventPolicyPackUnassigned, types.EventPolicyPackDeleted:
+		// Retract the pack's parent tuple (mirrors EventClusterSetDeleted).
+		// policy_pack.unassigned is only emitted by the force-delete cascade,
+		// where the pack row is deleted in the same TX, so retraction is safe.
+		var p types.PolicyPackAssignedPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		return w.store.DeleteTuples(ctx, []Tuple{{
 			User: OrgObject(p.OrgID), Relation: RelationParent, Object: PolicyPackObject(p.PackID),
 		}})
 	case types.EventExtensionRegistered:

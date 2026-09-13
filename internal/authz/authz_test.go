@@ -295,3 +295,34 @@ func TestPlatformCheckWithTupleAllows(t *testing.T) {
 		t.Errorf("Check superuser = %v, %v; want true, nil", ok, err)
 	}
 }
+
+func TestTupleWriterPolicyPackLifecycle(t *testing.T) {
+	fs := &fakeStore{}
+	w := NewTupleWriter(fs)
+	tuple := Tuple{User: "organization:1", Relation: "parent", Object: "policy_pack:p1"}
+
+	assigned := event(t, types.EventPolicyPackAssigned, types.PolicyPackAssignedPayload{
+		OrgID: "org:1", PackID: "policypack:p1", AssignmentID: "policyassignment:a1",
+		TargetType: "cluster", TargetID: "cluster:1",
+	})
+	if err := w.Handle(context.Background(), assigned); err != nil {
+		t.Fatalf("Handle assigned: %v", err)
+	}
+	if len(fs.written) != 1 || fs.written[0] != tuple {
+		t.Fatalf("written = %+v, want [%+v]", fs.written, tuple)
+	}
+
+	for _, typ := range []string{types.EventPolicyPackUnassigned, types.EventPolicyPackDeleted} {
+		fs.deleted = nil
+		ev := event(t, typ, types.PolicyPackAssignedPayload{
+			OrgID: "org:1", PackID: "policypack:p1", AssignmentID: "policyassignment:a1",
+			TargetType: "cluster", TargetID: "cluster:1",
+		})
+		if err := w.Handle(context.Background(), ev); err != nil {
+			t.Fatalf("Handle %s: %v", typ, err)
+		}
+		if len(fs.deleted) != 1 || fs.deleted[0] != tuple {
+			t.Fatalf("%s: deleted = %+v, want [%+v]", typ, fs.deleted, tuple)
+		}
+	}
+}

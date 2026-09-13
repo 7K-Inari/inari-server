@@ -24,7 +24,11 @@ The live e2e run (task 716c6404) found two CRUD holes:
 - A new unique index `policies_org_name_key` on
   `policies (COALESCE(org_id, ''), name)` enforces org-scoped name
   uniqueness (including platform-global rows); a conflicting rename returns
-  `ErrPolicyNameTaken` → **409**.
+  `ErrPolicyNameTaken` → **409**. Because `ListPolicies` merges org and
+  platform-global rows, a service-level check (`Store.PolicyNameExists`)
+  additionally rejects tenant creates/renames that would shadow a
+  platform-global name — names are unique across the whole merged list an
+  org can see.
 - Rego source is compiled before persisting (invalid source → 422), same
   as create. Policies remain rego-only; CEL exists solely as the `cel-vap`
   policy-*pack* engine.

@@ -181,6 +181,22 @@ func (s *Store) UpdatePolicy(ctx context.Context, q db.Querier, p *types.Policy)
 	return nil
 }
 
+// PolicyNameExists reports whether a policy with the given name is visible
+// to the org — its own policies plus platform-global rows (org_id IS NULL),
+// i.e. the set ListPolicies returns. excludeID ignores one row (the policy
+// being renamed). The policies_org_name_key index only scopes uniqueness
+// per org, so this check prevents tenant policies from shadowing
+// platform-global names in the merged list.
+func (s *Store) PolicyNameExists(ctx context.Context, q db.Querier, orgID, name, excludeID string) (bool, error) {
+	const sql = `SELECT EXISTS(SELECT 1 FROM policies
+	             WHERE name = $2 AND (org_id = $1 OR org_id IS NULL) AND id <> $3)`
+	var exists bool
+	if err := q.QueryRow(ctx, sql, orgID, name, excludeID).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
 func (s *Store) DeletePolicy(ctx context.Context, q db.Querier, id string) error {
 	const sql = `DELETE FROM policies WHERE id = $1`
 	tag, err := q.Exec(ctx, sql, id)
@@ -440,6 +456,15 @@ func (s *Service) CreatePolicy(ctx context.Context, actor, orgID, name, target, 
 		Target: target, Engine: engine, Source: source, Enabled: true,
 	}
 	err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		// Beyond the per-org unique index: reject names shadowing a
+		// platform-global policy (they render in the same merged list).
+		taken, err := s.store.PolicyNameExists(ctx, tx, orgID, name, p.ID)
+		if err != nil {
+			return err
+		}
+		if taken {
+			return ErrPolicyNameTaken
+		}
 		if err := s.store.CreatePolicy(ctx, tx, p); err != nil {
 			return err
 		}
@@ -503,6 +528,13 @@ func (s *Service) UpdatePolicy(ctx context.Context, actor, orgID, id, name, targ
 	p.Source = source
 	p.Enabled = enabled
 	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		taken, err := s.store.PolicyNameExists(ctx, tx, orgID, p.Name, p.ID)
+		if err != nil {
+			return err
+		}
+		if taken {
+			return ErrPolicyNameTaken
+		}
 		if err := s.store.UpdatePolicy(ctx, tx, p); err != nil {
 			return err
 		}

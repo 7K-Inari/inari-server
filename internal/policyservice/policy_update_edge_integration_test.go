@@ -32,19 +32,19 @@ func TestPolicyUpdateEdgeCases(t *testing.T) {
 	}
 
 	// 2. Platform-global rows dedupe among themselves (the '' bucket of the
-	// COALESCE index); a tenant policy may shadow a global name (QA note:
-	// ListPolicies then shows both — cosmetic ambiguity, reported).
+	// COALESCE index), and a tenant policy may not shadow a global name —
+	// ListPolicies merges both scopes, so duplicates would be ambiguous.
 	if _, err := svc.CreatePolicy(ctx, "admin", "", "global-one", types.PolicyTargetRequest, types.PolicyEngineRego, itDenyRego); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.CreatePolicy(ctx, "admin", "", "global-one", types.PolicyTargetRequest, types.PolicyEngineRego, itDenyRego); !errors.Is(err, policyservice.ErrPolicyNameTaken) {
 		t.Fatalf("duplicate global name: got %v, want ErrPolicyNameTaken", err)
 	}
-	if _, err := svc.UpdatePolicy(ctx, "user-1", "org:1", p.ID, "global-one", "", itDenyRego, true); err != nil {
-		t.Fatalf("tenant shadowing a global name is allowed by design: %v", err)
+	if _, err := svc.UpdatePolicy(ctx, "user-1", "org:1", p.ID, "global-one", "", itDenyRego, true); !errors.Is(err, policyservice.ErrPolicyNameTaken) {
+		t.Fatalf("rename shadowing a global name: got %v, want ErrPolicyNameTaken", err)
 	}
-	if _, err := svc.UpdatePolicy(ctx, "user-1", "org:1", p.ID, "alpha", "", itDenyRego, true); err != nil {
-		t.Fatal(err)
+	if _, err := svc.CreatePolicy(ctx, "user-1", "org:1", "global-one", types.PolicyTargetRequest, types.PolicyEngineRego, itDenyRego); !errors.Is(err, policyservice.ErrPolicyNameTaken) {
+		t.Fatalf("create shadowing a global name: got %v, want ErrPolicyNameTaken", err)
 	}
 	// And a tenant policy blocks a second tenant's rename (index is org-scoped,
 	// so another org may reuse the name freely).

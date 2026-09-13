@@ -60,6 +60,11 @@ func TestApplyCommandPayload(t *testing.T) {
 	if m.CommandId != cmd.ID || m.Name != "corp-vault" || m.Scope != "cluster" {
 		t.Fatalf("message %+v", &m)
 	}
+	// The target path must stay under baseline/: the tenant ArgoCD root app
+	// syncs only that path, anything else is never applied to the cluster.
+	if got := m.GetTarget().GetPath(); got != "baseline/secretstores" {
+		t.Fatalf("target path = %q, want baseline/secretstores", got)
+	}
 	v := m.GetVault()
 	if v == nil || v.Server != "https://vault.example.com" || v.Path != "secret" {
 		t.Fatalf("vault provider %+v", m.Provider)

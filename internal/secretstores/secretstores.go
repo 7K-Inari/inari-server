@@ -169,8 +169,11 @@ func targetDiff(oldIDs, newIDs []string) []string {
 }
 
 // stateRepoPath is the directory in the tenant state repo where SecretStore
-// manifests are committed (synced into clusters by the tenant-local ArgoCD).
-const stateRepoPath = "secretstores"
+// manifests are committed. It MUST live under baseline/: the tenant-local
+// ArgoCD root app (tenantzonefactory.RenderBaseline) syncs only path
+// "baseline" — anything committed elsewhere in the repo is never applied
+// to the cluster.
+const stateRepoPath = "baseline/secretstores"
 
 // applyProto builds the contract message for one apply command. Credential
 // material never transits: only authSecretRef (plan §4.1).

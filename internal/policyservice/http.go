@@ -70,7 +70,7 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		OperationID: "updatePolicy",
 		Method:      http.MethodPut,
 		Path:        "/api/v1/tenants/{org}/policies/{id}",
-		Summary:     "Update a policy (bumps version)",
+		Summary:     "Update a policy (bumps version; exemptions bind the stable ID, so renames/edits keep them valid)",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.updatePolicy)
 	huma.Register(api, huma.Operation{
@@ -187,6 +187,8 @@ func mapErr(err error, notFound error) error {
 		return huma.Error404NotFound(notFound.Error())
 	case errors.Is(err, ErrAssignmentExists):
 		return huma.Error409Conflict(ErrAssignmentExists.Error())
+	case errors.Is(err, ErrPolicyNameTaken):
+		return huma.Error409Conflict(ErrPolicyNameTaken.Error())
 	case errors.Is(err, ErrExemptionNotPending):
 		return huma.Error409Conflict(ErrExemptionNotPending.Error())
 	case errors.Is(err, ErrInvalidInput):
@@ -272,6 +274,8 @@ type updatePolicyInput struct {
 	Org  string `path:"org"`
 	ID   string `path:"id"`
 	Body struct {
+		Name    string `json:"name,omitempty" doc:"New policy name (empty keeps the current name; 409 on conflict)"`
+		Target  string `json:"target,omitempty" doc:"request | render (empty keeps the current target)"`
 		Source  string `json:"source"`
 		Enabled bool   `json:"enabled"`
 	}
@@ -282,7 +286,7 @@ func (h *Handler) updatePolicy(ctx context.Context, in *updatePolicyInput) (*pol
 	if err != nil {
 		return nil, err
 	}
-	p, err := h.svc.UpdatePolicy(ctx, id.Subject, org.ID, in.ID, in.Body.Source, in.Body.Enabled)
+	p, err := h.svc.UpdatePolicy(ctx, id.Subject, org.ID, in.ID, in.Body.Name, in.Body.Target, in.Body.Source, in.Body.Enabled)
 	if err != nil {
 		return nil, mapErr(err, ErrPolicyNotFound)
 	}

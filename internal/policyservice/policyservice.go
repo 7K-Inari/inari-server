@@ -54,6 +54,7 @@ var (
 	ErrAssignmentNotFound  = errors.New("policy assignment not found")
 	ErrAssignmentExists    = errors.New("policy pack already assigned to target")
 	ErrExemptionNotPending = errors.New("exemption is not pending")
+	ErrPolicyNameTaken     = errors.New("policy name already exists")
 	ErrInvalidInput        = errors.New("policyservice: invalid input")
 )
 
@@ -156,13 +157,19 @@ func (s *Store) ListPolicies(ctx context.Context, q db.Querier, orgID string) ([
 	return out, rows.Err()
 }
 
-// UpdatePolicy replaces source/enabled and bumps the version.
+// UpdatePolicy replaces name/target/source/enabled and bumps the version.
+// A rename that collides with another policy in the same scope maps the
+// unique-violation on policies_org_name_key to ErrPolicyNameTaken.
 func (s *Store) UpdatePolicy(ctx context.Context, q db.Querier, p *types.Policy) error {
-	const sql = `UPDATE policies SET source = $2, enabled = $3, version = version + 1, updated_at = now()
+	const sql = `UPDATE policies SET name = $2, target = $3, source = $4, enabled = $5,
+	             version = version + 1, updated_at = now()
 	             WHERE id = $1 RETURNING ` + policyCols
-	out, err := scanPolicy(q.QueryRow(ctx, sql, p.ID, p.Source, p.Enabled))
+	out, err := scanPolicy(q.QueryRow(ctx, sql, p.ID, p.Name, p.Target, p.Source, p.Enabled))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrPolicyNotFound
+	}
+	if isUniqueViolation(err) {
+		return ErrPolicyNameTaken
 	}
 	if err != nil {
 		return err
@@ -459,7 +466,18 @@ func (s *Service) ListPolicies(ctx context.Context, orgID string) ([]types.Polic
 	return s.store.ListPolicies(ctx, s.db.Pool, orgID)
 }
 
-func (s *Service) UpdatePolicy(ctx context.Context, actor, orgID, id, source string, enabled bool) (*types.Policy, error) {
+// UpdatePolicy edits a policy's name, target, source, and enabled flag,
+// bumping the version. Empty name/target keep the current values. The rego
+// source is compiled before persisting; a rename colliding with an existing
+// policy in the org returns ErrPolicyNameTaken (409 at the route).
+//
+// Exemption semantics: exemptions bind the stable policy ID, never the
+// name, so renames and source edits cannot break them — an approved,
+// unexpired exemption keeps exempting the policy's violations across
+// updates. Source edits take effect at the next evaluation; enabled=false
+// stops enforcement immediately. Only delete+recreate breaks the binding,
+// which this update path removes the need for.
+func (s *Service) UpdatePolicy(ctx context.Context, actor, orgID, id, name, target, source string, enabled bool) (*types.Policy, error) {
 	p, err := s.GetPolicy(ctx, orgID, id)
 	if err != nil {
 		return nil, err
@@ -467,8 +485,17 @@ func (s *Service) UpdatePolicy(ctx context.Context, actor, orgID, id, source str
 	if p.OrgID == "" {
 		return nil, fmt.Errorf("%w: platform-global policies are not editable by tenants", ErrInvalidInput)
 	}
+	if target != "" && target != types.PolicyTargetRequest && target != types.PolicyTargetRender {
+		return nil, fmt.Errorf("%w: target must be request|render", ErrInvalidInput)
+	}
 	if err := s.eval.Compile(source); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+	}
+	if name != "" {
+		p.Name = name
+	}
+	if target != "" {
+		p.Target = target
 	}
 	p.Source = source
 	p.Enabled = enabled
@@ -478,7 +505,7 @@ func (s *Service) UpdatePolicy(ctx context.Context, actor, orgID, id, source str
 		}
 		return s.audit.Record(ctx, tx, &types.AuditEvent{
 			OrgID: orgID, Actor: actor, Action: "policy.updated", ObjectType: "policy", ObjectID: p.ID,
-			Payload: json.RawMessage(fmt.Sprintf(`{"version":%d}`, p.Version)),
+			Payload: json.RawMessage(fmt.Sprintf(`{"name":%q,"target":%q,"version":%d}`, p.Name, p.Target, p.Version)),
 		})
 	})
 	if err != nil {

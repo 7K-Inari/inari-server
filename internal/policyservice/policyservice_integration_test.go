@@ -123,7 +123,7 @@ func TestPolicyCRUD(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 
-	updated, err := svc.UpdatePolicy(ctx, "user-1", "org:1", p.ID, itDenyRego, false)
+	updated, err := svc.UpdatePolicy(ctx, "user-1", "org:1", p.ID, "", "", itDenyRego, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,6 +144,100 @@ func TestPolicyCRUD(t *testing.T) {
 	}
 	if _, err := svc.GetPolicy(ctx, "org:1", p.ID); !errors.Is(err, policyservice.ErrPolicyNotFound) {
 		t.Fatalf("expected ErrPolicyNotFound, got %v", err)
+	}
+}
+
+func TestPolicyUpdateRenameTargetAndConflicts(t *testing.T) {
+	svc, _, _ := itService(t)
+	ctx := context.Background()
+
+	p, err := svc.CreatePolicy(ctx, "user-1", "org:1", "registry", types.PolicyTargetRequest, types.PolicyEngineRego, itDenyRego)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CreatePolicy(ctx, "user-1", "org:1", "other", types.PolicyTargetRender, types.PolicyEngineRego, itDenyRego); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rename + retarget bumps the version and persists both fields.
+	updated, err := svc.UpdatePolicy(ctx, "user-1", "org:1", p.ID, "registry-v2", types.PolicyTargetRender, itDenyRego, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Name != "registry-v2" || updated.Target != types.PolicyTargetRender || updated.Version != 2 {
+		t.Fatalf("update = %+v", updated)
+	}
+	got, err := svc.GetPolicy(ctx, "org:1", p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "registry-v2" || got.Target != types.PolicyTargetRender {
+		t.Fatalf("persisted = %+v", got)
+	}
+
+	// Empty name/target keep the current values.
+	updated, err = svc.UpdatePolicy(ctx, "user-1", "org:1", p.ID, "", "", itDenyRego, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Name != "registry-v2" || updated.Target != types.PolicyTargetRender {
+		t.Fatalf("empty fields must keep current values: %+v", updated)
+	}
+
+	// Renaming onto an existing name conflicts.
+	if _, err := svc.UpdatePolicy(ctx, "user-1", "org:1", p.ID, "other", "", itDenyRego, true); !errors.Is(err, policyservice.ErrPolicyNameTaken) {
+		t.Fatalf("expected ErrPolicyNameTaken, got %v", err)
+	}
+
+	// Invalid target and broken rego are rejected before persisting.
+	if _, err := svc.UpdatePolicy(ctx, "user-1", "org:1", p.ID, "", "bogus", itDenyRego, true); !errors.Is(err, policyservice.ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for target, got %v", err)
+	}
+	if _, err := svc.UpdatePolicy(ctx, "user-1", "org:1", p.ID, "", "", "package inari.policy\n\ndeny if {", true); !errors.Is(err, policyservice.ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for rego, got %v", err)
+	}
+}
+
+func TestPolicyUpdateKeepsExemptionsBound(t *testing.T) {
+	svc, _, _ := itService(t)
+	ctx := context.Background()
+
+	p, err := svc.CreatePolicy(ctx, "user-1", "org:1", "registry", types.PolicyTargetRequest, types.PolicyEngineRego, itDenyRego)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ex, err := svc.RequestExemption(ctx, "user-1", "org:1", p.ID, nil, "migration window", time.Now().Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.DecideExemption(ctx, "user-2", "org:1", ex.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rename + edit source: the exemption binds the stable policy ID, so it
+	// keeps exempting the updated policy's violations.
+	const renamedRego = `package inari.policy
+
+deny contains {"rule": "renamed-rule", "reason": "still denied", "remediation": "fix it"} if {
+	input.spec.image != "registry.example.com/app"
+}
+`
+	if _, err := svc.UpdatePolicy(ctx, "user-1", "org:1", p.ID, "registry-renamed", "", renamedRego, true); err != nil {
+		t.Fatal(err)
+	}
+	decision, err := svc.PreFlight(ctx, policyservice.PreFlightInput{
+		OrgID: "org:1", ItemID: "item:1", Version: "1.0.0", ClusterID: "cluster:1",
+		Spec:      json.RawMessage(`{"image":"evil.io/app"}`),
+		Requester: "user-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !decision.Allow || len(decision.Violations) != 1 || !decision.Violations[0].Exempted {
+		t.Fatalf("exemption must survive rename/edit: %+v", decision)
+	}
+	if decision.Violations[0].Rule != "renamed-rule" {
+		t.Fatalf("edited source must take effect: %+v", decision.Violations[0])
 	}
 }
 

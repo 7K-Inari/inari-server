@@ -182,8 +182,8 @@ func readPackageDir(dir string) (*Package, error) {
 // RegistryPuller pulls the real curated packages from an OCI registry. It
 // first fetches the catalog index artifact (an oras-pushed catalog.yaml,
 // e.g. ghcr.io/7k-inari/catalog/index:latest), then each package artifact
-// listed in it. inari-catalog pushes per-package artifacts today; publishing
-// the index artifact is the companion step on that repo.
+// listed in it. inari-catalog's release.yml publishes both: per-package
+// artifacts on every package release and the index artifact afterwards.
 type RegistryPuller struct {
 	// IndexRef is the OCI reference of the catalog index artifact.
 	IndexRef string

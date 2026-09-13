@@ -210,5 +210,3 @@ require (
 )
 
 replace github.com/go-openapi/testify/v2 => github.com/go-openapi/testify/v2 v2.0.2
-
-replace github.com/7K-Inari/inari-api => ../inari-api

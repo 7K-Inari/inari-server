@@ -81,8 +81,21 @@ type Config struct {
 	// or "github" (GitHub App credentials, §12.1/2 — never PATs).
 	GitProvider             string
 	GitHubAppID             int64
-	GitHubInstallationID    int64
 	GitHubAppPrivateKeyFile string
+	// GitHubInstallationID is DEPRECATED (pinned single-org installs); the
+	// platform app's installation is now resolved per tenant at runtime.
+	// When set it seeds the installation cache for back-compat.
+	GitHubInstallationID int64
+	// GitHubAPIBase is the platform app's API base ("": github.com; or a
+	// GHE https://<host>/api/v3).
+	GitHubAPIBase string
+	// GitHubAppSlug builds tenant install links (<web>/apps/<slug>/installations/new).
+	GitHubAppSlug         string
+	GitHubInstallCacheTTL time.Duration
+	// GitHubAllowedAPIBases allowlists tenant BYO apiBase hosts (empty: any https host).
+	GitHubAllowedAPIBases []string
+	// TenantGitKeyMountRoot is where ESO renders tenant BYO app keys.
+	TenantGitKeyMountRoot string
 
 	// Tenant Zone Factory (plan §5.12). TZFAWSMode selects the AWS backend:
 	// "fake" (default; deterministic in-memory — the M3 acceptance layer)
@@ -172,6 +185,11 @@ func Load() (*Config, error) {
 		GitHubAppID:             intEnv("INARI_GITHUB_APP_ID", 0),
 		GitHubInstallationID:    intEnv("INARI_GITHUB_APP_INSTALLATION_ID", 0),
 		GitHubAppPrivateKeyFile: env("INARI_GITHUB_APP_PRIVATE_KEY_FILE", ""),
+		GitHubAPIBase:           env("INARI_GITHUB_API_BASE", ""),
+		GitHubAppSlug:           env("INARI_GITHUB_APP_SLUG", ""),
+		GitHubInstallCacheTTL:   durEnv("INARI_GITHUB_INSTALL_CACHE_TTL", 5*time.Minute),
+		GitHubAllowedAPIBases:   listEnv("INARI_GITHUB_ALLOWED_API_BASES", nil),
+		TenantGitKeyMountRoot:   env("INARI_TENANT_GIT_KEY_MOUNT_ROOT", "/var/run/inari/tenant-git-keys"),
 
 		TZFAWSMode:           env("INARI_TZF_AWS_MODE", "fake"),
 		TZFApprovalRequired:  boolEnv("INARI_TZF_APPROVAL_REQUIRED", true),

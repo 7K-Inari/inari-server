@@ -132,3 +132,46 @@ func TestRoleValid(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 }
+
+func TestGitHubResolverEnv(t *testing.T) {
+	t.Setenv("INARI_GITHUB_API_BASE", "https://ghe.example.com/api/v3")
+	t.Setenv("INARI_GITHUB_APP_SLUG", "inari-platform")
+	t.Setenv("INARI_GITHUB_INSTALL_CACHE_TTL", "10m")
+	t.Setenv("INARI_GITHUB_ALLOWED_API_BASES", "ghe.corp.example,ghe2.corp.example")
+	t.Setenv("INARI_TENANT_GIT_KEY_MOUNT_ROOT", "/keys")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.GitHubAPIBase != "https://ghe.example.com/api/v3" {
+		t.Errorf("GitHubAPIBase = %q", c.GitHubAPIBase)
+	}
+	if c.GitHubAppSlug != "inari-platform" {
+		t.Errorf("GitHubAppSlug = %q", c.GitHubAppSlug)
+	}
+	if c.GitHubInstallCacheTTL.Minutes() != 10 {
+		t.Errorf("GitHubInstallCacheTTL = %v", c.GitHubInstallCacheTTL)
+	}
+	if len(c.GitHubAllowedAPIBases) != 2 || c.GitHubAllowedAPIBases[0] != "ghe.corp.example" {
+		t.Errorf("GitHubAllowedAPIBases = %v", c.GitHubAllowedAPIBases)
+	}
+	if c.TenantGitKeyMountRoot != "/keys" {
+		t.Errorf("TenantGitKeyMountRoot = %q", c.TenantGitKeyMountRoot)
+	}
+}
+
+func TestGitHubResolverEnvDefaults(t *testing.T) {
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.GitHubAPIBase != "" {
+		t.Errorf("GitHubAPIBase default = %q, want empty (github.com)", c.GitHubAPIBase)
+	}
+	if c.GitHubInstallCacheTTL.Minutes() != 5 {
+		t.Errorf("GitHubInstallCacheTTL default = %v, want 5m", c.GitHubInstallCacheTTL)
+	}
+	if c.TenantGitKeyMountRoot != "/var/run/inari/tenant-git-keys" {
+		t.Errorf("TenantGitKeyMountRoot default = %q", c.TenantGitKeyMountRoot)
+	}
+}

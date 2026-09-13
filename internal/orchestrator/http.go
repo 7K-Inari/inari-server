@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -15,7 +18,9 @@ import (
 	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/inventory"
+	gitgithub "github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider/github"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
+	"github.com/7K-Inari/inari-server/internal/tenancy/gitkeys"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -29,10 +34,19 @@ type Handler struct {
 	svc     *Service
 	tenants TenantResolver
 	authz   authz.Authorizer
+	// allowedAPIBases allowlists tenant BYO GitHub Enterprise apiBase hosts
+	// (empty: any https host).
+	allowedAPIBases []string
 }
 
 func NewHandler(svc *Service, tenants TenantResolver, az authz.Authorizer) *Handler {
 	return &Handler{svc: svc, tenants: tenants, authz: az}
+}
+
+// WithAllowedAPIBases pins the GHE hosts tenants may point BYO apps at.
+func (h *Handler) WithAllowedAPIBases(bases []string) *Handler {
+	h.allowedAPIBases = bases
+	return h
 }
 
 // RegisterRoutes mounts the orchestrator API on the huma API instance.
@@ -137,6 +151,14 @@ func (h *Handler) deploy(ctx context.Context, in *deployInput) (*deployOutput, e
 	var pve *PolicyViolationError
 	if errors.As(err, &pve) {
 		return nil, huma.Error422UnprocessableEntity(pve.Error())
+	}
+	var notInstalled *gitgithub.ErrAppNotInstalled
+	if errors.As(err, &notInstalled) {
+		return nil, huma.NewError(http.StatusPreconditionFailed, notInstalled.Error())
+	}
+	var revoked *gitgithub.ErrAppCredentialsRevoked
+	if errors.As(err, &revoked) {
+		return nil, huma.NewError(http.StatusBadGateway, revoked.Error())
 	}
 	if errors.Is(err, ErrNoGitConfig) {
 		return nil, huma.Error409Conflict(err.Error())
@@ -243,19 +265,61 @@ type gitConfigInput struct {
 		// ScaffoldGitOrg optionally overrides the platform scaffold git
 		// org for this tenant (M8.W6); empty keeps the global default.
 		ScaffoldGitOrg string `json:"scaffoldGitOrg,omitempty"`
+		// GitHubApp is the optional BYO GitHub App override (model B) — a
+		// credential REFERENCE only; the private key stays in ESO mounts.
+		GitHubApp *types.GitHubAppConfig `json:"githubApp,omitempty"`
 	}
 }
 
 type gitConfigOutput struct {
 	Body struct {
-		Config types.TenantGitConfig `json:"config"`
+		Config types.TenantGitConfig    `json:"config"`
+		Status *types.GitProviderStatus `json:"gitProviderStatus,omitempty"`
 	}
+}
+
+// validateGitHubApp enforces the BYO app reference rules (422 on bad input).
+func (h *Handler) validateGitHubApp(app *types.GitHubAppConfig) error {
+	if app == nil {
+		return nil
+	}
+	if app.AppID <= 0 || app.InstallationID <= 0 {
+		return fmt.Errorf("githubApp.appId and githubApp.installationId must be positive integers")
+	}
+	if err := gitkeys.ValidateRef(app.KeyRef); err != nil {
+		return err
+	}
+	if app.APIBase != "" {
+		u, err := url.Parse(app.APIBase)
+		if err != nil || u.Scheme != "https" || u.Host == "" {
+			return fmt.Errorf("githubApp.apiBase must be an absolute https:// URL")
+		}
+		if u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/api/v3") {
+			return fmt.Errorf("githubApp.apiBase must have no query/fragment and no path other than /api/v3")
+		}
+		if len(h.allowedAPIBases) > 0 {
+			allowed := false
+			for _, base := range h.allowedAPIBases {
+				if strings.EqualFold(u.Hostname(), base) || strings.EqualFold(strings.TrimSuffix(app.APIBase, "/api/v3"), strings.TrimSuffix(base, "/")) {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return fmt.Errorf("githubApp.apiBase host %q is not in the platform allowlist", u.Host)
+			}
+		}
+	}
+	return nil
 }
 
 func (h *Handler) setGitConfig(ctx context.Context, in *gitConfigInput) (*struct{}, error) {
 	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
 	if err != nil {
 		return nil, err
+	}
+	if err := h.validateGitHubApp(in.Body.GitHubApp); err != nil {
+		return nil, huma.Error422UnprocessableEntity(err.Error())
 	}
 	policy := types.CommitPolicy(in.Body.CommitPolicy)
 	if policy == "" {
@@ -267,7 +331,7 @@ func (h *Handler) setGitConfig(ctx context.Context, in *gitConfigInput) (*struct
 	}
 	return nil, h.svc.SetGitConfig(ctx, "user:"+id.Subject, &types.TenantGitConfig{
 		OrgID: org.ID, Repo: in.Body.Repo, CommitPolicy: policy, BaseBranch: branch,
-		ScaffoldGitOrg: in.Body.ScaffoldGitOrg,
+		ScaffoldGitOrg: in.Body.ScaffoldGitOrg, GitHubApp: in.Body.GitHubApp,
 	})
 }
 
@@ -289,5 +353,9 @@ func (h *Handler) getGitConfig(ctx context.Context, in *gitConfigGetInput) (*git
 	}
 	out := &gitConfigOutput{}
 	out.Body.Config = *cfg
+	// Best-effort health probe; failures degrade to "unknown", never 5xx.
+	if st, err := h.svc.GitProviderStatus(ctx, org.ID); err == nil {
+		out.Body.Status = st
+	}
 	return out, nil
 }

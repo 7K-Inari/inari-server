@@ -88,13 +88,14 @@ type OutboxEvent struct {
 }
 
 const (
-	EventTenantCreated     = "tenant.created"
-	EventTenantDeleting    = "tenant.deleting"
-	EventTenantDeleted     = "tenant.deleted"
-	EventTeamCreated       = "team.created"
-	EventMembershipAdded   = "membership.added"
-	EventMembershipRemoved = "membership.removed"
-	EventTeamDeleted       = "team.deleted"
+	EventTenantCreated         = "tenant.created"
+	EventTenantDeleting        = "tenant.deleting"
+	EventTenantDeleted         = "tenant.deleted"
+	EventTenantGitAuthResolved = "tenant.git.auth.resolved"
+	EventTeamCreated           = "team.created"
+	EventMembershipAdded       = "membership.added"
+	EventMembershipRemoved     = "membership.removed"
+	EventTeamDeleted           = "team.deleted"
 
 	EventClusterCreated        = "cluster.created"
 	EventClusterRegistered     = "cluster.registered"
@@ -542,6 +543,26 @@ const (
 	CommitPolicyPullRequest CommitPolicy = "pull_request"
 )
 
+// GitHubAppSecretRef references an ESO-rendered Secret holding a tenant's
+// BYO GitHub App private key. Only the reference is stored — key material
+// stays cluster-side via ESO mounts (ADR-0004, plan §12.1).
+type GitHubAppSecretRef struct {
+	SecretName string `json:"secretName"`
+	Namespace  string `json:"namespace"`
+	Key        string `json:"key"` // data key inside the Secret, e.g. "private-key.pem"
+}
+
+// GitHubAppConfig is a tenant's BYO GitHub App credential reference
+// (model B override). The private key itself is never stored.
+type GitHubAppConfig struct {
+	AppID          int64               `json:"appId"`
+	InstallationID int64               `json:"installationId"`
+	KeyRef         *GitHubAppSecretRef `json:"keyRef"`
+	// APIBase targets a GitHub Enterprise host (https://<host>/api/v3);
+	// empty means https://api.github.com.
+	APIBase string `json:"apiBase,omitempty"`
+}
+
 // TenantGitConfig is the per-tenant git target + policy for the
 // platform-owned <tenant>-inari-state repository.
 type TenantGitConfig struct {
@@ -552,6 +573,18 @@ type TenantGitConfig struct {
 	// ScaffoldGitOrg overrides the platform-wide scaffold git org for this
 	// tenant (M8.W6); empty falls back to INARI_SCAFFOLD_GIT_ORG.
 	ScaffoldGitOrg string `json:"scaffoldGitOrg,omitempty"`
+	// GitHubApp is the optional BYO GitHub App override (model B); when
+	// nil the platform app + per-org installation is used (model A).
+	GitHubApp *GitHubAppConfig `json:"githubApp,omitempty"`
+}
+
+// GitProviderStatus reports the health of a tenant's git provider auth.
+type GitProviderStatus struct {
+	State          string    `json:"state"` // ok|not_installed|invalid_credentials|rate_limited|unknown
+	AuthModel      string    `json:"authModel"`
+	InstallationID int64     `json:"installationId,omitempty"`
+	APIBase        string    `json:"apiBase,omitempty"`
+	CheckedAt      time.Time `json:"checkedAt"`
 }
 
 // CatalogItemPayload is the outbox payload for EventCatalogItemUpserted.
@@ -578,6 +611,10 @@ type DeployRequestedPayload struct {
 	Version    string `json:"version"`
 	CommitSHA  string `json:"commitSha,omitempty"`
 	PRURL      string `json:"prUrl,omitempty"`
+	// Git auth attribution for the deploy's write (hybrid git app model).
+	AuthModel      string `json:"authModel,omitempty"`
+	InstallationID int64  `json:"installationId,omitempty"`
+	APIBase        string `json:"apiBase,omitempty"`
 }
 
 // InstancePayload is the outbox payload for instance lifecycle events.
@@ -640,6 +677,18 @@ type PlatformResource struct {
 	ReportedAt *time.Time             `json:"reportedAt,omitempty"`
 	CreatedAt  time.Time              `json:"createdAt"`
 	UpdatedAt  time.Time              `json:"updatedAt"`
+}
+
+// TenantGitAuthResolvedPayload is the outbox payload for
+// EventTenantGitAuthResolved — emitted when the git provider resolver
+// resolves/refreshes/fails a tenant's git credentials (never on cache hit).
+type TenantGitAuthResolvedPayload struct {
+	OrgID          string `json:"orgId"`
+	AuthModel      string `json:"authModel"` // platform|byo
+	AppID          int64  `json:"appId,omitempty"`
+	InstallationID int64  `json:"installationId,omitempty"`
+	APIBase        string `json:"apiBase,omitempty"`
+	Result         string `json:"result"` // resolved|scope_warning|not_installed|invalid_credentials|error
 }
 
 // PlatformResourcePayload is the outbox payload for platform resource events.

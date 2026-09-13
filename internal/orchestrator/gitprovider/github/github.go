@@ -48,6 +48,18 @@ type Config struct {
 	APIBase string
 }
 
+// APIError is a failed GitHub API call. Body is truncated (log-size guard).
+type APIError struct {
+	Method string
+	Path   string
+	Status int
+	Body   string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("gitprovider github: %s %s: status %d: %s", e.Method, e.Path, e.Status, e.Body)
+}
+
 func New(cfg Config) (*Provider, error) {
 	raw, err := os.ReadFile(cfg.PrivateKeyFile)
 	if err != nil {
@@ -57,28 +69,39 @@ func New(cfg Config) (*Provider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gitprovider github: parse app key: %w", err)
 	}
-	base := cfg.APIBase
+	return NewWithKey(cfg.AppID, cfg.InstallationID, key, cfg.APIBase), nil
+}
+
+// NewWithKey builds a Provider from an already-parsed App private key
+// (used by the per-tenant resolver; key bytes are loaded once and reused).
+func NewWithKey(appID, installationID int64, key *rsa.PrivateKey, apiBase string) *Provider {
+	base := apiBase
 	if base == "" {
 		base = "https://api.github.com"
 	}
 	return &Provider{
 		apiBase:        strings.TrimSuffix(base, "/"),
-		appID:          cfg.AppID,
-		installationID: cfg.InstallationID,
+		appID:          appID,
+		installationID: installationID,
 		key:            key,
 		http:           &http.Client{Timeout: 30 * time.Second},
-	}, nil
+	}
 }
 
-// appJWT signs a short-lived App JWT (RS256, §12.1).
-func (p *Provider) appJWT() (string, error) {
+// signAppJWT signs a short-lived App JWT (RS256, §12.1).
+func signAppJWT(appID int64, key *rsa.PrivateKey) (string, error) {
 	now := time.Now()
 	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.RegisteredClaims{
 		IssuedAt:  jwt.NewNumericDate(now.Add(-30 * time.Second)),
 		ExpiresAt: jwt.NewNumericDate(now.Add(9 * time.Minute)),
-		Issuer:    fmt.Sprint(p.appID),
+		Issuer:    fmt.Sprint(appID),
 	})
-	return tok.SignedString(p.key)
+	return tok.SignedString(key)
+}
+
+// appJWT signs a short-lived App JWT (RS256, §12.1).
+func (p *Provider) appJWT() (string, error) {
+	return signAppJWT(p.appID, p.key)
 }
 
 // installationToken mints (and caches) an installation access token.
@@ -106,7 +129,10 @@ func (p *Provider) installationToken(ctx context.Context) (string, error) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("gitprovider github: mint installation token: %s: %s", resp.Status, body)
+		if len(body) > 512 {
+			body = body[:512]
+		}
+		return "", &APIError{Method: http.MethodPost, Path: fmt.Sprintf("/app/installations/%d/access_tokens", p.installationID), Status: resp.StatusCode, Body: string(body)}
 	}
 	var out struct {
 		Token     string    `json:"token"`
@@ -152,7 +178,11 @@ func (p *Provider) do(ctx context.Context, method, path string, body, out any) (
 		return 0, err
 	}
 	if resp.StatusCode >= 400 {
-		return resp.StatusCode, fmt.Errorf("gitprovider github: %s %s: %s: %s", method, path, resp.Status, raw)
+		body := string(raw)
+		if len(body) > 512 {
+			body = body[:512]
+		}
+		return resp.StatusCode, &APIError{Method: method, Path: path, Status: resp.StatusCode, Body: body}
 	}
 	if out != nil && len(raw) > 0 {
 		return resp.StatusCode, json.Unmarshal(raw, out)
@@ -189,10 +219,7 @@ func (p *Provider) EnsureRepo(ctx context.Context, repo string) (string, error) 
 // webBase derives the clone-URL host from the API base: api.github.com maps
 // to github.com; a GitHub Enterprise <host>/api/v3 maps to <host>.
 func (p *Provider) webBase() string {
-	if p.apiBase == "https://api.github.com" {
-		return "https://github.com"
-	}
-	return strings.TrimSuffix(p.apiBase, "/api/v3")
+	return webBaseFrom(p.apiBase)
 }
 
 func (p *Provider) CommitFiles(ctx context.Context, repo, branch string, files []gitprovider.File, message string) (*gitprovider.Result, error) {

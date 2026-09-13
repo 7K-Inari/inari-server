@@ -77,9 +77,12 @@ type Config struct {
 	// CatalogSyncInterval re-syncs the catalog periodically; 0 = sync once
 	// at startup only.
 	CatalogSyncInterval time.Duration
-	// GitProvider selects the git backend: "fake" (default, local dev/tests)
-	// or "github" (GitHub App credentials, §12.1/2 — never PATs).
+	// GitProvider selects the git backend: "fake" (default, local dev/tests),
+	// "github" (GitHub App credentials, §12.1/2 — never PATs), or "local"
+	// (filesystem-backed bare repos under GitLocalRoot — real commits for
+	// dev/e2e environments without a git host).
 	GitProvider             string
+	GitLocalRoot            string
 	GitHubAppID             int64
 	GitHubAppPrivateKeyFile string
 	// GitHubInstallationID is DEPRECATED (pinned single-org installs); the
@@ -182,6 +185,7 @@ func Load() (*Config, error) {
 		CatalogOCIIndexRef:      env("INARI_CATALOG_OCI_INDEX_REF", ""),
 		CatalogSyncInterval:     durEnv("INARI_CATALOG_SYNC_INTERVAL", 0),
 		GitProvider:             env("INARI_GIT_PROVIDER", "fake"),
+		GitLocalRoot:            env("INARI_GIT_LOCAL_ROOT", "/var/lib/inari/git"),
 		GitHubAppID:             intEnv("INARI_GITHUB_APP_ID", 0),
 		GitHubInstallationID:    intEnv("INARI_GITHUB_APP_INSTALLATION_ID", 0),
 		GitHubAppPrivateKeyFile: env("INARI_GITHUB_APP_PRIVATE_KEY_FILE", ""),

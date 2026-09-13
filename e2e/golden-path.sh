@@ -460,10 +460,12 @@ xcurl -o /dev/null -X PUT -H "Authorization: Bearer $AT" \
   "http://keycloak-service:8080/admin/realms/inari/users/$VIEWER_UID/groups/$VIEWERS_GRP" || true
 
 log "fetching the rbac-viewer token (groups claim only — the viewer is a group member, not a Keycloak Organization member, so the organization:* scope would be rejected)"
-VIEWER_TOKEN=$(xcurl "http://keycloak-service:8080/realms/inari/protocol/openid-connect/token" \
+TOKEN_RESP=$(kubectl -n "$NAMESPACE" exec "$TOOLS" -- curl -s -m 20 \
+  "http://keycloak-service:8080/realms/inari/protocol/openid-connect/token" \
   -d grant_type=password -d client_id=inari-server \
-  -d username=rbac-viewer -d password=rbac-viewer -d scope="openid" \
-  | jq -r .access_token)
+  -d username=rbac-viewer -d password=rbac-viewer -d scope="openid")
+VIEWER_TOKEN=$(jq -r '.access_token // empty' <<<"$TOKEN_RESP")
+[ -n "$VIEWER_TOKEN" ] || die "rbac-viewer token request failed: $TOKEN_RESP"
 PAYLOAD=$(cut -d. -f2 <<<"$VIEWER_TOKEN"); PAYLOAD="${PAYLOAD}$(printf '=%.0s' $(seq 1 $(( (4 - ${#PAYLOAD} % 4) % 4 ))))"
 CLAIMS=$(base64 -d <<<"$PAYLOAD" 2>/dev/null || base64 -D <<<"$PAYLOAD")
 jq -e --arg g "/tenant-$TENANT/viewers" '.groups and (.groups | index($g))' <<<"$CLAIMS" >/dev/null \

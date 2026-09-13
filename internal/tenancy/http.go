@@ -280,7 +280,12 @@ type deleteTenantOutput struct {
 
 func (h *Handler) deleteTenant(ctx context.Context, in *deleteTenantInput) (*deleteTenantOutput, error) {
 	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
-		return nil, err
+		// Platform org_creators may force-decommission a tenant whose admin
+		// chain is broken (e.g. orgs created before the org-admin bootstrap
+		// fix, where no org-admin exists at all).
+		if perr := h.authorizePlatform(ctx); perr != nil {
+			return nil, err
+		}
 	}
 	id := identity(ctx)
 	approvalID, err := h.svc.DeleteTenant(ctx, id.Subject, in.Org, in.Body.Force, in.Body.Reason)

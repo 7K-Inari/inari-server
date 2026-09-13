@@ -6,23 +6,22 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/go-git/go-billy/v5"
-	"github.com/go-git/go-billy/v5/memfs"
 	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
-	"github.com/go-git/go-git/v5/plumbing/transport"
-	"github.com/go-git/go-git/v5/storage/memory"
+	"github.com/go-git/go-git/v5/storage"
 )
 
 // Local is a filesystem-backed Provider for dev/e2e (INARI_GIT_PROVIDER=
 // local): repositories are bare git repos under a root directory, written
-// with go-git (no git binary required, distroless-safe). It produces REAL
+// with go-git plumbing only (tree/blob/commit objects built directly) —
+// no git binary required anywhere, distroless-safe. It produces REAL
 // commits — unlike Fake — so an external syncer (the e2e harness standing
 // in for the tenant-local ArgoCD) can clone and apply the desired state.
 type Local struct {
@@ -82,30 +81,32 @@ func (l *Local) EnsureRepo(_ context.Context, repo string) (string, error) {
 func (l *Local) CommitFiles(_ context.Context, repo, branch string, files []File, message string) (*Result, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	r, w, err := l.checkout(repo, branch)
+	r, entries, parent, err := l.load(repo, branch)
 	if err != nil {
 		return nil, err
 	}
 	for _, f := range files {
-		if err := writeBillyFile(w.Filesystem, f.Path, f.Content); err != nil {
+		h, err := storeBlob(r.Storer, f.Content)
+		if err != nil {
 			return nil, err
 		}
+		entries[f.Path] = object.TreeEntry{Name: f.Path, Mode: filemode.Regular, Hash: h}
 	}
-	return l.commit(r, w, branch, message)
+	return l.storeCommit(r, branch, entries, parent, message)
 }
 
 // DeleteFiles implements Provider; deleting a missing path is a no-op.
 func (l *Local) DeleteFiles(_ context.Context, repo, branch string, paths []string, message string) (*Result, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	r, w, err := l.checkout(repo, branch)
+	r, entries, parent, err := l.load(repo, branch)
 	if err != nil {
 		return nil, err
 	}
 	for _, p := range paths {
-		_ = w.Filesystem.Remove(p) // missing files are already gone
+		delete(entries, p) // missing files are already gone
 	}
-	return l.commit(r, w, branch, message)
+	return l.storeCommit(r, branch, entries, parent, message)
 }
 
 // OpenPR implements Provider: local git has no pull requests, so the
@@ -114,16 +115,18 @@ func (l *Local) OpenPR(_ context.Context, repo, base, title, _ string, files []F
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	branch := "inari/" + sanitizeBranch(title)
-	r, w, err := l.checkout(repo, base)
+	r, entries, parent, err := l.load(repo, base)
 	if err != nil {
 		return nil, err
 	}
 	for _, f := range files {
-		if err := writeBillyFile(w.Filesystem, f.Path, f.Content); err != nil {
+		h, err := storeBlob(r.Storer, f.Content)
+		if err != nil {
 			return nil, err
 		}
+		entries[f.Path] = object.TreeEntry{Name: f.Path, Mode: filemode.Regular, Hash: h}
 	}
-	res, err := l.commit(r, w, branch, title)
+	res, err := l.storeCommit(r, branch, entries, parent, title)
 	if err != nil {
 		return nil, err
 	}
@@ -131,153 +134,190 @@ func (l *Local) OpenPR(_ context.Context, repo, base, title, _ string, files []F
 	return res, nil
 }
 
-// ReadFile implements Provider; a missing path reads as ("", nil).
+// ReadFile implements Provider; a missing path (or an unborn branch)
+// reads as ("", nil).
 func (l *Local) ReadFile(_ context.Context, repo, branch, path string) (string, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	r, _, err := l.open(repo)
-	if err != nil {
-		if errors.Is(err, errNoHead) {
-			return "", nil
-		}
-		return "", err
-	}
-	ref, err := r.Reference(plumbing.NewBranchReferenceName(branch), true)
-	if err != nil {
-		return "", nil // branch not created yet: nothing committed
-	}
-	commit, err := r.CommitObject(ref.Hash())
+	r, err := l.openBare(repo)
 	if err != nil {
 		return "", err
 	}
-	tree, err := commit.Tree()
-	if err != nil {
-		return "", err
-	}
-	f, err := tree.File(path)
-	if err != nil {
+	commit, err := headCommit(r, branch)
+	if errors.Is(err, plumbing.ErrReferenceNotFound) {
 		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	f, err := commit.File(path)
+	if errors.Is(err, object.ErrFileNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
 	}
 	return f.Contents()
 }
 
-var errNoHead = errors.New("gitprovider local: repo has no commits")
-
-// open returns the in-memory clone of the named repo.
-func (l *Local) open(repo string) (*git.Repository, *git.Worktree, error) {
+// openBare opens the bare repo (erroring when it does not exist).
+func (l *Local) openBare(repo string) (*git.Repository, error) {
 	path, err := l.repoPath(repo)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if _, err := os.Stat(path); err != nil {
-		return nil, nil, fmt.Errorf("gitprovider local: stat repo %q: %w", repo, err)
+		return nil, fmt.Errorf("gitprovider local: stat repo %q: %w", repo, err)
 	}
-	r, err := git.Clone(memory.NewStorage(), memfs.New(), &git.CloneOptions{URL: path})
-	if errors.Is(err, transport.ErrEmptyRemoteRepository) || errors.Is(err, plumbing.ErrReferenceNotFound) {
-		// Empty bare repo: start a fresh in-memory repo and treat the bare
-		// one as the push target.
-		r, err = git.Init(memory.NewStorage(), memfs.New())
-		if err != nil {
-			return nil, nil, err
-		}
-		if _, err := r.CreateRemote(&config.RemoteConfig{Name: "origin", URLs: []string{path}}); err != nil {
-			return nil, nil, err
-		}
-		w, err := mustWorktree(r)
-		if err != nil {
-			return nil, nil, err
-		}
-		return r, w, nil
-	}
+	r, err := git.PlainOpen(path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("gitprovider local: clone %s: %w", repo, err)
+		return nil, fmt.Errorf("gitprovider local: open %s: %w", repo, err)
 	}
-	w, err := mustWorktree(r)
-	if err != nil {
-		return nil, nil, err
-	}
-	return r, w, nil
+	return r, nil
 }
 
-// checkout opens the repo and makes sure branch is checked out (created
-// from HEAD when missing).
-func (l *Local) checkout(repo, branch string) (*git.Repository, *git.Worktree, error) {
-	r, w, err := l.open(repo)
-	if err != nil {
-		return nil, nil, err
-	}
-	if _, err := r.Head(); errors.Is(err, plumbing.ErrReferenceNotFound) {
-		// No commits yet: point HEAD at the target branch so the first
-		// commit lands there (go-git cannot Checkout-Create without HEAD).
-		if err := r.Storer.SetReference(
-			plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName(branch))); err != nil {
-			return nil, nil, err
-		}
-		return r, w, nil
-	}
-	_, branchErr := r.Reference(plumbing.NewBranchReferenceName(branch), true)
-	if err := w.Checkout(&git.CheckoutOptions{
-		Branch: plumbing.NewBranchReferenceName(branch),
-		Create: errors.Is(branchErr, plumbing.ErrReferenceNotFound),
-	}); err != nil {
-		return nil, nil, fmt.Errorf("gitprovider local: checkout %s: %w", branch, err)
-	}
-	return r, w, nil
-}
-
-// commit stages everything (including deletions), commits when content
-// changed, and pushes to the bare repo.
-func (l *Local) commit(r *git.Repository, w *git.Worktree, branch, message string) (*Result, error) {
-	if err := w.AddWithOptions(&git.AddOptions{All: true, Path: "."}); err != nil {
-		return nil, err
-	}
-	status, err := w.Status()
+// headCommit resolves refs/heads/<branch>; an unborn branch reports
+// plumbing.ErrReferenceNotFound.
+func headCommit(r *git.Repository, branch string) (*object.Commit, error) {
+	ref, err := r.Reference(plumbing.NewBranchReferenceName(branch), true)
 	if err != nil {
 		return nil, err
 	}
-	head, headErr := r.Head()
-	if status.IsClean() && headErr == nil {
-		return &Result{CommitSHA: head.Hash().String()}, nil
+	return r.CommitObject(ref.Hash())
+}
+
+// load opens the repo and flattens the branch's tree into path→entry
+// (empty map + no parent for an unborn branch).
+func (l *Local) load(repo, branch string) (*git.Repository, map[string]object.TreeEntry, *object.Commit, error) {
+	r, err := l.openBare(repo)
+	if err != nil {
+		return nil, nil, nil, err
 	}
-	hash, err := w.Commit(message, &git.CommitOptions{
-		Author: &object.Signature{Name: "inari-server", Email: "inari-server@inari.local", When: time.Now()},
+	entries := map[string]object.TreeEntry{}
+	parent, err := headCommit(r, branch)
+	if errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return r, entries, nil, nil
+	}
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	tree, err := parent.Tree()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	walker := object.NewTreeWalker(tree, true, nil)
+	defer walker.Close()
+	for {
+		name, entry, err := walker.Next()
+		if err != nil {
+			break
+		}
+		if entry.Mode == filemode.Dir {
+			continue // recursive walker lists subtrees themselves
+		}
+		entries[name] = object.TreeEntry{Name: name, Mode: entry.Mode, Hash: entry.Hash}
+	}
+	return r, entries, parent, nil
+}
+
+// storeCommit writes the flattened entries as a new tree + commit on
+// branch. Identical content produces no new commit (HEAD SHA returned).
+func (l *Local) storeCommit(r *git.Repository, branch string, entries map[string]object.TreeEntry, parent *object.Commit, message string) (*Result, error) {
+	treeHash, err := storeTree(r.Storer, entries, "")
+	if err != nil {
+		return nil, err
+	}
+	var parents []plumbing.Hash
+	if parent != nil {
+		if parent.TreeHash == treeHash {
+			return &Result{CommitSHA: parent.Hash.String()}, nil
+		}
+		parents = []plumbing.Hash{parent.Hash}
+	}
+	sig := object.Signature{Name: "inari-server", Email: "inari-server@inari.local", When: time.Now()}
+	commitHash, err := storeObject(r.Storer, &object.Commit{
+		Message:      message,
+		Author:       sig,
+		Committer:    sig,
+		TreeHash:     treeHash,
+		ParentHashes: parents,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("gitprovider local: commit: %w", err)
-	}
-	// Push from the in-memory clone to the bare repo. The remote already
-	// exists for clones; the empty-repo path created it explicitly.
-	remotes, err := r.Remotes()
-	if err != nil {
 		return nil, err
 	}
-	if len(remotes) == 0 {
-		return nil, fmt.Errorf("gitprovider local: no origin remote")
+	ref := plumbing.NewHashReference(plumbing.NewBranchReferenceName(branch), commitHash)
+	if err := r.Storer.SetReference(ref); err != nil {
+		return nil, fmt.Errorf("gitprovider local: update %s: %w", branch, err)
 	}
-	spec := config.RefSpec(fmt.Sprintf("%s:%s", plumbing.NewBranchReferenceName(branch), plumbing.NewBranchReferenceName(branch)))
-	err = r.Push(&git.PushOptions{RemoteName: "origin", RefSpecs: []config.RefSpec{spec}})
-	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
-		return nil, fmt.Errorf("gitprovider local: push: %w", err)
-	}
-	return &Result{CommitSHA: hash.String()}, nil
+	return &Result{CommitSHA: commitHash.String()}, nil
 }
 
-func mustWorktree(r *git.Repository) (*git.Worktree, error) {
-	w, err := r.Worktree()
-	return w, err
-}
-
-func writeBillyFile(fs billy.Filesystem, path string, content []byte) error {
-	if err := fs.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	f, err := fs.Create(path)
+// storeBlob writes one blob object.
+func storeBlob(st storage.Storer, content []byte) (plumbing.Hash, error) {
+	obj := st.NewEncodedObject()
+	obj.SetType(plumbing.BlobObject)
+	obj.SetSize(int64(len(content)))
+	w, err := obj.Writer()
 	if err != nil {
-		return err
+		return plumbing.ZeroHash, err
 	}
-	defer func() { _ = f.Close() }()
-	_, err = f.Write(content)
-	return err
+	if _, err := w.Write(content); err != nil {
+		_ = w.Close()
+		return plumbing.ZeroHash, err
+	}
+	if err := w.Close(); err != nil {
+		return plumbing.ZeroHash, err
+	}
+	return st.SetEncodedObject(obj)
+}
+
+// storeObject encodes and stores one git object.
+func storeObject(st storage.Storer, o object.Object) (plumbing.Hash, error) {
+	obj := st.NewEncodedObject()
+	if err := o.Encode(obj); err != nil {
+		return plumbing.ZeroHash, err
+	}
+	return st.SetEncodedObject(obj)
+}
+
+// storeTree writes the flattened path→entry map as nested tree objects
+// under prefix, returning the root tree hash. Empty maps encode the
+// well-known empty tree.
+func storeTree(st storage.Storer, entries map[string]object.TreeEntry, prefix string) (plumbing.Hash, error) {
+	var treeEntries []object.TreeEntry
+	subdirs := map[string]map[string]object.TreeEntry{}
+	for p, e := range entries {
+		rest := strings.TrimPrefix(p, prefix)
+		if i := strings.Index(rest, "/"); i >= 0 {
+			dir := rest[:i]
+			if subdirs[dir] == nil {
+				subdirs[dir] = map[string]object.TreeEntry{}
+			}
+			subdirs[dir][p] = e
+			continue
+		}
+		treeEntries = append(treeEntries, object.TreeEntry{Name: rest, Mode: e.Mode, Hash: e.Hash})
+	}
+	for dir, sub := range subdirs {
+		h, err := storeTree(st, sub, prefix+dir+"/")
+		if err != nil {
+			return plumbing.ZeroHash, err
+		}
+		treeEntries = append(treeEntries, object.TreeEntry{Name: dir, Mode: filemode.Dir, Hash: h})
+	}
+	// Git orders tree entries by name, directories as name+"/".
+	sort.Slice(treeEntries, func(i, j int) bool {
+		a, b := treeEntries[i], treeEntries[j]
+		an, bn := a.Name, b.Name
+		if a.Mode == filemode.Dir {
+			an += "/"
+		}
+		if b.Mode == filemode.Dir {
+			bn += "/"
+		}
+		return an < bn
+	})
+	return storeObject(st, &object.Tree{Entries: treeEntries})
 }
 
 func sanitizeBranch(s string) string {

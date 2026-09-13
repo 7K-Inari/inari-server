@@ -37,11 +37,19 @@ VAULT_DEV_TOKEN="${VAULT_DEV_TOKEN:-e2e-root-token}"
 log() { printf '\033[1;34m[e2e]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[e2e] %s\033[0m\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null || die "missing prerequisite: $1"; }
-need docker; need kubectl; need helm; need jq; need kind
+need docker; need kubectl; need helm; need jq; need kind; need git; need base64
+
+# Host-side git root for INARI_GIT_PROVIDER=local: the server writes real
+# bare repos here (mounted into the kind node), and this script clones and
+# applies baseline/rbac/ from them — GAP(rbac-e2e-argocd): this stands in
+# for the tenant-local ArgoCD, which the e2e platform stack does not
+# install ("platform stack without ArgoCD", see below).
+GIT_HOST_DIR="$(mktemp -d /tmp/inari-e2e-git.XXXXXX)"
 
 cleanup() {
   kubectl -n "$NAMESPACE" delete pod "$TOOLS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   $KEEP_CLUSTER || kind delete cluster --name "$CLUSTER_NAME" >/dev/null 2>&1 || true
+  $KEEP_CLUSTER || rm -rf "$GIT_HOST_DIR" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -50,7 +58,18 @@ xcurl() { kubectl -n "$NAMESPACE" exec "$TOOLS" -- curl -sf -m 20 "$@"; }
 
 log "creating kind cluster '$CLUSTER_NAME'"
 kind delete cluster --name "$CLUSTER_NAME" >/dev/null 2>&1 || true
-kind create cluster --name "$CLUSTER_NAME" --wait 60s
+# extraMounts: the host git root lands at /git inside the kind node so the
+# server pod can hostPath-mount it for the local git provider.
+kind create cluster --name "$CLUSTER_NAME" --wait 60s \
+  --config - <<EOF
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraMounts:
+      - hostPath: $GIT_HOST_DIR
+        containerPath: /git
+EOF
 kubectl config use-context "kind-${CLUSTER_NAME}" >/dev/null
 
 log "loading images ($SERVER_IMAGE, $AGENT_IMAGE)"
@@ -148,7 +167,15 @@ helm upgrade --install inari-server "$SERVER_CHART_DIR" \
   --set-json "extraEnv=[
     {\"name\":\"INARI_AGENT_GATEWAY_ADDRESS\",\"value\":\"http://$SERVER_SVC.${NAMESPACE}.svc:8080\"},
     {\"name\":\"INARI_AGENT_IMAGE_REPO\",\"value\":\"inari/agent\"},
-    {\"name\":\"INARI_AGENT_IMAGE_TAG\",\"value\":\"e2e\"}
+    {\"name\":\"INARI_AGENT_IMAGE_TAG\",\"value\":\"e2e\"},
+    {\"name\":\"INARI_GIT_PROVIDER\",\"value\":\"local\"},
+    {\"name\":\"INARI_GIT_LOCAL_ROOT\",\"value\":\"/var/lib/inari/git\"}
+  ]" \
+  --set-json "extraVolumes=[
+    {\"name\":\"git-repos\",\"hostPath\":{\"path\":\"/git\",\"type\":\"Directory\"}}
+  ]" \
+  --set-json "extraVolumeMounts=[
+    {\"name\":\"git-repos\",\"mountPath\":\"/var/lib/inari/git\"}
   ]" \
   --wait --timeout 10m
 kubectl -n "$NAMESPACE" rollout status deployment/inari-server --timeout=180s
@@ -358,4 +385,96 @@ sleep 30
 SEEN2=$(xcurl -H "Authorization: Bearer $(user_token)" "$API/tenants/$TENANT/clusters/$CLUSTER_ID" | jq -r '.cluster.lastSeenAt')
 [ "$SEEN1" != "$SEEN2" ] || die "heartbeat not advancing ($SEEN1)"
 
-log "PASS: golden path verified (tenant → register → stream → $CAPS capabilities → heartbeats)"
+# --- RBAC mapping materialization (plan §7.1) -------------------------------
+# tenant.created fired the materializer: <slug>-inari-state must appear as a
+# real bare repo with baseline/rbac/* committed.
+STATE_REPO="$GIT_HOST_DIR/$TENANT-inari-state.git"
+log "waiting for the materialized tenant state repo ($STATE_REPO)"
+for i in $(seq 1 36); do
+  [ -d "$STATE_REPO" ] && git -C "$STATE_REPO" show main:baseline/rbac/clusterroles.yaml >/dev/null 2>&1 && break
+  sleep 5
+  [ "$i" = 36 ] && die "state repo never materialized (server logs: kubectl -n $NAMESPACE logs deploy/inari-server)"
+done
+
+# GAP(rbac-e2e-argocd): apply the repo's baseline/rbac/ from the host,
+# standing in for the tenant-local ArgoCD (not installed in this stack).
+STATE_WORK="$GIT_HOST_DIR/work"
+sync_rbac() {
+  rm -rf "$STATE_WORK"
+  git clone -q "$STATE_REPO" "$STATE_WORK"
+  kubectl apply -f "$STATE_WORK/baseline/rbac/" >/dev/null
+}
+
+log "applying the materialized RBAC bundle and asserting the anchor roles"
+sync_rbac
+for ROLE in admin operator editor viewer; do
+  kubectl get clusterrole "tenant-$TENANT-$ROLE" >/dev/null \
+    || die "clusterrole tenant-$TENANT-$ROLE missing after sync"
+done
+kubectl get clusterrolebinding "tenant-$TENANT-viewers" >/dev/null \
+  || die "clusterrolebinding tenant-$TENANT-viewers missing"
+kubectl get clusterrolebinding "tenant-$TENANT-viewers" -o jsonpath='{.roleRef.name}' | grep -q "tenant-$TENANT-viewer" \
+  || die "viewers binding roleRef is not tenant-$TENANT-viewer"
+
+log "GAP(kc-groups-mapper): ensuring the groups claim carries full group paths"
+AT="$(admin_token)"
+MAPPERS=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/clients/$KC_CLIENT/protocol-mappers/models" | jq -r '.[].name')
+if ! grep -q '^groups$' <<<"$MAPPERS"; then
+  xcurl -X POST -H "Authorization: Bearer $AT" -H "Content-Type: application/json" \
+    -d '{"name":"groups","protocol":"openid-connect","protocolMapper":"oidc-group-membership-mapper","config":{"claim.name":"groups","full.path":"true","id.token.claim":"true","access.token.claim":"true","userinfo.token.claim":"true"}}' \
+    -o /dev/null "http://keycloak-service:8080/admin/realms/inari/clients/$KC_CLIENT/protocol-mappers/models" \
+    || die "failed to add the groups mapper"
+fi
+
+log "kubelogin-style check: group membership maps to real RBAC"
+# A user in the viewers team group must read but not write.
+VIEWER_UID=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/users?username=rbac-viewer" | jq -r '.[0].id // empty')
+if [ -z "$VIEWER_UID" ]; then
+  xcurl -X POST -H "Authorization: Bearer $AT" -H "Content-Type: application/json" \
+    -d '{"username":"rbac-viewer","enabled":true,"emailVerified":true,"credentials":[{"type":"password","value":"rbac-viewer","temporary":false}]}' \
+    -o /dev/null "http://keycloak-service:8080/admin/realms/inari/users"
+  VIEWER_UID=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/users?username=rbac-viewer" | jq -r '.[0].id')
+fi
+VIEWERS_GRP=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/group-by-path/tenant-$TENANT/viewers" | jq -r '.id // empty')
+[ -n "$VIEWERS_GRP" ] || die "Keycloak group tenant-$TENANT/viewers not found (tenant seeding broken?)"
+xcurl -o /dev/null -X PUT -H "Authorization: Bearer $AT" \
+  "http://keycloak-service:8080/admin/realms/inari/users/$VIEWER_UID/groups/$VIEWERS_GRP" || true
+
+VIEWER_TOKEN=$(xcurl "http://keycloak-service:8080/realms/inari/protocol/openid-connect/token" \
+  -d grant_type=password -d client_id=inari-server \
+  -d username=rbac-viewer -d password=rbac-viewer -d scope="openid organization:*" \
+  | jq -r .access_token)
+PAYLOAD=$(cut -d. -f2 <<<"$VIEWER_TOKEN"); PAYLOAD="${PAYLOAD}$(printf '=%.0s' $(seq 1 $(( (4 - ${#PAYLOAD} % 4) % 4 ))))"
+CLAIMS=$(base64 -d <<<"$PAYLOAD" 2>/dev/null || base64 -D <<<"$PAYLOAD")
+jq -e --arg g "/tenant-$TENANT/viewers" '.groups and (.groups | index($g))' <<<"$CLAIMS" >/dev/null \
+  || die "viewer token lacks the groups claim entry /tenant-$TENANT/viewers: $(jq -c .groups <<<"$CLAIMS")"
+
+# RBAC authorizer check with the token's group (what the cluster would
+# decide for this group once the API server trusts the Keycloak issuer —
+# GAP(rbac-e2e-jwt-authn): wiring kind's kube-apiserver Authentication-
+# Configuration to Keycloak is a follow-up).
+kubectl auth can-i get pods --as="oidc:rbac-viewer" --as-group="/tenant-$TENANT/viewers" >/dev/null \
+  || die "viewer group cannot get pods (binding not effective)"
+if kubectl auth can-i create deployments --as="oidc:rbac-viewer" --as-group="/tenant-$TENANT/viewers" >/dev/null 2>&1; then
+  die "viewer group can create deployments (viewer role over-privileged)"
+fi
+
+log "flipping the viewers team mapping to editor and expecting a binding update"
+xcurl -X PUT -H "Authorization: Bearer $(user_token)" -H "Content-Type: application/json" \
+  -d "{\"mappings\":[{\"team\":\"viewers\",\"role\":\"developer\"}]}" \
+  "$API/tenants/$TENANT/rbac/mappings" >/dev/null || die "PUT rbac/mappings failed"
+for i in $(seq 1 36); do
+  if git -C "$STATE_REPO" show main:baseline/rbac/clusterrolebindings.yaml 2>/dev/null \
+      | awk '/name: tenant-'"$TENANT"'-viewers$/{f=1} f && /name: tenant-'"$TENANT"'-editor$/{found=1} END{exit !found}'; then
+    break
+  fi
+  sleep 5
+  [ "$i" = 36 ] && die "state repo binding never updated after the mapping change"
+done
+sync_rbac
+kubectl get clusterrolebinding "tenant-$TENANT-viewers" -o jsonpath='{.roleRef.name}' | grep -q "tenant-$TENANT-editor" \
+  || die "viewers binding roleRef did not move to tenant-$TENANT-editor"
+kubectl auth can-i create deployments --as="oidc:rbac-viewer" --as-group="/tenant-$TENANT/viewers" >/dev/null \
+  || die "editor-mapped group cannot create deployments after the mapping change"
+
+log "PASS: golden path verified (tenant → register → stream → $CAPS capabilities → heartbeats → RBAC materialization)"

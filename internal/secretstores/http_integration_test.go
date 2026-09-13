@@ -536,9 +536,54 @@ func TestSecretStoreSetTargets(t *testing.T) {
 	}
 }
 
+// TestSecretStoreUpdatePrunesCordonedRemoved covers target removal of a
+// cordoned cluster: the cordon filter must not hide it from the prune diff,
+// or its stale manifest would never be deleted.
+func TestSecretStoreUpdatePrunesCordonedRemoved(t *testing.T) {
+	srv, database := itServer(t)
+	defer srv.Close()
+
+	code, body := itDo(t, srv, http.MethodPost, "/api/v1/tenants/acme/secret-stores", "admin",
+		map[string]any{
+			"name":     "vault-prune",
+			"scope":    "cluster",
+			"targets":  map[string]any{"clusterIds": []string{"cluster:1", "cluster:3"}},
+			"provider": vaultProvider(),
+		})
+	if code != http.StatusOK {
+		t.Fatalf("create: %d %s", code, body)
+	}
+
+	code, body = itDo(t, srv, http.MethodPatch, "/api/v1/tenants/acme/secret-stores/vault-prune", "admin",
+		map[string]any{"targets": map[string]any{"clusterIds": []string{"cluster:1"}}})
+	if code != http.StatusOK {
+		t.Fatalf("update: %d %s", code, body)
+	}
+	rows, err := database.Pool.Query(context.Background(),
+		`SELECT cluster_id FROM agent_commands
+		 WHERE type = $1 ORDER BY cluster_id`,
+		agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_SECRET_STORE_DELETE))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var deleteTargets []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		deleteTargets = append(deleteTargets, id)
+	}
+	if len(deleteTargets) != 1 || deleteTargets[0] != "cluster:3" {
+		t.Fatalf("prune fan-out = %v, want [cluster:3] (removed while cordoned)", deleteTargets)
+	}
+}
+
 // TestSecretStoreCordonedTargets covers cordon behavior: cordoned clusters
 // are skipped at fan-out (cordon blocks new deploys) and reported as
-// Cordoned conditions, excluded from the delivered computation.
+// Cordoned conditions, excluded from the delivered computation. Deletes,
+// however, must reach cordoned clusters too (pruning is not a deploy).
 func TestSecretStoreCordonedTargets(t *testing.T) {
 	srv, database := itServer(t)
 	defer srv.Close()
@@ -605,5 +650,32 @@ func TestSecretStoreCordonedTargets(t *testing.T) {
 	}
 	if !st.Status.Delivered {
 		t.Fatalf("delivered must ignore cordoned targets: %+v", st.Status)
+	}
+
+	// Delete must prune everywhere, including the cordoned cluster: cordon
+	// blocks new deploys, not pruning, and once the row is gone nothing else
+	// reconciles a stale manifest.
+	code, body = itDo(t, srv, http.MethodDelete, "/api/v1/tenants/acme/secret-stores/vault-cordon", "admin", nil)
+	if code != http.StatusNoContent && code != http.StatusOK {
+		t.Fatalf("delete: %d %s", code, body)
+	}
+	rows, err := database.Pool.Query(context.Background(),
+		`SELECT cluster_id FROM agent_commands
+		 WHERE type = $1 ORDER BY cluster_id`,
+		agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_SECRET_STORE_DELETE))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var deleteTargets []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		deleteTargets = append(deleteTargets, id)
+	}
+	if len(deleteTargets) != 2 || deleteTargets[0] != "cluster:1" || deleteTargets[1] != "cluster:3" {
+		t.Fatalf("delete fan-out = %v, want [cluster:1 cluster:3] (cordon blocks deploys, not pruning)", deleteTargets)
 	}
 }

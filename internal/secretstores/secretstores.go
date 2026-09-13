@@ -263,7 +263,10 @@ func (s *Service) fanout(ctx context.Context, st *types.SecretStore) {
 	s.enqueue(ctx, st, false, nil)
 }
 
-// fanoutDelete enqueues delete commands to the store's deliverable targets.
+// fanoutDelete enqueues delete commands to all resolved targets, including
+// cordoned clusters: cordon blocks new deploys, not pruning — a stale store
+// must still be removed (the registry row is gone, so nothing would ever
+// reconcile it).
 func (s *Service) fanoutDelete(ctx context.Context, st *types.SecretStore) {
 	s.enqueue(ctx, st, true, nil)
 }
@@ -279,7 +282,7 @@ func (s *Service) enqueue(ctx context.Context, st *types.SecretStore, delete boo
 	if s.queue == nil {
 		return
 	}
-	clusterIDs, _, err := s.resolveTargetsByState(ctx, st)
+	deliverable, cordoned, err := s.resolveTargetsByState(ctx, st)
 	if err != nil {
 		slog.Error("secretstores: resolve targets", "store", st.ID, "error", err)
 		return
@@ -295,12 +298,12 @@ func (s *Service) enqueue(ctx context.Context, st *types.SecretStore, delete boo
 		}
 	}
 	if delete {
-		for _, clusterID := range clusterIDs {
+		for _, clusterID := range append(deliverable, cordoned...) {
 			enqueue(deleteCommand(st, clusterID, nonce))
 		}
 		return
 	}
-	for _, clusterID := range clusterIDs {
+	for _, clusterID := range deliverable {
 		enqueue(applyCommand(st, clusterID, nonce))
 	}
 	for _, clusterID := range removedTargets {
@@ -362,9 +365,10 @@ func (s *Service) Update(ctx context.Context, actor, orgID, name string, targets
 	if err != nil {
 		return nil, err
 	}
-	// Capture the current deliverable targets before the mutation so removed
-	// clusters can be pruned after the update commits.
-	oldTargets, _, err := s.resolveTargetsByState(ctx, st)
+	// Capture the full current target set (including cordoned clusters) before
+	// the mutation so every removed cluster is pruned after the update commits
+	// — a cluster cordoned before removal still holds the stale manifest.
+	oldTargets, err := s.resolveTargets(ctx, st)
 	if err != nil {
 		return nil, err
 	}
@@ -406,7 +410,7 @@ func (s *Service) Update(ctx context.Context, actor, orgID, name string, targets
 	if err != nil {
 		return nil, err
 	}
-	newTargets, _, err := s.resolveTargetsByState(ctx, st)
+	newTargets, err := s.resolveTargets(ctx, st)
 	if err != nil {
 		// The row is committed; log and still report the update.
 		slog.Error("secretstores: resolve updated targets", "store", st.ID, "error", err)

@@ -52,6 +52,16 @@ func (h *ResumeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) error
 	if err != nil {
 		return fmt.Errorf("orchestrator: resume: load approval %s: %w", p.ApprovalID, err)
 	}
+	// Lifecycle approvals (tenant decommission, zone lifecycle) are not
+	// deploy resumes — they carry no catalog item and are handled by the
+	// tenancy deletion resume handler. Treating them as deploys poisons
+	// the outbox event and blocks the deletion handler behind it (live
+	// finding, 2026-09-13: approval.decided dead-lettered with
+	// "catalog: item not found", teardown stalled).
+	if req.Action != "" || req.ItemID == "" {
+		h.log.Debug("orchestrator: resume: skipping lifecycle approval", "approval", p.ApprovalID, "action", req.Action)
+		return nil
+	}
 	// Double-audit: the real actor is the approvals automation; the
 	// impersonated identity is the tenant-scoped virtual user (§5.4).
 	ctx = impersonation.WithImpersonator(ctx, impersonation.VirtualUser(req.OrgID))

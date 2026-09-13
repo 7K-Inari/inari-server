@@ -115,8 +115,8 @@ type Resolver struct {
 	providers map[string]*cachedProvider
 	status    map[string]statusEntry
 
-	seedOnce sync.Once
-	sf       singleflight.Group
+	legacySeeded bool // true only after a successful seed (retries on failure)
+	sf           singleflight.Group
 }
 
 // NewResolver parses the platform app key and prepares caches. The legacy
@@ -339,27 +339,34 @@ func (r *Resolver) invalidate(owner string) {
 }
 
 // seedLegacy resolves the deprecated pinned installation ID once and caches
-// its org (back-compat with the old single-org env config).
+// its org (back-compat with the old single-org env config). A failed attempt
+// (e.g. the caller's ctx was cancelled) does NOT latch — the next request
+// retries, so one unlucky request can't silently lose the back-compat seed.
 func (r *Resolver) seedLegacy(ctx context.Context) {
-	r.seedOnce.Do(func() {
-		if r.cfg.LegacyInstallationID == 0 {
-			return
-		}
-		var inst struct {
-			ID      int64 `json:"id"`
-			Account struct {
-				Login string `json:"login"`
-			} `json:"account"`
-		}
-		if err := r.appGet(ctx, fmt.Sprintf("/app/installations/%d", r.cfg.LegacyInstallationID), &inst); err != nil {
-			return // best-effort; discovery will handle failures later
-		}
-		if inst.Account.Login != "" {
-			r.mu.Lock()
-			r.installs[strings.ToLower(inst.Account.Login)] = installation{id: inst.ID, fetchedAt: r.now()}
-			r.mu.Unlock()
-		}
-	})
+	if r.cfg.LegacyInstallationID == 0 {
+		return
+	}
+	r.mu.Lock()
+	done := r.legacySeeded
+	r.mu.Unlock()
+	if done {
+		return
+	}
+	var inst struct {
+		ID      int64 `json:"id"`
+		Account struct {
+			Login string `json:"login"`
+		} `json:"account"`
+	}
+	if err := r.appGet(ctx, fmt.Sprintf("/app/installations/%d", r.cfg.LegacyInstallationID), &inst); err != nil {
+		return // best-effort; retried on the next request, discovery is the fallback
+	}
+	if inst.Account.Login != "" {
+		r.mu.Lock()
+		r.installs[strings.ToLower(inst.Account.Login)] = installation{id: inst.ID, fetchedAt: r.now()}
+		r.legacySeeded = true
+		r.mu.Unlock()
+	}
 }
 
 // discover lists the platform app's installations and warms the cache for

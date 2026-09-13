@@ -266,6 +266,26 @@ func TestResolverLegacyInstallationSeed(t *testing.T) {
 	}
 }
 
+func TestResolverLegacySeedRetriesAfterFailure(t *testing.T) {
+	gh := &fakeGitHub{installations: []map[string]any{inst(2, "acme")}}
+	r, _ := newTestResolver(t, gh, func(c *ResolverConfig) { c.LegacyInstallationID = 2 })
+	// First attempt with an already-cancelled ctx: the seed GET fails and
+	// must NOT latch — the next request retries.
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, _ = r.ForTenant(cancelled, gitCfg("org:1", "acme/acme-inari-state"))
+	_, info, err := r.ForTenant(context.Background(), gitCfg("org:1", "acme/acme-inari-state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.InstallationID != 2 {
+		t.Errorf("installation = %d, want 2 (legacy seed retried)", info.InstallationID)
+	}
+	if n := gh.listCalls.Load(); n != 0 {
+		t.Errorf("list calls = %d, want 0 (legacy seed)", n)
+	}
+}
+
 func TestResolverPaginatesInstallations(t *testing.T) {
 	gh := &fakeGitHub{
 		installations: []map[string]any{inst(2, "acme"), inst(3, "globex"), inst(4, "initech")},

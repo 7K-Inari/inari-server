@@ -517,6 +517,27 @@ func TestGitConfigBYOApp(t *testing.T) {
 	if cfg.GitHubApp == nil || cfg.GitHubApp.AppID != 7 {
 		t.Fatalf("BYO app wiped by plain upsert: %+v", cfg.GitHubApp)
 	}
+
+	// 422: clearGithubApp combined with githubApp.
+	code, body = itReq(t, srv, "PUT", "/api/v1/tenants/acme/git-config", "good",
+		`{"repo":"acme/acme-inari-state","clearGithubApp":true,"githubApp":{"appId":7,"installationId":8,"keyRef":{"namespace":"tenant-acme","secretName":"gh","key":"k.pem"}}}`)
+	if code != http.StatusUnprocessableEntity {
+		t.Fatalf("clear+set combo: %d %s", code, body)
+	}
+
+	// Explicit clear removes the BYO override (revert to model A).
+	code, body = itReq(t, srv, "PUT", "/api/v1/tenants/acme/git-config", "good",
+		`{"repo":"acme/acme-inari-state","commitPolicy":"direct","baseBranch":"main","clearGithubApp":true}`)
+	if code != http.StatusOK && code != http.StatusNoContent {
+		t.Fatalf("clear BYO git config: %d %s", code, body)
+	}
+	cfg, err = inv.GitConfig(ctx, database.Pool, "org:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GitHubApp != nil {
+		t.Fatalf("BYO app not cleared: %+v", cfg.GitHubApp)
+	}
 }
 
 // TestGitConfigAllOrNoneConstraint verifies the migration CHECK rejects

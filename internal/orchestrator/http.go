@@ -268,6 +268,10 @@ type gitConfigInput struct {
 		// GitHubApp is the optional BYO GitHub App override (model B) — a
 		// credential REFERENCE only; the private key stays in ESO mounts.
 		GitHubApp *types.GitHubAppConfig `json:"githubApp,omitempty"`
+		// ClearGitHubApp removes a previously set BYO override, reverting
+		// the tenant to the platform app (model A). Mutually exclusive
+		// with githubApp; omitting both leaves any stored override intact.
+		ClearGitHubApp bool `json:"clearGithubApp,omitempty"`
 	}
 }
 
@@ -318,6 +322,9 @@ func (h *Handler) setGitConfig(ctx context.Context, in *gitConfigInput) (*struct
 	if err != nil {
 		return nil, err
 	}
+	if in.Body.ClearGitHubApp && in.Body.GitHubApp != nil {
+		return nil, huma.Error422UnprocessableEntity("clearGithubApp and githubApp are mutually exclusive")
+	}
 	if err := h.validateGitHubApp(in.Body.GitHubApp); err != nil {
 		return nil, huma.Error422UnprocessableEntity(err.Error())
 	}
@@ -332,6 +339,7 @@ func (h *Handler) setGitConfig(ctx context.Context, in *gitConfigInput) (*struct
 	return nil, h.svc.SetGitConfig(ctx, "user:"+id.Subject, &types.TenantGitConfig{
 		OrgID: org.ID, Repo: in.Body.Repo, CommitPolicy: policy, BaseBranch: branch,
 		ScaffoldGitOrg: in.Body.ScaffoldGitOrg, GitHubApp: in.Body.GitHubApp,
+		ClearGitHubApp: in.Body.ClearGitHubApp,
 	})
 }
 

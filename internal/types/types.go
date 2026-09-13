@@ -576,6 +576,10 @@ type TenantGitConfig struct {
 	// GitHubApp is the optional BYO GitHub App override (model B); when
 	// nil the platform app + per-org installation is used (model A).
 	GitHubApp *GitHubAppConfig `json:"githubApp,omitempty"`
+	// ClearGitHubApp is a transient write-time signal (never persisted or
+	// serialized): remove the tenant's BYO override, reverting to model A.
+	// Plain nil GitHubApp keeps the stored reference (TZF-safe).
+	ClearGitHubApp bool `json:"-"`
 }
 
 // GitProviderStatus reports the health of a tenant's git provider auth.

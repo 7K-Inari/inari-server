@@ -207,7 +207,19 @@ func (s *Store) UpsertGitConfig(ctx context.Context, q db.Querier, c *types.Tena
 			apiBase = &c.GitHubApp.APIBase
 		}
 	}
-	const sql = `INSERT INTO tenant_git_configs
+	// An omitted githubApp must not wipe the stored reference (a writer
+	// like the tenant zone factory doesn't know about it); an explicit
+	// ClearGitHubApp NULLs the BYO columns, reverting the tenant to model A.
+	byoClause := `github_app_id = COALESCE(EXCLUDED.github_app_id, tenant_git_configs.github_app_id),
+		  github_app_installation_id = COALESCE(EXCLUDED.github_app_installation_id, tenant_git_configs.github_app_installation_id),
+		  github_app_key_secret = COALESCE(EXCLUDED.github_app_key_secret, tenant_git_configs.github_app_key_secret),
+		  github_app_key_key = COALESCE(EXCLUDED.github_app_key_key, tenant_git_configs.github_app_key_key),
+		  github_app_api_base = COALESCE(EXCLUDED.github_app_api_base, tenant_git_configs.github_app_api_base)`
+	if c.ClearGitHubApp {
+		byoClause = `github_app_id = NULL, github_app_installation_id = NULL,
+		  github_app_key_secret = NULL, github_app_key_key = NULL, github_app_api_base = NULL`
+	}
+	const sqlFmt = `INSERT INTO tenant_git_configs
 		(org_id, repo, commit_policy, base_branch, scaffold_git_org,
 		 github_app_id, github_app_installation_id, github_app_key_secret, github_app_key_key, github_app_api_base)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
@@ -216,12 +228,8 @@ func (s *Store) UpsertGitConfig(ctx context.Context, q db.Querier, c *types.Tena
 		  -- A writer that doesn't know the override (e.g. the
 		  -- tenant zone factory) must not wipe it.
 		  scaffold_git_org = COALESCE(EXCLUDED.scaffold_git_org, tenant_git_configs.scaffold_git_org),
-		  github_app_id = COALESCE(EXCLUDED.github_app_id, tenant_git_configs.github_app_id),
-		  github_app_installation_id = COALESCE(EXCLUDED.github_app_installation_id, tenant_git_configs.github_app_installation_id),
-		  github_app_key_secret = COALESCE(EXCLUDED.github_app_key_secret, tenant_git_configs.github_app_key_secret),
-		  github_app_key_key = COALESCE(EXCLUDED.github_app_key_key, tenant_git_configs.github_app_key_key),
-		  github_app_api_base = COALESCE(EXCLUDED.github_app_api_base, tenant_git_configs.github_app_api_base)`
-	_, err := q.Exec(ctx, sql, c.OrgID, c.Repo, c.CommitPolicy, c.BaseBranch, scaffoldOrg,
+		  %s`
+	_, err := q.Exec(ctx, fmt.Sprintf(sqlFmt, byoClause), c.OrgID, c.Repo, c.CommitPolicy, c.BaseBranch, scaffoldOrg,
 		appID, installationID, keySecret, keyKey, apiBase)
 	return err
 }

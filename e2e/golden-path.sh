@@ -448,6 +448,11 @@ if [ -z "$VIEWER_UID" ]; then
     -o /dev/null "http://keycloak-service:8080/admin/realms/inari/users"
   VIEWER_UID=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/users?username=rbac-viewer" | jq -r '.[0].id')
 fi
+# KC 26.x: create alone can leave the account unverified — force the final
+# state, else the password grant fails with "Account is not fully set up".
+xcurl -X PUT -H "Authorization: Bearer $AT" -H "Content-Type: application/json" \
+  -d '{"emailVerified":true,"requiredActions":[],"enabled":true}' \
+  -o /dev/null "http://keycloak-service:8080/admin/realms/inari/users/$VIEWER_UID"
 log "adding rbac-viewer to the viewers team group"
 VIEWERS_GRP=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/group-by-path/tenant-$TENANT/viewers" | jq -r '.id // empty')
 [ -n "$VIEWERS_GRP" ] || die "Keycloak group tenant-$TENANT/viewers not found (tenant seeding broken?)"

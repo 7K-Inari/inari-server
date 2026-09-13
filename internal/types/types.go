@@ -47,6 +47,7 @@ type Team struct {
 	ID                string    `json:"id"`
 	OrgID             string    `json:"orgId"`
 	Name              string    `json:"name"`
+	DisplayName       string    `json:"displayName"`
 	Role              Role      `json:"role"`
 	KeycloakGroupPath string    `json:"keycloakGroupPath"`
 	CreatedAt         time.Time `json:"createdAt"`

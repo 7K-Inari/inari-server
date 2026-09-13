@@ -103,6 +103,14 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 	}, h.createTeam)
 
 	huma.Register(api, huma.Operation{
+		OperationID: "updateTeam",
+		Method:      http.MethodPut,
+		Path:        "/api/v1/tenants/{org}/teams/{team}",
+		Summary:     "Update a team's display name (org admin only; name and Keycloak group path are immutable, default teams are protected — ADR-0007)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.updateTeam)
+
+	huma.Register(api, huma.Operation{
 		OperationID: "deleteTeam",
 		Method:      http.MethodDelete,
 		Path:        "/api/v1/tenants/{org}/teams/{team}",
@@ -548,6 +556,39 @@ func (h *Handler) createTeam(ctx context.Context, in *createTeamInput) (*teamOut
 	switch {
 	case errors.Is(err, ErrTeamNameTaken):
 		return nil, huma.Error409Conflict("team name already exists in tenant")
+	case errors.Is(err, ErrOrgNotFound):
+		return nil, huma.Error404NotFound("organization not found")
+	case err != nil:
+		return nil, err
+	}
+	out := &teamOutput{}
+	out.Body.Team = *team
+	return out, nil
+}
+
+type updateTeamInput struct {
+	Org  string `path:"org" doc:"Tenant slug"`
+	Team string `path:"team" doc:"Team name"`
+	Body struct {
+		DisplayName string `json:"displayName" maxLength:"200" doc:"Human-friendly display name (name and Keycloak group path stay immutable)"`
+	}
+}
+
+func (h *Handler) updateTeam(ctx context.Context, in *updateTeamInput) (*teamOutput, error) {
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureOrgActive(org); err != nil {
+		return nil, err
+	}
+	id := identity(ctx)
+	team, err := h.svc.UpdateTeam(ctx, id.Subject, in.Org, in.Team, in.Body.DisplayName)
+	switch {
+	case errors.Is(err, ErrDefaultTeam):
+		return nil, huma.Error409Conflict("default teams cannot be modified")
+	case errors.Is(err, ErrTeamNotFound):
+		return nil, huma.Error404NotFound("team not found")
 	case errors.Is(err, ErrOrgNotFound):
 		return nil, huma.Error404NotFound("organization not found")
 	case err != nil:

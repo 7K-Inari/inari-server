@@ -26,6 +26,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/orchestrator"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
+	gitgithub "github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider/github"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -82,6 +83,15 @@ func (itClusters) GetCluster(_ context.Context, id string) (*types.Cluster, erro
 
 func itServer(t *testing.T) (*httptest.Server, *db.DB, *gitprovider.Fake, *itQueue) {
 	t.Helper()
+	fake := gitprovider.NewFake()
+	srv, database, queue := itServerWithGit(t, gitprovider.StaticResolver{P: fake})
+	return srv, database, fake, queue
+}
+
+// itServerWithGit is itServer with a caller-supplied git resolver (e.g. one
+// returning typed credential errors for the deploy failure mapping).
+func itServerWithGit(t *testing.T, git gitprovider.Resolver) (*httptest.Server, *db.DB, *itQueue) {
+	t.Helper()
 	ctx := context.Background()
 	pg, err := postgres.Run(ctx, "postgres:16-alpine",
 		postgres.WithDatabase("inari"),
@@ -126,8 +136,6 @@ func itServer(t *testing.T) (*httptest.Server, *db.DB, *gitprovider.Fake, *itQue
 	}
 	approvalsSvc := approvals.NewService(database, approvals.NewStore(database), auditStore, tenancySvc, catalogSvc)
 	inventorySvc := inventory.NewService(database, inventory.NewStore(), auditStore, catalogSvc)
-	fake := gitprovider.NewFake()
-	git := gitprovider.StaticResolver{P: fake}
 	queue := &itQueue{}
 	orchSvc := orchestrator.NewService(database, inventory.NewStore(), catalogSvc, itClusters{},
 		approvalsSvc, queue, git, auditStore)
@@ -137,7 +145,7 @@ func itServer(t *testing.T) (*httptest.Server, *db.DB, *gitprovider.Fake, *itQue
 	approvals.NewHandler(approvalsSvc, itTenants{"acme": {ID: "org:1", Slug: "acme"}}, itAuthorizer{allow: true}).RegisterRoutes(api)
 	inventory.NewHandler(inventorySvc, itTenants{"acme": {ID: "org:1", Slug: "acme"}}, itAuthorizer{allow: true}).RegisterRoutes(api)
 	orchestrator.NewHandler(orchSvc, itTenants{"acme": {ID: "org:1", Slug: "acme"}}, itAuthorizer{allow: true}).RegisterRoutes(api)
-	return httptest.NewServer(router), database, fake, queue
+	return httptest.NewServer(router), database, queue
 }
 
 func itReq(t *testing.T, srv *httptest.Server, method, path, token, body string) (int, string) {
@@ -311,8 +319,44 @@ func TestDeployToHealthVisible(t *testing.T) {
 	}
 }
 
-func keysOf(m map[string]string) []string {
-	var out []string
+// errGitResolver fails every resolution with a fixed (typed) error — drives
+// the deploy handler's 412/502 credential-error mapping.
+type errGitResolver struct{ err error }
+
+func (r errGitResolver) ForTenant(context.Context, *types.TenantGitConfig) (gitprovider.Provider, *gitprovider.AuthInfo, error) {
+	return nil, nil, r.err
+}
+
+// TestDeployGitAuthFailureMapping verifies typed git credential failures
+// surface as 412 (app not installed, with install link) and 502 (credentials
+// revoked) instead of a generic 500.
+func TestDeployGitAuthFailureMapping(t *testing.T) {
+	notInstalled := &gitgithub.ErrAppNotInstalled{Org: "inari-dev", InstallURL: "https://github.com/apps/inari-platform/installations/new"}
+	srv, _, queue := itServerWithGit(t, errGitResolver{err: notInstalled})
+	defer srv.Close()
+
+	deployBody := `{"itemId":"curated:postgres-aws","clusterId":"cluster-1","name":"my-db","namespace":"apps","ownerTeam":"developers","spec":{"engineVersion":"16"}}`
+	code, body := itReq(t, srv, "POST", "/api/v1/tenants/acme/deploys", "good", deployBody)
+	if code != http.StatusPreconditionFailed {
+		t.Fatalf("not-installed deploy: %d %s, want 412", code, body)
+	}
+	if !strings.Contains(body, notInstalled.InstallURL) {
+		t.Errorf("412 body missing install link: %s", body)
+	}
+	if len(queue.cmds) != 0 {
+		t.Errorf("queued commands = %d, want 0 (deploy must not dispatch)", len(queue.cmds))
+	}
+
+	revoked := &gitgithub.ErrAppCredentialsRevoked{OrgID: "org:1", AppID: 7, InstallationID: 8, APIBase: "https://api.github.com"}
+	srv2, _, _ := itServerWithGit(t, errGitResolver{err: revoked})
+	defer srv2.Close()
+	code, body = itReq(t, srv2, "POST", "/api/v1/tenants/acme/deploys", "good", deployBody)
+	if code != http.StatusBadGateway {
+		t.Fatalf("revoked deploy: %d %s, want 502", code, body)
+	}
+}
+
+func keysOf(m map[string]string) []string {	var out []string
 	for k := range m {
 		out = append(out, k)
 	}

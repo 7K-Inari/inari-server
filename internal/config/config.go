@@ -24,6 +24,9 @@ var DefaultIdentityScopes = []ServiceScopes{
 	{Audience: "inari-server", Scopes: []string{"read", "write"}},
 	{Audience: "inari-agent-gateway", Scopes: []string{"connect"}},
 	{Audience: "inari-catalog", Scopes: []string{"read", "deploy"}},
+	// kubectl access via kubelogin (plan §5.4, §7.2): the per-tenant
+	// org-<slug>-kubectl client requests this audience.
+	{Audience: "kubernetes", Scopes: []string{"cluster"}},
 }
 
 type Config struct {

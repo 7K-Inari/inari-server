@@ -593,6 +593,13 @@ func (s *Service) CreateTenant(ctx context.Context, actor, slug, displayName str
 			return nil, nil, fmt.Errorf("tenancy: ensure base platform resources: %w", err)
 		}
 	}
+	// Kubelogin client after commit (idempotent ensure): kubectl access works
+	// out of the box for every tenant (plan §5.4, §7.2).
+	if s.clients != nil {
+		if err := s.EnsureKubectlClient(ctx, actor, slug); err != nil {
+			return nil, nil, fmt.Errorf("tenancy: ensure kubectl client: %w", err)
+		}
+	}
 	// Creator auto-membership: the creating user joins the Keycloak
 	// Organization (drives the org token claim), the org-admins group
 	// (tenant's first administrator — the only non-circular path to the

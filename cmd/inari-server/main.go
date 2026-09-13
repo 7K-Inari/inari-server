@@ -312,7 +312,7 @@ func run() error {
 	}
 	registryHandler := clusterregistry.NewHandler(registry, svc, authorizer, manifestParams, clusterregistry.CapabilitiesListerFunc(func(ctx context.Context, clusterID string) ([]types.Capability, error) {
 		return capsStore.List(ctx, database.Pool, clusterID)
-	}))
+	})).WithAccessInfo(cfg.OIDCIssuerURL)
 	caps := capabilities.NewService(database, capsStore, auditStore)
 	gateway := agentgateway.NewGateway(database, registry, idp, caps, auditStore, agentgateway.Config{
 		OIDCIssuerURL:       cfg.OIDCIssuerURL,

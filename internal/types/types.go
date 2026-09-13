@@ -189,6 +189,18 @@ type Cluster struct {
 	CreatedAt          time.Time         `json:"createdAt"`
 }
 
+// ClusterAccessInfo is everything a developer needs to build a kubelogin
+// exec-credential kubeconfig for a tenant cluster (plan §5.4, §7.2). It
+// carries no secrets and no API-server URL — the hub never learns tenant
+// endpoints (pull-only); the user supplies --server, or the gateway form is
+// used for private clusters.
+type ClusterAccessInfo struct {
+	IssuerURL       string `json:"issuerUrl"`
+	KubectlClientID string `json:"kubectlClientId"`
+	Audience        string `json:"audience"`
+	Organization    string `json:"organization"`
+}
+
 // RegistrationToken is a one-time, TTL'd bootstrap credential. Only the
 // SHA-256 hash is persisted; the plaintext is returned once at issuance.
 type RegistrationToken struct {

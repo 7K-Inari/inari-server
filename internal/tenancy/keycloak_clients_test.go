@@ -188,6 +188,96 @@ func TestCreatePublicClientHasNoSecret(t *testing.T) {
 	}
 }
 
+func TestKubectlClientSpecShape(t *testing.T) {
+	spec := KubectlClientSpec("acme")
+	if spec.ClientID != "org-acme-kubectl" {
+		t.Errorf("ClientID = %q, want org-acme-kubectl", spec.ClientID)
+	}
+	if spec.ClientType != ClientTypePublic {
+		t.Errorf("ClientType = %q, want public", spec.ClientType)
+	}
+	if len(spec.Audiences) != 1 || spec.Audiences[0] != "kubernetes" {
+		t.Errorf("Audiences = %v, want [kubernetes]", spec.Audiences)
+	}
+	var localhost8000, localhost18000 bool
+	for _, u := range spec.RedirectURIs {
+		switch u {
+		case "http://localhost:8000":
+			localhost8000 = true
+		case "http://localhost:18000":
+			localhost18000 = true
+		}
+	}
+	if !localhost8000 || !localhost18000 {
+		t.Errorf("RedirectURIs = %v, want kubelogin localhost callbacks", spec.RedirectURIs)
+	}
+	if !spec.DeviceFlow {
+		t.Errorf("DeviceFlow = false, want true (headless kubelogin)")
+	}
+	if !spec.GroupsClaim {
+		t.Errorf("GroupsClaim = false, want true (tenant groups must land in tokens)")
+	}
+	var orgScope bool
+	for _, s := range spec.Scopes {
+		if s == "organization" {
+			orgScope = true
+		}
+	}
+	if !orgScope {
+		t.Errorf("Scopes = %v, want organization scope", spec.Scopes)
+	}
+}
+
+func TestCreateKubectlClientMapsGroupsAndDeviceFlow(t *testing.T) {
+	srv, f := newClientCrudFake(t)
+	defer srv.Close()
+
+	k := NewKeycloakAdmin(srv.URL, "inari", "inari-platform-admin", "test-secret")
+	secret, err := k.CreateClient(context.Background(), KubectlClientSpec("acme"))
+	if err != nil {
+		t.Fatalf("CreateClient: %v", err)
+	}
+	if secret != "" {
+		t.Errorf("public client must not return a secret, got %q", secret)
+	}
+	if f.created["publicClient"] != true || f.created["standardFlowEnabled"] != true {
+		t.Errorf("public client flags wrong: %v", f.created)
+	}
+	attrs, _ := f.created["attributes"].(map[string]any)
+	if attrs["oauth2.device.authorization.grant.enabled"] != "true" {
+		t.Errorf("device flow attribute missing: %v", attrs)
+	}
+	mappers, _ := f.created["protocolMappers"].([]any)
+	var groups, audience bool
+	for _, m := range mappers {
+		mm, _ := m.(map[string]any)
+		cfg, _ := mm["config"].(map[string]any)
+		switch mm["protocolMapper"] {
+		case "oidc-group-membership-mapper":
+			groups = true
+			if cfg["claim.name"] != "groups" {
+				t.Errorf("groups claim name = %v, want groups", cfg["claim.name"])
+			}
+			if cfg["full.path"] != "true" {
+				t.Errorf("groups full.path = %v, want true (leading-slash contract)", cfg["full.path"])
+			}
+			if cfg["id.token.claim"] != "true" || cfg["access.token.claim"] != "true" {
+				t.Errorf("groups mapper must emit id+access token claims: %v", cfg)
+			}
+		case "oidc-audience-mapper":
+			if cfg["included.client.audience"] == "kubernetes" {
+				audience = true
+			}
+		}
+	}
+	if !groups {
+		t.Errorf("group-membership mapper missing: %v", mappers)
+	}
+	if !audience {
+		t.Errorf("kubernetes audience mapper missing: %v", mappers)
+	}
+}
+
 func TestRotateClientSecret(t *testing.T) {
 	srv, f := newClientCrudFake(t)
 	defer srv.Close()

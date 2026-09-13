@@ -365,6 +365,39 @@ type ClientSpec struct {
 	Scopes       []string
 	RedirectURIs []string
 	Enabled      bool
+	// DeviceFlow enables the OAuth2 device authorization grant (headless
+	// kubelogin); rendered as the client attribute KC expects.
+	DeviceFlow bool
+	// GroupsClaim attaches a group-membership mapper emitting claim `groups`
+	// with full group paths (/tenant-<slug>/<team>, leading slash) — the
+	// kubectl-access contract pinned in plan §5.4.
+	GroupsClaim bool
+}
+
+// KubectlClientSpec returns the canonical per-tenant kubelogin client spec
+// (org-<slug>-kubectl): public, standard + device flow, kubelogin's
+// localhost callbacks, audience `kubernetes`, the built-in `organization`
+// scope, and the groups claim (plan §5.4, §7.2).
+func KubectlClientSpec(slug string) ClientSpec {
+	return ClientSpec{
+		ClientID:   KubectlClientID(slug),
+		Name:       "kubectl",
+		ClientType: ClientTypePublic,
+		Audiences:  []string{"kubernetes"},
+		Scopes:     []string{"organization"},
+		RedirectURIs: []string{
+			"http://localhost:8000",  // kubelogin authcode callback (default port)
+			"http://localhost:18000", // kubelogin authcode callback (fallback port)
+		},
+		Enabled:     true,
+		DeviceFlow:  true,
+		GroupsClaim: true,
+	}
+}
+
+// KubectlClientID renders the per-tenant kubelogin clientId.
+func KubectlClientID(slug string) string {
+	return "org-" + slug + "-kubectl"
 }
 
 // CreateClient provisions a tenant OIDC client in the inari realm and, for
@@ -373,6 +406,10 @@ type ClientSpec struct {
 // scopes (realm client scopes are created on demand).
 func (k *KeycloakAdmin) CreateClient(ctx context.Context, spec ClientSpec) (string, error) {
 	public := spec.ClientType == ClientTypePublic
+	mappers := audienceMappers(spec.Audiences)
+	if spec.GroupsClaim {
+		mappers = append(mappers, groupsClaimMapper())
+	}
 	rep := map[string]any{
 		"clientId":                  spec.ClientID,
 		"name":                      spec.Name,
@@ -382,7 +419,12 @@ func (k *KeycloakAdmin) CreateClient(ctx context.Context, spec ClientSpec) (stri
 		"serviceAccountsEnabled":    !public,
 		"directAccessGrantsEnabled": false,
 		"redirectUris":              spec.RedirectURIs,
-		"protocolMappers":           audienceMappers(spec.Audiences),
+		"protocolMappers":           mappers,
+	}
+	if spec.DeviceFlow {
+		rep["attributes"] = map[string]any{
+			"oauth2.device.authorization.grant.enabled": "true",
+		}
 	}
 	resp, err := k.do(ctx, http.MethodPost, "/clients", rep)
 	if err != nil {
@@ -515,6 +557,26 @@ func (k *KeycloakAdmin) RotateClientSecret(ctx context.Context, clientID string)
 		return "", fmt.Errorf("keycloak: client %s rotated to empty secret", clientID)
 	}
 	return body.Value, nil
+}
+
+// groupsClaimMapper renders the oidc-group-membership-mapper pinned by the
+// kubectl-access contract (plan §5.4): claim `groups`, full group paths with
+// leading slash (/tenant-<slug>/<team>) — the exact strings the sibling
+// RBAC-materialization task binds as Group subjects.
+func groupsClaimMapper() map[string]any {
+	return map[string]any{
+		"name":           "groups",
+		"protocol":       "openid-connect",
+		"protocolMapper": "oidc-group-membership-mapper",
+		"config": map[string]string{
+			"claim.name":           "groups",
+			"full.path":            "true",
+			"id.token.claim":       "true",
+			"access.token.claim":   "true",
+			"userinfo.token.claim": "true",
+			"jsonType.label":       "String",
+		},
+	}
 }
 
 // audienceMappers renders one oidc-audience-mapper per audience (same shape

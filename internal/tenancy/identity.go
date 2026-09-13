@@ -196,6 +196,57 @@ func (s *Service) RotateIdentityClientSecret(ctx context.Context, actor, slug, c
 	return secret, nil
 }
 
+// EnsureKubectlClient idempotently provisions the per-tenant kubelogin
+// client (KubectlClientSpec) in Keycloak and its metadata projection, so
+// `inari cluster kubeconfig` works out of the box (plan §5.4, §7.2). Called
+// from CreateTenant and safe to re-run for tenants created before this
+// feature; the audit event is recorded only when the client is created.
+func (s *Service) EnsureKubectlClient(ctx context.Context, actor, slug string) error {
+	if s.clients == nil {
+		return errors.New("tenancy: identity client manager not configured")
+	}
+	org, err := s.store.GetOrganizationBySlug(ctx, s.db.Pool, slug)
+	if err != nil {
+		return err
+	}
+	clientID := KubectlClientID(slug)
+	if _, err := s.store.GetIdentityClient(ctx, s.db.Pool, org.ID, clientID); err == nil {
+		return nil // already provisioned
+	} else if !errors.Is(err, ErrClientNotFound) {
+		return err
+	}
+	spec := KubectlClientSpec(slug)
+	if _, err := s.clients.CreateClient(ctx, spec); err != nil {
+		return fmt.Errorf("tenancy: create kubectl keycloak client: %w", err)
+	}
+	client := &types.IdentityClient{
+		ClientID:     clientID,
+		OrgID:        org.ID,
+		Name:         spec.Name,
+		Type:         types.IdentityClientTypePublic,
+		Audiences:    spec.Audiences,
+		Scopes:       spec.Scopes,
+		RedirectURIs: spec.RedirectURIs,
+		Status:       types.IdentityClientStatusActive,
+	}
+	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		if err := s.store.CreateIdentityClient(ctx, tx, client); err != nil {
+			return err
+		}
+		return s.audit.Record(ctx, tx, &types.AuditEvent{
+			OrgID: org.ID, Actor: actor, Action: "identity.client.kubectl_ensured", ObjectType: "identity_client", ObjectID: clientID,
+		})
+	})
+	if err != nil {
+		// Best-effort compensation for the external Keycloak write.
+		if rbErr := s.clients.DisableClient(ctx, clientID); rbErr != nil {
+			return fmt.Errorf("tenancy: %w (rollback keycloak client: %v)", err, rbErr)
+		}
+		return err
+	}
+	return nil
+}
+
 // GroupMemberCount returns the number of Keycloak users in a group path,
 // best-effort for the RBAC matrix view.
 func (s *Service) GroupMemberCount(ctx context.Context, groupPath string) (int, error) {

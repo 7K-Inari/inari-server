@@ -54,7 +54,12 @@ func (l *Local) EnsureRepo(_ context.Context, repo string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(path); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			// EACCES etc.: do NOT treat the repo as existing — the next
+			// read would fail with a misleading "does not exist".
+			return "", fmt.Errorf("gitprovider local: stat %s: %w", repo, err)
+		}
 		if err := os.MkdirAll(path, 0o755); err != nil {
 			return "", err
 		}
@@ -165,7 +170,7 @@ func (l *Local) open(repo string) (*git.Repository, *git.Worktree, error) {
 		return nil, nil, err
 	}
 	if _, err := os.Stat(path); err != nil {
-		return nil, nil, fmt.Errorf("gitprovider local: repo %q does not exist", repo)
+		return nil, nil, fmt.Errorf("gitprovider local: stat repo %q: %w", repo, err)
 	}
 	r, err := git.Clone(memory.NewStorage(), memfs.New(), &git.CloneOptions{URL: path})
 	if errors.Is(err, transport.ErrEmptyRemoteRepository) || errors.Is(err, plumbing.ErrReferenceNotFound) {

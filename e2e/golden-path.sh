@@ -45,6 +45,10 @@ need docker; need kubectl; need helm; need jq; need kind; need git; need base64
 # for the tenant-local ArgoCD, which the e2e platform stack does not
 # install ("platform stack without ArgoCD", see below).
 GIT_HOST_DIR="$(mktemp -d /tmp/inari-e2e-git.XXXXXX)"
+# mktemp dirs are 0700; the server container runs non-root, so open the
+# shared git root up (it is bind-mounted into the kind node at /git and
+# hostPath-mounted into the server pod at /var/lib/inari/git).
+chmod 0777 "$GIT_HOST_DIR"
 
 cleanup() {
   kubectl -n "$NAMESPACE" delete pod "$TOOLS" --ignore-not-found --wait=false >/dev/null 2>&1 || true

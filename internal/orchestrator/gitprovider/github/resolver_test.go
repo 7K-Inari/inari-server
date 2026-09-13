@@ -46,7 +46,7 @@ func (f *fakeGitHub) handler() http.Handler {
 			}
 			page := 1
 			if p := r.URL.Query().Get("page"); p != "" {
-				fmt.Sscanf(p, "%d", &page)
+				_, _ = fmt.Sscanf(p, "%d", &page)
 			}
 			items := f.installations
 			perPage := 100

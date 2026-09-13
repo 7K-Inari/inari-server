@@ -179,7 +179,7 @@ func buildGitResolver(cfg *config.Config, database *db.DB) (gitprovider.Resolver
 		LegacyInstallationID:   cfg.GitHubInstallationID,
 		CacheTTL:               cfg.GitHubInstallCacheTTL,
 		KeyLoader:              loader.Load,
-		OnResolved: func(ctx context.Context, ev gitgithub.ResolvedEvent) {
+		OnResolved: func(_ context.Context, ev gitgithub.ResolvedEvent) {
 			// Audit trail for credential resolutions (outbox → NATS).
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()

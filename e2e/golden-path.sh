@@ -403,6 +403,14 @@ sync_rbac() {
   rm -rf "$STATE_WORK"
   git clone -q "$STATE_REPO" "$STATE_WORK"
   kubectl apply -f "$STATE_WORK/baseline/rbac/" >/dev/null
+  # Emulate ArgoCD's prune: drop managed bindings absent from the desired
+  # set (a mapping flip renders a NEW role-qualified binding because
+  # roleRef is immutable, so the stale object must be pruned to converge).
+  for b in $(kubectl get clusterrolebinding -l "inari.io/tenant=$TENANT" -o name); do
+    name="${b#clusterrolebinding.rbac.authorization.k8s.io/}"
+    grep -qE "^  name: ${name}\$" "$STATE_WORK/baseline/rbac/clusterrolebindings.yaml" \
+      || kubectl delete clusterrolebinding "$name" >/dev/null
+  done
 }
 
 log "applying the materialized RBAC bundle and asserting the anchor roles"
@@ -411,9 +419,9 @@ for ROLE in admin operator editor viewer; do
   kubectl get clusterrole "tenant-$TENANT-$ROLE" >/dev/null \
     || die "clusterrole tenant-$TENANT-$ROLE missing after sync"
 done
-kubectl get clusterrolebinding "tenant-$TENANT-viewers" >/dev/null \
-  || die "clusterrolebinding tenant-$TENANT-viewers missing"
-kubectl get clusterrolebinding "tenant-$TENANT-viewers" -o jsonpath='{.roleRef.name}' | grep -q "tenant-$TENANT-viewer" \
+kubectl get clusterrolebinding "tenant-$TENANT-viewers-viewer" >/dev/null \
+  || die "clusterrolebinding tenant-$TENANT-viewers-viewer missing"
+kubectl get clusterrolebinding "tenant-$TENANT-viewers-viewer" -o jsonpath='{.roleRef.name}' | grep -q "tenant-$TENANT-viewer" \
   || die "viewers binding roleRef is not tenant-$TENANT-viewer"
 
 log "GAP(kc-groups-mapper): ensuring the groups claim carries full group paths"
@@ -465,15 +473,18 @@ xcurl -X PUT -H "Authorization: Bearer $(user_token)" -H "Content-Type: applicat
   "$API/tenants/$TENANT/rbac/mappings" >/dev/null || die "PUT rbac/mappings failed"
 for i in $(seq 1 36); do
   if git -C "$STATE_REPO" show main:baseline/rbac/clusterrolebindings.yaml 2>/dev/null \
-      | awk '/name: tenant-'"$TENANT"'-viewers$/{f=1} f && /name: tenant-'"$TENANT"'-editor$/{found=1} END{exit !found}'; then
+      | grep -qE "^  name: tenant-$TENANT-viewers-editor\$"; then
     break
   fi
   sleep 5
   [ "$i" = 36 ] && die "state repo binding never updated after the mapping change"
 done
 sync_rbac
-kubectl get clusterrolebinding "tenant-$TENANT-viewers" -o jsonpath='{.roleRef.name}' | grep -q "tenant-$TENANT-editor" \
-  || die "viewers binding roleRef did not move to tenant-$TENANT-editor"
+kubectl get clusterrolebinding "tenant-$TENANT-viewers-editor" -o jsonpath='{.roleRef.name}' | grep -q "tenant-$TENANT-editor" \
+  || die "viewers binding did not converge to tenant-$TENANT-editor"
+if kubectl get clusterrolebinding "tenant-$TENANT-viewers-viewer" >/dev/null 2>&1; then
+  die "stale viewers-viewer binding not pruned after the mapping change"
+fi
 kubectl auth can-i create deployments --as="oidc:rbac-viewer" --as-group="/tenant-$TENANT/viewers" >/dev/null \
   || die "editor-mapped group cannot create deployments after the mapping change"
 

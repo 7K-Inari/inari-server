@@ -116,11 +116,16 @@ func TestMaterializesOnTenantAndMappingLifecycle(t *testing.T) {
 		t.Error("root app not seeded for repo created outside the zone flow")
 	}
 
-	// A mapping change must flip the affected binding's roleRef.
+	// A mapping change must render a NEW role-qualified binding (roleRef
+	// is immutable; the syncer applies the new object and prunes the old).
 	team := teams[0]
 	newRole := types.RoleViewer
 	if team.Role == newRole {
 		newRole = types.RoleOrgAdmin
+	}
+	oldBinding, ok := rbacmaterialize.BindingName("acme", team.Name, team.Role)
+	if !ok {
+		t.Fatalf("seeded team role %q has no anchor role", team.Role)
 	}
 	if _, err := svc.SetRBACMappings(ctx, "user-1", "acme",
 		[]types.TeamRoleMapping{{Team: team.Name, Role: newRole}}); err != nil {
@@ -133,6 +138,13 @@ func TestMaterializesOnTenantAndMappingLifecycle(t *testing.T) {
 	wantRef, _ := rbacmaterialize.ClusterRoleName("acme", newRole)
 	if !strings.Contains(updated, "name: "+wantRef) {
 		t.Errorf("binding roleRef not updated to %s:\n%s", wantRef, updated)
+	}
+	newBinding, _ := rbacmaterialize.BindingName("acme", team.Name, newRole)
+	if !strings.Contains(updated, "name: "+newBinding) {
+		t.Errorf("new role-qualified binding %s missing:\n%s", newBinding, updated)
+	}
+	if strings.Contains(updated, "name: "+oldBinding) {
+		t.Errorf("stale pre-flip binding %s still rendered:\n%s", oldBinding, updated)
 	}
 
 	// Idempotency: redispatching with no changes must not alter content.

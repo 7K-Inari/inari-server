@@ -114,9 +114,9 @@ func TestRenderTenantRBACBindings(t *testing.T) {
 		name, role, group string
 	}
 	wants := []want{
-		{"tenant-acme-admins", "tenant-acme-admin", "/tenant-acme/admins"},
-		{"tenant-acme-devs", "tenant-acme-editor", "/tenant-acme/devs"},
-		{"tenant-acme-platform-team", "tenant-acme-operator", "/tenant-acme/platform-team"},
+		{"tenant-acme-admins-admin", "tenant-acme-admin", "/tenant-acme/admins"},
+		{"tenant-acme-devs-editor", "tenant-acme-editor", "/tenant-acme/devs"},
+		{"tenant-acme-platform-team-operator", "tenant-acme-operator", "/tenant-acme/platform-team"},
 	}
 	for i, w := range wants {
 		meta, _ := docs[i]["metadata"].(map[string]any)
@@ -135,6 +135,31 @@ func TestRenderTenantRBACBindings(t *testing.T) {
 		if sub["kind"] != "Group" || sub["name"] != w.group {
 			t.Errorf("binding %d subject = %v, want Group/%s", i, sub, w.group)
 		}
+	}
+}
+
+// A role flip must render a NEW binding object, never an in-place roleRef
+// change: ClusterRoleBinding roleRef is immutable, so the syncer (ArgoCD)
+// applies the new binding and prunes the stale one (QA: k3s rejects
+// in-place flips with "cannot change roleRef").
+func TestRenderTenantRBACRoleFlipRendersNewBinding(t *testing.T) {
+	teams := testTeams()
+	before := RenderTenantRBAC("acme", teams)
+	devsBefore := "tenant-acme-devs-editor"
+	if !strings.Contains(fileByPath(t, before, "baseline/rbac/clusterrolebindings.yaml"), "name: "+devsBefore) {
+		t.Fatalf("expected binding %s before the flip", devsBefore)
+	}
+	for i := range teams {
+		if teams[i].Name == "devs" {
+			teams[i].Role = types.RoleViewer
+		}
+	}
+	after := fileByPath(t, RenderTenantRBAC("acme", teams), "baseline/rbac/clusterrolebindings.yaml")
+	if !strings.Contains(after, "name: tenant-acme-devs-viewer") {
+		t.Errorf("flipped binding missing new role-qualified name:\n%s", after)
+	}
+	if strings.Contains(after, "name: "+devsBefore) {
+		t.Errorf("stale binding %s still rendered after the flip:\n%s", devsBefore, after)
 	}
 }
 

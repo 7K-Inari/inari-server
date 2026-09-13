@@ -1,7 +1,9 @@
 // Package rbacmaterialize closes the RBAC-mapping chain (plan §7.1): it
 // renders the four per-tenant anchor ClusterRoles
-// (tenant-<slug>-admin/operator/editor/viewer) plus one ClusterRoleBinding
-// per team (Group subject = the team's Keycloak group path) as desired
+// (tenant-<slug>-admin/operator/editor/viewer) plus one role-qualified
+// ClusterRoleBinding per team mapping (tenant-<slug>-<team>-<role>;
+// role-qualified because roleRef is immutable — a mapping flip must create
+// a new object and prune the old one, never update in place) as desired
 // state into the tenant's <slug>-inari-state repo under baseline/rbac/ —
 // the tenant-local ArgoCD root app syncs only baseline/, so committing
 // there is sufficient for convergence (same constraint as
@@ -65,16 +67,38 @@ var anchorRoles = []struct {
     verbs: ["get", "list", "watch"]`},
 }
 
-// ClusterRoleName returns the anchor ClusterRole for an org role; ok is
-// false for unknown roles (callers skip such teams rather than rendering a
+// anchorSuffix maps an org role onto its anchor role suffix; ok is false
+// for unknown roles (callers skip such teams rather than rendering a
 // binding to a role that does not exist).
-func ClusterRoleName(slug string, role types.Role) (string, bool) {
+func anchorSuffix(role types.Role) (string, bool) {
 	for _, a := range anchorRoles {
 		if a.Role == role {
-			return "tenant-" + slug + "-" + a.Suffix, true
+			return a.Suffix, true
 		}
 	}
 	return "", false
+}
+
+// ClusterRoleName returns the anchor ClusterRole for an org role.
+func ClusterRoleName(slug string, role types.Role) (string, bool) {
+	suffix, ok := anchorSuffix(role)
+	if !ok {
+		return "", false
+	}
+	return "tenant-" + slug + "-" + suffix, true
+}
+
+// BindingName returns the ClusterRoleBinding for a team mapping. The name
+// is role-qualified (tenant-<slug>-<team>-<role>) because roleRef is
+// immutable: a mapping change must produce a NEW binding object (the
+// ArgoCD root app prunes the stale one) instead of an in-place update the
+// API server rejects.
+func BindingName(slug, team string, role types.Role) (string, bool) {
+	suffix, ok := anchorSuffix(role)
+	if !ok {
+		return "", false
+	}
+	return "tenant-" + slug + "-" + team + "-" + suffix, true
 }
 
 // GroupSubjectName maps a stored Keycloak group path
@@ -91,8 +115,11 @@ func GroupSubjectName(groupPath string) string {
 
 // RenderTenantRBAC produces the tenant's RBAC desired-state files:
 // baseline/rbac/clusterroles.yaml (always the four anchor roles) and
-// baseline/rbac/clusterrolebindings.yaml (one binding per team, sorted by
-// team name so an unchanged desired state produces no git diff).
+// baseline/rbac/clusterrolebindings.yaml (one role-qualified binding per
+// team, sorted by team name so an unchanged desired state produces no git
+// diff; a role change renders a new binding name and the ArgoCD root app
+// prunes the stale one — roleRef is immutable, so in-place flips are
+// rejected by the API server).
 func RenderTenantRBAC(slug string, teams []types.Team) []gitprovider.File {
 	var roles strings.Builder
 	for i, a := range anchorRoles {
@@ -117,10 +144,11 @@ rules:%s
 	var bindings strings.Builder
 	first := true
 	for _, t := range sorted {
-		roleName, ok := ClusterRoleName(slug, t.Role)
+		bindingName, ok := BindingName(slug, t.Name, t.Role)
 		if !ok {
 			continue
 		}
+		roleName, _ := ClusterRoleName(slug, t.Role)
 		if !first {
 			bindings.WriteString("---\n")
 		}
@@ -128,7 +156,7 @@ rules:%s
 		fmt.Fprintf(&bindings, `apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: tenant-%s-%s
+  name: %s
   labels:
     app.kubernetes.io/managed-by: inari
     inari.io/tenant: %s
@@ -140,7 +168,7 @@ subjects:
   - kind: Group
     name: %s
     apiGroup: rbac.authorization.k8s.io
-`, slug, t.Name, slug, roleName, GroupSubjectName(t.KeycloakGroupPath))
+`, bindingName, slug, roleName, GroupSubjectName(t.KeycloakGroupPath))
 	}
 
 	return []gitprovider.File{

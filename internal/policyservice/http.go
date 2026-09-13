@@ -103,6 +103,20 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Security:    httpserver.SecurityRequirement(),
 	}, h.getPack)
 	huma.Register(api, huma.Operation{
+		OperationID: "deletePolicyPack",
+		Method:      http.MethodDelete,
+		Path:        "/api/v1/tenants/{org}/policy-packs/{id}",
+		Summary:     "Delete a policy pack (409 while assigned unless force=true)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.deletePack)
+	huma.Register(api, huma.Operation{
+		OperationID: "listPolicyPackAssignments",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/tenants/{org}/policy-packs/{id}/assignments",
+		Summary:     "List a policy pack's assignments",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.listPackAssignments)
+	huma.Register(api, huma.Operation{
 		OperationID: "assignPolicyPack",
 		Method:      http.MethodPost,
 		Path:        "/api/v1/tenants/{org}/policy-packs/{id}/assign",
@@ -409,6 +423,49 @@ func (h *Handler) getPack(ctx context.Context, in *packIDInput) (*packOutput, er
 	}
 	out := &packOutput{}
 	out.Body.Pack = *p
+	return out, nil
+}
+
+type deletePackInput struct {
+	Org   string `path:"org"`
+	ID    string `path:"id"`
+	Force bool   `query:"force" doc:"cascade-unassign active assignments before deleting"`
+}
+
+func (h *Handler) deletePack(ctx context.Context, in *deletePackInput) (*struct{}, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	if err != nil {
+		return nil, err
+	}
+	err = h.svc.DeletePolicyPack(ctx, id.Subject, org.ID, in.ID, in.Force)
+	var depErr *DependencyError
+	switch {
+	case errors.As(err, &depErr):
+		return nil, huma.Error409Conflict("policy pack has active assignments; unassign first or re-issue with force=true",
+			&huma.ErrorDetail{Message: "active assignments", Location: "query.force", Value: depErr.Assignments})
+	case err != nil:
+		return nil, mapErr(err, ErrPackNotFound)
+	}
+	return nil, nil
+}
+
+type listPackAssignmentsOutput struct {
+	Body struct {
+		Assignments []types.PolicyAssignment `json:"assignments"`
+	}
+}
+
+func (h *Handler) listPackAssignments(ctx context.Context, in *packIDInput) (*listPackAssignmentsOutput, error) {
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	if err != nil {
+		return nil, err
+	}
+	assignments, err := h.svc.ListAssignments(ctx, org.ID, in.ID)
+	if err != nil {
+		return nil, mapErr(err, ErrPackNotFound)
+	}
+	out := &listPackAssignmentsOutput{}
+	out.Body.Assignments = assignments
 	return out, nil
 }
 

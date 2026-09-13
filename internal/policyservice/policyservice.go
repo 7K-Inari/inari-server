@@ -58,6 +58,15 @@ var (
 // MaxExemptionDuration bounds exemption lifetime (§5.11).
 const MaxExemptionDuration = 90 * 24 * time.Hour
 
+// DependencyError rejects a non-forced pack deletion while active
+// assignments exist; the HTTP layer maps it to 409 with the structured
+// list (same dependency style as tenancy's deletion DependencyError).
+type DependencyError struct{ Assignments []types.PolicyAssignment }
+
+func (e *DependencyError) Error() string {
+	return fmt.Sprintf("policy pack has %d active assignments", len(e.Assignments))
+}
+
 // ClusterLister is the cluster registry seam (satisfied by
 // clusterregistry.Service).
 type ClusterLister interface {
@@ -227,6 +236,18 @@ func (s *Store) ListPolicyPacks(ctx context.Context, q db.Querier, orgID string)
 		out = append(out, *p)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) DeletePolicyPack(ctx context.Context, q db.Querier, id string) error {
+	const sql = `DELETE FROM policy_packs WHERE id = $1`
+	tag, err := q.Exec(ctx, sql, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrPackNotFound
+	}
+	return nil
 }
 
 const assignmentCols = `id, pack_id, target_type, target_id, state, created_at`
@@ -729,6 +750,59 @@ func (s *Service) Unassign(ctx context.Context, actor, orgID, packID, assignment
 		return s.audit.Record(ctx, tx, &types.AuditEvent{
 			OrgID: orgID, Actor: actor, Action: "policy_pack.unassigned", ObjectType: "policy_pack", ObjectID: packID,
 			Payload: json.RawMessage(fmt.Sprintf(`{"assignmentId":%q}`, assignmentID)),
+		})
+	})
+}
+
+// DeletePolicyPack removes a pack. While active assignments exist a
+// non-forced delete fails with DependencyError; force cascade-unassigns
+// first. Assignment retractions, the pack deletion, audit rows and outbox
+// events (EventPolicyPackUnassigned per assignment, EventPolicyPackDeleted
+// for the pack — the OpenFGA tuple writer retracts the pack tuple) commit
+// in one TX. Deleting a missing pack returns ErrPackNotFound.
+func (s *Service) DeletePolicyPack(ctx context.Context, actor, orgID, packID string, force bool) error {
+	p, err := s.GetPolicyPack(ctx, orgID, packID)
+	if err != nil {
+		return err
+	}
+	if p.OrgID == "" {
+		return fmt.Errorf("%w: platform-global policy packs are not deletable by tenants", ErrInvalidInput)
+	}
+	assignments, err := s.store.ListAssignments(ctx, s.db.Pool, packID)
+	if err != nil {
+		return err
+	}
+	if len(assignments) > 0 && !force {
+		return &DependencyError{Assignments: assignments}
+	}
+	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		for i := range assignments {
+			a := &assignments[i]
+			if err := s.store.DeleteAssignment(ctx, tx, a.ID); err != nil {
+				return err
+			}
+			if err := s.audit.Record(ctx, tx, &types.AuditEvent{
+				OrgID: orgID, Actor: actor, Action: "policy_pack.unassigned", ObjectType: "policy_pack", ObjectID: packID,
+				Payload: json.RawMessage(fmt.Sprintf(`{"assignmentId":%q,"targetType":%q,"targetId":%q}`, a.ID, a.TargetType, a.TargetID)),
+			}); err != nil {
+				return err
+			}
+			if err := audit.AppendOutbox(ctx, tx, orgID, types.EventPolicyPackUnassigned, types.PolicyPackAssignedPayload{
+				OrgID: orgID, PackID: packID, AssignmentID: a.ID, TargetType: a.TargetType, TargetID: a.TargetID,
+			}); err != nil {
+				return err
+			}
+		}
+		if err := s.store.DeletePolicyPack(ctx, tx, packID); err != nil {
+			return err
+		}
+		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
+			OrgID: orgID, Actor: actor, Action: "policy_pack.deleted", ObjectType: "policy_pack", ObjectID: packID,
+		}); err != nil {
+			return err
+		}
+		return audit.AppendOutbox(ctx, tx, orgID, types.EventPolicyPackDeleted, types.PolicyPackAssignedPayload{
+			OrgID: orgID, PackID: packID,
 		})
 	})
 }

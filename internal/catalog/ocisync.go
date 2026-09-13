@@ -269,6 +269,18 @@ func packageFromFiles(name, typ, indexDesc, ref string, files map[string][]byte)
 	}
 	base.Schema = files["schema.json"]
 	base.UIHints = files["ui-hints.json"]
+	// inari-catalog packages ship ui-hints.yaml; convert to JSON for the
+	// jsonb column / API responses.
+	if len(base.UIHints) == 0 {
+		if raw, ok := files["ui-hints.yaml"]; ok {
+			var hints any
+			if err := yaml.Unmarshal(raw, &hints); err == nil {
+				if asJSON, err := json.Marshal(hints); err == nil {
+					base.UIHints = asJSON
+				}
+			}
+		}
+	}
 	if raw, ok := files["chart.yaml"]; ok {
 		var cy chartYAML
 		if err := yaml.Unmarshal(raw, &cy); err != nil {

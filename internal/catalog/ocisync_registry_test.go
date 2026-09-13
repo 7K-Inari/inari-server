@@ -93,9 +93,10 @@ func setupFakeCatalog(t *testing.T) *RegistryPuller {
 		"chart.yaml":   testChartYAML,
 	})
 	pushArtifact(t, host, "catalog/web-service", "incubating", map[string]string{
-		"package.yaml": "version: 0.1.0\nchannel: incubating\ntype: kro-rgd\n",
-		"rgd.yaml":     "apiVersion: kro.run/v1alpha1\nkind: ResourceGraphDefinition\n",
-		"schema.json":  `{"type":"object"}`,
+		"package.yaml":  "version: 0.1.0\nchannel: incubating\ntype: kro-rgd\n",
+		"rgd.yaml":      "apiVersion: kro.run/v1alpha1\nkind: ResourceGraphDefinition\n",
+		"schema.json":   `{"type":"object"}`,
+		"ui-hints.yaml": "fields:\n  - name: image\n    widget: text\n",
 	})
 	pushArtifact(t, host, "catalog/index", "latest", map[string]string{
 		"catalog.yaml": fmt.Sprintf(testIndexYAML, host),
@@ -149,6 +150,12 @@ func TestRegistryPuller(t *testing.T) {
 	}
 	if len(ws[0].Schema) == 0 {
 		t.Error("web-service schema empty")
+	}
+	// inari-catalog packages ship ui-hints.yaml; it must surface as JSON.
+	if len(ws[0].UIHints) == 0 {
+		t.Error("web-service UI hints empty (ui-hints.yaml fallback missing)")
+	} else if !strings.Contains(string(ws[0].UIHints), `"fields"`) {
+		t.Errorf("web-service UI hints = %s, want JSON", ws[0].UIHints)
 	}
 }
 

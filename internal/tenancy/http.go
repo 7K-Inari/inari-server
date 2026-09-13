@@ -61,6 +61,32 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 	}, h.updateTenant)
 
 	huma.Register(api, huma.Operation{
+		OperationID:   "deleteTenant",
+		Method:        http.MethodDelete,
+		Path:          "/api/v1/tenants/{org}",
+		Summary:       "Decommission a tenant (org admin only; approval-gated, asynchronous)",
+		DefaultStatus: http.StatusAccepted,
+		Security:      httpserver.SecurityRequirement(),
+	}, h.deleteTenant)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "tenantDeletionDependencies",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/tenants/{org}/deletion/dependencies",
+		Summary:     "Dry-run: list resources blocking tenant deletion (org admin only)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.deletionDependencies)
+
+	huma.Register(api, huma.Operation{
+		OperationID:   "retryTenantDeletion",
+		Method:        http.MethodPost,
+		Path:          "/api/v1/tenants/{org}/deletion:retry",
+		Summary:       "Retry a failed tenant deletion (org admin only)",
+		DefaultStatus: http.StatusAccepted,
+		Security:      httpserver.SecurityRequirement(),
+	}, h.retryDeletion)
+
+	huma.Register(api, huma.Operation{
 		OperationID: "listTeams",
 		Method:      http.MethodGet,
 		Path:        "/api/v1/tenants/{org}/teams",
@@ -145,8 +171,9 @@ type createTenantInput struct {
 
 type tenantOutput struct {
 	Body struct {
-		Organization types.Organization `json:"organization"`
-		Teams        []types.Team       `json:"teams"`
+		Organization types.Organization    `json:"organization"`
+		Teams        []types.Team          `json:"teams"`
+		Deletion     *types.TenantDeletion `json:"deletion,omitempty"`
 	}
 }
 
@@ -228,6 +255,122 @@ func (h *Handler) getTenant(ctx context.Context, in *orgPathInput) (*tenantOutpu
 	out := &tenantOutput{}
 	out.Body.Organization = *org
 	out.Body.Teams = teams
+	if org.Status == types.OrgStatusDeleting {
+		if del, derr := h.svc.GetDeletion(ctx, in.Org); derr == nil {
+			out.Body.Deletion = del
+		}
+	}
+	return out, nil
+}
+
+type deleteTenantInput struct {
+	Org  string `path:"org" doc:"Tenant slug"`
+	Body struct {
+		Force  bool   `json:"force,omitempty" doc:"Revoke non-terminal clusters and delete despite dependencies"`
+		Reason string `json:"reason,omitempty" maxLength:"500"`
+	}
+}
+
+type deleteTenantOutput struct {
+	Body struct {
+		ApprovalID string `json:"approvalId"`
+		Status     string `json:"status"`
+	}
+}
+
+func (h *Handler) deleteTenant(ctx context.Context, in *deleteTenantInput) (*deleteTenantOutput, error) {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+		// Platform org_creators may force-decommission a tenant whose admin
+		// chain is broken (e.g. orgs created before the org-admin bootstrap
+		// fix, where no org-admin exists at all).
+		if perr := h.authorizePlatform(ctx); perr != nil {
+			return nil, err
+		}
+	}
+	id := identity(ctx)
+	approvalID, err := h.svc.DeleteTenant(ctx, id.Subject, in.Org, in.Body.Force, in.Body.Reason)
+	var depErr *DependencyError
+	switch {
+	case errors.As(err, &depErr):
+		return nil, huma.Error409Conflict("tenant has blocking dependencies; re-issue with force or remove them first",
+			&huma.ErrorDetail{Message: "blocking dependencies", Location: "body.force", Value: depErr.Blockers})
+	case errors.Is(err, ErrOrgNotFound):
+		return nil, huma.Error404NotFound("organization not found")
+	case err != nil:
+		return nil, err
+	}
+	out := &deleteTenantOutput{}
+	out.Body.ApprovalID = approvalID
+	out.Body.Status = types.OrgStatusDeleting
+	return out, nil
+}
+
+type deletionDependenciesOutput struct {
+	Body struct {
+		Blockers []Dependency `json:"blockers"`
+	}
+}
+
+func (h *Handler) deletionDependencies(ctx context.Context, in *orgPathInput) (*deletionDependenciesOutput, error) {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+		return nil, err
+	}
+	blockers, err := h.svc.DeletionDependencies(ctx, in.Org)
+	if errors.Is(err, ErrOrgNotFound) {
+		return nil, huma.Error404NotFound("organization not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := &deletionDependenciesOutput{}
+	out.Body.Blockers = blockers
+	return out, nil
+}
+
+type retryDeletionOutput struct {
+	Body struct {
+		Deletion *types.TenantDeletion `json:"deletion"`
+	}
+}
+
+// authorizePlatform checks the caller holds org_creator on platform:inari
+// (platform-admin, synced from the Keycloak platform-admins group). Used as
+// a fallback for routes that act on frozen/deleting orgs whose FGA tuples
+// have already been swept.
+func (h *Handler) authorizePlatform(ctx context.Context) error {
+	id := identity(ctx)
+	if id == nil {
+		return huma.Error401Unauthorized("unauthenticated")
+	}
+	ok, err := h.authz.Check(ctx, authz.UserObject(id.Subject), authz.RelationOrgCreator, authz.ObjectPlatform)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return huma.Error403Forbidden("insufficient permissions")
+	}
+	return nil
+}
+
+func (h *Handler) retryDeletion(ctx context.Context, in *orgPathInput) (*retryDeletionOutput, error) {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+		// A frozen org's tuples are already swept, so the original org-admin
+		// can no longer pass the org check; platform org_creators may retry.
+		if perr := h.authorizePlatform(ctx); perr != nil {
+			return nil, err
+		}
+	}
+	del, err := h.svc.RetryDeletion(ctx, in.Org)
+	switch {
+	case errors.Is(err, ErrOrgNotFound):
+		return nil, huma.Error404NotFound("organization not found")
+	case errors.Is(err, ErrDeletionNotFound):
+		return nil, huma.Error404NotFound("no tenant deletion in progress")
+	case err != nil:
+		return nil, err
+	}
+	out := &retryDeletionOutput{}
+	out.Body.Deletion = del
 	return out, nil
 }
 
@@ -292,11 +435,15 @@ type addMemberInput struct {
 }
 
 func (h *Handler) addMember(ctx context.Context, in *addMemberInput) (*struct{}, error) {
-	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer); err != nil {
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureOrgActive(org); err != nil {
 		return nil, err
 	}
 	id := identity(ctx)
-	err := h.svc.AddMember(ctx, id.Subject, in.Org, in.Team, in.Body.Subject)
+	err = h.svc.AddMember(ctx, id.Subject, in.Org, in.Team, in.Body.Subject)
 	switch {
 	case errors.Is(err, ErrUserNotFound):
 		return nil, huma.Error404NotFound("user not found")
@@ -317,11 +464,15 @@ type removeMemberInput struct {
 }
 
 func (h *Handler) removeMember(ctx context.Context, in *removeMemberInput) (*struct{}, error) {
-	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer); err != nil {
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureOrgActive(org); err != nil {
 		return nil, err
 	}
 	id := identity(ctx)
-	err := h.svc.RemoveMember(ctx, id.Subject, in.Org, in.Team, in.Subject)
+	err = h.svc.RemoveMember(ctx, id.Subject, in.Org, in.Team, in.Subject)
 	switch {
 	case errors.Is(err, ErrTeamNotFound):
 		return nil, huma.Error404NotFound("team not found")
@@ -343,6 +494,9 @@ type updateTenantInput struct {
 func (h *Handler) updateTenant(ctx context.Context, in *updateTenantInput) (*tenantOutput, error) {
 	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
 	if err != nil {
+		return nil, err
+	}
+	if err := ensureOrgActive(org); err != nil {
 		return nil, err
 	}
 	id := identity(ctx)
@@ -375,7 +529,11 @@ type teamOutput struct {
 }
 
 func (h *Handler) createTeam(ctx context.Context, in *createTeamInput) (*teamOutput, error) {
-	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureOrgActive(org); err != nil {
 		return nil, err
 	}
 	role := in.Body.Role
@@ -401,11 +559,15 @@ func (h *Handler) createTeam(ctx context.Context, in *createTeamInput) (*teamOut
 }
 
 func (h *Handler) deleteTeam(ctx context.Context, in *teamPathInput) (*struct{}, error) {
-	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureOrgActive(org); err != nil {
 		return nil, err
 	}
 	id := identity(ctx)
-	err := h.svc.DeleteTeam(ctx, id.Subject, in.Org, in.Team)
+	err = h.svc.DeleteTeam(ctx, id.Subject, in.Org, in.Team)
 	switch {
 	case errors.Is(err, ErrDefaultTeam):
 		return nil, huma.Error409Conflict("default teams cannot be deleted")
@@ -450,14 +612,18 @@ type putMemberInput struct {
 }
 
 func (h *Handler) putMember(ctx context.Context, in *putMemberInput) (*struct{}, error) {
-	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureOrgActive(org); err != nil {
 		return nil, err
 	}
 	if !in.Body.Role.Valid() {
 		return nil, huma.Error400BadRequest("invalid role")
 	}
 	id := identity(ctx)
-	err := h.svc.SetMemberRole(ctx, id.Subject, in.Org, in.Subject, in.Body.Role)
+	err = h.svc.SetMemberRole(ctx, id.Subject, in.Org, in.Subject, in.Body.Role)
 	switch {
 	case errors.Is(err, ErrUserNotFound):
 		return nil, huma.Error404NotFound("user not found")
@@ -475,11 +641,15 @@ type removeOrgMemberInput struct {
 }
 
 func (h *Handler) removeOrgMember(ctx context.Context, in *removeOrgMemberInput) (*struct{}, error) {
-	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureOrgActive(org); err != nil {
 		return nil, err
 	}
 	id := identity(ctx)
-	err := h.svc.RemoveOrgMember(ctx, id.Subject, in.Org, in.Subject)
+	err = h.svc.RemoveOrgMember(ctx, id.Subject, in.Org, in.Subject)
 	switch {
 	case errors.Is(err, ErrOrgNotFound):
 		return nil, huma.Error404NotFound("organization not found")
@@ -487,6 +657,15 @@ func (h *Handler) removeOrgMember(ctx context.Context, in *removeOrgMemberInput)
 		return nil, err
 	}
 	return nil, nil
+}
+
+// ensureOrgActive rejects mutations on a tenant being deleted (ADR-0006) so
+// a half-deleted org cannot accept new writes.
+func ensureOrgActive(org *types.Organization) error {
+	if org.Status != types.OrgStatusActive {
+		return huma.Error409Conflict("tenant is being deleted and no longer accepts changes")
+	}
+	return nil
 }
 
 // authorizeOrg performs coarse PEP (org claim) + fine PEP (OpenFGA Check).

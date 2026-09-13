@@ -14,13 +14,23 @@ func TestGroupPath(t *testing.T) {
 }
 
 func TestDefaultTeams(t *testing.T) {
-	if len(DefaultTeams) != 3 {
-		t.Fatalf("DefaultTeams = %d, want 3", len(DefaultTeams))
+	if len(DefaultTeams) != 4 {
+		t.Fatalf("DefaultTeams = %d, want 4", len(DefaultTeams))
 	}
+	var haveOrgAdmins bool
 	for _, dt := range DefaultTeams {
 		if !dt.Role.Valid() {
 			t.Errorf("invalid role %q", dt.Role)
 		}
+		if dt.Name == OrgAdminsTeamName {
+			haveOrgAdmins = true
+			if dt.Role != types.RoleOrgAdmin {
+				t.Errorf("org-admins team grants %q, want org-admin", dt.Role)
+			}
+		}
+	}
+	if !haveOrgAdmins {
+		t.Error("DefaultTeams must include the org-admins anchor team (tenant bootstrap)")
 	}
 }
 

@@ -332,10 +332,38 @@ type decideOutput struct {
 	}
 }
 
+// authorizePlatform checks the caller holds org_creator on platform:inari
+// (platform-admin, synced from the Keycloak platform-admins group).
+func (h *Handler) authorizePlatform(ctx context.Context) error {
+	id := httpserver.IdentityFromContext(ctx)
+	if id == nil {
+		return huma.Error401Unauthorized("unauthenticated")
+	}
+	ok, err := h.authz.Check(ctx, authz.UserObject(id.Subject), authz.RelationOrgCreator, authz.ObjectPlatform)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return huma.Error403Forbidden("insufficient permissions")
+	}
+	return nil
+}
+
 func (h *Handler) decide(ctx context.Context, in *decideInput) (*decideOutput, error) {
 	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
 	if err != nil {
-		return nil, err
+		// A tenant freeze sweeps the org's FGA tuples before its lifecycle
+		// approval is decided, so even legitimate approvers lose org-level
+		// access. Platform org_creators may still decide (lifecycle
+		// approvals are platform-admin gated by design).
+		if perr := h.authorizePlatform(ctx); perr != nil {
+			return nil, err
+		}
+		id = httpserver.IdentityFromContext(ctx)
+		org, err = h.tenants.GetTenant(ctx, in.Org)
+		if err != nil {
+			return nil, err
+		}
 	}
 	req, err := h.svc.Decide(ctx, org.ID, in.ID, id.Subject, in.Body.Approve, in.Body.Reason)
 	if errors.Is(err, ErrNotFound) {

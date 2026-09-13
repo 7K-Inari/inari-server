@@ -194,13 +194,13 @@ func TestCreateTenantEndToEnd(t *testing.T) {
 	if !strings.HasPrefix(org.ID, "org:kc-acme") {
 		t.Errorf("org.ID = %q", org.ID)
 	}
-	if len(teams) != 3 {
+	if len(teams) != 4 {
 		t.Fatalf("teams = %d, want 3", len(teams))
 	}
-	if teams[0].KeycloakGroupPath != "tenant-acme/platform-team" {
-		t.Errorf("group path = %q", teams[0].KeycloakGroupPath)
+	if teams[1].KeycloakGroupPath != "tenant-acme/platform-team" {
+		t.Errorf("group path = %q", teams[1].KeycloakGroupPath)
 	}
-	if len(idp.groups) != 3 {
+	if len(idp.groups) != 4 {
 		t.Errorf("keycloak groups created = %v", idp.groups)
 	}
 
@@ -212,12 +212,12 @@ func TestCreateTenantEndToEnd(t *testing.T) {
 		t.Errorf("platform-team members = %v, want [user-1]", got)
 	}
 
-	// Creator membership row with platform-engineer role.
+	// Creator membership rows: org-admin is the highest role (bootstrap).
 	role, ok, err := tenancy.NewStore().HighestRole(ctx, database.Pool, org.ID, "user-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ok || role != types.RolePlatformEngineer {
+	if !ok || role != types.RoleOrgAdmin {
 		t.Errorf("creator role = %q, ok=%v", role, ok)
 	}
 
@@ -226,8 +226,8 @@ func TestCreateTenantEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("audit list: %v", err)
 	}
-	if len(events) != 5 { // 3 teams + 1 tenant + 1 membership
-		t.Errorf("audit events = %d, want 5", len(events))
+	if len(events) != 7 { // 4 teams + 1 tenant + 2 creator memberships
+		t.Errorf("audit events = %d, want 7", len(events))
 	}
 
 	// Outbox rows pending, then dispatched into tuples.
@@ -236,23 +236,21 @@ func TestCreateTenantEndToEnd(t *testing.T) {
 	if err := disp.DispatchOnce(ctx); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
-	if len(rec.written) != 4 { // 3 team→org role tuples + 1 creator membership
+	if len(rec.written) != 6 { // 4 team→org role tuples + 2 creator memberships
 		t.Fatalf("tuples written = %v", rec.written)
 	}
 	if rec.written[0].Object != authz.OrgObject(org.ID) {
 		t.Errorf("tuple object = %q", rec.written[0].Object)
 	}
-	var memberTuple *authz.Tuple
+	memberTeams := map[string]bool{}
 	for i := range rec.written {
-		if rec.written[i].Relation == "member" {
-			memberTuple = &rec.written[i]
+		if rec.written[i].Relation == "member" && rec.written[i].User == "user:user-1" {
+			memberTeams[rec.written[i].Object] = true
 		}
 	}
-	if memberTuple == nil || memberTuple.User != "user:user-1" {
-		t.Fatalf("no creator membership tuple in %v", rec.written)
-	}
-	if memberTuple.Object != "team:"+teams[0].ID {
-		t.Errorf("membership tuple object = %q, want team:%s", memberTuple.Object, teams[0].ID)
+	// Creator is joined to both org-admins and platform-team.
+	if !memberTeams["team:"+teams[0].ID] || !memberTeams["team:"+teams[1].ID] {
+		t.Errorf("creator membership tuples = %v, want teams %s and %s", memberTeams, teams[0].ID, teams[1].ID)
 	}
 
 	// No unpublished rows remain.
@@ -311,7 +309,7 @@ func TestMembershipLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	devTeam := teams[1] // developers
+	devTeam := teams[2] // developers
 
 	// Unknown user rejected before any Keycloak/DB write.
 	if err := svc.AddMember(ctx, "user-1", "acme", "developers", "ghost"); !errors.Is(err, tenancy.ErrUserNotFound) {
@@ -418,7 +416,7 @@ func TestMembershipIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	devTeam := teams[1] // developers
+	devTeam := teams[2] // developers
 
 	// Sequential duplicates plus concurrent adds racing on the unique PK:
 	// exactly one outbox event must result in all cases.
@@ -560,7 +558,7 @@ func TestCreateTenantHTTPEnforcement(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Organization.Slug != "allowed-org" || len(body.Teams) != 3 {
+	if body.Organization.Slug != "allowed-org" || len(body.Teams) != 4 {
 		t.Errorf("body = %+v", body)
 	}
 }
@@ -773,8 +771,8 @@ func TestOrgMemberRoleLifecycle(t *testing.T) {
 	if got := idp.grpMembers["tenant-acme/viewers"]; len(got) != 0 {
 		t.Errorf("viewers members after change = %v", got)
 	}
-	if got := idp.grpMembers["tenant-acme/org-admins"]; len(got) != 1 || got[0] != "user-2" {
-		t.Errorf("org-admins members = %v", got)
+	if got := idp.grpMembers["tenant-acme/org-admins"]; len(got) != 2 {
+		t.Errorf("org-admins members = %v, want creator + user-2", got)
 	}
 	role, ok, err := tenancy.NewStore().HighestRole(ctx, database.Pool, org.ID, "user-2")
 	if err != nil || !ok || role != types.RoleOrgAdmin {
@@ -831,8 +829,8 @@ func TestOrgMemberRoleLifecycle(t *testing.T) {
 	if got := idp.orgMembers[org.KeycloakOrgID]; len(got) != 1 {
 		t.Errorf("org members after remove = %v, want [user-1]", got)
 	}
-	if got := idp.grpMembers["tenant-acme/org-admins"]; len(got) != 0 {
-		t.Errorf("org-admins members after remove = %v", got)
+	if got := idp.grpMembers["tenant-acme/org-admins"]; len(got) != 1 || got[0] != "user-1" {
+		t.Errorf("org-admins members after remove = %v, want only creator", got)
 	}
 	if _, ok, _ := tenancy.NewStore().HighestRole(ctx, database.Pool, org.ID, "user-2"); ok {
 		t.Error("user-2 still has a role after org removal")

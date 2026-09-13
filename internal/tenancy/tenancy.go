@@ -34,10 +34,15 @@ type IdentityProvider interface {
 }
 
 // DefaultTeams are created with every tenant; each grants its org role.
+// org-admins is the anchor team for the tenant's first administrator —
+// without it no one could ever reach the org-admin role (every
+// admin-granting route is org-admin gated, and the deletion/RBAC routes
+// require it), which the live e2e run proved makes tenants unmanageable.
 var DefaultTeams = []struct {
 	Name string
 	Role types.Role
 }{
+	{"org-admins", types.RoleOrgAdmin},
 	{"platform-team", types.RolePlatformEngineer},
 	{"developers", types.RoleDeveloper},
 	{"viewers", types.RoleViewer},
@@ -59,6 +64,11 @@ var (
 // PlatformTeamName is the default team that receives the tenant creator.
 const PlatformTeamName = "platform-team"
 
+// OrgAdminsTeamName is the anchor team granting the org-admin role; it is
+// also created with every tenant and receives the tenant creator so the
+// first administrator exists without a circular admin-gated grant.
+const OrgAdminsTeamName = "org-admins"
+
 // membersTeamName is the team materialized for a brokered IdP's Hardcoded
 // Group mapper target (tenant-<slug>/members), granting org viewer.
 const membersTeamName = "members"
@@ -69,8 +79,8 @@ type Store struct{}
 func NewStore() *Store { return &Store{} }
 
 func (s *Store) CreateOrganization(ctx context.Context, q db.Querier, org *types.Organization) error {
-	const sql = `INSERT INTO organizations (id, slug, display_name, keycloak_org_id) VALUES ($1,$2,$3,$4) RETURNING created_at`
-	err := q.QueryRow(ctx, sql, org.ID, org.Slug, org.DisplayName, org.KeycloakOrgID).Scan(&org.CreatedAt)
+	const sql = `INSERT INTO organizations (id, slug, display_name, keycloak_org_id) VALUES ($1,$2,$3,$4) RETURNING status, created_at`
+	err := q.QueryRow(ctx, sql, org.ID, org.Slug, org.DisplayName, org.KeycloakOrgID).Scan(&org.Status, &org.CreatedAt)
 	if isUniqueViolation(err) {
 		return ErrSlugTaken
 	}
@@ -78,9 +88,9 @@ func (s *Store) CreateOrganization(ctx context.Context, q db.Querier, org *types
 }
 
 func (s *Store) GetOrganizationBySlug(ctx context.Context, q db.Querier, slug string) (*types.Organization, error) {
-	const sql = `SELECT id, slug, display_name, keycloak_org_id, created_at FROM organizations WHERE slug = $1`
+	const sql = `SELECT id, slug, display_name, keycloak_org_id, status, created_at FROM organizations WHERE slug = $1`
 	var org types.Organization
-	err := q.QueryRow(ctx, sql, slug).Scan(&org.ID, &org.Slug, &org.DisplayName, &org.KeycloakOrgID, &org.CreatedAt)
+	err := q.QueryRow(ctx, sql, slug).Scan(&org.ID, &org.Slug, &org.DisplayName, &org.KeycloakOrgID, &org.Status, &org.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrOrgNotFound
 	}
@@ -91,9 +101,9 @@ func (s *Store) GetOrganizationBySlug(ctx context.Context, q db.Querier, slug st
 }
 
 func (s *Store) GetOrganizationByID(ctx context.Context, q db.Querier, id string) (*types.Organization, error) {
-	const sql = `SELECT id, slug, display_name, keycloak_org_id, created_at FROM organizations WHERE id = $1`
+	const sql = `SELECT id, slug, display_name, keycloak_org_id, status, created_at FROM organizations WHERE id = $1`
 	var org types.Organization
-	err := q.QueryRow(ctx, sql, id).Scan(&org.ID, &org.Slug, &org.DisplayName, &org.KeycloakOrgID, &org.CreatedAt)
+	err := q.QueryRow(ctx, sql, id).Scan(&org.ID, &org.Slug, &org.DisplayName, &org.KeycloakOrgID, &org.Status, &org.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrOrgNotFound
 	}
@@ -103,8 +113,25 @@ func (s *Store) GetOrganizationByID(ctx context.Context, q db.Querier, id string
 	return &org, nil
 }
 
+// SetOrgStatus flips the organization lifecycle status (ADR-0006).
+func (s *Store) SetOrgStatus(ctx context.Context, q db.Querier, orgID, status string) error {
+	const sql = `UPDATE organizations SET status = $2 WHERE id = $1`
+	_, err := q.Exec(ctx, sql, orgID, status)
+	return err
+}
+
+// DeleteOrganization removes the org row; FK-cascading children go with it.
+// Tables without an organizations FK (secret_stores, scaffold_runs,
+// tenant_zones, approval_config) must be deleted explicitly first — see the
+// tenant deleter.
+func (s *Store) DeleteOrganization(ctx context.Context, q db.Querier, orgID string) error {
+	const sql = `DELETE FROM organizations WHERE id = $1`
+	_, err := q.Exec(ctx, sql, orgID)
+	return err
+}
+
 func (s *Store) ListOrganizations(ctx context.Context, q db.Querier) ([]types.Organization, error) {
-	const sql = `SELECT id, slug, display_name, keycloak_org_id, created_at FROM organizations ORDER BY created_at`
+	const sql = `SELECT id, slug, display_name, keycloak_org_id, status, created_at FROM organizations ORDER BY created_at`
 	rows, err := q.Query(ctx, sql)
 	if err != nil {
 		return nil, err
@@ -113,7 +140,7 @@ func (s *Store) ListOrganizations(ctx context.Context, q db.Querier) ([]types.Or
 	var out []types.Organization
 	for rows.Next() {
 		var o types.Organization
-		if err := rows.Scan(&o.ID, &o.Slug, &o.DisplayName, &o.KeycloakOrgID, &o.CreatedAt); err != nil {
+		if err := rows.Scan(&o.ID, &o.Slug, &o.DisplayName, &o.KeycloakOrgID, &o.Status, &o.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, o)
@@ -175,7 +202,21 @@ func (s *Store) ListTeams(ctx context.Context, q db.Querier, orgID string) ([]ty
 // reconciler enumerates team groups without an org scope).
 func (s *Store) ListAllTeams(ctx context.Context, q db.Querier) ([]types.Team, error) {
 	const sql = `SELECT id, org_id, name, role, keycloak_group_path, created_at FROM teams ORDER BY org_id, name`
-	rows, err := q.Query(ctx, sql)
+	return s.scanTeams(ctx, q, sql)
+}
+
+// ListActiveTeams returns teams of active orgs only — the OrgTeamSync seam.
+// Teams of a deleting tenant are excluded so the reconciler cannot
+// resurrect tuples the teardown is retracting (ADR-0006).
+func (s *Store) ListActiveTeams(ctx context.Context, q db.Querier) ([]types.Team, error) {
+	const sql = `SELECT t.id, t.org_id, t.name, t.role, t.keycloak_group_path, t.created_at
+	             FROM teams t JOIN organizations o ON o.id = t.org_id
+	             WHERE o.status = 'active' ORDER BY t.org_id, t.name`
+	return s.scanTeams(ctx, q, sql)
+}
+
+func (s *Store) scanTeams(ctx context.Context, q db.Querier, sql string, args ...any) ([]types.Team, error) {
+	rows, err := q.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -437,6 +478,8 @@ type Service struct {
 	clients  ClientManager
 	brokers  IdentityProviderManager
 	platform PlatformResourceEnsurer
+	gate     DeletionApprovalGate
+	deleter  *Deleter
 	store    *Store
 	audit    *audit.Store
 }
@@ -450,6 +493,19 @@ func NewService(d *db.DB, idp IdentityProvider, store *Store, auditStore *audit.
 // tenant-namespace).
 func (s *Service) WithPlatformResources(e PlatformResourceEnsurer) *Service {
 	s.platform = e
+	return s
+}
+
+// WithDeletionApprovalGate wires the approvals module so tenant deletion can
+// open a platform-admin lifecycle approval (ADR-0006).
+func (s *Service) WithDeletionApprovalGate(g DeletionApprovalGate) *Service {
+	s.gate = g
+	return s
+}
+
+// WithDeleter wires the teardown state machine for the retry endpoint.
+func (s *Service) WithDeleter(d *Deleter) *Service {
+	s.deleter = d
 	return s
 }
 
@@ -521,41 +577,59 @@ func (s *Service) CreateTenant(ctx context.Context, actor, slug, displayName str
 		}
 	}
 	// Creator auto-membership: the creating user joins the Keycloak
-	// Organization (drives the org token claim) and the platform-team group;
-	// the DB row + outbox event seed OpenFGA via the tuple writer.
+	// Organization (drives the org token claim), the org-admins group
+	// (tenant's first administrator — the only non-circular path to the
+	// org-admin role) and the platform-team group; the DB rows + outbox
+	// events seed OpenFGA via the tuple writer.
 	if actor != "" {
 		if err := s.idp.AddOrganizationMember(ctx, kcOrgID, actor); err != nil {
 			return nil, nil, fmt.Errorf("tenancy: add creator to org: %w", err)
 		}
-		if err := s.idp.AddGroupMember(ctx, GroupPath(slug, PlatformTeamName), actor); err != nil {
-			return nil, nil, fmt.Errorf("tenancy: add creator to %s: %w", PlatformTeamName, err)
-		}
-		var platformTeam *types.Team
-		for i := range teams {
-			if teams[i].Name == PlatformTeamName {
-				platformTeam = &teams[i]
+		findTeam := func(name string) *types.Team {
+			for i := range teams {
+				if teams[i].Name == name {
+					return &teams[i]
+				}
 			}
+			return nil
 		}
-		if platformTeam == nil {
-			return nil, nil, fmt.Errorf("tenancy: %s not among default teams", PlatformTeamName)
+		joins := []struct {
+			team *types.Team
+			role types.Role
+		}{
+			{findTeam(OrgAdminsTeamName), types.RoleOrgAdmin},
+			{findTeam(PlatformTeamName), types.RolePlatformEngineer},
+		}
+		for _, j := range joins {
+			if j.team == nil {
+				return nil, nil, fmt.Errorf("tenancy: default team not found for role %s", j.role)
+			}
+			if err := s.idp.AddGroupMember(ctx, j.team.KeycloakGroupPath, actor); err != nil {
+				return nil, nil, fmt.Errorf("tenancy: add creator to %s: %w", j.team.Name, err)
+			}
 		}
 		err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
 			if err := s.store.UpsertUser(ctx, tx, &types.User{ID: actor}); err != nil {
 				return err
 			}
-			if _, err := s.store.AddMembership(ctx, tx, &types.Membership{
-				UserID: actor, OrgID: org.ID, TeamID: platformTeam.ID, Role: types.RolePlatformEngineer,
-			}); err != nil {
-				return err
+			for _, j := range joins {
+				if _, err := s.store.AddMembership(ctx, tx, &types.Membership{
+					UserID: actor, OrgID: org.ID, TeamID: j.team.ID, Role: j.role,
+				}); err != nil {
+					return err
+				}
+				if err := s.audit.Record(ctx, tx, &types.AuditEvent{
+					OrgID: org.ID, Actor: actor, Action: "membership.added", ObjectType: "user", ObjectID: actor,
+				}); err != nil {
+					return err
+				}
+				if err := audit.AppendOutbox(ctx, tx, org.ID, types.EventMembershipAdded, types.MembershipPayload{
+					OrgID: org.ID, TeamID: j.team.ID, UserID: actor, Role: j.role,
+				}); err != nil {
+					return err
+				}
 			}
-			if err := s.audit.Record(ctx, tx, &types.AuditEvent{
-				OrgID: org.ID, Actor: actor, Action: "membership.added", ObjectType: "user", ObjectID: actor,
-			}); err != nil {
-				return err
-			}
-			return audit.AppendOutbox(ctx, tx, org.ID, types.EventMembershipAdded, types.MembershipPayload{
-				OrgID: org.ID, TeamID: platformTeam.ID, UserID: actor, Role: types.RolePlatformEngineer,
-			})
+			return nil
 		})
 		if err != nil {
 			return nil, nil, err
@@ -587,6 +661,12 @@ func (s *Service) ListTeams(ctx context.Context, orgID string) ([]types.Team, er
 // ListAllTeams returns every team across all orgs (authz.OrgTeamSync seam).
 func (s *Service) ListAllTeams(ctx context.Context) ([]types.Team, error) {
 	return s.store.ListAllTeams(ctx, s.db.Pool)
+}
+
+// ListActiveTeams returns teams of active orgs only (authz.OrgTeamSync
+// seam, ADR-0006).
+func (s *Service) ListActiveTeams(ctx context.Context) ([]types.Team, error) {
+	return s.store.ListActiveTeams(ctx, s.db.Pool)
 }
 
 // UpdateTenantProfile updates the org display name in Keycloak and in the

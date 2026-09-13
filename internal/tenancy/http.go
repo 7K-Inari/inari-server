@@ -328,9 +328,32 @@ type retryDeletionOutput struct {
 	}
 }
 
+// authorizePlatform checks the caller holds org_creator on platform:inari
+// (platform-admin, synced from the Keycloak platform-admins group). Used as
+// a fallback for routes that act on frozen/deleting orgs whose FGA tuples
+// have already been swept.
+func (h *Handler) authorizePlatform(ctx context.Context) error {
+	id := identity(ctx)
+	if id == nil {
+		return huma.Error401Unauthorized("unauthenticated")
+	}
+	ok, err := h.authz.Check(ctx, authz.UserObject(id.Subject), authz.RelationOrgCreator, authz.ObjectPlatform)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return huma.Error403Forbidden("insufficient permissions")
+	}
+	return nil
+}
+
 func (h *Handler) retryDeletion(ctx context.Context, in *orgPathInput) (*retryDeletionOutput, error) {
 	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
-		return nil, err
+		// A frozen org's tuples are already swept, so the original org-admin
+		// can no longer pass the org check; platform org_creators may retry.
+		if perr := h.authorizePlatform(ctx); perr != nil {
+			return nil, err
+		}
 	}
 	del, err := h.svc.RetryDeletion(ctx, in.Org)
 	switch {

@@ -495,7 +495,13 @@ func (d *Deleter) stepArchiveAudit(ctx context.Context, del *types.TenantDeletio
 		if _, err := tx.Exec(ctx, `DELETE FROM audit_events WHERE org_id = $1`, del.OrgID); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `DELETE FROM outbox WHERE org_id = $1`, del.OrgID); err != nil {
+		// Only published rows: this step usually runs inside the dispatcher's
+		// own batch transaction (driven by the org's approval.decided event),
+		// which still holds FOR-UPDATE locks on its unpublished rows — deleting
+		// those self-locks the runner and stalls the teardown at this step
+		// (live finding, 2026-09-13). Leftover pending rows for the dead org
+		// fail their handlers and dead-letter out instead.
+		if _, err := tx.Exec(ctx, `DELETE FROM outbox WHERE org_id = $1 AND published_at IS NOT NULL`, del.OrgID); err != nil {
 			return err
 		}
 		return d.markDone(ctx, tx, del.OrgID, "archive_audit")

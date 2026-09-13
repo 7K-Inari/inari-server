@@ -39,6 +39,7 @@ import (
 	gitgithub "github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider/github"
 	"github.com/7K-Inari/inari-server/internal/platformresources"
 	"github.com/7K-Inari/inari-server/internal/policyservice"
+	"github.com/7K-Inari/inari-server/internal/rbacmaterialize"
 	"github.com/7K-Inari/inari-server/internal/scaffold"
 	"github.com/7K-Inari/inari-server/internal/secrets"
 	"github.com/7K-Inari/inari-server/internal/secretstores"
@@ -526,6 +527,12 @@ func run() error {
 		tenancy.NewDeletionResumeHandler(svc, tenantDeleter, approvalsSvc, log),
 		fleetmanager.NewResumeHandler(fleetSvc, approvalsSvc, log),
 		scaffold.NewResumeHandler(scaffoldSvc, approvalsSvc, log),
+		// RBAC mapping materialization (plan §7.1): renders the tenant's
+		// anchor ClusterRoles + Keycloak-group bindings into the tenant
+		// state repo on rbac.mappings.updated / tenant & team lifecycle
+		// events; the tenant-local ArgoCD syncs them into the cluster.
+		rbacmaterialize.NewHandler(svc,
+			rbacmaterialize.NewInventoryGitConfigs(database, inventory.NewStore()), git, log),
 	)
 	go dispatcher.Run(ctx)
 

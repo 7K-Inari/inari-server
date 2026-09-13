@@ -527,9 +527,12 @@ func (d *Deleter) stepFGACleanup(ctx context.Context, del *types.TenantDeletion)
 	return d.markDone(ctx, d.db.Pool, del.OrgID, "fga_cleanup")
 }
 
-// stepDeleteKeycloakOrg removes the Keycloak organization (its groups and
-// memberships go with it). DeleteOrganization is 404-tolerant, so an org
-// deleted manually Keycloak-side is treated as done (drift tolerance).
+// stepDeleteKeycloakOrg removes the Keycloak organization and the tenant's
+// realm group tree (tenant-<slug>/...). Group deletion is 404-tolerant, so
+// orgs/groups removed manually Keycloak-side are treated as done (drift
+// tolerance). NOTE: KC organization deletion does NOT cascade to realm
+// groups — without the explicit group-tree delete they orphan (observed
+// live: tenant-e2e-del3/del4 groups left behind).
 func (d *Deleter) stepDeleteKeycloakOrg(ctx context.Context, del *types.TenantDeletion) error {
 	org, err := d.store.GetOrganizationByID(ctx, d.db.Pool, del.OrgID)
 	if err != nil {
@@ -537,6 +540,9 @@ func (d *Deleter) stepDeleteKeycloakOrg(ctx context.Context, del *types.TenantDe
 	}
 	if err := d.idp.DeleteOrganization(ctx, org.KeycloakOrgID); err != nil {
 		return err
+	}
+	if err := d.idp.DeleteGroup(ctx, "tenant-"+org.Slug); err != nil {
+		return fmt.Errorf("delete group tree tenant-%s: %w", org.Slug, err)
 	}
 	return d.markDone(ctx, d.db.Pool, del.OrgID, "delete_keycloak_org")
 }

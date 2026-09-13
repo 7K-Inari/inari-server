@@ -118,6 +118,9 @@ func (s *Store) CreatePolicy(ctx context.Context, q db.Querier, p *types.Policy)
 	const sql = `INSERT INTO policies (id, org_id, name, target, engine, source, enabled)
 	             VALUES ($1, NULLIF($2,''), $3, $4, $5, $6, $7) RETURNING ` + policyCols
 	out, err := scanPolicy(q.QueryRow(ctx, sql, p.ID, p.OrgID, p.Name, p.Target, p.Engine, p.Source, p.Enabled))
+	if isUniqueViolation(err) {
+		return ErrPolicyNameTaken
+	}
 	if err != nil {
 		return err
 	}

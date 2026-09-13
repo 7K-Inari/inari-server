@@ -188,6 +188,10 @@ func TestPolicyUpdateRenameTargetAndConflicts(t *testing.T) {
 	if _, err := svc.UpdatePolicy(ctx, "user-1", "org:1", p.ID, "other", "", itDenyRego, true); !errors.Is(err, policyservice.ErrPolicyNameTaken) {
 		t.Fatalf("expected ErrPolicyNameTaken, got %v", err)
 	}
+	// Creating with a duplicate name conflicts the same way.
+	if _, err := svc.CreatePolicy(ctx, "user-1", "org:1", "other", types.PolicyTargetRequest, types.PolicyEngineRego, itDenyRego); !errors.Is(err, policyservice.ErrPolicyNameTaken) {
+		t.Fatalf("expected ErrPolicyNameTaken on create, got %v", err)
+	}
 
 	// Invalid target and broken rego are rejected before persisting.
 	if _, err := svc.UpdatePolicy(ctx, "user-1", "org:1", p.ID, "", "bogus", itDenyRego, true); !errors.Is(err, policyservice.ErrInvalidInput) {

@@ -169,18 +169,19 @@ func TestTenantDeletionHappyPath(t *testing.T) {
 		t.Errorf("live audit actions = %v, want [tenant.deleted]", liveActions)
 	}
 
-	// Outbox holds only the terminal tenant.deleted event.
-	if err := database.Pool.QueryRow(ctx, `SELECT count(*) FROM outbox WHERE org_id = $1`, org.ID).Scan(&n); err != nil {
+	// Outbox holds no published rows for the dead org (archive purges them);
+	// pending rows may remain and dead-letter out.
+	if err := database.Pool.QueryRow(ctx, `SELECT count(*) FROM outbox WHERE org_id = $1 AND published_at IS NOT NULL`, org.ID).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 {
-		t.Errorf("outbox rows = %d, want 1 (tenant.deleted)", n)
+	if n != 0 {
+		t.Errorf("published outbox rows = %d, want 0 (archived)", n)
 	}
 
 	// FGA tuples retracted: one org role tuple per default team + the
-	// creator's membership tuple.
-	if len(rec.deleted) != len(teams)+1 {
-		t.Errorf("deleted tuples = %d, want %d: %+v", len(rec.deleted), len(teams)+1, rec.deleted)
+	// creator's two membership tuples (org-admins + platform-team).
+	if len(rec.deleted) != len(teams)+2 {
+		t.Errorf("deleted tuples = %d, want %d: %+v", len(rec.deleted), len(teams)+2, rec.deleted)
 	}
 	for _, tup := range rec.deleted {
 		if !strings.Contains(tup.Object, "organization:kc-acme") && !strings.HasPrefix(tup.Object, "team:") {

@@ -36,8 +36,8 @@ func TestSeedPlatformOrg(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(teams) != 3 {
-		t.Fatalf("teams = %d, want 3", len(teams))
+	if len(teams) != 4 {
+		t.Fatalf("teams = %d, want 4", len(teams))
 	}
 	var paths []string
 	for _, tm := range teams {
@@ -54,7 +54,7 @@ func TestSeedPlatformOrg(t *testing.T) {
 			t.Errorf("missing group path %q in %v", want, paths)
 		}
 	}
-	if len(idp.groups) != 3 {
+	if len(idp.groups) != 4 {
 		t.Errorf("keycloak groups created = %v", idp.groups)
 	}
 
@@ -71,7 +71,7 @@ func TestSeedPlatformOrg(t *testing.T) {
 	if err != nil {
 		t.Fatalf("audit list: %v", err)
 	}
-	if len(events) != 4 {
+	if len(events) != 5 {
 		t.Fatalf("audit events = %d, want 4", len(events))
 	}
 	for _, ev := range events {
@@ -105,7 +105,7 @@ func TestSeedPlatformOrgIdempotent(t *testing.T) {
 	if orgs != 1 {
 		t.Errorf("keycloak orgs with alias platform = %d, want 1", orgs)
 	}
-	if len(idp.groups) != 3 {
+	if len(idp.groups) != 4 {
 		t.Errorf("keycloak groups = %v, want 3", idp.groups)
 	}
 	org, err := svc.GetTenant(ctx, tenancy.PlatformOrgSlug)
@@ -116,14 +116,14 @@ func TestSeedPlatformOrgIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(teams) != 3 {
-		t.Errorf("teams = %d, want 3", len(teams))
+	if len(teams) != 4 {
+		t.Errorf("teams = %d, want 4", len(teams))
 	}
 	events, err := audit.NewStore().List(ctx, database.Pool, org.ID, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 4 {
+	if len(events) != 5 {
 		t.Errorf("audit events = %d, want 4 (no duplicates)", len(events))
 	}
 }

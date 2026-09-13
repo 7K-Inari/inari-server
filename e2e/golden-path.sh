@@ -451,7 +451,7 @@ fi
 # KC 26.x: create alone can leave the account unverified — force the final
 # state, else the password grant fails with "Account is not fully set up".
 xcurl -X PUT -H "Authorization: Bearer $AT" -H "Content-Type: application/json" \
-  -d '{"emailVerified":true,"requiredActions":[],"enabled":true}' \
+  -d '{"email":"rbac-viewer@inari.local","emailVerified":true,"firstName":"RBAC","lastName":"Viewer","requiredActions":[],"enabled":true}' \
   -o /dev/null "http://keycloak-service:8080/admin/realms/inari/users/$VIEWER_UID"
 log "adding rbac-viewer to the viewers team group"
 VIEWERS_GRP=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/group-by-path/tenant-$TENANT/viewers" | jq -r '.id // empty')

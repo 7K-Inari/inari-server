@@ -541,11 +541,9 @@ func TestProbeStates(t *testing.T) {
 func TestProbeCached(t *testing.T) {
 	gh := &fakeGitHub{installations: []map[string]any{inst(2, "acme")}}
 	now := time.Now()
-	var probes atomic.Int32
 	r, _ := newTestResolver(t, gh, func(c *ResolverConfig) {
 		c.Now = func() time.Time { return now }
 	})
-	_ = probes
 	ctx := context.Background()
 	cfg := gitCfg("org:1", "acme/acme-inari-state")
 	st1 := r.Probe(ctx, cfg)

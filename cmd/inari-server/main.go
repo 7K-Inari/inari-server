@@ -165,6 +165,11 @@ func (a policyCheckerAdapter) RenderCheck(ctx context.Context, orgID string, man
 // at runtime (model A). INARI_GITHUB_APP_INSTALLATION_ID is deprecated and
 // only seeds the installation cache for back-compat.
 func buildGitResolver(cfg *config.Config, database *db.DB) (gitprovider.Resolver, error) {
+	if cfg.GitProvider == "local" {
+		// Filesystem-backed bare repos (dev/e2e): real commits an external
+		// syncer can clone — the fake provider keeps nothing observable.
+		return gitprovider.StaticResolver{P: gitprovider.NewLocal(cfg.GitLocalRoot)}, nil
+	}
 	if cfg.GitProvider != "github" {
 		return gitprovider.StaticResolver{P: gitprovider.NewFake()}, nil
 	}

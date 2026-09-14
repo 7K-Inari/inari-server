@@ -24,6 +24,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+
+	yaml "sigs.k8s.io/yaml"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -525,8 +527,12 @@ func (s *Service) RenderCheck(ctx context.Context, orgID string, manifests ...[]
 	docs := make([]any, 0, len(manifests))
 	for i, raw := range manifests {
 		var doc any
-		if err := json.Unmarshal(raw, &doc); err != nil {
-			return nil, fmt.Errorf("%w: manifest %d must be valid JSON", ErrInvalidInput, i)
+		// Rendered manifests are YAML (RenderInstanceManifest yaml.Marshals);
+		// YAML is a JSON superset, so parse with a YAML decoder that yields
+		// the same JSON-compatible shape — block YAML must not 500 deploys
+		// (live finding: every deploy failed "must be valid JSON").
+		if err := yaml.Unmarshal(raw, &doc); err != nil {
+			return nil, fmt.Errorf("%w: manifest %d must be valid JSON/YAML", ErrInvalidInput, i)
 		}
 		docs = append(docs, doc)
 	}

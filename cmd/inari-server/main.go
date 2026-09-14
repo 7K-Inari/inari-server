@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/7K-Inari/inari-server/internal/agentgateway"
 	"github.com/7K-Inari/inari-server/internal/approvals"
 	"github.com/7K-Inari/inari-server/internal/audit"
@@ -41,6 +43,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/secrets"
 	"github.com/7K-Inari/inari-server/internal/secretstores"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
+	"github.com/7K-Inari/inari-server/internal/tenancy/gitkeys"
 	"github.com/7K-Inari/inari-server/internal/tenantzonefactory"
 	"github.com/7K-Inari/inari-server/internal/types"
 
@@ -154,17 +157,42 @@ func (a policyCheckerAdapter) RenderCheck(ctx context.Context, orgID string, man
 	return a.ps.RenderCheck(ctx, orgID, manifests...)
 }
 
-// buildGitProvider selects the git backend (fake for dev/tests; GitHub App
-// credentials in production, §12.1/2).
-func buildGitProvider(cfg *config.Config) (gitprovider.Provider, error) {
-	if cfg.GitProvider == "github" {
-		return gitgithub.New(gitgithub.Config{
-			AppID:          cfg.GitHubAppID,
-			InstallationID: cfg.GitHubInstallationID,
-			PrivateKeyFile: cfg.GitHubAppPrivateKeyFile,
-		})
+// buildGitResolver selects the git backend (fake for dev/tests; GitHub App
+// credentials in production, §12.1/2). The github backend resolves the
+// provider per tenant: BYO app override (model B) when the tenant git-config
+// carries one, else the platform app with a per-org installation discovered
+// at runtime (model A). INARI_GITHUB_APP_INSTALLATION_ID is deprecated and
+// only seeds the installation cache for back-compat.
+func buildGitResolver(cfg *config.Config, database *db.DB) (gitprovider.Resolver, error) {
+	if cfg.GitProvider != "github" {
+		return gitprovider.StaticResolver{P: gitprovider.NewFake()}, nil
 	}
-	return gitprovider.NewFake(), nil
+	if cfg.GitHubInstallationID != 0 {
+		slog.Warn("INARI_GITHUB_APP_INSTALLATION_ID is deprecated; install the platform app per-org instead (falls back to seeded installation)")
+	}
+	loader := gitkeys.Loader{MountRoot: cfg.TenantGitKeyMountRoot}
+	return gitgithub.NewResolver(gitgithub.ResolverConfig{
+		PlatformAppID:          cfg.GitHubAppID,
+		PlatformPrivateKeyFile: cfg.GitHubAppPrivateKeyFile,
+		PlatformAPIBase:        cfg.GitHubAPIBase,
+		PlatformAppSlug:        cfg.GitHubAppSlug,
+		LegacyInstallationID:   cfg.GitHubInstallationID,
+		CacheTTL:               cfg.GitHubInstallCacheTTL,
+		KeyLoader:              loader.Load,
+		OnResolved: func(_ context.Context, ev gitgithub.ResolvedEvent) {
+			// Audit trail for credential resolutions (outbox → NATS).
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := database.WithTx(ctx, func(tx pgx.Tx) error {
+				return audit.AppendOutbox(ctx, tx, ev.OrgID, types.EventTenantGitAuthResolved, types.TenantGitAuthResolvedPayload{
+					OrgID: ev.OrgID, AuthModel: string(ev.AuthModel), AppID: ev.AppID,
+					InstallationID: ev.InstallationID, APIBase: ev.APIBase, Result: ev.Result,
+				})
+			}); err != nil {
+				slog.Warn("git auth audit event failed", "org", ev.OrgID, "result", ev.Result, "error", err)
+			}
+		},
+	})
 }
 
 func run() error {
@@ -370,13 +398,17 @@ func run() error {
 	platformResourcesHandler := platformresources.NewHandler(platformResourcesSvc, svc, authorizer)
 	gateway.SetStatusSink(statusSinkRouter{inv: inventorySvc, plat: platformResourcesSvc})
 
-	git, err := buildGitProvider(cfg)
+	git, err := buildGitResolver(cfg, database)
 	if err != nil {
 		return err
 	}
+	// Modules that address repos directly (scaffold, TZF) resolve
+	// credentials per repo via the platform app.
+	gitPerRepo := gitprovider.PerRepo{R: git}
 	orchestratorSvc := orchestrator.NewService(database, inventory.NewStore(), catalogSvc, registry,
 		approvalsSvc, gateway.Queue(), git, auditStore)
-	orchestratorHandler := orchestrator.NewHandler(orchestratorSvc, svc, authorizer)
+	orchestratorHandler := orchestrator.NewHandler(orchestratorSvc, svc, authorizer).
+		WithAllowedAPIBases(cfg.GitHubAllowedAPIBases)
 
 	cloudAccountsSvc := cloudaccounts.NewService(database, cloudaccounts.NewStore(), auditStore, cloudaccounts.NewSTSValidator())
 	cloudAccountsHandler := cloudaccounts.NewHandler(cloudAccountsSvc, svc, registry, authorizer)
@@ -401,7 +433,7 @@ func run() error {
 	scaffoldHandler := scaffold.NewHandler(scaffoldSvc, svc, authorizer)
 	if templateSource != nil {
 		scaffoldSvc.WithExecEnv(&scaffold.ExecEnv{
-			Git:        git,
+			Git:        gitPerRepo,
 			GitOrg:     cfg.ScaffoldGitOrg,
 			Upsert:     catalogSvc,
 			RBAC:       svc,
@@ -472,7 +504,7 @@ func run() error {
 	}
 	tzfEnv.Wiring = &tenantzonefactory.ModuleWiring{
 		Tenants: svc, IDP: idp, Clusters: registry, Accounts: cloudAccountsSvc,
-		Git: git, GitCfg: orchestratorSvc,
+		Git: gitPerRepo, GitCfg: orchestratorSvc,
 		PlatformResources:  platformResourcesSvc,
 		PlatformGitOpsRepo: cfg.PlatformGitOpsRepo,
 		Manifest:           manifestParams,

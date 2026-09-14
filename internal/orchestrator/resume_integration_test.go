@@ -86,7 +86,8 @@ func itServerM3(t *testing.T, checker orchestrator.PolicyChecker) (*httptest.Ser
 	}
 	approvalsSvc := approvals.NewService(database, approvals.NewStore(database), auditStore, tenancySvc, catalogSvc)
 	inventorySvc := inventory.NewService(database, inventory.NewStore(), auditStore, catalogSvc)
-	git := gitprovider.NewFake()
+	fake := gitprovider.NewFake()
+	git := gitprovider.StaticResolver{P: fake}
 	queue := &itQueue{}
 	orchSvc := orchestrator.NewService(database, inventory.NewStore(), catalogSvc, itClusters{},
 		approvalsSvc, queue, git, auditStore)
@@ -101,7 +102,7 @@ func itServerM3(t *testing.T, checker orchestrator.PolicyChecker) (*httptest.Ser
 	approvals.NewHandler(approvalsSvc, itTenants{"acme": {ID: "org:1", Slug: "acme"}}, itAuthorizer{allow: true}).RegisterRoutes(api)
 	inventory.NewHandler(inventorySvc, itTenants{"acme": {ID: "org:1", Slug: "acme"}}, itAuthorizer{allow: true}).RegisterRoutes(api)
 	orchestrator.NewHandler(orchSvc, itTenants{"acme": {ID: "org:1", Slug: "acme"}}, itAuthorizer{allow: true}).RegisterRoutes(api)
-	return httptest.NewServer(router), database, git, queue, approvalsSvc, dispatcher
+	return httptest.NewServer(router), database, fake, queue, approvalsSvc, dispatcher
 }
 
 // TestApprovalGateResume is the M3 acceptance path: the approval gate blocks

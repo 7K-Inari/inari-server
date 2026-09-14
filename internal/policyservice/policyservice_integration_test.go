@@ -277,3 +277,176 @@ func TestAssignDistributesApplyBundle(t *testing.T) {
 		t.Fatalf("commands = %d, want 2 (cluster:1 via set)", len(queue.cmds))
 	}
 }
+
+func TestListAssignments(t *testing.T) {
+	svc, _, _ := itService(t)
+	ctx := context.Background()
+
+	manifests := json.RawMessage(`[{"apiVersion":"kyverno.io/v1","kind":"ClusterPolicy","metadata":{"name":"require-labels"}}]`)
+	pack, err := svc.CreatePolicyPack(ctx, "user-1", "org:1", "baseline", types.PolicyPackEngineKyverno, "", "1.0.0", nil, manifests)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Unknown pack and cross-org access are 404-shaped.
+	if _, err := svc.ListAssignments(ctx, "org:1", "policypack:missing"); !errors.Is(err, policyservice.ErrPackNotFound) {
+		t.Fatalf("expected ErrPackNotFound, got %v", err)
+	}
+	if _, err := svc.ListAssignments(ctx, "org:2", pack.ID); !errors.Is(err, policyservice.ErrPackNotFound) {
+		t.Fatalf("cross-org: expected ErrPackNotFound, got %v", err)
+	}
+
+	a, err := svc.Assign(ctx, "user-1", "org:1", pack.ID, types.PolicyTargetCluster, "cluster:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := svc.ListAssignments(ctx, "org:1", pack.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("assignments = %+v, want 1", list)
+	}
+	got := list[0]
+	if got.ID != a.ID || got.TargetType != types.PolicyTargetCluster || got.TargetID != "cluster:1" || got.CreatedAt.IsZero() {
+		t.Fatalf("assignment = %+v", got)
+	}
+}
+
+func TestDeletePolicyPack(t *testing.T) {
+	svc, _, database := itService(t)
+	ctx := context.Background()
+	newPack := func(t *testing.T, name string) *types.PolicyPack {
+		t.Helper()
+		manifests := json.RawMessage(`[{"apiVersion":"kyverno.io/v1","kind":"ClusterPolicy","metadata":{"name":"require-labels"}}]`)
+		pack, err := svc.CreatePolicyPack(ctx, "user-1", "org:1", name, types.PolicyPackEngineKyverno, "", "1.0.0", nil, manifests)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pack
+	}
+
+	t.Run("missing pack is not found", func(t *testing.T) {
+		err := svc.DeletePolicyPack(ctx, "user-1", "org:1", "policypack:missing", true)
+		if !errors.Is(err, policyservice.ErrPackNotFound) {
+			t.Fatalf("expected ErrPackNotFound, got %v", err)
+		}
+	})
+
+	t.Run("assigned pack conflicts without force", func(t *testing.T) {
+		pack := newPack(t, "conflict")
+		a, err := svc.Assign(ctx, "user-1", "org:1", pack.ID, types.PolicyTargetCluster, "cluster:1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = svc.DeletePolicyPack(ctx, "user-1", "org:1", pack.ID, false)
+		var depErr *policyservice.DependencyError
+		if !errors.As(err, &depErr) {
+			t.Fatalf("expected DependencyError, got %v", err)
+		}
+		if len(depErr.Assignments) != 1 || depErr.Assignments[0].ID != a.ID {
+			t.Fatalf("DependencyError.Assignments = %+v", depErr.Assignments)
+		}
+		// Pack and assignment survive the refused delete.
+		if _, err := svc.GetPolicyPack(ctx, "org:1", pack.ID); err != nil {
+			t.Fatal(err)
+		}
+		if list, _ := svc.ListAssignments(ctx, "org:1", pack.ID); len(list) != 1 {
+			t.Fatalf("assignments after refused delete = %+v", list)
+		}
+	})
+
+	t.Run("force cascade-unassigns and deletes with outbox events", func(t *testing.T) {
+		pack := newPack(t, "force")
+		a1, err := svc.Assign(ctx, "user-1", "org:1", pack.ID, types.PolicyTargetCluster, "cluster:1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		a2, err := svc.Assign(ctx, "user-1", "org:1", pack.ID, types.PolicyTargetCluster, "cluster:2")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := svc.DeletePolicyPack(ctx, "user-1", "org:1", pack.ID, true); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := svc.GetPolicyPack(ctx, "org:1", pack.ID); !errors.Is(err, policyservice.ErrPackNotFound) {
+			t.Fatalf("expected ErrPackNotFound after delete, got %v", err)
+		}
+		var count int
+		if err := database.Pool.QueryRow(ctx,
+			`SELECT count(*) FROM policy_assignments WHERE pack_id = $1`, pack.ID).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("assignments left = %d, want 0", count)
+		}
+		// Outbox: one unassigned per assignment + one pack deleted.
+		rows, err := database.Pool.Query(ctx,
+			`SELECT event_type, payload FROM outbox WHERE org_id = 'org:1' AND event_type IN ($1,$2) ORDER BY occurred_at, id`,
+			types.EventPolicyPackUnassigned, types.EventPolicyPackDeleted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var unassigned, deleted int
+		for rows.Next() {
+			var typ string
+			var payload []byte
+			if err := rows.Scan(&typ, &payload); err != nil {
+				t.Fatal(err)
+			}
+			switch typ {
+			case types.EventPolicyPackUnassigned:
+				unassigned++
+				var p types.PolicyPackAssignedPayload
+				if err := json.Unmarshal(payload, &p); err != nil {
+					t.Fatal(err)
+				}
+				if p.PackID != pack.ID || (p.AssignmentID != a1.ID && p.AssignmentID != a2.ID) {
+					t.Fatalf("unassigned payload = %+v", p)
+				}
+			case types.EventPolicyPackDeleted:
+				deleted++
+			}
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		if unassigned != 2 || deleted != 1 {
+			t.Fatalf("outbox events: unassigned = %d, deleted = %d; want 2, 1", unassigned, deleted)
+		}
+		// Audit rows for both actions exist.
+		if err := database.Pool.QueryRow(ctx,
+			`SELECT count(*) FROM audit_events WHERE object_id = $1 AND action IN ('policy_pack.unassigned','policy_pack.deleted')`, pack.ID).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 3 {
+			t.Fatalf("audit rows = %d, want 3 (2 unassigned + 1 deleted)", count)
+		}
+		// Re-delete is a 404-shaped not-found.
+		if err := svc.DeletePolicyPack(ctx, "user-1", "org:1", pack.ID, true); !errors.Is(err, policyservice.ErrPackNotFound) {
+			t.Fatalf("re-delete: expected ErrPackNotFound, got %v", err)
+		}
+	})
+
+	t.Run("unassigned pack deletes cleanly without force", func(t *testing.T) {
+		pack := newPack(t, "plain")
+		if err := svc.DeletePolicyPack(ctx, "user-1", "org:1", pack.ID, false); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := svc.GetPolicyPack(ctx, "org:1", pack.ID); !errors.Is(err, policyservice.ErrPackNotFound) {
+			t.Fatalf("expected ErrPackNotFound after delete, got %v", err)
+		}
+	})
+
+	t.Run("platform-global pack is not deletable by tenants", func(t *testing.T) {
+		pack := newPack(t, "global")
+		if _, err := database.Pool.Exec(ctx, `UPDATE policy_packs SET org_id = NULL WHERE id = $1`, pack.ID); err != nil {
+			t.Fatal(err)
+		}
+		err := svc.DeletePolicyPack(ctx, "user-1", "org:1", pack.ID, true)
+		if !errors.Is(err, policyservice.ErrInvalidInput) {
+			t.Fatalf("expected ErrInvalidInput, got %v", err)
+		}
+	})
+}

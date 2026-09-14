@@ -151,12 +151,12 @@ type Service struct {
 	gate      Gate
 	policy    PolicyChecker // nil = no policy enforcement
 	queue     Queue
-	git       gitprovider.Provider
+	git       gitprovider.Resolver
 	audit     *audit.Store
 }
 
 func NewService(d *db.DB, instances *inventory.Store, catalog CatalogResolver, clusters ClusterResolver,
-	gate Gate, queue Queue, git gitprovider.Provider, auditStore *audit.Store) *Service {
+	gate Gate, queue Queue, git gitprovider.Resolver, auditStore *audit.Store) *Service {
 	return &Service{
 		db: d, instances: instances, catalog: catalog, clusters: clusters,
 		gate: gate, queue: queue, git: git, audit: auditStore,
@@ -267,7 +267,11 @@ func (s *Service) apply(ctx context.Context, req DeployRequest, item *types.Cata
 	if gitCfg == nil {
 		return nil, ErrNoGitConfig
 	}
-	if _, err := s.git.EnsureRepo(ctx, gitCfg.Repo); err != nil {
+	git, authInfo, err := s.git.ForTenant(ctx, gitCfg)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := git.EnsureRepo(ctx, gitCfg.Repo); err != nil {
 		return nil, err
 	}
 
@@ -315,9 +319,9 @@ func (s *Service) apply(ctx context.Context, req DeployRequest, item *types.Cata
 	message := fmt.Sprintf("deploy %s@%s to %s (instance %s)", req.ItemID, version, req.ClusterID, instanceID)
 	var gitResult *gitprovider.Result
 	if gitCfg.CommitPolicy == types.CommitPolicyPullRequest {
-		gitResult, err = s.git.OpenPR(ctx, gitCfg.Repo, gitCfg.BaseBranch, message, "", files)
+		gitResult, err = git.OpenPR(ctx, gitCfg.Repo, gitCfg.BaseBranch, message, "", files)
 	} else {
-		gitResult, err = s.git.CommitFiles(ctx, gitCfg.Repo, gitCfg.BaseBranch, files, message)
+		gitResult, err = git.CommitFiles(ctx, gitCfg.Repo, gitCfg.BaseBranch, files, message)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: git write: %w", err)
@@ -357,7 +361,8 @@ func (s *Service) apply(ctx context.Context, req DeployRequest, item *types.Cata
 		ev := &types.AuditEvent{
 			OrgID: req.OrgID, Actor: req.Requester, Impersonator: impersonation.FromContext(ctx), Action: "deploy.requested",
 			ObjectType: "resource_instance", ObjectID: instanceID,
-			Payload: json.RawMessage(fmt.Sprintf(`{"item":%q,"version":%q,"cluster":%q}`, req.ItemID, version, req.ClusterID)),
+			Payload: json.RawMessage(fmt.Sprintf(`{"item":%q,"version":%q,"cluster":%q,"authModel":%q,"installationId":%d,"apiBase":%q}`,
+				req.ItemID, version, req.ClusterID, authInfo.Model, authInfo.InstallationID, authInfo.APIBase)),
 		}
 		if err := impersonation.Stamp(ctx, ev); err != nil {
 			return err
@@ -372,6 +377,7 @@ func (s *Service) apply(ctx context.Context, req DeployRequest, item *types.Cata
 		return audit.AppendOutbox(ctx, tx, req.OrgID, eventType, types.DeployRequestedPayload{
 			OrgID: req.OrgID, InstanceID: instanceID, ItemID: req.ItemID, ClusterID: req.ClusterID,
 			Version: version, CommitSHA: gitResult.CommitSHA, PRURL: gitResult.PRURL,
+			AuthModel: string(authInfo.Model), InstallationID: authInfo.InstallationID, APIBase: authInfo.APIBase,
 		})
 	})
 	if err != nil {
@@ -515,16 +521,43 @@ type DiffPreview struct {
 // SetGitConfig configures the tenant's state repo (admin flow; the tenant
 // zone factory will own this later).
 func (s *Service) SetGitConfig(ctx context.Context, actor string, cfg *types.TenantGitConfig) error {
-	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
+	err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		if err := s.instances.UpsertGitConfig(ctx, tx, cfg); err != nil {
 			return err
 		}
 		return s.audit.Record(ctx, tx, &types.AuditEvent{
 			OrgID: cfg.OrgID, Actor: actor, Action: "git.config_set",
 			ObjectType: "tenant", ObjectID: cfg.OrgID,
-			Payload: json.RawMessage(fmt.Sprintf(`{"repo":%q,"commitPolicy":%q}`, cfg.Repo, cfg.CommitPolicy)),
+			Payload: json.RawMessage(fmt.Sprintf(`{"repo":%q,"commitPolicy":%q,"byoGitApp":%t}`, cfg.Repo, cfg.CommitPolicy, cfg.GitHubApp != nil)),
 		})
 	})
+	if err != nil {
+		return err
+	}
+	// Drop cached credentials so the next deploy picks up the new config
+	// (no-op for static resolvers).
+	if ev, ok := s.git.(interface{ EvictTenant(string) }); ok {
+		ev.EvictTenant(cfg.OrgID)
+	}
+	return nil
+}
+
+// GitProviderStatus health-checks the tenant's git provider auth (cached).
+func (s *Service) GitProviderStatus(ctx context.Context, orgID string) (*types.GitProviderStatus, error) {
+	cfg, err := s.instances.GitConfig(ctx, s.db.Pool, orgID)
+	if err != nil {
+		return nil, err
+	}
+	if cfg == nil {
+		return nil, ErrNoGitConfig
+	}
+	prober, ok := s.git.(interface {
+		Probe(context.Context, *types.TenantGitConfig) *types.GitProviderStatus
+	})
+	if !ok {
+		return &types.GitProviderStatus{State: "unknown", AuthModel: "static"}, nil
+	}
+	return prober.Probe(ctx, cfg), nil
 }
 
 // GetGitConfig reads the tenant's git config.

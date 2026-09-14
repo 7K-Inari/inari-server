@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -142,16 +143,50 @@ func (s *Store) MarkDeployed(ctx context.Context, q db.Querier, id, version, com
 // GitConfig reads the tenant's git target.
 func (s *Store) GitConfig(ctx context.Context, q db.Querier, orgID string) (*types.TenantGitConfig, error) {
 	var c types.TenantGitConfig
-	var scaffoldOrg *string
-	err := q.QueryRow(ctx, `SELECT org_id, repo, commit_policy, base_branch, scaffold_git_org FROM tenant_git_configs WHERE org_id = $1`, orgID).
-		Scan(&c.OrgID, &c.Repo, &c.CommitPolicy, &c.BaseBranch, &scaffoldOrg)
+	var scaffoldOrg, keySecret, keyKey, apiBase *string
+	var appID, installationID *int64
+	err := q.QueryRow(ctx, `SELECT org_id, repo, commit_policy, base_branch, scaffold_git_org,
+		github_app_id, github_app_installation_id, github_app_key_secret, github_app_key_key, github_app_api_base
+		FROM tenant_git_configs WHERE org_id = $1`, orgID).
+		Scan(&c.OrgID, &c.Repo, &c.CommitPolicy, &c.BaseBranch, &scaffoldOrg,
+			&appID, &installationID, &keySecret, &keyKey, &apiBase)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
+	}
+	if err != nil {
+		return nil, err
 	}
 	if scaffoldOrg != nil {
 		c.ScaffoldGitOrg = *scaffoldOrg
 	}
-	return &c, err
+	if appID != nil {
+		c.GitHubApp = gitAppFromColumns(*appID, installationID, keySecret, keyKey, apiBase)
+	}
+	return &c, nil
+}
+
+// gitAppFromColumns rebuilds the BYO app reference from storage. The
+// namespace/name pair is packed in one column (validated at write time).
+func gitAppFromColumns(appID int64, installationID *int64, keySecret, keyKey, apiBase *string) *types.GitHubAppConfig {
+	app := &types.GitHubAppConfig{AppID: appID, KeyRef: &types.GitHubAppSecretRef{}}
+	if installationID != nil {
+		app.InstallationID = *installationID
+	}
+	if keySecret != nil {
+		if i := strings.Index(*keySecret, "/"); i > 0 {
+			app.KeyRef.Namespace = (*keySecret)[:i]
+			app.KeyRef.SecretName = (*keySecret)[i+1:]
+		} else {
+			app.KeyRef.SecretName = *keySecret
+		}
+	}
+	if keyKey != nil {
+		app.KeyRef.Key = *keyKey
+	}
+	if apiBase != nil {
+		app.APIBase = *apiBase
+	}
+	return app
 }
 
 // UpsertGitConfig sets the tenant's git target + commit policy.
@@ -160,12 +195,41 @@ func (s *Store) UpsertGitConfig(ctx context.Context, q db.Querier, c *types.Tena
 	if c.ScaffoldGitOrg != "" {
 		scaffoldOrg = &c.ScaffoldGitOrg
 	}
-	const sql = `INSERT INTO tenant_git_configs (org_id, repo, commit_policy, base_branch, scaffold_git_org) VALUES ($1,$2,$3,$4,$5)
-	             ON CONFLICT (org_id) DO UPDATE SET repo = EXCLUDED.repo, commit_policy = EXCLUDED.commit_policy,
-	               base_branch = EXCLUDED.base_branch,
-	               -- A writer that doesn't know the override (e.g. the
-	               -- tenant zone factory) must not wipe it.
-	               scaffold_git_org = COALESCE(EXCLUDED.scaffold_git_org, tenant_git_configs.scaffold_git_org)`
-	_, err := q.Exec(ctx, sql, c.OrgID, c.Repo, c.CommitPolicy, c.BaseBranch, scaffoldOrg)
+	var appID, installationID *int64
+	var keySecret, keyKey, apiBase *string
+	if c.GitHubApp != nil {
+		appID = &c.GitHubApp.AppID
+		installationID = &c.GitHubApp.InstallationID
+		packed := c.GitHubApp.KeyRef.Namespace + "/" + c.GitHubApp.KeyRef.SecretName
+		keySecret = &packed
+		keyKey = &c.GitHubApp.KeyRef.Key
+		if c.GitHubApp.APIBase != "" {
+			apiBase = &c.GitHubApp.APIBase
+		}
+	}
+	// An omitted githubApp must not wipe the stored reference (a writer
+	// like the tenant zone factory doesn't know about it); an explicit
+	// ClearGitHubApp NULLs the BYO columns, reverting the tenant to model A.
+	byoClause := `github_app_id = COALESCE(EXCLUDED.github_app_id, tenant_git_configs.github_app_id),
+		  github_app_installation_id = COALESCE(EXCLUDED.github_app_installation_id, tenant_git_configs.github_app_installation_id),
+		  github_app_key_secret = COALESCE(EXCLUDED.github_app_key_secret, tenant_git_configs.github_app_key_secret),
+		  github_app_key_key = COALESCE(EXCLUDED.github_app_key_key, tenant_git_configs.github_app_key_key),
+		  github_app_api_base = COALESCE(EXCLUDED.github_app_api_base, tenant_git_configs.github_app_api_base)`
+	if c.ClearGitHubApp {
+		byoClause = `github_app_id = NULL, github_app_installation_id = NULL,
+		  github_app_key_secret = NULL, github_app_key_key = NULL, github_app_api_base = NULL`
+	}
+	const sqlFmt = `INSERT INTO tenant_git_configs
+		(org_id, repo, commit_policy, base_branch, scaffold_git_org,
+		 github_app_id, github_app_installation_id, github_app_key_secret, github_app_key_key, github_app_api_base)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		ON CONFLICT (org_id) DO UPDATE SET repo = EXCLUDED.repo, commit_policy = EXCLUDED.commit_policy,
+		  base_branch = EXCLUDED.base_branch,
+		  -- A writer that doesn't know the override (e.g. the
+		  -- tenant zone factory) must not wipe it.
+		  scaffold_git_org = COALESCE(EXCLUDED.scaffold_git_org, tenant_git_configs.scaffold_git_org),
+		  %s`
+	_, err := q.Exec(ctx, fmt.Sprintf(sqlFmt, byoClause), c.OrgID, c.Repo, c.CommitPolicy, c.BaseBranch, scaffoldOrg,
+		appID, installationID, keySecret, keyKey, apiBase)
 	return err
 }

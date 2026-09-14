@@ -26,6 +26,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/orchestrator"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
+	gitgithub "github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider/github"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -82,6 +83,15 @@ func (itClusters) GetCluster(_ context.Context, id string) (*types.Cluster, erro
 
 func itServer(t *testing.T) (*httptest.Server, *db.DB, *gitprovider.Fake, *itQueue) {
 	t.Helper()
+	fake := gitprovider.NewFake()
+	srv, database, queue := itServerWithGit(t, gitprovider.StaticResolver{P: fake})
+	return srv, database, fake, queue
+}
+
+// itServerWithGit is itServer with a caller-supplied git resolver (e.g. one
+// returning typed credential errors for the deploy failure mapping).
+func itServerWithGit(t *testing.T, git gitprovider.Resolver) (*httptest.Server, *db.DB, *itQueue) {
+	t.Helper()
 	ctx := context.Background()
 	pg, err := postgres.Run(ctx, "postgres:16-alpine",
 		postgres.WithDatabase("inari"),
@@ -126,7 +136,6 @@ func itServer(t *testing.T) (*httptest.Server, *db.DB, *gitprovider.Fake, *itQue
 	}
 	approvalsSvc := approvals.NewService(database, approvals.NewStore(database), auditStore, tenancySvc, catalogSvc)
 	inventorySvc := inventory.NewService(database, inventory.NewStore(), auditStore, catalogSvc)
-	git := gitprovider.NewFake()
 	queue := &itQueue{}
 	orchSvc := orchestrator.NewService(database, inventory.NewStore(), catalogSvc, itClusters{},
 		approvalsSvc, queue, git, auditStore)
@@ -136,7 +145,7 @@ func itServer(t *testing.T) (*httptest.Server, *db.DB, *gitprovider.Fake, *itQue
 	approvals.NewHandler(approvalsSvc, itTenants{"acme": {ID: "org:1", Slug: "acme"}}, itAuthorizer{allow: true}).RegisterRoutes(api)
 	inventory.NewHandler(inventorySvc, itTenants{"acme": {ID: "org:1", Slug: "acme"}}, itAuthorizer{allow: true}).RegisterRoutes(api)
 	orchestrator.NewHandler(orchSvc, itTenants{"acme": {ID: "org:1", Slug: "acme"}}, itAuthorizer{allow: true}).RegisterRoutes(api)
-	return httptest.NewServer(router), database, git, queue
+	return httptest.NewServer(router), database, queue
 }
 
 func itReq(t *testing.T, srv *httptest.Server, method, path, token, body string) (int, string) {
@@ -310,6 +319,43 @@ func TestDeployToHealthVisible(t *testing.T) {
 	}
 }
 
+// errGitResolver fails every resolution with a fixed (typed) error — drives
+// the deploy handler's 412/502 credential-error mapping.
+type errGitResolver struct{ err error }
+
+func (r errGitResolver) ForTenant(context.Context, *types.TenantGitConfig) (gitprovider.Provider, *gitprovider.AuthInfo, error) {
+	return nil, nil, r.err
+}
+
+// TestDeployGitAuthFailureMapping verifies typed git credential failures
+// surface as 412 (app not installed, with install link) and 502 (credentials
+// revoked) instead of a generic 500.
+func TestDeployGitAuthFailureMapping(t *testing.T) {
+	notInstalled := &gitgithub.ErrAppNotInstalled{Org: "inari-dev", InstallURL: "https://github.com/apps/inari-platform/installations/new"}
+	srv, _, queue := itServerWithGit(t, errGitResolver{err: notInstalled})
+	defer srv.Close()
+
+	deployBody := `{"itemId":"curated:postgres-aws","clusterId":"cluster-1","name":"my-db","namespace":"apps","ownerTeam":"developers","spec":{"engineVersion":"16"}}`
+	code, body := itReq(t, srv, "POST", "/api/v1/tenants/acme/deploys", "good", deployBody)
+	if code != http.StatusPreconditionFailed {
+		t.Fatalf("not-installed deploy: %d %s, want 412", code, body)
+	}
+	if !strings.Contains(body, notInstalled.InstallURL) {
+		t.Errorf("412 body missing install link: %s", body)
+	}
+	if len(queue.cmds) != 0 {
+		t.Errorf("queued commands = %d, want 0 (deploy must not dispatch)", len(queue.cmds))
+	}
+
+	revoked := &gitgithub.ErrAppCredentialsRevoked{OrgID: "org:1", AppID: 7, InstallationID: 8, APIBase: "https://api.github.com"}
+	srv2, _, _ := itServerWithGit(t, errGitResolver{err: revoked})
+	defer srv2.Close()
+	code, body = itReq(t, srv2, "POST", "/api/v1/tenants/acme/deploys", "good", deployBody)
+	if code != http.StatusBadGateway {
+		t.Fatalf("revoked deploy: %d %s, want 502", code, body)
+	}
+}
+
 func keysOf(m map[string]string) []string {
 	var out []string
 	for k := range m {
@@ -447,5 +493,107 @@ func TestUpgradeFlow(t *testing.T) {
 	if err := database.Pool.QueryRow(context.Background(),
 		`SELECT version FROM resource_instances WHERE id = 'db1'`).Scan(&v); err != nil || v != "1.1.0" {
 		t.Errorf("instance version = %q err=%v", v, err)
+	}
+}
+
+// TestGitConfigBYOApp covers the hybrid git app model API surface: BYO
+// credential reference round-trip, 422 validation, writer COALESCE
+// protection, and provider status surfacing.
+func TestGitConfigBYOApp(t *testing.T) {
+	srv, database, _, _ := itServer(t)
+	defer srv.Close()
+	ctx := context.Background()
+
+	// 422: partial BYO object (missing keyRef).
+	code, body := itReq(t, srv, "PUT", "/api/v1/tenants/acme/git-config", "good",
+		`{"repo":"acme/acme-inari-state","commitPolicy":"direct","githubApp":{"appId":7,"installationId":8}}`)
+	if code != http.StatusUnprocessableEntity {
+		t.Fatalf("partial githubApp: %d %s", code, body)
+	}
+
+	// 422: http (non-TLS) apiBase.
+	code, body = itReq(t, srv, "PUT", "/api/v1/tenants/acme/git-config", "good",
+		`{"repo":"acme/acme-inari-state","githubApp":{"appId":7,"installationId":8,"apiBase":"http://ghe.example.com/api/v3","keyRef":{"namespace":"tenant-acme","secretName":"gh","key":"k.pem"}}}`)
+	if code != http.StatusUnprocessableEntity {
+		t.Fatalf("http apiBase: %d %s", code, body)
+	}
+
+	// Valid BYO config round-trips.
+	code, body = itReq(t, srv, "PUT", "/api/v1/tenants/acme/git-config", "good",
+		`{"repo":"acme/acme-inari-state","commitPolicy":"pull_request","baseBranch":"main","githubApp":{"appId":7,"installationId":8,"apiBase":"https://ghe.example.com/api/v3","keyRef":{"namespace":"tenant-acme","secretName":"gh","key":"k.pem"}}}`)
+	if code != http.StatusOK && code != http.StatusNoContent {
+		t.Fatalf("set BYO git config: %d %s", code, body)
+	}
+	code, body = itReq(t, srv, "GET", "/api/v1/tenants/acme/git-config", "good", "")
+	if code != http.StatusOK {
+		t.Fatalf("get git config: %d %s", code, body)
+	}
+	var out struct {
+		Config types.TenantGitConfig    `json:"config"`
+		Status *types.GitProviderStatus `json:"gitProviderStatus,omitempty"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	app := out.Config.GitHubApp
+	if app == nil || app.AppID != 7 || app.InstallationID != 8 || app.APIBase != "https://ghe.example.com/api/v3" {
+		t.Fatalf("BYO app did not round-trip: %+v", app)
+	}
+	if app.KeyRef == nil || app.KeyRef.Namespace != "tenant-acme" || app.KeyRef.SecretName != "gh" || app.KeyRef.Key != "k.pem" {
+		t.Fatalf("keyRef did not round-trip: %+v", app.KeyRef)
+	}
+	// StaticResolver (fake) reports an unknown/static status, never an error.
+	if out.Status == nil || out.Status.State != "unknown" {
+		t.Fatalf("status = %+v, want unknown", out.Status)
+	}
+
+	// A writer that doesn't know the override (TZF-style upsert without
+	// githubApp) must not wipe it.
+	if _, err := database.Pool.Exec(ctx,
+		`INSERT INTO tenant_git_configs (org_id, repo, commit_policy, base_branch) VALUES ('org:1','acme/acme-inari-state','direct','main')
+		 ON CONFLICT (org_id) DO UPDATE SET repo = EXCLUDED.repo`); err != nil {
+		t.Fatal(err)
+	}
+	inv := inventory.NewStore()
+	cfg, err := inv.GitConfig(ctx, database.Pool, "org:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GitHubApp == nil || cfg.GitHubApp.AppID != 7 {
+		t.Fatalf("BYO app wiped by plain upsert: %+v", cfg.GitHubApp)
+	}
+
+	// 422: clearGithubApp combined with githubApp.
+	code, body = itReq(t, srv, "PUT", "/api/v1/tenants/acme/git-config", "good",
+		`{"repo":"acme/acme-inari-state","clearGithubApp":true,"githubApp":{"appId":7,"installationId":8,"keyRef":{"namespace":"tenant-acme","secretName":"gh","key":"k.pem"}}}`)
+	if code != http.StatusUnprocessableEntity {
+		t.Fatalf("clear+set combo: %d %s", code, body)
+	}
+
+	// Explicit clear removes the BYO override (revert to model A).
+	code, body = itReq(t, srv, "PUT", "/api/v1/tenants/acme/git-config", "good",
+		`{"repo":"acme/acme-inari-state","commitPolicy":"direct","baseBranch":"main","clearGithubApp":true}`)
+	if code != http.StatusOK && code != http.StatusNoContent {
+		t.Fatalf("clear BYO git config: %d %s", code, body)
+	}
+	cfg, err = inv.GitConfig(ctx, database.Pool, "org:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GitHubApp != nil {
+		t.Fatalf("BYO app not cleared: %+v", cfg.GitHubApp)
+	}
+}
+
+// TestGitConfigAllOrNoneConstraint verifies the migration CHECK rejects
+// partial credential columns at the DB level.
+func TestGitConfigAllOrNoneConstraint(t *testing.T) {
+	srv, database, _, _ := itServer(t)
+	defer srv.Close()
+	ctx := context.Background()
+	_, err := database.Pool.Exec(ctx,
+		`UPDATE tenant_git_configs SET github_app_id = 1 WHERE org_id = 'org:1'`)
+	if err == nil {
+		t.Fatal("partial BYO columns accepted; want CHECK violation")
 	}
 }

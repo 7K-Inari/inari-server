@@ -1373,12 +1373,9 @@ const (
 	SecretStoreScopeCluster  = "cluster"
 )
 
-// Secret store agent command types (desired-state fan-out over the agent
-// command queue, same path as SecretDeliveryReference).
-const (
-	AgentCommandSecretStoreApply  = "inari.secrets.SecretStoreApply"
-	AgentCommandSecretStoreDelete = "inari.secrets.SecretStoreDelete"
-)
+// Secret store agent commands are typed contract events
+// (agentv1.EVENT_TYPE_SECRET_STORE_APPLY/DELETE); payloads are protojson Any
+// of agentv1.SecretStoreApply/SecretStoreDelete.
 
 // SecretRef references a cluster-side Kubernetes Secret holding the
 // provider credentials. The control plane only ever stores this reference —

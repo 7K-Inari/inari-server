@@ -19,6 +19,10 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/anypb"
+
+	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
 
 	"github.com/7K-Inari/inari-server/internal/agentgateway"
 	"github.com/7K-Inari/inari-server/internal/audit"
@@ -151,12 +155,14 @@ func itServer(t *testing.T) (*httptest.Server, *db.DB) {
 		 ('org:1','acme','Acme','kc-1'), ('org:2','other','Other','kc-2');
 		 INSERT INTO clusters (id, org_id, name, state, labels) VALUES
 		 ('cluster:1','org:1','prod-eu','active','{"env":"prod"}'),
-		 ('cluster:2','org:1','dev','active','{"env":"dev"}')`); err != nil {
+		 ('cluster:2','org:1','dev','active','{"env":"dev"}'),
+		 ('cluster:3','org:1','cordon-eu','cordoned','{"env":"cordon"}')`); err != nil {
 		t.Fatal(err)
 	}
 	clusters := &itClusters{clusters: []types.Cluster{
-		{ID: "cluster:1", OrgID: "org:1", Name: "prod-eu", Labels: map[string]string{"env": "prod"}},
-		{ID: "cluster:2", OrgID: "org:1", Name: "dev", Labels: map[string]string{"env": "dev"}},
+		{ID: "cluster:1", OrgID: "org:1", Name: "prod-eu", State: types.ClusterStateActive, Labels: map[string]string{"env": "prod"}},
+		{ID: "cluster:2", OrgID: "org:1", Name: "dev", State: types.ClusterStateActive, Labels: map[string]string{"env": "dev"}},
+		{ID: "cluster:3", OrgID: "org:1", Name: "cordon-eu", State: types.ClusterStateCordoned, Labels: map[string]string{"env": "cordon"}},
 	}}
 	// Real queue: fan-out commands must land in agent_commands so the status
 	// projection reads the same rows agents ack against.
@@ -270,6 +276,31 @@ func TestSecretStoreCRUD(t *testing.T) {
 		}
 	}
 
+	// Queued payloads must be protojson Any wrapping SecretStoreApply — the
+	// only form the gateway stream will deliver to agents.
+	var applyPayload []byte
+	var applyType string
+	if err := database.Pool.QueryRow(ctx,
+		`SELECT type, payload FROM agent_commands WHERE id LIKE $1 LIMIT 1`, wantPrefixes[0]+"%").Scan(&applyType, &applyPayload); err != nil {
+		t.Fatal(err)
+	}
+	if applyType != agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_SECRET_STORE_APPLY) {
+		t.Fatalf("apply command type = %q", applyType)
+	}
+	var anyMsg anypb.Any
+	if err := protojson.Unmarshal(applyPayload, &anyMsg); err != nil {
+		t.Fatalf("payload not protojson Any: %v", err)
+	}
+	var apply agentv1.SecretStoreApply
+	if err := anyMsg.UnmarshalTo(&apply); err != nil {
+		t.Fatalf("payload not SecretStoreApply: %v", err)
+	}
+	if apply.Name != "vault-prod" || apply.Scope != "cluster" ||
+		apply.GetVault().GetServer() != "https://vault.example.com" ||
+		apply.GetVault().GetAuthSecretRef().GetName() != "vault-token" {
+		t.Fatalf("apply payload %+v", &apply)
+	}
+
 	// Duplicate name conflicts.
 	code, _ = itDo(t, srv, http.MethodPost, "/api/v1/tenants/acme/secret-stores", "admin", createBody)
 	if code != http.StatusConflict {
@@ -318,11 +349,48 @@ func TestSecretStoreCRUD(t *testing.T) {
 		t.Fatalf("status after ack: %+v", st2.Status)
 	}
 
-	// Patch: retarget to cluster:1 only.
+	// Patch: retarget to cluster:1 only — applies to cluster:1 and prunes
+	// cluster:2 (targets-change pruning).
 	code, body = itDo(t, srv, http.MethodPatch, "/api/v1/tenants/acme/secret-stores/vault-prod", "admin",
 		map[string]any{"targets": map[string]any{"clusterIds": []string{"cluster:1"}}})
 	if code != http.StatusOK {
 		t.Fatalf("patch: %d %s", code, body)
+	}
+	pruneType := agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_SECRET_STORE_DELETE)
+	var pruned []string
+	rows, err := database.Pool.Query(ctx,
+		`SELECT cluster_id FROM agent_commands WHERE type = $1 AND id LIKE $2 ORDER BY cluster_id`,
+		pruneType, "secretstore:"+st.ID+":%")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid string
+		if err := rows.Scan(&cid); err != nil {
+			t.Fatal(err)
+		}
+		pruned = append(pruned, cid)
+	}
+	if len(pruned) != 1 || pruned[0] != "cluster:2" {
+		t.Fatalf("removed targets pruned = %v, want [cluster:2]", pruned)
+	}
+	var delPayload []byte
+	if err := database.Pool.QueryRow(ctx,
+		`SELECT payload FROM agent_commands WHERE type = $1 AND id LIKE $2 LIMIT 1`,
+		pruneType, "secretstore:"+st.ID+":%").Scan(&delPayload); err != nil {
+		t.Fatal(err)
+	}
+	var delAny anypb.Any
+	if err := protojson.Unmarshal(delPayload, &delAny); err != nil {
+		t.Fatalf("delete payload not protojson Any: %v", err)
+	}
+	var del agentv1.SecretStoreDelete
+	if err := delAny.UnmarshalTo(&del); err != nil {
+		t.Fatalf("delete payload not SecretStoreDelete: %v", err)
+	}
+	if del.Name != "vault-prod" || del.Scope != "cluster" {
+		t.Fatalf("delete payload %+v", &del)
 	}
 
 	// Delete: fans out a delete command, then 404 on get.
@@ -335,11 +403,12 @@ func TestSecretStoreCRUD(t *testing.T) {
 	}
 	var delCount int
 	if err := database.Pool.QueryRow(ctx,
-		`SELECT count(*) FROM agent_commands WHERE type = $1`, types.AgentCommandSecretStoreDelete).Scan(&delCount); err != nil {
+		`SELECT count(*) FROM agent_commands WHERE type = $1 AND id LIKE $2`,
+		pruneType, "secretstore:"+st.ID+":%").Scan(&delCount); err != nil {
 		t.Fatal(err)
 	}
-	if delCount != 1 {
-		t.Fatalf("delete fan-out = %d, want 1 (retargeted to cluster:1)", delCount)
+	if delCount != 2 {
+		t.Fatalf("delete fan-out = %d, want 2 (prune of cluster:2 + delete of cluster:1)", delCount)
 	}
 
 	// Audit rows for create/update/delete.
@@ -464,5 +533,149 @@ func TestSecretStoreSetTargets(t *testing.T) {
 	wantPrefix := fmt.Sprintf("secretstore:%s:cluster:1:", created.Store.ID)
 	if len(cmds) != 1 || !strings.HasPrefix(cmds[0], wantPrefix) {
 		t.Fatalf("set fan-out = %v, want one command with prefix %s (env=prod only)", cmds, wantPrefix)
+	}
+}
+
+// TestSecretStoreUpdatePrunesCordonedRemoved covers target removal of a
+// cordoned cluster: the cordon filter must not hide it from the prune diff,
+// or its stale manifest would never be deleted.
+func TestSecretStoreUpdatePrunesCordonedRemoved(t *testing.T) {
+	srv, database := itServer(t)
+	defer srv.Close()
+
+	code, body := itDo(t, srv, http.MethodPost, "/api/v1/tenants/acme/secret-stores", "admin",
+		map[string]any{
+			"name":     "vault-prune",
+			"scope":    "cluster",
+			"targets":  map[string]any{"clusterIds": []string{"cluster:1", "cluster:3"}},
+			"provider": vaultProvider(),
+		})
+	if code != http.StatusOK {
+		t.Fatalf("create: %d %s", code, body)
+	}
+
+	code, body = itDo(t, srv, http.MethodPatch, "/api/v1/tenants/acme/secret-stores/vault-prune", "admin",
+		map[string]any{"targets": map[string]any{"clusterIds": []string{"cluster:1"}}})
+	if code != http.StatusOK {
+		t.Fatalf("update: %d %s", code, body)
+	}
+	rows, err := database.Pool.Query(context.Background(),
+		`SELECT cluster_id FROM agent_commands
+		 WHERE type = $1 ORDER BY cluster_id`,
+		agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_SECRET_STORE_DELETE))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var deleteTargets []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		deleteTargets = append(deleteTargets, id)
+	}
+	if len(deleteTargets) != 1 || deleteTargets[0] != "cluster:3" {
+		t.Fatalf("prune fan-out = %v, want [cluster:3] (removed while cordoned)", deleteTargets)
+	}
+}
+
+// TestSecretStoreCordonedTargets covers cordon behavior: cordoned clusters
+// are skipped at fan-out (cordon blocks new deploys) and reported as
+// Cordoned conditions, excluded from the delivered computation. Deletes,
+// however, must reach cordoned clusters too (pruning is not a deploy).
+func TestSecretStoreCordonedTargets(t *testing.T) {
+	srv, database := itServer(t)
+	defer srv.Close()
+
+	code, body := itDo(t, srv, http.MethodPost, "/api/v1/tenants/acme/secret-stores", "admin",
+		map[string]any{
+			"name":     "vault-cordon",
+			"scope":    "cluster",
+			"targets":  map[string]any{"clusterIds": []string{"cluster:1", "cluster:3"}},
+			"provider": vaultProvider(),
+		})
+	if code != http.StatusOK {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	var created struct {
+		Store types.SecretStore `json:"store"`
+	}
+	if err := json.Unmarshal([]byte(body), &created); err != nil {
+		t.Fatal(err)
+	}
+	cmds := commandIDs(t, database)
+	wantPrefix := fmt.Sprintf("secretstore:%s:cluster:1:", created.Store.ID)
+	if len(cmds) != 1 || !strings.HasPrefix(cmds[0], wantPrefix) {
+		t.Fatalf("cordoned fan-out = %v, want one command for cluster:1 only", cmds)
+	}
+
+	code, body = itDo(t, srv, http.MethodGet, "/api/v1/tenants/acme/secret-stores/vault-cordon/status", "viewer", nil)
+	if code != http.StatusOK {
+		t.Fatalf("status: %d %s", code, body)
+	}
+	var st struct {
+		Status types.SecretStoreStatus `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(body), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Status.Delivered {
+		t.Fatalf("delivered must be false while cluster:1 is pending: %+v", st.Status)
+	}
+	byCluster := map[string]types.SecretStoreCondition{}
+	for _, c := range st.Status.Conditions {
+		byCluster[c.ClusterID] = c
+	}
+	if byCluster["cluster:1"].Reason != "Pending" {
+		t.Fatalf("cluster:1 condition %+v", byCluster["cluster:1"])
+	}
+	cordoned := byCluster["cluster:3"]
+	if cordoned.Reason != "Cordoned" || cordoned.Status != "False" {
+		t.Fatalf("cluster:3 condition %+v, want Cordoned", cordoned)
+	}
+
+	// Once the deliverable target acks, the store is delivered despite the
+	// cordoned target (delivery there is deferred until uncordon).
+	if _, err := database.Pool.Exec(context.Background(),
+		`UPDATE agent_commands SET status = 'acked', result_message = 'applied'`); err != nil {
+		t.Fatal(err)
+	}
+	code, body = itDo(t, srv, http.MethodGet, "/api/v1/tenants/acme/secret-stores/vault-cordon/status", "viewer", nil)
+	if code != http.StatusOK {
+		t.Fatalf("status after ack: %d %s", code, body)
+	}
+	if err := json.Unmarshal([]byte(body), &st); err != nil {
+		t.Fatal(err)
+	}
+	if !st.Status.Delivered {
+		t.Fatalf("delivered must ignore cordoned targets: %+v", st.Status)
+	}
+
+	// Delete must prune everywhere, including the cordoned cluster: cordon
+	// blocks new deploys, not pruning, and once the row is gone nothing else
+	// reconciles a stale manifest.
+	code, body = itDo(t, srv, http.MethodDelete, "/api/v1/tenants/acme/secret-stores/vault-cordon", "admin", nil)
+	if code != http.StatusNoContent && code != http.StatusOK {
+		t.Fatalf("delete: %d %s", code, body)
+	}
+	rows, err := database.Pool.Query(context.Background(),
+		`SELECT cluster_id FROM agent_commands
+		 WHERE type = $1 ORDER BY cluster_id`,
+		agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_SECRET_STORE_DELETE))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var deleteTargets []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		deleteTargets = append(deleteTargets, id)
+	}
+	if len(deleteTargets) != 2 || deleteTargets[0] != "cluster:1" || deleteTargets[1] != "cluster:3" {
+		t.Fatalf("delete fan-out = %v, want [cluster:1 cluster:3] (cordon blocks deploys, not pruning)", deleteTargets)
 	}
 }

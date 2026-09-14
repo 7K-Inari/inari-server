@@ -16,6 +16,10 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/anypb"
+
+	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
 
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/db"
@@ -118,37 +122,195 @@ func (s *Service) resolveTargets(ctx context.Context, st *types.SecretStore) ([]
 	return append([]string(nil), t.ClusterIDs...), nil
 }
 
-// fanout enqueues one apply/delete command per resolved target cluster after
-// the registry mutation has committed. Command IDs embed a per-mutation nonce:
-// the queue dedupes on ID, so re-applies (updates) and deletes must NOT reuse
+// resolveTargetsByState splits resolved targets into deliverable and
+// cordoned clusters: cordon blocks new deploys (clusterregistry lifecycle),
+// so fan-out skips cordoned clusters while workloads keep running. Clusters
+// the lister does not know are treated as deliverable (fail-open matches the
+// enqueue-and-reconcile contract).
+func (s *Service) resolveTargetsByState(ctx context.Context, st *types.SecretStore) (deliverable, cordoned []string, err error) {
+	ids, err := s.resolveTargets(ctx, st)
+	if err != nil {
+		return nil, nil, err
+	}
+	states := map[string]types.ClusterState{}
+	if s.clusters != nil {
+		owned, err := s.clusters.ListClusters(ctx, st.OrgID)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, c := range owned {
+			states[c.ID] = c.State
+		}
+	}
+	for _, id := range ids {
+		if states[id] == types.ClusterStateCordoned {
+			cordoned = append(cordoned, id)
+			continue
+		}
+		deliverable = append(deliverable, id)
+	}
+	return deliverable, cordoned, nil
+}
+
+// targetDiff returns the sorted cluster IDs present in old but not in new.
+func targetDiff(oldIDs, newIDs []string) []string {
+	keep := make(map[string]bool, len(newIDs))
+	for _, id := range newIDs {
+		keep[id] = true
+	}
+	var removed []string
+	for _, id := range oldIDs {
+		if !keep[id] {
+			removed = append(removed, id)
+		}
+	}
+	sort.Strings(removed)
+	return removed
+}
+
+// stateRepoPath is the directory in the tenant state repo where SecretStore
+// manifests are committed. It MUST live under baseline/: the tenant-local
+// ArgoCD root app (tenantzonefactory.RenderBaseline) syncs only path
+// "baseline" — anything committed elsewhere in the repo is never applied
+// to the cluster.
+const stateRepoPath = "baseline/secretstores"
+
+// applyProto builds the contract message for one apply command. Credential
+// material never transits: only authSecretRef (plan §4.1).
+func applyProto(st *types.SecretStore, commandID string) (*agentv1.SecretStoreApply, error) {
+	m := &agentv1.SecretStoreApply{
+		CommandId: commandID,
+		Name:      st.Name,
+		Scope:     st.Scope,
+		Target:    &agentv1.GitTarget{Path: stateRepoPath},
+		Policy:    agentv1.CommitPolicy_COMMIT_POLICY_DIRECT_COMMIT,
+	}
+	ref := func(r types.SecretRef) *agentv1.SecretRef {
+		return &agentv1.SecretRef{Name: r.Name, Namespace: r.Namespace}
+	}
+	switch p := st.Provider; {
+	case p.AWSSM != nil:
+		m.Provider = &agentv1.SecretStoreApply_AwsSm{AwsSm: &agentv1.AwsSMProvider{
+			Region: p.AWSSM.Region, AuthSecretRef: ref(p.AWSSM.AuthSecretRef)}}
+	case p.Vault != nil:
+		m.Provider = &agentv1.SecretStoreApply_Vault{Vault: &agentv1.VaultProvider{
+			Server: p.Vault.Server, Path: p.Vault.Path, AuthSecretRef: ref(p.Vault.AuthSecretRef)}}
+	case p.GCPSM != nil:
+		m.Provider = &agentv1.SecretStoreApply_GcpSm{GcpSm: &agentv1.GcpSMProvider{
+			ProjectId: p.GCPSM.ProjectID, AuthSecretRef: ref(p.GCPSM.AuthSecretRef)}}
+	case p.AzureKV != nil:
+		m.Provider = &agentv1.SecretStoreApply_AzureKv{AzureKv: &agentv1.AzureKVProvider{
+			VaultUrl: p.AzureKV.VaultURL, TenantId: p.AzureKV.TenantID, AuthSecretRef: ref(p.AzureKV.AuthSecretRef)}}
+	default:
+		return nil, fmt.Errorf("%w: store %q has no provider", ErrInvalidInput, st.ID)
+	}
+	return m, nil
+}
+
+// applyCommand builds the queued apply command for one target cluster.
+func applyCommand(st *types.SecretStore, clusterID string, nonce int64) (*types.AgentCommand, error) {
+	id := fmt.Sprintf("secretstore:%s:%s:%d", st.ID, clusterID, nonce)
+	m, err := applyProto(st, id)
+	if err != nil {
+		return nil, err
+	}
+	any, err := anypb.New(m)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := protojson.Marshal(any)
+	if err != nil {
+		return nil, err
+	}
+	return &types.AgentCommand{
+		ID:        id,
+		ClusterID: clusterID,
+		Type:      agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_SECRET_STORE_APPLY),
+		Payload:   raw,
+	}, nil
+}
+
+// deleteCommand builds the queued delete command for one target cluster.
+func deleteCommand(st *types.SecretStore, clusterID string, nonce int64) (*types.AgentCommand, error) {
+	id := fmt.Sprintf("secretstore:%s:%s:%d", st.ID, clusterID, nonce)
+	any, err := anypb.New(&agentv1.SecretStoreDelete{
+		CommandId: id,
+		Name:      st.Name,
+		Scope:     st.Scope,
+		Target:    &agentv1.GitTarget{Path: stateRepoPath},
+		Policy:    agentv1.CommitPolicy_COMMIT_POLICY_DIRECT_COMMIT,
+	})
+	if err != nil {
+		return nil, err
+	}
+	raw, err := protojson.Marshal(any)
+	if err != nil {
+		return nil, err
+	}
+	return &types.AgentCommand{
+		ID:        id,
+		ClusterID: clusterID,
+		Type:      agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_SECRET_STORE_DELETE),
+		Payload:   raw,
+	}, nil
+}
+
+// fanout enqueues one apply command per resolved deliverable target cluster
+// after the registry mutation has committed; cordoned clusters are skipped
+// (cordon blocks new deploys). Command IDs embed a per-mutation nonce: the
+// queue dedupes on ID, so re-applies (updates) and deletes must NOT reuse
 // the create-time ID or they would be silently dropped. Failures are logged
 // (desired state is eventually reconciled) and never roll back the committed
 // registry row.
-func (s *Service) fanout(ctx context.Context, st *types.SecretStore, cmdType string) {
+func (s *Service) fanout(ctx context.Context, st *types.SecretStore) {
+	s.enqueue(ctx, st, false, nil)
+}
+
+// fanoutDelete enqueues delete commands to all resolved targets, including
+// cordoned clusters: cordon blocks new deploys, not pruning — a stale store
+// must still be removed (the registry row is gone, so nothing would ever
+// reconcile it).
+func (s *Service) fanoutDelete(ctx context.Context, st *types.SecretStore) {
+	s.enqueue(ctx, st, true, nil)
+}
+
+// fanoutUpdate enqueues apply commands to the store's deliverable targets
+// and delete commands to clusters removed from the target set, so stale
+// SecretStores are pruned from clusters no longer targeted.
+func (s *Service) fanoutUpdate(ctx context.Context, st *types.SecretStore, removedTargets []string) {
+	s.enqueue(ctx, st, false, removedTargets)
+}
+
+func (s *Service) enqueue(ctx context.Context, st *types.SecretStore, delete bool, removedTargets []string) {
 	if s.queue == nil {
 		return
 	}
-	clusterIDs, err := s.resolveTargets(ctx, st)
+	deliverable, cordoned, err := s.resolveTargetsByState(ctx, st)
 	if err != nil {
 		slog.Error("secretstores: resolve targets", "store", st.ID, "error", err)
 		return
 	}
-	payload, err := json.Marshal(st)
-	if err != nil {
-		slog.Error("secretstores: marshal command payload", "store", st.ID, "error", err)
-		return
-	}
 	nonce := time.Now().UnixNano()
-	for _, clusterID := range clusterIDs {
-		cmd := &types.AgentCommand{
-			ID:        fmt.Sprintf("secretstore:%s:%s:%d", st.ID, clusterID, nonce),
-			ClusterID: clusterID,
-			Type:      cmdType,
-			Payload:   payload,
+	enqueue := func(cmd *types.AgentCommand, err error) {
+		if err != nil {
+			slog.Error("secretstores: build command", "store", st.ID, "error", err)
+			return
 		}
 		if err := s.queue.Enqueue(ctx, cmd); err != nil {
 			slog.Error("secretstores: enqueue command", "command", cmd.ID, "error", err)
 		}
+	}
+	if delete {
+		for _, clusterID := range append(deliverable, cordoned...) {
+			enqueue(deleteCommand(st, clusterID, nonce))
+		}
+		return
+	}
+	for _, clusterID := range deliverable {
+		enqueue(applyCommand(st, clusterID, nonce))
+	}
+	for _, clusterID := range removedTargets {
+		enqueue(deleteCommand(st, clusterID, nonce))
 	}
 }
 
@@ -184,7 +346,7 @@ func (s *Service) Create(ctx context.Context, actor string, in types.SecretStore
 	if err != nil {
 		return nil, err
 	}
-	s.fanout(ctx, &in, types.AgentCommandSecretStoreApply)
+	s.fanout(ctx, &in)
 	return &in, nil
 }
 
@@ -203,6 +365,13 @@ func (s *Service) List(ctx context.Context, orgID string) ([]types.SecretStore, 
 // org-agnostic; the caller's authz is enforced at the HTTP layer.
 func (s *Service) Update(ctx context.Context, actor, orgID, name string, targets *types.SecretStoreTargets, provider *types.SecretStoreProvider) (*types.SecretStore, error) {
 	st, err := s.store.Get(ctx, s.db.Pool, orgID, name)
+	if err != nil {
+		return nil, err
+	}
+	// Capture the full current target set (including cordoned clusters) before
+	// the mutation so every removed cluster is pruned after the update commits
+	// — a cluster cordoned before removal still holds the stale manifest.
+	oldTargets, err := s.resolveTargets(ctx, st)
 	if err != nil {
 		return nil, err
 	}
@@ -244,7 +413,13 @@ func (s *Service) Update(ctx context.Context, actor, orgID, name string, targets
 	if err != nil {
 		return nil, err
 	}
-	s.fanout(ctx, st, types.AgentCommandSecretStoreApply)
+	newTargets, err := s.resolveTargets(ctx, st)
+	if err != nil {
+		// The row is committed; log and still report the update.
+		slog.Error("secretstores: resolve updated targets", "store", st.ID, "error", err)
+		newTargets = nil
+	}
+	s.fanoutUpdate(ctx, st, targetDiff(oldTargets, newTargets))
 	return st, nil
 }
 
@@ -277,18 +452,20 @@ func (s *Service) Delete(ctx context.Context, actor, orgID, name string) error {
 	if err != nil {
 		return err
 	}
-	s.fanout(ctx, st, types.AgentCommandSecretStoreDelete)
+	s.fanoutDelete(ctx, st)
 	return nil
 }
 
 // Status projects delivery state for one store over agent_commands: every
-// resolved target cluster must have an acked apply command for delivered.
+// resolved deliverable target cluster must have an acked apply command for
+// delivered. Cordoned targets are reported separately and excluded from the
+// delivered computation (cordon blocks new deploys by design).
 func (s *Service) Status(ctx context.Context, orgID, name string) (*types.SecretStoreStatus, error) {
 	st, err := s.store.Get(ctx, s.db.Pool, orgID, name)
 	if err != nil {
 		return nil, err
 	}
-	clusterIDs, err := s.resolveTargets(ctx, st)
+	clusterIDs, cordoned, err := s.resolveTargetsByState(ctx, st)
 	if err != nil {
 		return nil, err
 	}
@@ -301,6 +478,7 @@ func (s *Service) Status(ctx context.Context, orgID, name string) (*types.Secret
 		byCluster[cs.ClusterID] = cs
 	}
 	sort.Strings(clusterIDs)
+	sort.Strings(cordoned)
 	status := &types.SecretStoreStatus{Delivered: len(clusterIDs) > 0}
 	for _, clusterID := range clusterIDs {
 		cond := types.SecretStoreCondition{ClusterID: clusterID, Type: "Ready"}
@@ -319,6 +497,12 @@ func (s *Service) Status(ctx context.Context, orgID, name string) (*types.Secret
 			status.Delivered = false
 		}
 		status.Conditions = append(status.Conditions, cond)
+	}
+	for _, clusterID := range cordoned {
+		status.Conditions = append(status.Conditions, types.SecretStoreCondition{
+			ClusterID: clusterID, Type: "Ready", Status: "False", Reason: "Cordoned",
+			Message: "cluster is cordoned; delivery deferred until uncordon",
+		})
 	}
 	return status, nil
 }

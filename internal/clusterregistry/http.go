@@ -276,6 +276,9 @@ func (h *Handler) getAccessInfo(ctx context.Context, in *clusterPathInput) (*acc
 	if err := h.requireOrgCluster(ctx, org.ID, in.ID); err != nil {
 		return nil, err
 	}
+	if h.issuerURL == "" {
+		return nil, huma.Error500InternalServerError("OIDC issuer URL is not configured on the control plane")
+	}
 	out := &accessInfoOutput{}
 	out.Body.AccessInfo = types.ClusterAccessInfo{
 		IssuerURL:       h.issuerURL,

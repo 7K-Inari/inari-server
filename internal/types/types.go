@@ -47,6 +47,7 @@ type Team struct {
 	ID                string    `json:"id"`
 	OrgID             string    `json:"orgId"`
 	Name              string    `json:"name"`
+	DisplayName       string    `json:"displayName"`
 	Role              Role      `json:"role"`
 	KeycloakGroupPath string    `json:"keycloakGroupPath"`
 	CreatedAt         time.Time `json:"createdAt"`
@@ -186,6 +187,18 @@ type Cluster struct {
 	ConnectedAt        *time.Time        `json:"connectedAt,omitempty"`
 	LastSeenAt         *time.Time        `json:"lastSeenAt,omitempty"`
 	CreatedAt          time.Time         `json:"createdAt"`
+}
+
+// ClusterAccessInfo is everything a developer needs to build a kubelogin
+// exec-credential kubeconfig for a tenant cluster (plan §5.4, §7.2). It
+// carries no secrets and no API-server URL — the hub never learns tenant
+// endpoints (pull-only); the user supplies --server, or the gateway form is
+// used for private clusters.
+type ClusterAccessInfo struct {
+	IssuerURL       string `json:"issuerUrl"`
+	KubectlClientID string `json:"kubectlClientId"`
+	Audience        string `json:"audience"`
+	Organization    string `json:"organization"`
 }
 
 // RegistrationToken is a one-time, TTL'd bootstrap credential. Only the

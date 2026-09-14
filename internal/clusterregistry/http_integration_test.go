@@ -108,7 +108,8 @@ func itServerDB(t *testing.T, az itAuthorizer) (*httptest.Server, *Service, *db.
 	h := NewHandler(svc, itTenants{
 		"acme":  {ID: "org:1", Slug: "acme"},
 		"acme2": {ID: "org:2", Slug: "acme2"},
-	}, az, ManifestParams{AgentImageRepo: "ghcr.io/7k-inari/inari-agent", AgentImageTag: "v0.1.0", GatewayAddress: "https://gw.example.com"}, nil)
+	}, az, ManifestParams{AgentImageRepo: "ghcr.io/7k-inari/inari-agent", AgentImageTag: "v0.1.0", GatewayAddress: "https://gw.example.com"}, nil).
+		WithAccessInfo("https://keycloak.example.com/realms/inari")
 	router, api := httpserver.NewRouter(slog.Default(), itValidator{}, database)
 	h.RegisterRoutes(api)
 	return httptest.NewServer(router), svc, database
@@ -263,6 +264,43 @@ func TestClusterAPIRevokeFlow(t *testing.T) {
 }
 
 // TestClusterAPIAuthzDenied verifies OpenFGA denial maps to 403.
+func TestClusterAccessInfo(t *testing.T) {
+	srv, _ := itServer(t, itAuthorizer{allow: true})
+	id := itCreate(t, srv, "acme", "prod-1")
+
+	code, body := itReq(t, srv, "GET", "/api/v1/tenants/acme/clusters/"+id+"/access-info", "good", "")
+	if code != 200 {
+		t.Fatalf("access-info: %d %s", code, body)
+	}
+	var out struct {
+		AccessInfo types.ClusterAccessInfo `json:"accessInfo"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	ai := out.AccessInfo
+	if ai.IssuerURL != "https://keycloak.example.com/realms/inari" {
+		t.Errorf("issuerUrl = %q", ai.IssuerURL)
+	}
+	if ai.KubectlClientID != "org-acme-kubectl" {
+		t.Errorf("kubectlClientId = %q", ai.KubectlClientID)
+	}
+	if ai.Audience != "kubernetes" {
+		t.Errorf("audience = %q", ai.Audience)
+	}
+	if ai.Organization != "acme" {
+		t.Errorf("organization = %q", ai.Organization)
+	}
+
+	// Cross-tenant and unauthenticated access are denied.
+	if code, _ := itReq(t, srv, "GET", "/api/v1/tenants/acme2/clusters/"+id+"/access-info", "good", ""); code != 404 {
+		t.Errorf("cross-tenant = %d, want 404", code)
+	}
+	if code, _ := itReq(t, srv, "GET", "/api/v1/tenants/acme/clusters/"+id+"/access-info", "", ""); code != 401 {
+		t.Errorf("unauthenticated = %d, want 401", code)
+	}
+}
+
 func TestClusterAPIAuthzDenied(t *testing.T) {
 	srv, _ := itServer(t, itAuthorizer{allow: false})
 	defer srv.Close()

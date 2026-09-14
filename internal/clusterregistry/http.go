@@ -22,11 +22,12 @@ type TenantResolver interface {
 
 // Handler exposes the cluster registry REST surface.
 type Handler struct {
-	svc      *Service
-	tenants  TenantResolver
-	authz    authz.Authorizer
-	manifest ManifestParams
-	caps     CapabilitiesLister
+	svc       *Service
+	tenants   TenantResolver
+	authz     authz.Authorizer
+	manifest  ManifestParams
+	caps      CapabilitiesLister
+	issuerURL string
 }
 
 // CapabilitiesLister reads the live capabilities of a cluster (implemented
@@ -45,6 +46,13 @@ func (f CapabilitiesListerFunc) List(ctx context.Context, clusterID string) ([]t
 
 func NewHandler(svc *Service, tenants TenantResolver, az authz.Authorizer, manifest ManifestParams, caps CapabilitiesLister) *Handler {
 	return &Handler{svc: svc, tenants: tenants, authz: az, manifest: manifest, caps: caps}
+}
+
+// WithAccessInfo wires the platform OIDC issuer URL used by the cluster
+// access-info endpoint (kubectl access via kubelogin, plan §5.4, §7.2).
+func (h *Handler) WithAccessInfo(issuerURL string) *Handler {
+	h.issuerURL = issuerURL
+	return h
 }
 
 // RegisterRoutes mounts the cluster API on the huma API instance.
@@ -72,6 +80,14 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Summary:     "Get a cluster",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.getCluster)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "getClusterAccessInfo",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/tenants/{org}/clusters/{id}/access-info",
+		Summary:     "OIDC access info for building a kubelogin kubeconfig (no secrets, no API URL)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.getAccessInfo)
 
 	huma.Register(api, huma.Operation{
 		OperationID: "issueRegistrationToken",
@@ -239,6 +255,37 @@ func (h *Handler) getCluster(ctx context.Context, in *clusterPathInput) (*cluste
 	}
 	out := &clusterOutput{}
 	out.Body.Cluster = *c
+	return out, nil
+}
+
+type accessInfoOutput struct {
+	Body struct {
+		AccessInfo types.ClusterAccessInfo `json:"accessInfo"`
+	}
+}
+
+// getAccessInfo returns the kubelogin kubeconfig inputs for a cluster. The
+// per-tenant public client org-<slug>-kubectl is provisioned by tenancy
+// (EnsureKubectlClient); the API-server URL is never returned — the hub
+// doesn't know it (pull-only).
+func (h *Handler) getAccessInfo(ctx context.Context, in *clusterPathInput) (*accessInfoOutput, error) {
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.requireOrgCluster(ctx, org.ID, in.ID); err != nil {
+		return nil, err
+	}
+	if h.issuerURL == "" {
+		return nil, huma.Error500InternalServerError("OIDC issuer URL is not configured on the control plane")
+	}
+	out := &accessInfoOutput{}
+	out.Body.AccessInfo = types.ClusterAccessInfo{
+		IssuerURL:       h.issuerURL,
+		KubectlClientID: tenancy.KubectlClientID(org.Slug),
+		Audience:        "kubernetes",
+		Organization:    org.Slug,
+	}
 	return out, nil
 }
 

@@ -146,8 +146,9 @@ func TestIdentityClientLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list) != 2 {
-		t.Fatalf("list = %d, want 2", len(list))
+	// ci-bot + web + the auto-provisioned kubelogin client.
+	if len(list) != 3 {
+		t.Fatalf("list = %d, want 3", len(list))
 	}
 
 	// Update flows through Keycloak and the projection.
@@ -219,6 +220,61 @@ func TestIdentityClientLifecycle(t *testing.T) {
 		if !found {
 			t.Errorf("missing audit event %s", action)
 		}
+	}
+}
+
+func TestEnsureKubectlClient(t *testing.T) {
+	database, svc, cm, ctx := setupIdentitySvc(t)
+	org, _, err := svc.CreateTenant(ctx, "user-1", "acme", "Acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Tenant creation provisions the kubelogin client automatically.
+	spec := cm.clients[tenancy.KubectlClientID("acme")]
+	if spec == nil {
+		t.Fatalf("kubectl client not provisioned at tenant creation: %v", cm.clients)
+	}
+	if spec.ClientType != tenancy.ClientTypePublic {
+		t.Errorf("ClientType = %q, want public", spec.ClientType)
+	}
+	if !spec.DeviceFlow || !spec.GroupsClaim {
+		t.Errorf("spec = %+v, want DeviceFlow+GroupsClaim", spec)
+	}
+	proj, err := svc.GetIdentityClient(ctx, "acme", tenancy.KubectlClientID("acme"))
+	if err != nil {
+		t.Fatalf("projection row: %v", err)
+	}
+	if proj.Type != types.IdentityClientTypePublic {
+		t.Errorf("projection type = %q", proj.Type)
+	}
+
+	// Idempotent: a second ensure creates nothing new and audits once total.
+	if err := svc.EnsureKubectlClient(ctx, "user-1", "acme"); err != nil {
+		t.Fatalf("EnsureKubectlClient: %v", err)
+	}
+	if err := svc.EnsureKubectlClient(ctx, "user-1", "acme"); err != nil {
+		t.Fatalf("EnsureKubectlClient (2nd): %v", err)
+	}
+	clients, err := svc.ListIdentityClients(ctx, org.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(clients) != 1 {
+		t.Errorf("clients = %d, want exactly the kubectl client", len(clients))
+	}
+	events, err := audit.NewStore().List(ctx, database.Pool, org.ID, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ensured := 0
+	for _, e := range events {
+		if e.Action == "identity.client.kubectl_ensured" {
+			ensured++
+		}
+	}
+	if ensured != 1 {
+		t.Errorf("kubectl_ensured audit events = %d, want 1 (creation only)", ensured)
 	}
 }
 

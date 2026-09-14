@@ -666,6 +666,60 @@ func TestTeamLifecycle(t *testing.T) {
 		t.Fatalf("delete missing: %v, want ErrTeamNotFound", err)
 	}
 
+	// Update changes the display name only; name and Keycloak group path
+	// stay immutable (ADR-0007) and the change is audited.
+	updated, err := svc.UpdateTeam(ctx, "user-1", "acme", "data-science", "Data Science")
+	if err != nil {
+		t.Fatalf("UpdateTeam: %v", err)
+	}
+	if updated.DisplayName != "Data Science" || updated.Name != "data-science" ||
+		updated.KeycloakGroupPath != "tenant-acme/data-science" {
+		t.Fatalf("updated team = %+v", updated)
+	}
+	persisted, err := svc.ListTeams(ctx, org.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundTeam := false
+	for _, tm := range persisted {
+		if tm.Name == "data-science" {
+			foundTeam = true
+			if tm.DisplayName != "Data Science" {
+				t.Errorf("persisted display name = %q", tm.DisplayName)
+			}
+		}
+	}
+	if !foundTeam {
+		t.Fatal("data-science missing after update")
+	}
+	// Default teams reject updates with the same protection class as delete.
+	if _, err := svc.UpdateTeam(ctx, "user-1", "acme", "platform-team", "Platform"); !errors.Is(err, tenancy.ErrDefaultTeam) {
+		t.Fatalf("update default: %v, want ErrDefaultTeam", err)
+	}
+	if _, err := svc.UpdateTeam(ctx, "user-1", "acme", "developers", "Devs"); !errors.Is(err, tenancy.ErrDefaultTeam) {
+		t.Fatalf("update developers anchor: %v, want ErrDefaultTeam", err)
+	}
+	if _, err := svc.UpdateTeam(ctx, "user-1", "acme", "nope", "X"); !errors.Is(err, tenancy.ErrTeamNotFound) {
+		t.Fatalf("update missing: %v, want ErrTeamNotFound", err)
+	}
+	// team.updated audit row.
+	events, err := audit.NewStore().List(ctx, database.Pool, org.ID, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundAudit := false
+	for _, e := range events {
+		if e.Action == "team.updated" && e.ObjectID == team.ID {
+			foundAudit = true
+			if !strings.Contains(string(e.Payload), `"Data Science"`) {
+				t.Errorf("audit payload = %s", e.Payload)
+			}
+		}
+	}
+	if !foundAudit {
+		t.Error("no team.updated audit event")
+	}
+
 	// Delete the custom team.
 	if err := svc.DeleteTeam(ctx, "user-1", "acme", "data-science"); err != nil {
 		t.Fatalf("DeleteTeam: %v", err)
@@ -698,7 +752,7 @@ func TestTeamLifecycle(t *testing.T) {
 	}
 
 	// Writes are audited.
-	events, err := audit.NewStore().List(ctx, database.Pool, org.ID, 30)
+	events, err = audit.NewStore().List(ctx, database.Pool, org.ID, 30)
 	if err != nil {
 		t.Fatal(err)
 	}

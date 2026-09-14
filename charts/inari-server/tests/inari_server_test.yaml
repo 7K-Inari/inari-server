@@ -201,3 +201,28 @@ tests:
       - equal:
           path: spec.hostnames[0]
           value: api.example.org
+  - it: mounts extra volumes for the local git provider (dev/e2e)
+    template: deployment.yaml
+    set:
+      extraVolumes:
+        - name: git-repos
+          hostPath:
+            path: /git
+      extraVolumeMounts:
+        - name: git-repos
+          mountPath: /var/lib/inari/git
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[0].name
+          value: git-repos
+      - equal:
+          path: spec.template.spec.volumes[0].hostPath.path
+          value: /git
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[0].mountPath
+          value: /var/lib/inari/git
+  - it: renders no volumes by default
+    template: deployment.yaml
+    asserts:
+      - notExists:
+          path: spec.template.spec.volumes

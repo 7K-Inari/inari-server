@@ -54,7 +54,7 @@ var (
 	ErrUserNotFound  = errors.New("user not found")
 	ErrTeamNotFound  = errors.New("team not found")
 	ErrTeamNameTaken = errors.New("team name already exists in tenant")
-	ErrDefaultTeam   = errors.New("default teams cannot be deleted")
+	ErrDefaultTeam   = errors.New("default teams cannot be modified")
 	// ErrMembersTeamInUse rejects deleting the "members" team while a
 	// brokered IdP exists: its Hardcoded Group mapper targets the team's
 	// Keycloak group, so deletion would break brokered logins (ADR-0004).
@@ -164,13 +164,30 @@ func (s *Store) UpdateOrganizationDisplayName(ctx context.Context, q db.Querier,
 	return err
 }
 
+// UpdateTeamDisplayName updates a team's mutable display name and returns
+// the updated record (name and keycloak_group_path are immutable, ADR-0007).
+func (s *Store) UpdateTeamDisplayName(ctx context.Context, q db.Querier, orgID, name, displayName string) (*types.Team, error) {
+	const sql = `UPDATE teams SET display_name = $3 WHERE org_id = $1 AND name = $2
+	             RETURNING id, org_id, name, display_name, role, keycloak_group_path, created_at`
+	var t types.Team
+	err := q.QueryRow(ctx, sql, orgID, name, displayName).
+		Scan(&t.ID, &t.OrgID, &t.Name, &t.DisplayName, &t.Role, &t.KeycloakGroupPath, &t.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrTeamNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
 // DeleteTeam removes a team row and returns the deleted record for audit
 // payloads; membership rows cascade away via FK.
 func (s *Store) DeleteTeam(ctx context.Context, q db.Querier, orgID, name string) (*types.Team, error) {
 	const sql = `DELETE FROM teams WHERE org_id = $1 AND name = $2
-	             RETURNING id, org_id, name, role, keycloak_group_path, created_at`
+	             RETURNING id, org_id, name, display_name, role, keycloak_group_path, created_at`
 	var t types.Team
-	err := q.QueryRow(ctx, sql, orgID, name).Scan(&t.ID, &t.OrgID, &t.Name, &t.Role, &t.KeycloakGroupPath, &t.CreatedAt)
+	err := q.QueryRow(ctx, sql, orgID, name).Scan(&t.ID, &t.OrgID, &t.Name, &t.DisplayName, &t.Role, &t.KeycloakGroupPath, &t.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrTeamNotFound
 	}
@@ -181,7 +198,7 @@ func (s *Store) DeleteTeam(ctx context.Context, q db.Querier, orgID, name string
 }
 
 func (s *Store) ListTeams(ctx context.Context, q db.Querier, orgID string) ([]types.Team, error) {
-	const sql = `SELECT id, org_id, name, role, keycloak_group_path, created_at FROM teams WHERE org_id = $1 ORDER BY name`
+	const sql = `SELECT id, org_id, name, display_name, role, keycloak_group_path, created_at FROM teams WHERE org_id = $1 ORDER BY name`
 	rows, err := q.Query(ctx, sql, orgID)
 	if err != nil {
 		return nil, err
@@ -190,7 +207,7 @@ func (s *Store) ListTeams(ctx context.Context, q db.Querier, orgID string) ([]ty
 	var out []types.Team
 	for rows.Next() {
 		var t types.Team
-		if err := rows.Scan(&t.ID, &t.OrgID, &t.Name, &t.Role, &t.KeycloakGroupPath, &t.CreatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.OrgID, &t.Name, &t.DisplayName, &t.Role, &t.KeycloakGroupPath, &t.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -201,7 +218,7 @@ func (s *Store) ListTeams(ctx context.Context, q db.Querier, orgID string) ([]ty
 // ListAllTeams returns every team across all orgs (the authz org-team
 // reconciler enumerates team groups without an org scope).
 func (s *Store) ListAllTeams(ctx context.Context, q db.Querier) ([]types.Team, error) {
-	const sql = `SELECT id, org_id, name, role, keycloak_group_path, created_at FROM teams ORDER BY org_id, name`
+	const sql = `SELECT id, org_id, name, display_name, role, keycloak_group_path, created_at FROM teams ORDER BY org_id, name`
 	return s.scanTeams(ctx, q, sql)
 }
 
@@ -209,7 +226,7 @@ func (s *Store) ListAllTeams(ctx context.Context, q db.Querier) ([]types.Team, e
 // Teams of a deleting tenant are excluded so the reconciler cannot
 // resurrect tuples the teardown is retracting (ADR-0006).
 func (s *Store) ListActiveTeams(ctx context.Context, q db.Querier) ([]types.Team, error) {
-	const sql = `SELECT t.id, t.org_id, t.name, t.role, t.keycloak_group_path, t.created_at
+	const sql = `SELECT t.id, t.org_id, t.name, t.display_name, t.role, t.keycloak_group_path, t.created_at
 	             FROM teams t JOIN organizations o ON o.id = t.org_id
 	             WHERE o.status = 'active' ORDER BY t.org_id, t.name`
 	return s.scanTeams(ctx, q, sql)
@@ -224,7 +241,7 @@ func (s *Store) scanTeams(ctx context.Context, q db.Querier, sql string, args ..
 	var out []types.Team
 	for rows.Next() {
 		var t types.Team
-		if err := rows.Scan(&t.ID, &t.OrgID, &t.Name, &t.Role, &t.KeycloakGroupPath, &t.CreatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.OrgID, &t.Name, &t.DisplayName, &t.Role, &t.KeycloakGroupPath, &t.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -392,9 +409,9 @@ func (s *Store) ListOrgMembers(ctx context.Context, q db.Querier, orgID string) 
 
 // GetTeamByName resolves a team within an org.
 func (s *Store) GetTeamByName(ctx context.Context, q db.Querier, orgID, name string) (*types.Team, error) {
-	const sql = `SELECT id, org_id, name, role, keycloak_group_path, created_at FROM teams WHERE org_id = $1 AND name = $2`
+	const sql = `SELECT id, org_id, name, display_name, role, keycloak_group_path, created_at FROM teams WHERE org_id = $1 AND name = $2`
 	var t types.Team
-	err := q.QueryRow(ctx, sql, orgID, name).Scan(&t.ID, &t.OrgID, &t.Name, &t.Role, &t.KeycloakGroupPath, &t.CreatedAt)
+	err := q.QueryRow(ctx, sql, orgID, name).Scan(&t.ID, &t.OrgID, &t.Name, &t.DisplayName, &t.Role, &t.KeycloakGroupPath, &t.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrTeamNotFound
 	}
@@ -574,6 +591,13 @@ func (s *Service) CreateTenant(ctx context.Context, actor, slug, displayName str
 	if s.platform != nil {
 		if err := s.platform.EnsureBaseResources(ctx, org); err != nil {
 			return nil, nil, fmt.Errorf("tenancy: ensure base platform resources: %w", err)
+		}
+	}
+	// Kubelogin client after commit (idempotent ensure): kubectl access works
+	// out of the box for every tenant (plan §5.4, §7.2).
+	if s.clients != nil {
+		if err := s.EnsureKubectlClient(ctx, actor, slug); err != nil {
+			return nil, nil, fmt.Errorf("tenancy: ensure kubectl client: %w", err)
 		}
 	}
 	// Creator auto-membership: the creating user joins the Keycloak
@@ -783,6 +807,45 @@ func (s *Service) ensureTeam(ctx context.Context, actor string, org *types.Organ
 		return s.store.GetTeamByName(ctx, s.db.Pool, org.ID, name)
 	}
 	return team, err
+}
+
+// UpdateTeam changes a non-default team's mutable display name. The team
+// name (URL identifier), Keycloak group path, and the OpenFGA tuples keyed
+// by the stable team ID are immutable (ADR-0007), so no Keycloak call or
+// outbox event is needed — only the DB projection and audit row change.
+func (s *Service) UpdateTeam(ctx context.Context, actor, slug, name, displayName string) (*types.Team, error) {
+	for _, anchor := range roleAnchorTeam {
+		if anchor == name {
+			return nil, ErrDefaultTeam
+		}
+	}
+	org, err := s.store.GetOrganizationBySlug(ctx, s.db.Pool, slug)
+	if err != nil {
+		return nil, err
+	}
+	existing, err := s.store.GetTeamByName(ctx, s.db.Pool, org.ID, name)
+	if err != nil {
+		return nil, err
+	}
+	if existing.DisplayName == displayName {
+		return existing, nil
+	}
+	var updated *types.Team
+	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		updated, err = s.store.UpdateTeamDisplayName(ctx, tx, org.ID, name, displayName)
+		if err != nil {
+			return err
+		}
+		return s.audit.Record(ctx, tx, &types.AuditEvent{
+			OrgID: org.ID, Actor: actor, Action: "team.updated", ObjectType: "team", ObjectID: updated.ID,
+			Payload: []byte(fmt.Sprintf(`{"team":%q,"displayName":{"from":%q,"to":%q}}`, name, existing.DisplayName, displayName)),
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
 }
 
 // DeleteTeam removes a non-default team: membership rows, the DB row, and

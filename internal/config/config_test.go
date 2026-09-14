@@ -102,6 +102,16 @@ func TestIdentityScopesDefault(t *testing.T) {
 	if len(c.IdentityScopes) == 0 || c.IdentityScopes[0].Audience != "inari-server" {
 		t.Errorf("IdentityScopes = %v, want built-in default", c.IdentityScopes)
 	}
+	// The kubectl-access audience must be in the built-in catalog (plan §5.4).
+	var k8s bool
+	for _, s := range c.IdentityScopes {
+		if s.Audience == "kubernetes" {
+			k8s = true
+		}
+	}
+	if !k8s {
+		t.Errorf("IdentityScopes = %v, want a kubernetes audience entry", c.IdentityScopes)
+	}
 }
 
 func TestIdentityScopesEnvOverride(t *testing.T) {

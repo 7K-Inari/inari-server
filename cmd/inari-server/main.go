@@ -39,6 +39,7 @@ import (
 	gitgithub "github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider/github"
 	"github.com/7K-Inari/inari-server/internal/platformresources"
 	"github.com/7K-Inari/inari-server/internal/policyservice"
+	"github.com/7K-Inari/inari-server/internal/rbacmaterialize"
 	"github.com/7K-Inari/inari-server/internal/scaffold"
 	"github.com/7K-Inari/inari-server/internal/secrets"
 	"github.com/7K-Inari/inari-server/internal/secretstores"
@@ -164,6 +165,11 @@ func (a policyCheckerAdapter) RenderCheck(ctx context.Context, orgID string, man
 // at runtime (model A). INARI_GITHUB_APP_INSTALLATION_ID is deprecated and
 // only seeds the installation cache for back-compat.
 func buildGitResolver(cfg *config.Config, database *db.DB) (gitprovider.Resolver, error) {
+	if cfg.GitProvider == "local" {
+		// Filesystem-backed bare repos (dev/e2e): real commits an external
+		// syncer can clone — the fake provider keeps nothing observable.
+		return gitprovider.StaticResolver{P: gitprovider.NewLocal(cfg.GitLocalRoot)}, nil
+	}
 	if cfg.GitProvider != "github" {
 		return gitprovider.StaticResolver{P: gitprovider.NewFake()}, nil
 	}
@@ -311,7 +317,7 @@ func run() error {
 	}
 	registryHandler := clusterregistry.NewHandler(registry, svc, authorizer, manifestParams, clusterregistry.CapabilitiesListerFunc(func(ctx context.Context, clusterID string) ([]types.Capability, error) {
 		return capsStore.List(ctx, database.Pool, clusterID)
-	}))
+	})).WithAccessInfo(cfg.OIDCIssuerURL)
 	caps := capabilities.NewService(database, capsStore, auditStore)
 	gateway := agentgateway.NewGateway(database, registry, idp, caps, auditStore, agentgateway.Config{
 		OIDCIssuerURL:       cfg.OIDCIssuerURL,
@@ -526,6 +532,12 @@ func run() error {
 		tenancy.NewDeletionResumeHandler(svc, tenantDeleter, approvalsSvc, log),
 		fleetmanager.NewResumeHandler(fleetSvc, approvalsSvc, log),
 		scaffold.NewResumeHandler(scaffoldSvc, approvalsSvc, log),
+		// RBAC mapping materialization (plan §7.1): renders the tenant's
+		// anchor ClusterRoles + Keycloak-group bindings into the tenant
+		// state repo on rbac.mappings.updated / tenant & team lifecycle
+		// events; the tenant-local ArgoCD syncs them into the cluster.
+		rbacmaterialize.NewHandler(svc,
+			rbacmaterialize.NewInventoryGitConfigs(database, inventory.NewStore()), gitprovider.PerRepo{R: git}, log),
 	)
 	go dispatcher.Run(ctx)
 

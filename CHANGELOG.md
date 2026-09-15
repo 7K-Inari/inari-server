@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.8.0](https://github.com/7K-Inari/inari-server/compare/v1.7.0...v1.8.0) (2026-09-14)
+
+
+### Features
+
+* bootstrap per-tenant platform resources (M7.W2) ([#51](https://github.com/7K-Inari/inari-server/issues/51)) ([91b5ca1](https://github.com/7K-Inari/inari-server/commit/91b5ca1a056a1652045eb52f2b7f437bba15fb55))
+* **orchestrator:** hybrid multi-tenant GitHub App model (ADR-0010) ([#61](https://github.com/7K-Inari/inari-server/issues/61)) ([efe9f0a](https://github.com/7K-Inari/inari-server/commit/efe9f0a6b67184f717e957da456acab1be2f9aff))
+* platform resources server skeleton (M7) ([#49](https://github.com/7K-Inari/inari-server/issues/49)) ([c744b87](https://github.com/7K-Inari/inari-server/commit/c744b87b317839c5110f850b49092dcd14c11534))
+* **platformresources:** ops reconcile endpoint + tzf platform-manifest teardown (M7.W4) ([#54](https://github.com/7K-Inari/inari-server/issues/54)) ([3fe3011](https://github.com/7K-Inari/inari-server/commit/3fe3011e59b4eca27af68868424e1feb190d0fde))
+* **platformresources:** route agent platform CRD status updates to platform_resources (M7.W3) ([#53](https://github.com/7K-Inari/inari-server/issues/53)) ([f466ffc](https://github.com/7K-Inari/inari-server/commit/f466ffc7a439ed46ba5e5fe631f62d5d9df90b9f))
+* RBAC mapping materialization (Keycloak groups → tenant ClusterRoles), ESO SecretStore delivery, policy update + team rename ([#64](https://github.com/7K-Inari/inari-server/issues/64)) ([c488b3f](https://github.com/7K-Inari/inari-server/commit/c488b3fbc3b5db40b5a54f69594d44ee7b4caa4f))
+* **scaffold:** M8 software templates — engine, OCI sources, approval gates, and hardening ([#56](https://github.com/7K-Inari/inari-server/issues/56)) ([f46856b](https://github.com/7K-Inari/inari-server/commit/f46856b6ccb8201e6009f49923b08cdbcb54b966))
+* **scaffold:** M8 wave 1 foundation — scaffold run schema, types, and config knobs ([#55](https://github.com/7K-Inari/inari-server/issues/55)) ([1fa6f21](https://github.com/7K-Inari/inari-server/commit/1fa6f21196e53262723da2217cf1de08ed51ab27))
+* **secretstores:** deliver stores to agents as typed contract commands ([#65](https://github.com/7K-Inari/inari-server/issues/65)) ([24ba96b](https://github.com/7K-Inari/inari-server/commit/24ba96bccccf247aea07395c7f5affea304ede7a))
+* seed reserved platform pseudo-org for platform cluster registration ([#52](https://github.com/7K-Inari/inari-server/issues/52)) ([db767ec](https://github.com/7K-Inari/inari-server/commit/db767ec460935941e4fcb3c1f8451880d72ec7b0))
+* **tenancy:** approval-gated tenant deletion/decommission (ADR-0006) ([#58](https://github.com/7K-Inari/inari-server/issues/58)) ([de4fc4f](https://github.com/7K-Inari/inari-server/commit/de4fc4f09384765f0104d8a2d2cf72b04e046c11))
+
+
+### Bug Fixes
+
+* **catalog:** accept ui-hints.yaml from pulled packages ([da12472](https://github.com/7K-Inari/inari-server/commit/da12472dfe682c3449c8d820c6db4bdb6783f1f2))
+* **catalog:** accept ui-hints.yaml from pulled packages ([86475bd](https://github.com/7K-Inari/inari-server/commit/86475bd7ed260a37589c8b3727086b05187b4c94))
+* **orchestrator:** GET git-config 422 — handler declared a missing path param ([#59](https://github.com/7K-Inari/inari-server/issues/59)) ([661570d](https://github.com/7K-Inari/inari-server/commit/661570d2f49c5067e1793f586ea9ca24849aaf1b))
+* **policyservice:** parse rendered manifests as YAML in RenderCheck ([#66](https://github.com/7K-Inari/inari-server/issues/66)) ([f83052c](https://github.com/7K-Inari/inari-server/commit/f83052ca5b9efa6b901122f8ea1321139ead598c))
+* valid OpenFGA object strings, outbox dead-lettering, idempotent tuple writes, audit log API ([#57](https://github.com/7K-Inari/inari-server/issues/57)) ([b4e1f82](https://github.com/7K-Inari/inari-server/commit/b4e1f8290c1bc626d77953f42e5f3088b046079a))
+
 ## [1.7.0](https://github.com/7K-Inari/inari-server/compare/v1.6.0...v1.7.0) (2026-09-11)
 
 

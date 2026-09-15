@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.7](https://github.com/7K-Inari/inari-server/compare/inari-server-chart-v0.1.6...inari-server-chart-v0.1.7) (2026-09-14)
+
+
+### Features
+
+* RBAC mapping materialization (Keycloak groups → tenant ClusterRoles), ESO SecretStore delivery, policy update + team rename ([#64](https://github.com/7K-Inari/inari-server/issues/64)) ([c488b3f](https://github.com/7K-Inari/inari-server/commit/c488b3fbc3b5db40b5a54f69594d44ee7b4caa4f))
+
 ## [0.1.6](https://github.com/7K-Inari/inari-server/compare/inari-server-chart-v0.1.5...inari-server-chart-v0.1.6) (2026-09-10)
 
 

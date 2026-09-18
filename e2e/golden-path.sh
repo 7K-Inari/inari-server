@@ -17,8 +17,8 @@
 #   HELM_CHARTS_DIR (default ../inari-helm-charts — checkout of the
 #     inari-helm-charts repo providing charts/platform-config + scripts)
 #   SERVER_CHART_DIR (default ./charts/inari-server)
-#   AGENT_CHART_DIR (default ../../inari-agent/charts/inari-agent — checkout
-#     of the inari-agent repo providing the agent Helm chart)
+#   AGENT_CHART_DIR (default ../inari-agent/charts/inari-agent — the
+#     inari-agent repo checkout the e2e workflow nests in the repo root)
 #   KEEP_CLUSTER=true to skip teardown
 set -euo pipefail
 
@@ -28,7 +28,7 @@ AGENT_IMAGE="${AGENT_IMAGE:-inari/agent:e2e}"
 HELM_CHARTS_DIR="${HELM_CHARTS_DIR:-$(dirname "$0")/../../inari-helm-charts}"
 PLATFORM_CHART_DIR="${PLATFORM_CHART_DIR:-$HELM_CHARTS_DIR/charts/platform-config}"
 SERVER_CHART_DIR="${SERVER_CHART_DIR:-$(dirname "$0")/../charts/inari-server}"
-AGENT_CHART_DIR="${AGENT_CHART_DIR:-$(dirname "$0")/../../inari-agent/charts/inari-agent}"
+AGENT_CHART_DIR="${AGENT_CHART_DIR:-$(dirname "$0")/../inari-agent/charts/inari-agent}"
 NAMESPACE="${NAMESPACE:-inari}"
 TENANT="${TENANT:-e2e-org}"
 KEEP_CLUSTER="${KEEP_CLUSTER:-false}"

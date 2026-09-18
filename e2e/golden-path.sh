@@ -332,6 +332,9 @@ log "installing agent via the inari-agent Helm chart"
 REG_TOKEN=$(jq -r '.token' <<<"$TOK_RESP")
 # No --namespace: the chart renders and owns the inari-system Namespace
 # itself (same invocation the Register Cluster wizard shows users).
+# oidcSecret.remotePath: the control plane writes the OIDC client secret at
+# the trimmed Vault path (secrets.ClusterOIDCPath strips the "cluster:"
+# type prefix from the cluster ID).
 helm upgrade --install inari-agent "$AGENT_CHART_DIR" \
   --set image.repository="${AGENT_IMAGE%:*}" \
   --set image.tag="${AGENT_IMAGE##*:}" \
@@ -342,8 +345,6 @@ helm upgrade --install inari-agent "$AGENT_CHART_DIR" \
   --set config.clusterLabels="e2e=true" \
   --set oidcSecret.create=true \
   --set oidcSecret.secretStore=inari-platform \
-  # The control plane writes the OIDC client secret at the trimmed Vault
-  # path (secrets.ClusterOIDCPath strips the "cluster:" type prefix).
   --set oidcSecret.remotePath="inari/clusters/${CLUSTER_ID#cluster:}/oidc-client-secret" \
   --wait --timeout 180s
 # ESO wiring: the chart's opt-in ExternalSecret pulls from the

@@ -241,7 +241,7 @@ func run() error {
 		WithIdentityProviderManager(idp).
 		WithPlatformResources(platformResourcesSvc)
 	handler := tenancy.NewHandler(svc, authorizer).WithScopesCatalog(cfg.IdentityScopes)
-	meHandler := tenancy.NewMeHandler(authorizer)
+	meHandler := tenancy.NewMeHandler(authorizer, svc)
 
 	// Platform pseudo-org (ADR-0005, D1): seed the reserved "platform" org so
 	// the 7kgroup platform cluster registers through the standard org-scoped

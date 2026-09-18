@@ -330,8 +330,9 @@ TOK_RESP=$(xcurl -X POST -H "Authorization: Bearer $(user_token)" \
 
 log "installing agent via the inari-agent Helm chart"
 REG_TOKEN=$(jq -r '.token' <<<"$TOK_RESP")
+# No --namespace: the chart renders and owns the inari-system Namespace
+# itself (same invocation the Register Cluster wizard shows users).
 helm upgrade --install inari-agent "$AGENT_CHART_DIR" \
-  --namespace inari-system \
   --set image.repository="${AGENT_IMAGE%:*}" \
   --set image.tag="${AGENT_IMAGE##*:}" \
   --set image.pullPolicy=IfNotPresent \
@@ -346,8 +347,7 @@ helm upgrade --install inari-agent "$AGENT_CHART_DIR" \
 # ESO wiring: the chart's opt-in ExternalSecret pulls from the
 # ClusterSecretStore the registration response references
 # (SecretDeliveryReference.esoSecretStore). ESO retries the ExternalSecret
-# until the store exists, so this can be applied after the install — the
-# namespace must be Helm-owned (created by the chart), not pre-created.
+# until the store exists, so this can be applied after the install.
 kubectl -n inari-system create secret generic inari-vault-token \
   --from-literal=token="$VAULT_DEV_TOKEN" --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -f - <<EOF

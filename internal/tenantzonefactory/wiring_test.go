@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -27,7 +26,7 @@ func TestWireZoneEnsuresPlatformResourcesAndCommitsManifests(t *testing.T) {
 		Git:                git,
 		PlatformResources:  ensurer,
 		PlatformGitOpsRepo: "inari-platform-gitops",
-		Manifest:           clusterregistry.ManifestParams{AgentImageRepo: "img", AgentImageTag: "v1", GatewayAddress: "https://gw"},
+		Agent:              AgentInstallParams{ImageRepo: "img", GatewayAddress: "https://gw"},
 	}
 	zone := &types.TenantZone{Slug: "acme", DisplayName: "Acme", Region: "eu-west-1", Tier: "starter"}
 	if _, err := w.WireZone(context.Background(), zone, "arn:role"); err != nil {
@@ -63,7 +62,7 @@ func TestWireZoneWithoutPlatformResources(t *testing.T) {
 		Clusters: &qaClusters{},
 		Accounts: &qaAccounts{},
 		Git:      git,
-		Manifest: clusterregistry.ManifestParams{AgentImageRepo: "img", AgentImageTag: "v1", GatewayAddress: "https://gw"},
+		Agent:   AgentInstallParams{ImageRepo: "img", GatewayAddress: "https://gw"},
 	}
 	zone := &types.TenantZone{Slug: "acme", DisplayName: "Acme", Region: "eu-west-1", Tier: "starter"}
 	if _, err := w.WireZone(context.Background(), zone, "arn:role"); err != nil {

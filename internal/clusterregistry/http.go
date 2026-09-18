@@ -25,7 +25,6 @@ type Handler struct {
 	svc       *Service
 	tenants   TenantResolver
 	authz     authz.Authorizer
-	manifest  ManifestParams
 	caps      CapabilitiesLister
 	issuerURL string
 }
@@ -44,8 +43,8 @@ func (f CapabilitiesListerFunc) List(ctx context.Context, clusterID string) ([]t
 	return f(ctx, clusterID)
 }
 
-func NewHandler(svc *Service, tenants TenantResolver, az authz.Authorizer, manifest ManifestParams, caps CapabilitiesLister) *Handler {
-	return &Handler{svc: svc, tenants: tenants, authz: az, manifest: manifest, caps: caps}
+func NewHandler(svc *Service, tenants TenantResolver, az authz.Authorizer, caps CapabilitiesLister) *Handler {
+	return &Handler{svc: svc, tenants: tenants, authz: az, caps: caps}
 }
 
 // WithAccessInfo wires the platform OIDC issuer URL used by the cluster
@@ -152,14 +151,6 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Summary:     "Decommission a cluster (ownership-checked drain, identity revocation, archived audit)",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.decommissionCluster)
-
-	huma.Register(api, huma.Operation{
-		OperationID: "renderInstallManifest",
-		Method:      http.MethodPost,
-		Path:        "/api/v1/tenants/{org}/clusters/{id}/install-manifest",
-		Summary:     "Render the agent install manifest embedding a fresh registration token",
-		Security:    httpserver.SecurityRequirement(),
-	}, h.renderManifest)
 
 	huma.Register(api, huma.Operation{
 		OperationID: "deleteCluster",
@@ -482,34 +473,6 @@ func (h *Handler) lifecycle(ctx context.Context, in *clusterPathInput, fn func(c
 	out := &clusterOutput{}
 	out.Body.Cluster = *c
 	return out, nil
-}
-
-type manifestOutput struct {
-	ContentType string `header:"Content-Type"`
-	Body        []byte
-}
-
-func (h *Handler) renderManifest(ctx context.Context, in *clusterPathInput) (*manifestOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
-	if err != nil {
-		return nil, err
-	}
-	c, err := h.svc.GetCluster(ctx, in.ID)
-	if errors.Is(err, ErrClusterNotFound) || (err == nil && c.OrgID != org.ID) {
-		return nil, huma.Error404NotFound("cluster not found")
-	}
-	if err != nil {
-		return nil, err
-	}
-	plaintext, _, err := h.svc.IssueToken(ctx, id.Subject, in.ID)
-	if err != nil {
-		return nil, err
-	}
-	manifest, err := RenderInstallManifest(c, plaintext, h.manifest)
-	if err != nil {
-		return nil, err
-	}
-	return &manifestOutput{ContentType: "application/yaml", Body: manifest}, nil
 }
 
 type listCapabilitiesOutput struct {

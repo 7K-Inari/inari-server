@@ -108,7 +108,7 @@ func itServerDB(t *testing.T, az itAuthorizer) (*httptest.Server, *Service, *db.
 	h := NewHandler(svc, itTenants{
 		"acme":  {ID: "org:1", Slug: "acme"},
 		"acme2": {ID: "org:2", Slug: "acme2"},
-	}, az, ManifestParams{AgentImageRepo: "ghcr.io/7k-inari/inari-agent", AgentImageTag: "v0.1.0", GatewayAddress: "https://gw.example.com"}, nil).
+	}, az, nil).
 		WithAccessInfo("https://keycloak.example.com/realms/inari")
 	router, api := httpserver.NewRouter(slog.Default(), itValidator{}, database)
 	h.RegisterRoutes(api)
@@ -175,7 +175,7 @@ func TestClusterAPIAuthAndTenancy(t *testing.T) {
 
 	// Cross-tenant: caller is a member of acme2, but the cluster lives in
 	// acme — object access by ID must not leak across tenants.
-	for _, suffix := range []string{"", "/tokens", "/approve", "/revoke", "/install-manifest"} {
+	for _, suffix := range []string{"", "/tokens", "/approve", "/revoke"} {
 		method := "GET"
 		if suffix != "" {
 			method = "POST"
@@ -194,9 +194,8 @@ func TestClusterAPIAuthAndTenancy(t *testing.T) {
 	}
 }
 
-// TestClusterAPITokenAndManifest verifies token issuance and manifest
-// rendering over REST, and that the manifest embeds a usable one-time token.
-func TestClusterAPITokenAndManifest(t *testing.T) {
+// TestClusterAPIToken verifies one-time token issuance over REST.
+func TestClusterAPIToken(t *testing.T) {
 	srv, _ := itServer(t, itAuthorizer{allow: true})
 	defer srv.Close()
 	cid := itCreate(t, srv, "acme", "c1")
@@ -215,33 +214,10 @@ func TestClusterAPITokenAndManifest(t *testing.T) {
 		t.Fatal("empty plaintext token")
 	}
 
-	code, body = itReq(t, srv, "POST", "/api/v1/tenants/acme/clusters/"+cid+"/install-manifest", "good", "")
-	if code != http.StatusOK {
-		t.Fatalf("manifest: %d %s", code, body)
-	}
-	if !strings.Contains(body, "registration-token:") {
-		t.Error("manifest missing bootstrap token")
-	}
-	if !strings.Contains(body, `"ghcr.io/7k-inari/inari-agent:v0.1.0"`) {
-		t.Error("manifest missing published agent image reference")
-	}
-	if strings.Contains(body, "kubeconfig") {
-		t.Error("manifest must never contain a kubeconfig")
-	}
-	// Capability-discovery RBAC must mirror the agent's watchers — a missing
-	// rule fails closed at runtime (watch denied, capability never reported).
-	for _, want := range []string{
-		`resources: ["providers"]`,
-		`resources: ["compositions", "compositeresourcedefinitions"]`,
-		`resources: ["resourcegraphdefinitions"]`,
-		`resources: ["clusterserviceversions"]`,
-	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("manifest missing capability-watcher RBAC %s", want)
-		}
-	}
-	if !strings.Contains(body, "memory: 512Mi") {
-		t.Error("manifest memory limit too small for informer caches (OOM loop)")
+	// The server-rendered install manifest endpoint was removed: the
+	// inari-agent Helm chart is the single install source of truth.
+	if code, _ := itReq(t, srv, "POST", "/api/v1/tenants/acme/clusters/"+cid+"/install-manifest", "good", ""); code != http.StatusNotFound && code != http.StatusMethodNotAllowed {
+		t.Errorf("install-manifest should be gone: got %d", code)
 	}
 }
 

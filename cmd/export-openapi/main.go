@@ -35,7 +35,7 @@ func buildAPI() huma.API {
 	_, api := httpserver.NewRouter(log, nil, nil)
 
 	tenancy.NewHandler(nil, nil).RegisterRoutes(api)
-	clusterregistry.NewHandler(nil, nil, nil, clusterregistry.ManifestParams{}, nil).RegisterRoutes(api)
+	clusterregistry.NewHandler(nil, nil, nil, nil).RegisterRoutes(api)
 	catalog.NewHandler(nil, nil, nil).RegisterRoutes(api)
 	approvals.NewHandler(nil, nil, nil).RegisterRoutes(api)
 	inventory.NewHandler(nil, nil, nil).RegisterRoutes(api)

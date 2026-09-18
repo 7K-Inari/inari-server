@@ -298,7 +298,7 @@ func run() error {
 	}))
 	capsStore := capabilities.NewStore()
 	// ESO delivery wiring: the Vault writer pushes the per-cluster OIDC
-	// client secret at registration; the install manifest renders the
+	// client secret at registration; the agent Helm chart renders the
 	// matching ExternalSecret (pull, never push).
 	var secretWriter secrets.Writer
 	if cfg.VaultAddr != "" {
@@ -306,16 +306,14 @@ func run() error {
 	} else {
 		log.Warn("INARI_VAULT_ADDR unset: cluster registration will fail with pending_secret_delivery")
 	}
-	manifestParams := clusterregistry.ManifestParams{
-		AgentImageRepo:     cfg.AgentImageRepo,
-		AgentImageTag:      cfg.AgentImageTag,
-		GatewayAddress:     cfg.AgentGatewayAddress,
-		ESOSecretStore:     cfg.ESOSecretStore,
-		ESOSecretKey:       "client-secret",
-		ESOSecretName:      "inari-agent-oidc-client",
-		ESOSecretNamespace: "inari-system",
+	agentParams := tenantzonefactory.AgentInstallParams{
+		ImageRepo:      cfg.AgentImageRepo,
+		GatewayAddress: cfg.AgentGatewayAddress,
+		ESOSecretStore: cfg.ESOSecretStore,
+		ESOSecretKey:   "client-secret",
+		ESOSecretName:  "inari-agent-oidc-client",
 	}
-	registryHandler := clusterregistry.NewHandler(registry, svc, authorizer, manifestParams, clusterregistry.CapabilitiesListerFunc(func(ctx context.Context, clusterID string) ([]types.Capability, error) {
+	registryHandler := clusterregistry.NewHandler(registry, svc, authorizer, clusterregistry.CapabilitiesListerFunc(func(ctx context.Context, clusterID string) ([]types.Capability, error) {
 		return capsStore.List(ctx, database.Pool, clusterID)
 	})).WithAccessInfo(cfg.OIDCIssuerURL)
 	caps := capabilities.NewService(database, capsStore, auditStore)
@@ -513,7 +511,7 @@ func run() error {
 		Git: gitPerRepo, GitCfg: orchestratorSvc,
 		PlatformResources:  platformResourcesSvc,
 		PlatformGitOpsRepo: cfg.PlatformGitOpsRepo,
-		Manifest:           manifestParams,
+		Agent:              agentParams,
 	}
 	tzfEnv.Clusters = tzfClusterLifecycle{registry}
 	tzfSvc := tenantzonefactory.NewService(database, tenantzonefactory.NewStore(), auditStore, tzfEnv, approvalsSvc, log)

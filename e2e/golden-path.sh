@@ -329,10 +329,25 @@ TOK_RESP=$(xcurl -X POST -H "Authorization: Bearer $(user_token)" \
   "$API/tenants/$TENANT/clusters/$CLUSTER_ID/tokens")
 
 log "installing agent via the inari-agent Helm chart"
-# ESO wiring must exist BEFORE the agent registers: the chart's opt-in
-# ExternalSecret pulls from the ClusterSecretStore the registration
-# response references (SecretDeliveryReference.esoSecretStore).
-kubectl create namespace inari-system --dry-run=client -o yaml | kubectl apply -f -
+REG_TOKEN=$(jq -r '.token' <<<"$TOK_RESP")
+helm upgrade --install inari-agent "$AGENT_CHART_DIR" \
+  --namespace inari-system \
+  --set image.repository="${AGENT_IMAGE%:*}" \
+  --set image.tag="${AGENT_IMAGE##*:}" \
+  --set image.pullPolicy=IfNotPresent \
+  --set config.tenantID="$ORG_ID" \
+  --set config.controlPlane="http://$SERVER_SVC.${NAMESPACE}.svc:8080" \
+  --set config.registrationToken="$REG_TOKEN" \
+  --set config.clusterLabels="e2e=true" \
+  --set oidcSecret.create=true \
+  --set oidcSecret.secretStore=inari-platform \
+  --set oidcSecret.remotePath="inari/clusters/$CLUSTER_ID/oidc-client-secret" \
+  --wait --timeout 180s
+# ESO wiring: the chart's opt-in ExternalSecret pulls from the
+# ClusterSecretStore the registration response references
+# (SecretDeliveryReference.esoSecretStore). ESO retries the ExternalSecret
+# until the store exists, so this can be applied after the install — the
+# namespace must be Helm-owned (created by the chart), not pre-created.
 kubectl -n inari-system create secret generic inari-vault-token \
   --from-literal=token="$VAULT_DEV_TOKEN" --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -f - <<EOF
@@ -352,20 +367,6 @@ spec:
           namespace: inari-system
           key: token
 EOF
-REG_TOKEN=$(jq -r '.token' <<<"$TOK_RESP")
-helm upgrade --install inari-agent "$AGENT_CHART_DIR" \
-  --namespace inari-system \
-  --set image.repository="${AGENT_IMAGE%:*}" \
-  --set image.tag="${AGENT_IMAGE##*:}" \
-  --set image.pullPolicy=IfNotPresent \
-  --set config.tenantID="$ORG_ID" \
-  --set config.controlPlane="http://$SERVER_SVC.${NAMESPACE}.svc:8080" \
-  --set config.registrationToken="$REG_TOKEN" \
-  --set config.clusterLabels="e2e=true" \
-  --set oidcSecret.create=true \
-  --set oidcSecret.secretStore=inari-platform \
-  --set oidcSecret.remotePath="inari/clusters/$CLUSTER_ID/oidc-client-secret" \
-  --wait --timeout 180s
 
 log "waiting for registration, then the ESO-projected client secret"
 for i in $(seq 1 24); do

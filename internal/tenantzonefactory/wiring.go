@@ -73,7 +73,7 @@ type ModuleWiring struct {
 	// tenant CR manifests (tenants/<slug>/, see docs/platform-gitops.md);
 	// empty skips the manifest commit.
 	PlatformGitOpsRepo string
-	Manifest           clusterregistry.ManifestParams
+	Agent              AgentInstallParams
 }
 
 // WireZone implements Wiring: Keycloak Organization → CloudAccount record
@@ -160,7 +160,7 @@ func (w *ModuleWiring) WireZone(ctx context.Context, zone *types.TenantZone, rol
 	if err != nil {
 		return nil, fmt.Errorf("tzf: wiring git repo: %w", err)
 	}
-	files, err := RenderBaseline(cluster, zone, token, w.Manifest, repoURL)
+	files, err := RenderBaseline(cluster, zone, token, w.Agent, repoURL)
 	if err != nil {
 		return nil, err
 	}

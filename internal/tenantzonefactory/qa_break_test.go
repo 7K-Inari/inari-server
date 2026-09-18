@@ -70,7 +70,7 @@ func TestQAWireZoneResumeAfterPartialFailure(t *testing.T) {
 		Clusters: &qaClusters{failFirst: true},
 		Accounts: &qaAccounts{failFirst: true},
 		Git:      newQAGit(),
-		Manifest: clusterregistry.ManifestParams{AgentImageRepo: "ghcr.io/7k-inari/inari-agent", AgentImageTag: "v0.1.0", GatewayAddress: "https://gw.example"},
+		Agent:   AgentInstallParams{ImageRepo: "ghcr.io/7k-inari/inari-agent", GatewayAddress: "https://gw.example"},
 	}
 	zone := &types.TenantZone{Slug: "acme", DisplayName: "Acme", Region: "eu-west-1", Tier: "starter"}
 	if _, err := w.WireZone(context.Background(), zone, "arn:role"); err == nil {

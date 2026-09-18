@@ -58,7 +58,6 @@ type Config struct {
 	RegistrationTokenTTL       time.Duration
 	EnrollmentApprovalRequired bool
 	AgentImageRepo             string
-	AgentImageTag              string
 	AgentGatewayAddress        string
 	ESOSecretStore             string
 
@@ -176,7 +175,6 @@ func Load() (*Config, error) {
 		RegistrationTokenTTL:       durEnv("INARI_REGISTRATION_TOKEN_TTL", time.Hour),
 		EnrollmentApprovalRequired: boolEnv("INARI_ENROLLMENT_APPROVAL_REQUIRED", false),
 		AgentImageRepo:             env("INARI_AGENT_IMAGE_REPO", "ghcr.io/7k-inari/inari-agent"),
-		AgentImageTag:              env("INARI_AGENT_IMAGE_TAG", "edge"),
 		AgentGatewayAddress:        env("INARI_AGENT_GATEWAY_ADDRESS", "https://inari-server.example.com"),
 		ESOSecretStore:             env("INARI_ESO_SECRET_STORE", "inari-platform"),
 

@@ -25,7 +25,6 @@ func TestExportContainsFullRESTSurface(t *testing.T) {
 		"/api/v1/tenants/{org}/instances",
 		"/api/v1/tenants/{org}/deploys",
 		"/api/v1/tenants/{org}/clusters/{id}/capabilities",
-		"/api/v1/tenants/{org}/clusters/{id}/install-manifest",
 		"/api/v1/tenants/{org}/approvals",
 		"/api/v1/tenants/{org}/cloud-accounts",
 		"/api/v1/tenants/{org}/notification-endpoints",

@@ -36,10 +36,21 @@ jobs:
           ref: ${{ steps.chart.outputs.ref }}
           path: inari-helm-charts
 
+      - name: Resolve matching inari-agent ref
+        id: agent
+        run: |
+          BRANCH="${{ github.head_ref || github.ref_name }}"
+          if git ls-remote --exit-code https://github.com/7K-Inari/inari-agent.git "refs/heads/$BRANCH" >/dev/null 2>&1; then
+            echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout inari-agent
         uses: actions/checkout@v4
         with:
           repository: 7K-Inari/inari-agent
+          ref: ${{ steps.agent.outputs.ref }}
           path: inari-agent
 
       - name: Set up Go

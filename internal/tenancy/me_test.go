@@ -12,6 +12,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
+	"github.com/7K-Inari/inari-server/internal/types"
 )
 
 type stubValidator struct{ id *authn.Identity }
@@ -39,11 +40,52 @@ func newMeTestServer(t *testing.T, az authz.Authorizer) *httptest.Server {
 	t.Helper()
 	router, api := httpserver.NewRouter(slog.New(slog.NewTextHandler(nil, nil)),
 		stubValidator{id: &authn.Identity{Subject: "u1"}}, stubReady{})
-	NewMeHandler(az).RegisterRoutes(api)
+	NewMeHandler(az, nil).RegisterRoutes(api)
 	NewHandler(nil, az).RegisterRoutes(api)
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+type stubTenantResolver struct{ org *types.Organization }
+
+func (s stubTenantResolver) GetTenant(_ context.Context, slug string) (*types.Organization, error) {
+	if s.org != nil && slug == "acme" {
+		return s.org, nil
+	}
+	return nil, ErrOrgNotFound
+}
+
+// roleAuthorizer grants relation admin only for subject u1 on org:o1.
+type roleAuthorizer struct{}
+
+func (roleAuthorizer) Check(_ context.Context, user, relation, object string) (bool, error) {
+	return user == authz.UserObject("u1") && relation == authz.RelationAdmin && object == authz.OrgObject("org:o1"), nil
+}
+
+func (roleAuthorizer) ListObjects(context.Context, string, string, string) ([]string, error) {
+	return nil, nil
+}
+
+func TestMyPermissionsOrgRoles(t *testing.T) {
+	router, api := httpserver.NewRouter(slog.New(slog.NewTextHandler(nil, nil)),
+		stubValidator{id: &authn.Identity{Subject: "u1", Organizations: []string{"acme"}}}, stubReady{})
+	NewMeHandler(roleAuthorizer{}, stubTenantResolver{org: &types.Organization{ID: "org:o1", Slug: "acme"}}).RegisterRoutes(api)
+	srv := httptest.NewServer(router)
+	t.Cleanup(srv.Close)
+	resp := testTokenReq(t, http.MethodGet, srv.URL+"/api/v1/me/permissions", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+	var body struct {
+		OrgRoles map[string]types.Role `json:"orgRoles"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.OrgRoles["acme"] != types.RoleOrgAdmin {
+		t.Fatalf("orgRoles = %v, want acme=org-admin", body.OrgRoles)
+	}
 }
 
 func testTokenReq(t *testing.T, method, url, body string) *http.Response {

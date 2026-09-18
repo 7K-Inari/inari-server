@@ -268,6 +268,15 @@ func packageFromFiles(name, typ, indexDesc, ref string, files map[string][]byte)
 		base.Channel = py.Channel
 	}
 	base.Schema = files["schema.json"]
+	// Packages ship no schema.json layer; fall back to deriving the instance
+	// schema from the RGD's spec.schema so item previews/deploy forms render.
+	if len(base.Schema) == 0 {
+		if raw, ok := files["rgd.yaml"]; ok {
+			if schema, err := schemaFromRGD(raw); err == nil && len(schema) > 0 {
+				base.Schema = schema
+			}
+		}
+	}
 	base.UIHints = files["ui-hints.json"]
 	// inari-catalog packages ship ui-hints.yaml; convert to JSON for the
 	// jsonb column / API responses.

@@ -17,6 +17,8 @@
 #   HELM_CHARTS_DIR (default ../inari-helm-charts — checkout of the
 #     inari-helm-charts repo providing charts/platform-config + scripts)
 #   SERVER_CHART_DIR (default ./charts/inari-server)
+#   AGENT_CHART_DIR (default ../../inari-agent/charts/inari-agent — checkout
+#     of the inari-agent repo providing the agent Helm chart)
 #   KEEP_CLUSTER=true to skip teardown
 set -euo pipefail
 
@@ -26,6 +28,7 @@ AGENT_IMAGE="${AGENT_IMAGE:-inari/agent:e2e}"
 HELM_CHARTS_DIR="${HELM_CHARTS_DIR:-$(dirname "$0")/../../inari-helm-charts}"
 PLATFORM_CHART_DIR="${PLATFORM_CHART_DIR:-$HELM_CHARTS_DIR/charts/platform-config}"
 SERVER_CHART_DIR="${SERVER_CHART_DIR:-$(dirname "$0")/../charts/inari-server}"
+AGENT_CHART_DIR="${AGENT_CHART_DIR:-$(dirname "$0")/../../inari-agent/charts/inari-agent}"
 NAMESPACE="${NAMESPACE:-inari}"
 TENANT="${TENANT:-e2e-org}"
 KEEP_CLUSTER="${KEEP_CLUSTER:-false}"
@@ -171,7 +174,6 @@ helm upgrade --install inari-server "$SERVER_CHART_DIR" \
   --set-json "extraEnv=[
     {\"name\":\"INARI_AGENT_GATEWAY_ADDRESS\",\"value\":\"http://$SERVER_SVC.${NAMESPACE}.svc:8080\"},
     {\"name\":\"INARI_AGENT_IMAGE_REPO\",\"value\":\"inari/agent\"},
-    {\"name\":\"INARI_AGENT_IMAGE_TAG\",\"value\":\"e2e\"},
     {\"name\":\"INARI_GIT_PROVIDER\",\"value\":\"local\"},
     {\"name\":\"INARI_GIT_LOCAL_ROOT\",\"value\":\"/var/lib/inari/git\"}
   ]" \
@@ -322,13 +324,12 @@ TOKEN="$(user_token)"
 CLUSTER_RESP=$(xcurl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"name":"e2e-self","labels":{"e2e":"true"}}' "$API/tenants/$TENANT/clusters")
 CLUSTER_ID=$(jq -r '.cluster.id' <<<"$CLUSTER_RESP")
+ORG_ID=$(jq -r '.cluster.orgId' <<<"$CLUSTER_RESP")
+TOK_RESP=$(xcurl -X POST -H "Authorization: Bearer $(user_token)" \
+  "$API/tenants/$TENANT/clusters/$CLUSTER_ID/tokens")
 
-log "installing agent via the server-rendered manifest"
-MANIFEST=$(mktemp)
-trap 'rm -f "$MANIFEST"; cleanup' EXIT
-xcurl -X POST -H "Authorization: Bearer $(user_token)" \
-  "$API/tenants/$TENANT/clusters/$CLUSTER_ID/install-manifest" >"$MANIFEST"
-# ESO wiring must exist BEFORE the agent registers: the manifest's
+log "installing agent via the inari-agent Helm chart"
+# ESO wiring must exist BEFORE the agent registers: the chart's opt-in
 # ExternalSecret pulls from the ClusterSecretStore the registration
 # response references (SecretDeliveryReference.esoSecretStore).
 kubectl create namespace inari-system --dry-run=client -o yaml | kubectl apply -f -
@@ -351,8 +352,20 @@ spec:
           namespace: inari-system
           key: token
 EOF
-kubectl apply -f "$MANIFEST"
-kubectl -n inari-system rollout status deployment/inari-agent --timeout=180s
+REG_TOKEN=$(jq -r '.token' <<<"$TOK_RESP")
+helm upgrade --install inari-agent "$AGENT_CHART_DIR" \
+  --namespace inari-system \
+  --set image.repository="${AGENT_IMAGE%:*}" \
+  --set image.tag="${AGENT_IMAGE##*:}" \
+  --set image.pullPolicy=IfNotPresent \
+  --set config.tenantID="$ORG_ID" \
+  --set config.controlPlane="http://$SERVER_SVC.${NAMESPACE}.svc:8080" \
+  --set config.registrationToken="$REG_TOKEN" \
+  --set config.clusterLabels="e2e=true" \
+  --set oidcSecret.create=true \
+  --set oidcSecret.secretStore=inari-platform \
+  --set oidcSecret.remotePath="inari/clusters/$CLUSTER_ID/oidc-client-secret" \
+  --wait --timeout 180s
 
 log "waiting for registration, then the ESO-projected client secret"
 for i in $(seq 1 24); do

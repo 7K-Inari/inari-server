@@ -186,8 +186,7 @@ func (h *Handler) listUI(ctx context.Context, in *listAuditUIInput) (*listAuditU
 	return out, nil
 }
 
-// exportCSV returns the same events as a text/csv download (raw body,
-// same pattern as the cluster install-manifest endpoint).
+// exportCSV returns the same events as a text/csv download (raw body).
 func (h *Handler) exportCSV(ctx context.Context, in *listAuditUIInput) (*struct {
 	ContentType string `header:"Content-Type"`
 	Body        []byte

@@ -28,7 +28,7 @@ user to:
 - the group `tenant-platform/platform-team` (grants platform-engineer via
   the ADR-0004 group→tuple sync; converges within one sync interval).
 
-## 3. Register the cluster and render the install manifest
+## 3. Register the cluster and install the agent via Helm
 
 ```sh
 # Create the cluster record
@@ -36,11 +36,10 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
   -d '{"name": "7kgroup-platform"}' \
   https://<control-plane>/api/v1/tenants/platform/clusters
 
-# Render the agent install manifest (embeds a fresh one-time registration
-# token; plaintext is returned once, only its hash is stored)
+# Issue a one-time registration token (plaintext is returned once, only its
+# hash is stored)
 curl -X POST -H "Authorization: Bearer $TOKEN" \
-  https://<control-plane>/api/v1/tenants/platform/clusters/<cluster-id>/install-manifest \
-  > platform-agent.yaml
+  https://<control-plane>/api/v1/tenants/platform/clusters/<cluster-id>/tokens
 ```
 
 If `INARI_ENROLLMENT_APPROVAL_REQUIRED` is on, approve the cluster first
@@ -49,9 +48,11 @@ If `INARI_ENROLLMENT_APPROVAL_REQUIRED` is on, approve the cluster first
 ## 4. Deploy the agent on the 7kgroup cluster
 
 ```sh
-kubectl apply -f platform-agent.yaml
+helm install inari-agent oci://ghcr.io/7k-inari/charts/inari-agent \
+  --set config.tenantID=<org-id> \
+  --set config.controlPlane=https://<control-plane> \
+  --set config.registrationToken=<one-time token>
 ```
-
 The agent dials out to the control plane (pull, never push), exchanges the
 bootstrap token for its per-cluster OIDC identity, and connects the event
 stream. Verify:
@@ -64,7 +65,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 ## RBAC note (platform.inari.io CRDs)
 
-The server-rendered manifest (`internal/clusterregistry/manifest.go`) grants
+The inari-agent Helm chart grants
 only generic discovery access (CRDs, nodes, Crossplane/kro/OLM watchers) via
 the `inari-agent-discovery` ClusterRole — it deliberately contains **no**
 `platform.inari.io` rules. Read access to the platform CRDs is added by the

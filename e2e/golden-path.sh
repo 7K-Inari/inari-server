@@ -342,7 +342,9 @@ helm upgrade --install inari-agent "$AGENT_CHART_DIR" \
   --set config.clusterLabels="e2e=true" \
   --set oidcSecret.create=true \
   --set oidcSecret.secretStore=inari-platform \
-  --set oidcSecret.remotePath="inari/clusters/$CLUSTER_ID/oidc-client-secret" \
+  # The control plane writes the OIDC client secret at the trimmed Vault
+  # path (secrets.ClusterOIDCPath strips the "cluster:" type prefix).
+  --set oidcSecret.remotePath="inari/clusters/${CLUSTER_ID#cluster:}/oidc-client-secret" \
   --wait --timeout 180s
 # ESO wiring: the chart's opt-in ExternalSecret pulls from the
 # ClusterSecretStore the registration response references

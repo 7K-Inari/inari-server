@@ -50,7 +50,9 @@ extraVolumeMounts: []
 
 # Platform Vault for ESO delivery of per-cluster OIDC client secrets
 # (registration exchange). Without addr, cluster registration fails
-# explicitly with pending_secret_delivery.
+# explicitly with pending_secret_delivery. Vault-side setup (policy,
+# Kubernetes auth role): docs/operator-guide/bootstrap.md "Platform Vault
+# setup" in inari-docs.
 vault:
   addr: ""
   kvMount: secret

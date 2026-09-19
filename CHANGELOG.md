@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.0.0](https://github.com/7K-Inari/inari-server/compare/v1.8.0...v2.0.0) (2026-09-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* **clusterregistry:** remove install-manifest endpoint; TZF installs agent via ArgoCD Application from OCI chart ([#69](https://github.com/7K-Inari/inari-server/issues/69))
+
+### Features
+
+* **clusterregistry:** remove install-manifest endpoint; TZF installs agent via ArgoCD Application from OCI chart ([#69](https://github.com/7K-Inari/inari-server/issues/69)) ([d0b67d3](https://github.com/7K-Inari/inari-server/commit/d0b67d33ba8bc7fd9386fe882f1e8f1859a40dd6))
+* **secrets:** Vault Kubernetes auth for the registration exchange ([#70](https://github.com/7K-Inari/inari-server/issues/70)) ([5f5183f](https://github.com/7K-Inari/inari-server/commit/5f5183f94c6926a5edd8467ae72cca15ad937960))
+
+
+### Bug Fixes
+
+* catalog schema from RGD, org roles in /me/permissions, singular IdP compat routes ([#67](https://github.com/7K-Inari/inari-server/issues/67)) ([82ec1e2](https://github.com/7K-Inari/inari-server/commit/82ec1e2478517e53a822c9c212f39f66cbc6e6e8))
+
 ## [1.8.0](https://github.com/7K-Inari/inari-server/compare/v1.7.0...v1.8.0) (2026-09-14)
 
 

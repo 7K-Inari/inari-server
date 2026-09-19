@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.8](https://github.com/7K-Inari/inari-server/compare/inari-server-chart-v0.1.7...inari-server-chart-v0.1.8) (2026-09-19)
+
+
+### Features
+
+* **secrets:** Vault Kubernetes auth for the registration exchange ([#70](https://github.com/7K-Inari/inari-server/issues/70)) ([5f5183f](https://github.com/7K-Inari/inari-server/commit/5f5183f94c6926a5edd8467ae72cca15ad937960))
+
 ## [0.1.7](https://github.com/7K-Inari/inari-server/compare/inari-server-chart-v0.1.6...inari-server-chart-v0.1.7) (2026-09-14)
 
 

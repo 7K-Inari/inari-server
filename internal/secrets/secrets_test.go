@@ -75,8 +75,8 @@ func TestVaultWriterKubernetesLoginAndPut(t *testing.T) {
 	var logins int
 	var gotRole, gotJWT, gotPutToken, gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/v1/auth/kubernetes/login":
+		switch r.URL.Path {
+		case "/v1/auth/kubernetes/login":
 			logins++
 			var in struct {
 				Role string `json:"role"`
@@ -90,7 +90,7 @@ func TestVaultWriterKubernetesLoginAndPut(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"auth": map[string]any{"client_token": "vault-tok-1", "lease_duration": 3600},
 			})
-		case r.URL.Path == "/v1/secret/data/inari/clusters/abc/oidc-client-secret":
+		case "/v1/secret/data/inari/clusters/abc/oidc-client-secret":
 			gotPutToken = r.Header.Get("X-Vault-Token")
 			gotPath = r.URL.Path
 			w.WriteHeader(http.StatusOK)

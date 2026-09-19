@@ -72,6 +72,8 @@
       "properties": {
         "addr": { "type": "string" },
         "kvMount": { "type": "string", "minLength": 1 },
+        "authMethod": { "type": "string", "enum": ["token", "kubernetes"] },
+        "role": { "type": "string" },
         "tokenSecret": {
           "type": "object",
           "properties": {
@@ -80,8 +82,7 @@
           },
           "required": ["name", "tokenKey"]
         }
-      },
-      "required": ["tokenSecret"]
+      }
     },
     "gateway": {
       "type": "object",

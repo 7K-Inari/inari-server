@@ -112,6 +112,35 @@ tests:
               secretKeyRef:
                 name: inari-vault
                 key: token
+  - it: renders kubernetes Vault auth without a token secret
+    template: deployment.yaml
+    set:
+      vault.addr: https://vault.example.org
+      vault.authMethod: kubernetes
+      vault.role: inari-server
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_VAULT_AUTH_METHOD
+            value: kubernetes
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_VAULT_K8S_ROLE
+            value: inari-server
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_VAULT_TOKEN
+  - it: fails when kubernetes auth has no role
+    template: deployment.yaml
+    set:
+      vault.addr: https://vault.example.org
+      vault.authMethod: kubernetes
+    asserts:
+      - failedTemplate:
+          errorMessage: vault.role is required when vault.authMethod=kubernetes
   - it: renders a Service
     template: service.yaml
     asserts:

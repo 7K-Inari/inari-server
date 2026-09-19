@@ -68,6 +68,20 @@ type Config struct {
 	VaultAddr    string
 	VaultToken   string
 	VaultKVMount string
+	// VaultAuthMethod selects how the server authenticates to Vault:
+	// "token" (static VaultToken, default/back-compat) or "kubernetes"
+	// (ServiceAccount JWT login, short-lived tokens, no secret material to
+	// distribute or rotate).
+	VaultAuthMethod string
+	// VaultK8sRole is the Vault Kubernetes-auth role bound to the
+	// inari-server ServiceAccount (policy: update on
+	// <VaultKVMount>/data/inari/clusters/* only).
+	VaultK8sRole string
+	// VaultK8sAuthPath is the Vault auth mount for the Kubernetes method
+	// (default "kubernetes"); VaultK8sTokenPath overrides the SA JWT path
+	// (default the in-pod ServiceAccount token).
+	VaultK8sAuthPath  string
+	VaultK8sTokenPath string
 
 	// CatalogOCIPath points at a local fixture OCI layout directory
 	// (dev/tests). CatalogOCIIndexRef takes precedence when both are set.
@@ -178,9 +192,14 @@ func Load() (*Config, error) {
 		AgentGatewayAddress:        env("INARI_AGENT_GATEWAY_ADDRESS", "https://inari-server.example.com"),
 		ESOSecretStore:             env("INARI_ESO_SECRET_STORE", "inari-platform"),
 
-		VaultAddr:    env("INARI_VAULT_ADDR", ""),
-		VaultToken:   env("INARI_VAULT_TOKEN", ""),
-		VaultKVMount: env("INARI_VAULT_KV_MOUNT", "secret"),
+		VaultAddr:        env("INARI_VAULT_ADDR", ""),
+		VaultToken:       env("INARI_VAULT_TOKEN", ""),
+		VaultKVMount:     env("INARI_VAULT_KV_MOUNT", "secret"),
+		VaultAuthMethod:  env("INARI_VAULT_AUTH_METHOD", "token"),
+		VaultK8sRole:     env("INARI_VAULT_K8S_ROLE", ""),
+		VaultK8sAuthPath: env("INARI_VAULT_K8S_AUTH_PATH", ""),
+		VaultK8sTokenPath: env("INARI_VAULT_K8S_TOKEN_PATH",
+			"/var/run/secrets/kubernetes.io/serviceaccount/token"),
 
 		CatalogOCIPath:          env("INARI_CATALOG_OCI_PATH", ""),
 		CatalogOCIIndexRef:      env("INARI_CATALOG_OCI_INDEX_REF", ""),

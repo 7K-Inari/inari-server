@@ -50,12 +50,22 @@ extraVolumeMounts: []
 
 # Platform Vault for ESO delivery of per-cluster OIDC client secrets
 # (registration exchange). Without addr, cluster registration fails
-# explicitly with pending_secret_delivery.
+# explicitly with pending_secret_delivery. Vault-side setup (policy,
+# Kubernetes auth role): docs/operator-guide/bootstrap.md "Platform Vault
+# setup" in inari-docs.
 vault:
   addr: ""
   kvMount: secret
-  # Secret holding the Vault token (policy: update on
-  # <kvMount>/data/inari/clusters/* only).
+  # Auth method: "token" (static token from tokenSecret; expires and needs
+  # out-of-band rotation + pod restart) or "kubernetes" (ServiceAccount JWT
+  # login; short-lived tokens, re-login on expiry/401 — no secret material).
+  authMethod: token
+  # Kubernetes auth: Vault role bound to the inari-server ServiceAccount
+  # (policy: update on <kvMount>/data/inari/clusters/* only). The auth mount
+  # path defaults to "kubernetes" server-side.
+  role: ""
+  # Token auth: Secret holding the Vault token (policy: update on
+  # <kvMount>/data/inari/clusters/* only). Ignored when authMethod=kubernetes.
   tokenSecret:
     name: inari-vault
     tokenKey: token

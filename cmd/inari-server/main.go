@@ -302,7 +302,17 @@ func run() error {
 	// matching ExternalSecret (pull, never push).
 	var secretWriter secrets.Writer
 	if cfg.VaultAddr != "" {
-		secretWriter = secrets.NewVaultWriter(cfg.VaultAddr, cfg.VaultToken, cfg.VaultKVMount)
+		switch cfg.VaultAuthMethod {
+		case "kubernetes":
+			if cfg.VaultK8sRole == "" {
+				log.Warn("INARI_VAULT_AUTH_METHOD=kubernetes requires INARI_VAULT_K8S_ROLE: cluster registration will fail with pending_secret_delivery")
+			} else {
+				secretWriter = secrets.NewVaultWriterKubernetes(cfg.VaultAddr, cfg.VaultKVMount,
+					cfg.VaultK8sRole, cfg.VaultK8sAuthPath, cfg.VaultK8sTokenPath)
+			}
+		default:
+			secretWriter = secrets.NewVaultWriter(cfg.VaultAddr, cfg.VaultToken, cfg.VaultKVMount)
+		}
 	} else {
 		log.Warn("INARI_VAULT_ADDR unset: cluster registration will fail with pending_secret_delivery")
 	}

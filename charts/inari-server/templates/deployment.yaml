@@ -53,11 +53,18 @@ spec:
               value: {{ .Values.vault.addr | quote }}
             - name: INARI_VAULT_KV_MOUNT
               value: {{ .Values.vault.kvMount | quote }}
+            - name: INARI_VAULT_AUTH_METHOD
+              value: {{ .Values.vault.authMethod | default "token" | quote }}
+            {{- if eq (.Values.vault.authMethod | default "token") "kubernetes" }}
+            - name: INARI_VAULT_K8S_ROLE
+              value: {{ required "vault.role is required when vault.authMethod=kubernetes" .Values.vault.role | quote }}
+            {{- else }}
             - name: INARI_VAULT_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.vault.tokenSecret.name }}
                   key: {{ .Values.vault.tokenSecret.tokenKey }}
+            {{- end }}
             {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}

@@ -41,9 +41,12 @@ var ErrProtocolVersion = errors.New("extensionhost: unsupported protocol version
 // not match the registry record.
 var ErrPluginIdentity = errors.New("extensionhost: plugin identity mismatch")
 
-// SupportedProtocolVersion is the plugin contract protocol version this
-// control plane speaks (inari.plugin.v1, handshake "1").
-const SupportedProtocolVersion = "1"
+// SupportedProtocolVersion is the plugin contract version this control plane
+// speaks. The value must equal the proto contract version reported in
+// PluginInfo.api_version (proto/inari/plugin/v1: "e.g. inari.plugin.v1") —
+// not the go-plugin wire protocol version ("1"); confusing the two rejects
+// every SDK-based plugin at handshake.
+const SupportedProtocolVersion = "inari.plugin.v1"
 
 // Store persists extension registry rows.
 type Store struct{}

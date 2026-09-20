@@ -577,6 +577,15 @@ func run() error {
 	router.Handle(regPath+"*", regHandler)
 	router.Handle(streamPath+"*", streamHandler)
 
+	// Extension-gateway tunnel (plan §5.8): extensions invoke imperative
+	// actions on tenant clusters. Mounted only when the shared gate token is
+	// configured (INARI_EXTENSION_GATEWAY_TOKEN); callers present it in the
+	// x-inari-extension-token header.
+	if path, handler := gateway.ExtensionInvokeHandler(cfg.ExtensionGatewayToken, 0); handler != nil {
+		router.Handle(path, handler)
+		log.Info("extension gateway tunnel enabled", "path", path)
+	}
+
 	// Extension proxy: wildcard path mounted on chi directly; the proxy runs
 	// its own token validation + FGA invoke check before forwarding to the
 	// verified sidecar (plan §5.8).

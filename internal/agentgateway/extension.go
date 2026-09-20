@@ -81,6 +81,10 @@ func (g *Gateway) invokeExtension(ctx context.Context, req *connect.Request[agen
 	if cluster.State != types.ClusterStateActive {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("cluster is %s, not active", cluster.State))
 	}
+	// The control plane owns the command journal id: stamp it into the
+	// payload — the agent's dispatcher dedupes/acks on
+	// InvokeAction.CommandId, and its ack must match our journal row.
+	req.Msg.CommandId = uuid.NewString()
 	anyPayload, err := anypb.New(req.Msg)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
@@ -90,7 +94,7 @@ func (g *Gateway) invokeExtension(ctx context.Context, req *connect.Request[agen
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	cmd := &types.AgentCommand{
-		ID:        uuid.NewString(),
+		ID:        req.Msg.CommandId,
 		ClusterID: clusterID,
 		Type:      agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_INVOKE_ACTION),
 		Payload:   raw,

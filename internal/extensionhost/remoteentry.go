@@ -154,7 +154,7 @@ func (f *RemoteEntryFetcher) fetchHTTP(ctx context.Context, rawURL string) ([]by
 	}
 	// SSRF guard: https only; plain http is permitted solely for loopback
 	// (dev harnesses and tests), never for routable addresses.
-	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
+	if u.Scheme != "https" && (u.Scheme != "http" || !isLoopbackHost(u.Hostname())) {
 		return nil, fmt.Errorf("%w: remoteEntry URL must be https (http allowed for loopback only)", ErrRemoteEntryFetch)
 	}
 	hc := f.HTTPClient

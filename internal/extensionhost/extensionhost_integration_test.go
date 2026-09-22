@@ -4,7 +4,13 @@ package extensionhost_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/testcontainers/testcontainers-go"
@@ -12,8 +18,12 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/7K-Inari/inari-server/internal/audit"
+	"github.com/7K-Inari/inari-server/internal/authn"
+	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/extensionhost"
+	"github.com/7K-Inari/inari-server/internal/httpserver"
+	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -189,4 +199,179 @@ func TestExtensionRegisterValidation(t *testing.T) {
 	}); err == nil {
 		t.Error("expected kind error")
 	}
+}
+
+// HTTP-level coverage for the UI registry routes (§5.8): the full router
+// stack (bearer middleware → authorizeOrg → handler) against a real service.
+type itValidator struct{ id *authn.Identity }
+
+func (v itValidator) Validate(_ context.Context, token string) (*authn.Identity, error) {
+	if token == "bad" {
+		return nil, errors.New("invalid token")
+	}
+	return v.id, nil
+}
+
+type itRelationAuthorizer struct{ deny map[string]bool }
+
+func (a itRelationAuthorizer) Check(_ context.Context, _, relation, _ string) (bool, error) {
+	return !a.deny[relation], nil
+}
+func (a itRelationAuthorizer) ListObjects(context.Context, string, string, string) ([]string, error) {
+	return nil, nil
+}
+
+type itTenantResolver struct{ org *types.Organization }
+
+func (r itTenantResolver) GetTenant(_ context.Context, slug string) (*types.Organization, error) {
+	if r.org == nil || r.org.Slug != slug {
+		return nil, tenancy.ErrOrgNotFound
+	}
+	return r.org, nil
+}
+
+type itReady struct{}
+
+func (itReady) Ping(context.Context) error { return nil }
+
+func TestUiExtensionHTTPRoutes(t *testing.T) {
+	svc := itService(t)
+	org := &types.Organization{ID: "org:1", Slug: "acme"}
+	id := &authn.Identity{Subject: "user-1", Organizations: []string{"acme"}}
+
+	content := []byte(`/* remoteEntry */`)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(content)
+	}))
+	t.Cleanup(upstream.Close)
+
+	fetcher := &extensionhost.RemoteEntryFetcher{}
+	router, api := httpserver.NewRouter(slog.New(slog.NewTextHandler(io.Discard, nil)), itValidator{id}, itReady{})
+	extensionhost.NewHandler(svc, itTenantResolver{org}, itRelationAuthorizer{}).
+		WithRemoteEntryFetcher(fetcher).RegisterRoutes(api)
+	extensionhost.NewUiAssetServer(svc, itTenantResolver{org}, fetcher).Mount(router)
+	srv := httptest.NewServer(router)
+	t.Cleanup(srv.Close)
+	base := srv.URL + "/api/v1/tenants/acme/extensions/ui"
+
+	do := func(t *testing.T, method, url, token, body string) *http.Response {
+		t.Helper()
+		var rdr io.Reader
+		if body != "" {
+			rdr = strings.NewReader(body)
+		}
+		req, err := http.NewRequest(method, url, rdr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		res, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+
+	t.Run("viewer cannot register", func(t *testing.T) {
+		r, api2 := httpserver.NewRouter(slog.New(slog.NewTextHandler(io.Discard, nil)), itValidator{id}, itReady{})
+		extensionhost.NewHandler(svc, itTenantResolver{org},
+			itRelationAuthorizer{deny: map[string]bool{authz.RelationPlatformEngineer: true}}).RegisterRoutes(api2)
+		s := httptest.NewServer(r)
+		t.Cleanup(s.Close)
+		req, _ := http.NewRequest(http.MethodPost, s.URL+"/api/v1/tenants/acme/extensions/ui",
+			strings.NewReader(`{"name":"cards","version":"0.1.0","remoteEntry":"https://example.com/r.js"}`))
+		req.Header.Set("Authorization", "Bearer good")
+		req.Header.Set("Content-Type", "application/json")
+		res, err := s.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusForbidden {
+			t.Errorf("status = %d, want 403", res.StatusCode)
+		}
+	})
+
+	t.Run("unauthenticated rejected", func(t *testing.T) {
+		res := do(t, http.MethodGet, base, "", "")
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusUnauthorized {
+			t.Errorf("status = %d, want 401", res.StatusCode)
+		}
+	})
+
+	t.Run("non-member org rejected", func(t *testing.T) {
+		res := do(t, http.MethodGet, srv.URL+"/api/v1/tenants/ghost/extensions/ui", "good", "")
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusForbidden {
+			t.Errorf("status = %d, want 403", res.StatusCode)
+		}
+	})
+
+	t.Run("register validation error", func(t *testing.T) {
+		res := do(t, http.MethodPost, base, "good", `{"name":"bad","version":"1"}`)
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusUnprocessableEntity {
+			t.Errorf("status = %d, want 422", res.StatusCode)
+		}
+	})
+
+	t.Run("register list serve unregister", func(t *testing.T) {
+		res := do(t, http.MethodPost, base, "good",
+			`{"name":"cards","version":"0.1.0","remoteEntry":"`+upstream.URL+`","slots":[{"kind":"catalog-card","name":"cost-badge"}]}`)
+		body, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("register status = %d body = %s", res.StatusCode, body)
+		}
+		var out struct {
+			Extension struct {
+				Name           string `json:"name"`
+				RemoteEntryURL string `json:"remoteEntryUrl"`
+				Enabled        bool   `json:"enabled"`
+			} `json:"extension"`
+		}
+		if err := json.Unmarshal(body, &out); err != nil {
+			t.Fatal(err)
+		}
+		wantURL := "/api/v1/tenants/acme/extensions/ui/cards/remoteEntry.js"
+		if out.Extension.RemoteEntryURL != wantURL {
+			t.Errorf("remoteEntryUrl = %q, want %q", out.Extension.RemoteEntryURL, wantURL)
+		}
+		if !out.Extension.Enabled {
+			t.Error("enabled = false, want true")
+		}
+
+		res = do(t, http.MethodGet, base, "good", "")
+		body, _ = io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode != http.StatusOK || !strings.Contains(string(body), `"cards"`) {
+			t.Errorf("list status = %d body = %s", res.StatusCode, body)
+		}
+
+		// The asset route is public (Module Federation script loads carry no
+		// Authorization header); it must serve the registered upstream bytes.
+		res = do(t, http.MethodGet, srv.URL+wantURL, "", "")
+		body, _ = io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode != http.StatusOK || string(body) != string(content) {
+			t.Errorf("asset status = %d body = %q", res.StatusCode, body)
+		}
+
+		res = do(t, http.MethodDelete, base+"/cards", "good", "")
+		res.Body.Close()
+		if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusNoContent {
+			t.Errorf("delete status = %d", res.StatusCode)
+		}
+		res = do(t, http.MethodGet, srv.URL+wantURL, "", "")
+		res.Body.Close()
+		if res.StatusCode != http.StatusNotFound {
+			t.Errorf("asset after delete status = %d, want 404", res.StatusCode)
+		}
+	})
 }

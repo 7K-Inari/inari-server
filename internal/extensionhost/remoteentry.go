@@ -16,6 +16,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -116,6 +118,59 @@ func (f *RemoteEntryFetcher) Fetch(ctx context.Context, desc *types.UiExtensionD
 		if got := hex.EncodeToString(sum[:]); got != desc.Checksum {
 			return nil, fmt.Errorf("%w: checksum mismatch: got %s want %s", ErrRemoteEntryFetch, got, desc.Checksum)
 		}
+	}
+	f.mu.Lock()
+	f.cache[key] = remoteEntryCacheEntry{body: body, fetchedAt: time.Now()}
+	f.mu.Unlock()
+	return body, nil
+}
+
+// maxAssetFileBytes caps sibling assets (webpack chunks are typically
+// smaller than the entry, but we allow headroom).
+const maxAssetFileBytes = 8 << 20
+
+// assetFileRe constrains served sibling filenames to a single safe path
+// segment (no traversal, no subdirectories).
+var assetFileRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+// FetchAsset fetches a sibling asset of the remote entry (e.g. webpack async
+// chunks) from the same source directory as remoteEntry.js. Only HTTP(S)
+// sources are supported for sibling assets; OCI remotes must ship a
+// self-contained remoteEntry.js. No checksum is applied to siblings (the
+// integrity pin covers the entry; siblings come from the same origin).
+func (f *RemoteEntryFetcher) FetchAsset(ctx context.Context, desc *types.UiExtensionDescriptor, file string) ([]byte, error) {
+	if desc == nil {
+		return nil, fmt.Errorf("%w: extension has no ui descriptor", ErrRemoteEntryFetch)
+	}
+	if !assetFileRe.MatchString(file) || strings.Contains(file, "..") {
+		return nil, fmt.Errorf("%w: invalid asset name %q", ErrRemoteEntryFetch, file)
+	}
+	if desc.RemoteEntry == "" {
+		return nil, fmt.Errorf("%w: sibling assets require a remoteEntry URL source", ErrRemoteEntryFetch)
+	}
+	key := cacheKey(desc) + "|" + file
+	f.mu.Lock()
+	if f.cache == nil {
+		f.cache = map[string]remoteEntryCacheEntry{}
+	}
+	if ent, ok := f.cache[key]; ok && time.Since(ent.fetchedAt) < f.ttl() {
+		body := ent.body
+		f.mu.Unlock()
+		return body, nil
+	}
+	f.mu.Unlock()
+
+	u, err := url.Parse(desc.RemoteEntry)
+	if err != nil || u.Host == "" {
+		return nil, fmt.Errorf("%w: invalid remoteEntry URL %q", ErrRemoteEntryFetch, desc.RemoteEntry)
+	}
+	u.Path = path.Join(path.Dir(u.Path), file)
+	body, err := f.fetchHTTP(ctx, u.String())
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxAssetFileBytes {
+		return nil, fmt.Errorf("%w: asset %s exceeds %d bytes", ErrRemoteEntryFetch, file, maxAssetFileBytes)
 	}
 	f.mu.Lock()
 	f.cache[key] = remoteEntryCacheEntry{body: body, fetchedAt: time.Now()}

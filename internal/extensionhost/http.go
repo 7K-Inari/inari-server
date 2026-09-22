@@ -333,6 +333,13 @@ func (h *Handler) registerUi(ctx context.Context, in *registerUiInput) (*uiExten
 	if version == "" {
 		version = "0.0.0"
 	}
+	// Invalidate the stale asset before the upsert: the cache is keyed by the
+	// descriptor, so invalidating the post-update record is a no-op and would
+	// orphan the old entry until the TTL.
+	prev, err := h.svc.GetUi(ctx, org.ID, in.Body.Name)
+	if err == nil {
+		h.invalidateUiCache(prev)
+	}
 	e, err := h.svc.RegisterUi(ctx, id.Subject, RegisterUiInput{
 		OrgID: org.ID, Name: in.Body.Name, Version: version,
 		RemoteEntry: remoteEntry, RemoteEntryOci: in.Body.RemoteEntryOci,
@@ -342,7 +349,6 @@ func (h *Handler) registerUi(ctx context.Context, in *registerUiInput) (*uiExten
 	if err != nil {
 		return nil, mapErr(err)
 	}
-	h.invalidateUiCache(e)
 	out := &uiExtensionOutput{}
 	out.Body.Extension = uiRemote(org.Slug, e)
 	return out, nil

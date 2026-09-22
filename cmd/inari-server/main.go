@@ -494,7 +494,7 @@ func run() error {
 	}
 	extHandler := extensionhost.NewHandler(extSvc, svc, authorizer).WithRemoteEntryFetcher(remoteEntries)
 	extProxy := extensionhost.NewProxy(extSvc, validator, authorizer)
-	extUiAssets := extensionhost.NewUiAssetServer(extSvc, svc, validator, authorizer, remoteEntries)
+	extUiAssets := extensionhost.NewUiAssetServer(extSvc, svc, remoteEntries)
 
 	// Tenant Zone Factory (plan §5.12): fake AWS/Crossplane backends by
 	// default (the M3 acceptance layer); the SDK impl requires

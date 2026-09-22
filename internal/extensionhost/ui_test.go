@@ -5,14 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/7K-Inari/inari-server/internal/authn"
+	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -140,7 +139,7 @@ type fakeTenants struct{ org *types.Organization }
 
 func (f fakeTenants) GetTenant(_ context.Context, slug string) (*types.Organization, error) {
 	if f.org == nil || f.org.Slug != slug {
-		return nil, fmt.Errorf("not found")
+		return nil, tenancy.ErrOrgNotFound
 	}
 	return f.org, nil
 }
@@ -159,27 +158,23 @@ func TestUiAssetServer(t *testing.T) {
 			Ui: &types.UiExtensionDescriptor{RemoteEntry: upstream.URL, Enabled: true},
 		}
 	}
-	id := &authn.Identity{Subject: "user-1", Organizations: []string{"acme"}}
 
-	newRouter := func(reg UiRegistry, az fakeAuthorizer) *chi.Mux {
+	newRouter := func(reg UiRegistry) *chi.Mux {
 		f := &RemoteEntryFetcher{}
-		s := NewUiAssetServer(reg, fakeTenants{org}, fakeValidator{id: id}, az, f)
+		s := NewUiAssetServer(reg, fakeTenants{org}, f)
 		r := chi.NewRouter()
 		s.Mount(r)
 		return r
 	}
-	do := func(r http.Handler, token string) *httptest.ResponseRecorder {
+	do := func(r http.Handler) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants/acme/extensions/ui/argocd/remoteEntry.js", nil)
-		if token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
 		rec := httptest.NewRecorder()
 		r.ServeHTTP(rec, req)
 		return rec
 	}
 
-	t.Run("serves javascript", func(t *testing.T) {
-		rec := do(newRouter(fakeUiRegistry{uiExt()}, fakeAuthorizer{allow: true}), "good")
+	t.Run("serves javascript without auth (Module Federation script load)", func(t *testing.T) {
+		rec := do(newRouter(fakeUiRegistry{uiExt()}))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("code = %d body = %q", rec.Code, rec.Body.String())
 		}
@@ -190,20 +185,20 @@ func TestUiAssetServer(t *testing.T) {
 			t.Errorf("body = %q", rec.Body.String())
 		}
 	})
-	t.Run("401 without token", func(t *testing.T) {
-		rec := do(newRouter(fakeUiRegistry{uiExt()}, fakeAuthorizer{allow: true}), "")
-		if rec.Code != http.StatusUnauthorized {
-			t.Errorf("code = %d", rec.Code)
-		}
-	})
-	t.Run("403 without viewer grant", func(t *testing.T) {
-		rec := do(newRouter(fakeUiRegistry{uiExt()}, fakeAuthorizer{allow: false}), "good")
-		if rec.Code != http.StatusForbidden {
-			t.Errorf("code = %d", rec.Code)
-		}
-	})
 	t.Run("404 unknown extension", func(t *testing.T) {
-		rec := do(newRouter(fakeUiRegistry{}, fakeAuthorizer{allow: true}), "good")
+		rec := do(newRouter(fakeUiRegistry{}))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("code = %d", rec.Code)
+		}
+	})
+	t.Run("404 unknown org", func(t *testing.T) {
+		f := &RemoteEntryFetcher{}
+		s := NewUiAssetServer(fakeUiRegistry{uiExt()}, fakeTenants{}, f)
+		r := chi.NewRouter()
+		s.Mount(r)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants/ghost/extensions/ui/argocd/remoteEntry.js", nil)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("code = %d", rec.Code)
 		}
@@ -211,20 +206,8 @@ func TestUiAssetServer(t *testing.T) {
 	t.Run("404 when disabled", func(t *testing.T) {
 		e := uiExt()
 		e.Ui.Enabled = false
-		rec := do(newRouter(fakeUiRegistry{e}, fakeAuthorizer{allow: true}), "good")
+		rec := do(newRouter(fakeUiRegistry{e}))
 		if rec.Code != http.StatusNotFound {
-			t.Errorf("code = %d", rec.Code)
-		}
-	})
-	t.Run("requiredPermission enforces invoke", func(t *testing.T) {
-		e := uiExt()
-		e.Ui.RequiredPermission = "extensions:invoke:argocd"
-		rec := do(newRouter(fakeUiRegistry{e}, fakeAuthorizer{allow: true}), "good")
-		if rec.Code != http.StatusOK {
-			t.Errorf("code = %d", rec.Code)
-		}
-		rec = do(newRouter(fakeUiRegistry{e}, fakeAuthorizer{allow: false}), "good")
-		if rec.Code != http.StatusForbidden {
 			t.Errorf("code = %d", rec.Code)
 		}
 	})

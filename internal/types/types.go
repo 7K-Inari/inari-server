@@ -1085,28 +1085,71 @@ const (
 	ExtensionStateStopped  = "stopped"
 )
 
-// Extension kinds (§5.8): v1 supports backend plugins only (UI/API
-// contribution kinds are platform backlog).
+// Extension kinds (§5.8). A single extension row may pair a backend plugin
+// with a UI remote (spec.kinds: [backend, ui]); kind records the backend
+// presence and the nullable Extension.Ui descriptor records the UI presence.
 const (
 	ExtensionKindBackend = "backend"
+	ExtensionKindUI      = "ui"
 )
+
+// UI extension slot kinds (§8.4): the typed extension-point blueprints a
+// Module Federation remote may register against. Kept in sync with
+// inari-ui-plugin-sdk SlotKind.
+const (
+	UiSlotNavItem        = "nav-item"
+	UiSlotCatalogCard    = "catalog-card"
+	UiSlotClusterTab     = "cluster-tab"
+	UiSlotInstanceAction = "instance-action"
+	UiSlotFormWidget     = "form-widget"
+	UiSlotPage           = "page"
+)
+
+// UiSlotDescriptor names one slot contribution of a UI extension.
+type UiSlotDescriptor struct {
+	Kind string `json:"kind"`
+	Name string `json:"name"`
+}
+
+// UiExtensionDescriptor is the UI half of an extension (plan §5.8): the
+// Module Federation remote source plus its declared slots. Exactly one of
+// RemoteEntry (external HTTPS URL) or RemoteEntryOci (oras artifact ref
+// carrying a remoteEntry.js layer) is set; the control plane serves the
+// asset itself and reports its own URL to the console. Checksum optionally
+// pins the sha256 (hex) of the fetched remoteEntry.js. RequiredPermission is
+// the extension RBAC verb the console requires before rendering the remote's
+// slots; empty defaults to `extensions:invoke:<name>` (fail closed,
+// mirroring the backend proxy's unconditional invoke check). The
+// remoteEntry.js asset itself is served without authentication — it is
+// public client-side JavaScript, integrity-pinned hub-side.
+type UiExtensionDescriptor struct {
+	RemoteEntry        string             `json:"remoteEntry,omitempty"`
+	RemoteEntryOci     string             `json:"remoteEntryOci,omitempty"`
+	Checksum           string             `json:"checksum,omitempty"`
+	Title              string             `json:"title,omitempty"`
+	Description        string             `json:"description,omitempty"`
+	RequiredPermission string             `json:"requiredPermission,omitempty"`
+	Slots              []UiSlotDescriptor `json:"slots"`
+	Enabled            bool               `json:"enabled"`
+}
 
 // Extension is a registered backend plugin (plan §5.9). The manifest is the
 // plugin-declared descriptor (capabilities, contributed routes); Endpoint is
 // the sidecar HTTP base URL the authenticated reverse proxy targets. Checksum
 // is the sha256 of the plugin binary/artifact verified at handshake.
 type Extension struct {
-	ID        string          `json:"id"`
-	OrgID     string          `json:"orgId,omitempty"` // empty = platform-global
-	Name      string          `json:"name"`
-	Version   string          `json:"version"`
-	Kind      string          `json:"kind"`
-	Manifest  json.RawMessage `json:"manifest,omitempty"`
-	Endpoint  string          `json:"endpoint"`
-	Checksum  string          `json:"checksum"`
-	State     string          `json:"state"`
-	CreatedAt time.Time       `json:"createdAt"`
-	UpdatedAt time.Time       `json:"updatedAt"`
+	ID        string                 `json:"id"`
+	OrgID     string                 `json:"orgId,omitempty"` // empty = platform-global
+	Name      string                 `json:"name"`
+	Version   string                 `json:"version"`
+	Kind      string                 `json:"kind"`
+	Manifest  json.RawMessage        `json:"manifest,omitempty"`
+	Ui        *UiExtensionDescriptor `json:"ui,omitempty"`
+	Endpoint  string                 `json:"endpoint"`
+	Checksum  string                 `json:"checksum"`
+	State     string                 `json:"state"`
+	CreatedAt time.Time              `json:"createdAt"`
+	UpdatedAt time.Time              `json:"updatedAt"`
 }
 
 // ExtensionPayload is the outbox payload for extension lifecycle events.

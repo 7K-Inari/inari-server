@@ -53,7 +53,7 @@ func TestVerifyHandshake(t *testing.T) {
 	ext := &types.Extension{Name: "argocd", Version: "0.1.0"}
 
 	t.Run("ok", func(t *testing.T) {
-		srv := pluginServer(t, &pluginv1.PluginInfo{Name: "argocd", Version: "0.1.0", ApiVersion: "1"})
+		srv := pluginServer(t, &pluginv1.PluginInfo{Name: "argocd", Version: "0.1.0", ApiVersion: "inari.plugin.v1"})
 		info, err := VerifyHandshake(context.Background(), srv.URL, ext)
 		if err != nil {
 			t.Fatalf("VerifyHandshake: %v", err)
@@ -72,7 +72,7 @@ func TestVerifyHandshake(t *testing.T) {
 	})
 
 	t.Run("identity mismatch", func(t *testing.T) {
-		srv := pluginServer(t, &pluginv1.PluginInfo{Name: "evil", Version: "0.1.0", ApiVersion: "1"})
+		srv := pluginServer(t, &pluginv1.PluginInfo{Name: "evil", Version: "0.1.0", ApiVersion: "inari.plugin.v1"})
 		_, err := VerifyHandshake(context.Background(), srv.URL, ext)
 		if !errors.Is(err, ErrPluginIdentity) {
 			t.Errorf("err = %v, want ErrPluginIdentity", err)

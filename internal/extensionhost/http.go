@@ -28,10 +28,18 @@ type Handler struct {
 	svc     *Service
 	tenants TenantResolver
 	authz   authz.Authorizer
+	fetcher *RemoteEntryFetcher
 }
 
 func NewHandler(svc *Service, tenants TenantResolver, az authz.Authorizer) *Handler {
 	return &Handler{svc: svc, tenants: tenants, authz: az}
+}
+
+// WithRemoteEntryFetcher wires the remoteEntry cache so registration writes
+// invalidate stale assets.
+func (h *Handler) WithRemoteEntryFetcher(f *RemoteEntryFetcher) *Handler {
+	h.fetcher = f
+	return h
 }
 
 // RegisterRoutes mounts the extension registry API on the huma API instance.
@@ -71,6 +79,34 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Summary:     "Run the SDK handshake and mark the extension ready",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.verify)
+	huma.Register(api, huma.Operation{
+		OperationID: "listUiExtensions",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/tenants/{org}/extensions/ui",
+		Summary:     "List UI extensions (Module Federation remotes)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.listUi)
+	huma.Register(api, huma.Operation{
+		OperationID: "registerUiExtension",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/tenants/{org}/extensions/ui",
+		Summary:     "Register or update a UI extension remote",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.registerUi)
+	huma.Register(api, huma.Operation{
+		OperationID: "unregisterUiExtension",
+		Method:      http.MethodDelete,
+		Path:        "/api/v1/tenants/{org}/extensions/ui/{name}",
+		Summary:     "Unregister a UI extension remote",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.unregisterUi)
+	huma.Register(api, huma.Operation{
+		OperationID: "selfExtensionPermissions",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/tenants/{org}/authz/self/extensions",
+		Summary:     "List the caller's effective extension invoke permissions",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.selfExtensionPermissions)
 }
 
 func (h *Handler) authorizeOrg(ctx context.Context, slug, relation string) (*types.Organization, *authn.Identity, error) {
@@ -106,6 +142,8 @@ func mapErr(err error) error {
 		return huma.Error404NotFound(ErrNotFound.Error())
 	case errors.Is(err, ErrInvalidInput):
 		return huma.Error422UnprocessableEntity(err.Error())
+	case errors.Is(err, ErrConflict):
+		return huma.Error409Conflict(err.Error())
 	}
 	return err
 }
@@ -210,5 +248,179 @@ func (h *Handler) verify(ctx context.Context, in *idInput) (*extensionOutput, er
 	}
 	out := &extensionOutput{}
 	out.Body.Extension = *e
+	return out, nil
+}
+
+/* UI extension registry (§5.8) -------------------------------------------- */
+
+// UiExtensionRemote is the console-facing projection of a UI extension
+// record (inari-ui UiExtensionRemote). RemoteEntryURL always points at the
+// control-plane-served asset — never the registered upstream URL.
+type UiExtensionRemote struct {
+	Name               string                   `json:"name"`
+	Version            string                   `json:"version"`
+	Title              string                   `json:"title,omitempty"`
+	Description        string                   `json:"description,omitempty"`
+	RemoteEntryURL     string                   `json:"remoteEntryUrl"`
+	Slots              []types.UiSlotDescriptor `json:"slots"`
+	RequiredPermission string                   `json:"requiredPermission,omitempty"`
+	Enabled            bool                     `json:"enabled"`
+}
+
+func uiRemote(orgSlug string, e *types.Extension) UiExtensionRemote {
+	d := e.Ui
+	return UiExtensionRemote{
+		Name: e.Name, Version: e.Version, Title: d.Title, Description: d.Description,
+		RemoteEntryURL: "/api/v1/tenants/" + orgSlug + "/extensions/ui/" + e.Name + "/remoteEntry.js",
+		Slots:          d.Slots, RequiredPermission: d.RequiredPermission, Enabled: d.Enabled,
+	}
+}
+
+type listUiInput struct {
+	Org string `path:"org"`
+}
+
+type listUiOutput struct {
+	Body struct {
+		Extensions []UiExtensionRemote `json:"extensions"`
+	}
+}
+
+func (h *Handler) listUi(ctx context.Context, in *listUiInput) (*listUiOutput, error) {
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	if err != nil {
+		return nil, err
+	}
+	exts, err := h.svc.ListUi(ctx, org.ID)
+	if err != nil {
+		return nil, err
+	}
+	out := &listUiOutput{}
+	out.Body.Extensions = make([]UiExtensionRemote, 0, len(exts))
+	for i := range exts {
+		out.Body.Extensions = append(out.Body.Extensions, uiRemote(org.Slug, &exts[i]))
+	}
+	return out, nil
+}
+
+type registerUiInput struct {
+	Org  string `path:"org"`
+	Body struct {
+		Name    string `json:"name"`
+		Version string `json:"version,omitempty"`
+		// RemoteEntryURL is the console client's field name; RemoteEntry is
+		// the manifest (extension.yaml spec.ui.remoteEntry) name. Exactly one
+		// of these or RemoteEntryOci must be set.
+		RemoteEntryURL     string                   `json:"remoteEntryUrl,omitempty"`
+		RemoteEntry        string                   `json:"remoteEntry,omitempty"`
+		RemoteEntryOci     string                   `json:"remoteEntryOci,omitempty"`
+		Checksum           string                   `json:"checksum,omitempty"`
+		Title              string                   `json:"title,omitempty"`
+		Description        string                   `json:"description,omitempty"`
+		RequiredPermission string                   `json:"requiredPermission,omitempty"`
+		Slots              []types.UiSlotDescriptor `json:"slots,omitempty"`
+		Enabled            *bool                    `json:"enabled,omitempty"`
+	}
+}
+
+type uiExtensionOutput struct {
+	Body struct {
+		Extension UiExtensionRemote `json:"extension"`
+	}
+}
+
+func (h *Handler) registerUi(ctx context.Context, in *registerUiInput) (*uiExtensionOutput, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	if err != nil {
+		return nil, err
+	}
+	remoteEntry := in.Body.RemoteEntry
+	if remoteEntry == "" {
+		remoteEntry = in.Body.RemoteEntryURL
+	}
+	version := in.Body.Version
+	if version == "" {
+		version = "0.0.0"
+	}
+	// Invalidate the stale asset before the upsert: the cache is keyed by the
+	// descriptor, so invalidating the post-update record is a no-op and would
+	// orphan the old entry until the TTL.
+	prev, err := h.svc.GetUi(ctx, org.ID, in.Body.Name)
+	if err == nil {
+		h.invalidateUiCache(prev)
+	}
+	e, err := h.svc.RegisterUi(ctx, id.Subject, RegisterUiInput{
+		OrgID: org.ID, Name: in.Body.Name, Version: version,
+		RemoteEntry: remoteEntry, RemoteEntryOci: in.Body.RemoteEntryOci,
+		Checksum: in.Body.Checksum, Title: in.Body.Title, Description: in.Body.Description,
+		RequiredPermission: in.Body.RequiredPermission, Slots: in.Body.Slots, Enabled: in.Body.Enabled,
+	})
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	out := &uiExtensionOutput{}
+	out.Body.Extension = uiRemote(org.Slug, e)
+	return out, nil
+}
+
+type uiNameInput struct {
+	Org  string `path:"org"`
+	Name string `path:"name"`
+}
+
+func (h *Handler) unregisterUi(ctx context.Context, in *uiNameInput) (*struct{}, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	if err != nil {
+		return nil, err
+	}
+	e, err := h.svc.GetUi(ctx, org.ID, in.Name)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	if err := h.svc.UnregisterUi(ctx, id.Subject, org.ID, in.Name); err != nil {
+		return nil, mapErr(err)
+	}
+	h.invalidateUiCache(e)
+	return nil, nil
+}
+
+func (h *Handler) invalidateUiCache(e *types.Extension) {
+	if h.fetcher != nil && e != nil {
+		h.fetcher.Invalidate(e.Ui)
+	}
+}
+
+// Self-permissions (§5.8): the console hides slots for extensions the caller
+// may not invoke (inari-ui src/ext/rbac.ts). Returns the extension RBAC
+// verbs ("extensions:invoke:<name>") the caller holds in this tenant. The
+// FGA invoke relation already rolls up org roles (platform-engineer,
+// developer) via the parent tuple, so per-extension checks suffice;
+// extension counts per org are small.
+type selfPermissionsOutput struct {
+	Body struct {
+		Permissions []string `json:"permissions"`
+	}
+}
+
+func (h *Handler) selfExtensionPermissions(ctx context.Context, in *listUiInput) (*selfPermissionsOutput, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	if err != nil {
+		return nil, err
+	}
+	exts, err := h.svc.List(ctx, org.ID)
+	if err != nil {
+		return nil, err
+	}
+	out := &selfPermissionsOutput{}
+	out.Body.Permissions = []string{}
+	for i := range exts {
+		ok, err := h.authz.Check(ctx, authz.UserObject(id.Subject), authz.RelationInvoke, authz.ExtensionObject(exts[i].ID))
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			out.Body.Permissions = append(out.Body.Permissions, "extensions:invoke:"+exts[i].Name)
+		}
+	}
 	return out, nil
 }

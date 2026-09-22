@@ -92,6 +92,20 @@ func (q *Queue) CompletePendingByType(ctx context.Context, clusterID, cmdType, m
 	return err
 }
 
+// Get returns one command by id (used by the extension-gateway tunnel to
+// await the agent's ack).
+func (q *Queue) Get(ctx context.Context, id string) (*types.AgentCommand, error) {
+	const sql = `SELECT id, cluster_id, type, payload, status, attempts, result_message, created_at, updated_at
+	             FROM agent_commands WHERE id = $1`
+	var c types.AgentCommand
+	err := q.db.Pool.QueryRow(ctx, sql, id).Scan(&c.ID, &c.ClusterID, &c.Type, &c.Payload,
+		&c.Status, &c.Attempts, &c.ResultMessage, &c.CreatedAt, &c.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
 // Complete records the agent's ack/nack; the command leaves the queue.
 func (q *Queue) Complete(ctx context.Context, id string, status types.CommandStatus, message string) error {
 	if status != types.CommandStatusAcked && status != types.CommandStatusNacked {

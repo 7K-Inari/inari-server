@@ -29,6 +29,10 @@ var ErrNotFound = errors.New("extensionhost: extension not found")
 // ErrInvalidInput is returned for malformed registration requests.
 var ErrInvalidInput = errors.New("extensionhost: invalid input")
 
+// ErrConflict is returned when a concurrent registration creates the same
+// extension row first (unique name); the caller should retry as an upsert.
+var ErrConflict = errors.New("extensionhost: extension name conflict")
+
 // ErrChecksumMismatch is returned when the plugin binary does not match the
 // registered sha256 checksum.
 var ErrChecksumMismatch = errors.New("extensionhost: checksum mismatch")
@@ -380,9 +384,19 @@ func (s *Service) RegisterUi(ctx context.Context, actor string, in RegisterUiInp
 	if err := validateUiInput(in); err != nil {
 		return nil, err
 	}
+	e, err := s.store.getByName(ctx, s.db.Pool, in.Name)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
+	created := errors.Is(err, ErrNotFound)
+	// Enabled defaults to true on creation; on update an omitted flag
+	// preserves the stored value so re-registrations don't silently
+	// re-enable a disabled extension.
 	enabled := true
 	if in.Enabled != nil {
 		enabled = *in.Enabled
+	} else if !created && e.Ui != nil {
+		enabled = e.Ui.Enabled
 	}
 	desc := types.UiExtensionDescriptor{
 		RemoteEntry: in.RemoteEntry, RemoteEntryOci: in.RemoteEntryOci, Checksum: in.Checksum,
@@ -396,11 +410,6 @@ func (s *Service) RegisterUi(ctx context.Context, actor string, in RegisterUiInp
 	if err != nil {
 		return nil, err
 	}
-	e, err := s.store.getByName(ctx, s.db.Pool, in.Name)
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		return nil, err
-	}
-	created := errors.Is(err, ErrNotFound)
 	if created {
 		e = &types.Extension{
 			ID: "extension:" + newUUID(), OrgID: in.OrgID, Name: in.Name, Version: in.Version,
@@ -413,6 +422,9 @@ func (s *Service) RegisterUi(ctx context.Context, actor string, in RegisterUiInp
 	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		if created {
 			if err := s.store.create(ctx, tx, e); err != nil {
+				if isUniqueViolation(err) {
+					return ErrConflict
+				}
 				return err
 			}
 			if err := s.store.setState(ctx, tx, e.ID, types.ExtensionStateReady); err != nil {
@@ -523,4 +535,15 @@ func newUUID() string {
 	buf[6] = (buf[6] & 0x0f) | 0x40
 	buf[8] = (buf[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", buf[0:4], buf[4:6], buf[6:8], buf[8:10], buf[10:16])
+}
+
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	var pgErr interface{ SQLState() string }
+	if errors.As(err, &pgErr) {
+		return pgErr.SQLState() == "23505"
+	}
+	return false
 }

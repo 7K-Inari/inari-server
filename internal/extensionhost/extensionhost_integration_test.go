@@ -156,6 +156,30 @@ func TestUiExtensionRegistryLifecycle(t *testing.T) {
 		t.Errorf("listUi = %v, %v", list, err)
 	}
 
+	// Upsert without an enabled flag preserves the stored value (no silent
+	// re-enable of a disabled extension).
+	disabled := false
+	e3, err := svc.RegisterUi(ctx, "user-1", extensionhost.RegisterUiInput{
+		OrgID: "org:1", Name: "cards", Version: "0.2.1",
+		RemoteEntryOci: "ghcr.io/7k-inari/cards-ui:0.2.1", Enabled: &disabled,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e3.Ui.Enabled {
+		t.Fatal("explicit enabled=false not stored")
+	}
+	e4, err := svc.RegisterUi(ctx, "user-1", extensionhost.RegisterUiInput{
+		OrgID: "org:1", Name: "cards", Version: "0.2.2",
+		RemoteEntryOci: "ghcr.io/7k-inari/cards-ui:0.2.2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e4.Ui.Enabled {
+		t.Error("upsert with omitted enabled silently re-enabled the extension")
+	}
+
 	// Paired backend: UI registration on a backend row keeps the row.
 	b, err := svc.Register(ctx, "user-1", extensionhost.RegisterInput{
 		OrgID: "org:1", Name: "argocd", Version: "0.1.0", Endpoint: "http://127.0.0.1:9001",
@@ -212,9 +236,16 @@ func (v itValidator) Validate(_ context.Context, token string) (*authn.Identity,
 	return v.id, nil
 }
 
-type itRelationAuthorizer struct{ deny map[string]bool }
+type itRelationAuthorizer struct {
+	deny map[string]bool
+	// invokeObjects, when non-nil, gates RelationInvoke checks per object.
+	invokeObjects map[string]bool
+}
 
-func (a itRelationAuthorizer) Check(_ context.Context, _, relation, _ string) (bool, error) {
+func (a itRelationAuthorizer) Check(_ context.Context, _, relation, object string) (bool, error) {
+	if relation == authz.RelationInvoke && a.invokeObjects != nil {
+		return a.invokeObjects[object], nil
+	}
 	return !a.deny[relation], nil
 }
 func (a itRelationAuthorizer) ListObjects(context.Context, string, string, string) ([]string, error) {
@@ -372,6 +403,50 @@ func TestUiExtensionHTTPRoutes(t *testing.T) {
 		res.Body.Close()
 		if res.StatusCode != http.StatusNotFound {
 			t.Errorf("asset after delete status = %d, want 404", res.StatusCode)
+		}
+	})
+
+	t.Run("self extension permissions reflect FGA invoke", func(t *testing.T) {
+		ctx := context.Background()
+		if _, err := svc.RegisterUi(ctx, "user-1", extensionhost.RegisterUiInput{
+			OrgID: "org:1", Name: "allowed-ext", Version: "1", RemoteEntry: "https://example.com/a.js",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := svc.RegisterUi(ctx, "user-1", extensionhost.RegisterUiInput{
+			OrgID: "org:1", Name: "denied-ext", Version: "1", RemoteEntry: "https://example.com/b.js",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		allowed, err := svc.GetUi(ctx, "org:1", "allowed-ext")
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, api2 := httpserver.NewRouter(slog.New(slog.NewTextHandler(io.Discard, nil)), itValidator{id}, itReady{})
+		extensionhost.NewHandler(svc, itTenantResolver{org}, itRelationAuthorizer{
+			invokeObjects: map[string]bool{authz.ExtensionObject(allowed.ID): true},
+		}).RegisterRoutes(api2)
+		s := httptest.NewServer(r)
+		t.Cleanup(s.Close)
+		req, _ := http.NewRequest(http.MethodGet, s.URL+"/api/v1/tenants/acme/authz/self/extensions", nil)
+		req.Header.Set("Authorization", "Bearer good")
+		res, err := s.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d body = %s", res.StatusCode, body)
+		}
+		var out struct {
+			Permissions []string `json:"permissions"`
+		}
+		if err := json.Unmarshal(body, &out); err != nil {
+			t.Fatal(err)
+		}
+		if len(out.Permissions) != 1 || out.Permissions[0] != "extensions:invoke:allowed-ext" {
+			t.Errorf("permissions = %v, want [extensions:invoke:allowed-ext]", out.Permissions)
 		}
 	})
 }

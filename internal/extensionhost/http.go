@@ -100,6 +100,13 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Summary:     "Unregister a UI extension remote",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.unregisterUi)
+	huma.Register(api, huma.Operation{
+		OperationID: "selfExtensionPermissions",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/tenants/{org}/authz/self/extensions",
+		Summary:     "List the caller's effective extension invoke permissions",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.selfExtensionPermissions)
 }
 
 func (h *Handler) authorizeOrg(ctx context.Context, slug, relation string) (*types.Organization, *authn.Identity, error) {
@@ -135,6 +142,8 @@ func mapErr(err error) error {
 		return huma.Error404NotFound(ErrNotFound.Error())
 	case errors.Is(err, ErrInvalidInput):
 		return huma.Error422UnprocessableEntity(err.Error())
+	case errors.Is(err, ErrConflict):
+		return huma.Error409Conflict(err.Error())
 	}
 	return err
 }
@@ -379,4 +388,39 @@ func (h *Handler) invalidateUiCache(e *types.Extension) {
 	if h.fetcher != nil && e != nil {
 		h.fetcher.Invalidate(e.Ui)
 	}
+}
+
+// Self-permissions (§5.8): the console hides slots for extensions the caller
+// may not invoke (inari-ui src/ext/rbac.ts). Returns the extension RBAC
+// verbs ("extensions:invoke:<name>") the caller holds in this tenant. The
+// FGA invoke relation already rolls up org roles (platform-engineer,
+// developer) via the parent tuple, so per-extension checks suffice;
+// extension counts per org are small.
+type selfPermissionsOutput struct {
+	Body struct {
+		Permissions []string `json:"permissions"`
+	}
+}
+
+func (h *Handler) selfExtensionPermissions(ctx context.Context, in *listUiInput) (*selfPermissionsOutput, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	if err != nil {
+		return nil, err
+	}
+	exts, err := h.svc.List(ctx, org.ID)
+	if err != nil {
+		return nil, err
+	}
+	out := &selfPermissionsOutput{}
+	out.Body.Permissions = []string{}
+	for i := range exts {
+		ok, err := h.authz.Check(ctx, authz.UserObject(id.Subject), authz.RelationInvoke, authz.ExtensionObject(exts[i].ID))
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			out.Body.Permissions = append(out.Body.Permissions, "extensions:invoke:"+exts[i].Name)
+		}
+	}
+	return out, nil
 }

@@ -1117,8 +1117,11 @@ type UiSlotDescriptor struct {
 // carrying a remoteEntry.js layer) is set; the control plane serves the
 // asset itself and reports its own URL to the console. Checksum optionally
 // pins the sha256 (hex) of the fetched remoteEntry.js. RequiredPermission is
-// the extension RBAC verb (`extensions:invoke:<name>`); empty means any
-// tenant viewer may load it.
+// the extension RBAC verb the console requires before rendering the remote's
+// slots; empty defaults to `extensions:invoke:<name>` (fail closed,
+// mirroring the backend proxy's unconditional invoke check). The
+// remoteEntry.js asset itself is served without authentication — it is
+// public client-side JavaScript, integrity-pinned hub-side.
 type UiExtensionDescriptor struct {
 	RemoteEntry        string             `json:"remoteEntry,omitempty"`
 	RemoteEntryOci     string             `json:"remoteEntryOci,omitempty"`

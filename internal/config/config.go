@@ -155,6 +155,13 @@ type Config struct {
 	ScaffoldTemplateCosignIdentity string
 	ScaffoldTemplateCosignIssuer   string
 
+	// UiExtensionVerify enables cosign keyless signature verification of
+	// UI-extension remoteEntry OCI artifacts before the control plane serves
+	// them (§5.8/§5.10). Identity/issuer regexps pin the signing workflow.
+	UiExtensionVerify         bool
+	UiExtensionCosignIdentity string
+	UiExtensionCosignIssuer   string
+
 	// PlatformGitOpsRepo is the platform GitOps repository receiving
 	// per-tenant CR manifests (tenants/<slug>/, docs/platform-gitops.md);
 	// empty disables manifest commits.
@@ -241,6 +248,10 @@ func Load() (*Config, error) {
 		ScaffoldTemplateVerify:         boolEnv("INARI_SCAFFOLD_TEMPLATE_VERIFY", false),
 		ScaffoldTemplateCosignIdentity: env("INARI_SCAFFOLD_TEMPLATE_COSIGN_IDENTITY", ""),
 		ScaffoldTemplateCosignIssuer:   env("INARI_SCAFFOLD_TEMPLATE_COSIGN_ISSUER", ""),
+
+		UiExtensionVerify:         boolEnv("INARI_UI_EXTENSION_VERIFY", false),
+		UiExtensionCosignIdentity: env("INARI_UI_EXTENSION_COSIGN_IDENTITY", ""),
+		UiExtensionCosignIssuer:   env("INARI_UI_EXTENSION_COSIGN_ISSUER", ""),
 
 		PlatformGitOpsRepo: env("INARI_PLATFORM_GITOPS_REPO", ""),
 

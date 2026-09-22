@@ -98,6 +98,83 @@ func TestExtensionRegistryLifecycle(t *testing.T) {
 	}
 }
 
+func TestUiExtensionRegistryLifecycle(t *testing.T) {
+	svc := itService(t)
+	ctx := context.Background()
+
+	// UI-only registration: row created with kind=ui, straight to ready.
+	e, err := svc.RegisterUi(ctx, "user-1", extensionhost.RegisterUiInput{
+		OrgID: "org:1", Name: "cards", Version: "0.1.0",
+		RemoteEntry: "https://example.com/remoteEntry.js",
+		Slots:       []types.UiSlotDescriptor{{Kind: types.UiSlotCatalogCard, Name: "cost-badge"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Kind != types.ExtensionKindUI || e.State != types.ExtensionStateReady {
+		t.Fatalf("kind/state = %q/%q", e.Kind, e.State)
+	}
+	if e.Ui == nil || !e.Ui.Enabled || len(e.Ui.Slots) != 1 {
+		t.Fatalf("ui descriptor = %+v", e.Ui)
+	}
+
+	got, err := svc.GetUi(ctx, "org:1", "cards")
+	if err != nil || got.Ui.RemoteEntry != "https://example.com/remoteEntry.js" {
+		t.Fatalf("getUi = %+v, %v", got, err)
+	}
+	if _, err := svc.GetUi(ctx, "org:2", "cards"); !errors.Is(err, extensionhost.ErrNotFound) {
+		t.Errorf("cross-org getUi = %v, want ErrNotFound", err)
+	}
+
+	// Upsert: same name re-POST updates the descriptor and version.
+	e2, err := svc.RegisterUi(ctx, "user-1", extensionhost.RegisterUiInput{
+		OrgID: "org:1", Name: "cards", Version: "0.2.0",
+		RemoteEntryOci: "ghcr.io/7k-inari/cards-ui:0.2.0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e2.ID != e.ID {
+		t.Errorf("upsert created a new row: %q != %q", e2.ID, e.ID)
+	}
+	if e2.Version != "0.2.0" || e2.Ui.RemoteEntryOci == "" || e2.Ui.RemoteEntry != "" {
+		t.Errorf("upsert result = %+v ui=%+v", e2, e2.Ui)
+	}
+
+	list, err := svc.ListUi(ctx, "org:1")
+	if err != nil || len(list) != 1 {
+		t.Errorf("listUi = %v, %v", list, err)
+	}
+
+	// Paired backend: UI registration on a backend row keeps the row.
+	b, err := svc.Register(ctx, "user-1", extensionhost.RegisterInput{
+		OrgID: "org:1", Name: "argocd", Version: "0.1.0", Endpoint: "http://127.0.0.1:9001",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.RegisterUi(ctx, "user-1", extensionhost.RegisterUiInput{
+		OrgID: "org:1", Name: "argocd", Version: "0.1.0",
+		RemoteEntry: "https://example.com/argocd/remoteEntry.js",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.UnregisterUi(ctx, "user-1", "org:1", "argocd"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Get(ctx, "org:1", b.ID); err != nil {
+		t.Errorf("backend row removed with ui descriptor: %v", err)
+	}
+
+	// UI-only unregister deletes the row.
+	if err := svc.UnregisterUi(ctx, "user-1", "org:1", "cards"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.GetUi(ctx, "org:1", "cards"); !errors.Is(err, extensionhost.ErrNotFound) {
+		t.Errorf("getUi after unregister = %v, want ErrNotFound", err)
+	}
+}
+
 func TestExtensionRegisterValidation(t *testing.T) {
 	svc := itService(t)
 	ctx := context.Background()

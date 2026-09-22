@@ -482,8 +482,19 @@ func run() error {
 	// Extension Host (plan §5.8): plugin registry + authenticated reverse
 	// proxy for verified sidecars.
 	extSvc := extensionhost.NewService(database, extensionhost.NewStore(), auditStore)
-	extHandler := extensionhost.NewHandler(extSvc, svc, authorizer)
+	// UI extension remotes (§5.8): the control plane serves remoteEntry.js
+	// itself; OCI sources are cosign-verified when
+	// INARI_UI_EXTENSION_VERIFY=true (same trust model as template OCI).
+	remoteEntries := &extensionhost.RemoteEntryFetcher{}
+	if cfg.UiExtensionVerify {
+		remoteEntries.Verifier = &scaffold.CosignVerifier{
+			CertIdentityRegexp:   cfg.UiExtensionCosignIdentity,
+			CertOidcIssuerRegexp: cfg.UiExtensionCosignIssuer,
+		}
+	}
+	extHandler := extensionhost.NewHandler(extSvc, svc, authorizer).WithRemoteEntryFetcher(remoteEntries)
 	extProxy := extensionhost.NewProxy(extSvc, validator, authorizer)
+	extUiAssets := extensionhost.NewUiAssetServer(extSvc, svc, validator, authorizer, remoteEntries)
 
 	// Tenant Zone Factory (plan §5.12): fake AWS/Crossplane backends by
 	// default (the M3 acceptance layer); the SDK impl requires
@@ -590,6 +601,7 @@ func run() error {
 	// its own token validation + FGA invoke check before forwarding to the
 	// verified sidecar (plan §5.8).
 	extProxy.Mount(router)
+	extUiAssets.Mount(router)
 
 	// Unencrypted HTTP/2 (h2c) so Connect-RPC streaming works without TLS
 	// termination in front (agents may dial directly in dev). HTTP/1.1 stays

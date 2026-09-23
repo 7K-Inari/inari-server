@@ -353,8 +353,20 @@ func (p *Provider) commitTree(ctx context.Context, owner, name, branch string, f
 	}
 	if status == http.StatusNotFound || status == http.StatusConflict {
 		// Empty repo: GitHub answers 404 (missing ref) or 409 ("Git
-		// Repository is empty"); seed from a root tree with no parent.
-		baseSHA = ""
+		// Repository is empty"). The git-database API (blobs/trees) also 409s
+		// while a repo has zero commits, so seed it through the Contents API
+		// (which accepts the first commit) and then take the normal path.
+		if s, err := p.do(ctx, http.MethodPut, base+"/contents/.inari-init", map[string]any{
+			"message": "chore: initialize repository",
+			"content":  base64.StdEncoding.EncodeToString([]byte("initialized by inari\n")),
+			"branch":   branch,
+		}, nil); err != nil && s != http.StatusUnprocessableEntity {
+			return "", fmt.Errorf("gitprovider github: seed empty repo: %w", err)
+		}
+		if _, err := p.do(ctx, http.MethodGet, base+"/git/ref/heads/"+branch, nil, &ref); err != nil {
+			return "", err
+		}
+		baseSHA = ref.Object.SHA
 	} else {
 		baseSHA = ref.Object.SHA
 	}

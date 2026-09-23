@@ -519,4 +519,61 @@ fi
 kubectl auth can-i create deployments --as="oidc:rbac-viewer" --as-group="/tenant-$TENANT/viewers" >/dev/null \
   || die "editor-mapped group cannot create deployments after the mapping change"
 
-log "PASS: golden path verified (tenant → register → stream → $CAPS capabilities → heartbeats → RBAC materialization)"
+# --- Policy evaluate matrix (issue #77) --------------------------------------
+# deny-latest-image (target=request, Rego) must deny :latest and untagged
+# images and allow pinned tags and digests via POST /policies/evaluate.
+log "creating the deny-latest-image policy"
+DENY_LATEST_REGO=$(cat <<'REGO'
+package inari.policy
+
+deny contains {"rule": "deny-latest-image", "reason": "image uses the :latest tag", "remediation": "pin an immutable tag or digest"} if {
+	endswith(input.spec.image, ":latest")
+}
+
+deny contains {"rule": "deny-latest-image", "reason": "image has no tag or digest", "remediation": "pin an immutable tag or digest"} if {
+	img := input.spec.image
+	not contains(img, ":")
+	not contains(img, "@")
+}
+REGO
+)
+POLICY_RESP=$(kubectl -n "$NAMESPACE" exec "$TOOLS" -- curl -s -m 20 -X POST \
+  -H "Authorization: Bearer $(user_token)" -H "Content-Type: application/json" \
+  -d "$(jq -n --arg src "$DENY_LATEST_REGO" '{name:"deny-latest-image",target:"request",engine:"rego",source:$src}')" \
+  "$API/tenants/$TENANT/policies")
+POLICY_ID=$(jq -r '.policy.id // empty' <<<"$POLICY_RESP")
+[ -n "$POLICY_ID" ] || die "policy creation failed: $POLICY_RESP"
+
+eval_image() { # image -> evaluate response JSON
+  kubectl -n "$NAMESPACE" exec "$TOOLS" -- curl -s -m 20 -X POST \
+    -H "Authorization: Bearer $(user_token)" -H "Content-Type: application/json" \
+    -d "$(jq -n --arg img "$1" '{itemId:"demo",version:"1.0.0",spec:{image:$img}}')" \
+    "$API/tenants/$TENANT/policies/evaluate"
+}
+
+D=$(eval_image "ghcr.io/acme/app:latest")
+jq -e '.decision.allow == false and ([.decision.violations[]?.rule] | index("deny-latest-image"))' <<<"$D" >/dev/null \
+  || die ":latest image must be denied with a deny-latest-image violation: $D"
+D=$(eval_image "ghcr.io/acme/app")
+jq -e '.decision.allow == false' <<<"$D" >/dev/null \
+  || die "untagged image must be denied: $D"
+D=$(eval_image "ghcr.io/acme/app:1.4.2")
+jq -e '.decision.allow == true and (.decision.violations | length == 0)' <<<"$D" >/dev/null \
+  || die "pinned tag must be allowed: $D"
+DIGEST="ghcr.io/acme/app@sha256:$(printf 'a%.0s' $(seq 1 64))"
+D=$(eval_image "$DIGEST")
+jq -e '.decision.allow == true and (.decision.violations | length == 0)' <<<"$D" >/dev/null \
+  || die "digest-pinned image must be allowed: $D"
+
+# Negative control: a disabled policy must not gate the request.
+xcurl -X PUT -H "Authorization: Bearer $(user_token)" -H "Content-Type: application/json" \
+  -d "$(jq -n --arg src "$DENY_LATEST_REGO" '{source:$src,enabled:false}')" \
+  -o /dev/null "$API/tenants/$TENANT/policies/$POLICY_ID" || die "disabling the policy failed"
+D=$(eval_image "ghcr.io/acme/app:latest")
+jq -e '.decision.allow == true' <<<"$D" >/dev/null \
+  || die "disabled policy must not deny: $D"
+xcurl -X PUT -H "Authorization: Bearer $(user_token)" -H "Content-Type: application/json" \
+  -d "$(jq -n --arg src "$DENY_LATEST_REGO" '{source:$src,enabled:true}')" \
+  -o /dev/null "$API/tenants/$TENANT/policies/$POLICY_ID" || die "re-enabling the policy failed"
+
+log "PASS: golden path verified (tenant → register → stream → $CAPS capabilities → heartbeats → RBAC materialization → policy evaluate matrix)"

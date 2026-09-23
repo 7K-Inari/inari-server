@@ -27,18 +27,6 @@ func ValidLifecycleAction(action string) bool {
 	return false
 }
 
-// checkLifecycleApprover enforces the platform-admin policy on lifecycle
-// decisions; the requester may never decide their own request.
-func checkLifecycleApprover(req *types.ApprovalRequest, approver string, role types.Role) error {
-	if sameActor(req.Requester, approver) {
-		return ErrSelfApproval
-	}
-	if role != types.RoleOrgAdmin && role != types.RolePlatformEngineer {
-		return ErrApproverRole
-	}
-	return nil
-}
-
 // authorizeLifecycleApprover enforces the platform-admin policy on lifecycle
 // decisions. A tenant freeze sweeps the org's FGA tuples before its lifecycle
 // approval is decided (ADR-0006), so authorization accepts a platform

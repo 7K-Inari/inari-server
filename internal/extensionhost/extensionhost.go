@@ -249,6 +249,9 @@ func (s *Service) Register(ctx context.Context, actor string, in RegisterInput) 
 	}
 	err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		if err := s.store.create(ctx, tx, e); err != nil {
+			if isUniqueViolation(err) {
+				return ErrConflict
+			}
 			return err
 		}
 		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
@@ -262,6 +265,12 @@ func (s *Service) Register(ctx context.Context, actor string, in RegisterInput) 
 		})
 	})
 	if err != nil {
+		// A name conflict means a concurrent registration won and owns the
+		// ext-<name> client (KeycloakAdmin.CreateClient is 409-tolerant):
+		// never disable it here — there is no re-enable path.
+		if errors.Is(err, ErrConflict) {
+			return nil, nil, ErrConflict
+		}
 		// Best-effort compensation for the external Keycloak write.
 		if clientID != "" {
 			if rbErr := s.clients.DisableClient(ctx, clientID); rbErr != nil {

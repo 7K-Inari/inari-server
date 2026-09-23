@@ -393,7 +393,7 @@ func run() error {
 	}
 
 	approvalsSvc := approvals.NewService(database, approvals.NewStore(database), auditStore, svc, catalogSvc).WithPlatformChecker(authorizer)
-	approvalsHandler := approvals.NewHandler(approvalsSvc, svc, authorizer)
+	approvalsHandler := approvals.NewHandler(approvalsSvc, svc, authorizer, svc)
 	go approvalsSvc.RunExpiryLoop(ctx, time.Minute)
 
 	// Tenant deletion (ADR-0006): approval-gated, resumable teardown state

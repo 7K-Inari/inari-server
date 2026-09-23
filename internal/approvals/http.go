@@ -27,10 +27,14 @@ type Handler struct {
 	svc     *Service
 	tenants TenantResolver
 	authz   authz.Authorizer
+	// roles backs the decide fallback that survives the tenant-freeze FGA
+	// tuple sweep (RoleOf reads org_memberships). May be nil in route-only
+	// wiring (export-openapi); the fallback then denies.
+	roles RoleResolver
 }
 
-func NewHandler(svc *Service, tenants TenantResolver, az authz.Authorizer) *Handler {
-	return &Handler{svc: svc, tenants: tenants, authz: az}
+func NewHandler(svc *Service, tenants TenantResolver, az authz.Authorizer, roles RoleResolver) *Handler {
+	return &Handler{svc: svc, tenants: tenants, authz: az, roles: roles}
 }
 
 // RegisterRoutes mounts the approvals API on the huma API instance.
@@ -349,15 +353,59 @@ func (h *Handler) authorizePlatform(ctx context.Context) error {
 	return nil
 }
 
+// roleAtLeast reports whether role ranks at or above floor
+// (viewer < developer < platform-engineer < org-admin).
+func roleAtLeast(role, floor types.Role) bool {
+	rank := map[types.Role]int{
+		types.RoleViewer:           1,
+		types.RoleDeveloper:        2,
+		types.RolePlatformEngineer: 3,
+		types.RoleOrgAdmin:         4,
+	}
+	return rank[role] >= rank[floor] && role.Valid()
+}
+
+// authorizeOrgRole is the last-resort decide authorization: a DB-backed org
+// role check (RoleOf reads org_memberships) that survives the tenant-freeze
+// FGA tuple sweep, unlike the OpenFGA org check in authorizeOrg.
+func (h *Handler) authorizeOrgRole(ctx context.Context, orgID string, floor types.Role) error {
+	id := httpserver.IdentityFromContext(ctx)
+	if id == nil {
+		return huma.Error401Unauthorized("unauthenticated")
+	}
+	if h.roles == nil {
+		return huma.Error403Forbidden("insufficient permissions")
+	}
+	role, err := h.roles.RoleOf(ctx, orgID, id.Subject)
+	if err != nil {
+		return err
+	}
+	if !roleAtLeast(role, floor) {
+		return huma.Error403Forbidden("insufficient permissions")
+	}
+	return nil
+}
+
 func (h *Handler) decide(ctx context.Context, in *decideInput) (*decideOutput, error) {
 	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
 	if err != nil {
 		// A tenant freeze sweeps the org's FGA tuples before its lifecycle
 		// approval is decided, so even legitimate approvers lose org-level
-		// access. Platform org_creators may still decide (lifecycle
-		// approvals are platform-admin gated by design).
+		// access. Fall back to the platform org_creator check, then to the
+		// DB-backed org role (issue #74: both are needed — org-admins are
+		// not org_creators, and lifecycle approvals are platform-admin
+		// gated by design).
 		if perr := h.authorizePlatform(ctx); perr != nil {
-			return nil, err
+			orgID := ""
+			if org, rerr := h.tenants.GetTenant(ctx, in.Org); rerr == nil {
+				orgID = org.ID
+			}
+			if orgID == "" {
+				return nil, err
+			}
+			if rerr := h.authorizeOrgRole(ctx, orgID, types.RoleDeveloper); rerr != nil {
+				return nil, err
+			}
 		}
 		id = httpserver.IdentityFromContext(ctx)
 		org, err = h.tenants.GetTenant(ctx, in.Org)

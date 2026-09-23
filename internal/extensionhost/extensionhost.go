@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 
 	"github.com/jackc/pgx/v5"
@@ -376,7 +377,11 @@ func (s *Service) Unregister(ctx context.Context, actor, orgID, id string) error
 		return err
 	}
 	if err := s.disableIdentity(ctx, actor, e); err != nil {
-		return err
+		// Best-effort revocation: the registry row deletion is the
+		// authoritative operation; a disabled-later client still expires on
+		// its token TTL.
+		slog.WarnContext(ctx, "extensionhost: disable identity failed, continuing unregister",
+			"extensionId", id, "clientId", e.ClientID, "error", err)
 	}
 	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		if err := s.store.delete(ctx, tx, id); err != nil {

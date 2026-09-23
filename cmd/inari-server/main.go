@@ -481,7 +481,16 @@ func run() error {
 
 	// Extension Host (plan §5.8): plugin registry + authenticated reverse
 	// proxy for verified sidecars.
-	extSvc := extensionhost.NewService(database, extensionhost.NewStore(), auditStore)
+	extSvc := extensionhost.NewService(database, extensionhost.NewStore(), auditStore).
+		WithExtensionClientManager(idp, cfg.ExtensionGatewayAudience)
+	// Tunnel authentication (ADR-0008): extension backends present
+	// client_credentials JWTs minted for their own ext-<name> client; the
+	// validator is pinned to the gateway audience.
+	extValidator, err := authn.NewOIDCValidator(ctx, cfg.OIDCIssuerURL, cfg.ExtensionGatewayAudience)
+	if err != nil {
+		return err
+	}
+	extAuth := extensionhost.NewTunnelAuthenticator(extSvc, extValidator)
 	// UI extension remotes (§5.8): the control plane serves remoteEntry.js
 	// itself; OCI sources are cosign-verified when
 	// INARI_UI_EXTENSION_VERIFY=true (same trust model as template OCI).
@@ -589,10 +598,9 @@ func run() error {
 	router.Handle(streamPath+"*", streamHandler)
 
 	// Extension-gateway tunnel (plan §5.8): extensions invoke imperative
-	// actions on tenant clusters. Mounted only when the shared gate token is
-	// configured (INARI_EXTENSION_GATEWAY_TOKEN); callers present it in the
-	// x-inari-extension-token header.
-	if path, handler := gateway.ExtensionInvokeHandler(cfg.ExtensionGatewayToken, 0); handler != nil {
+	// actions on tenant clusters, authenticated by per-extension identity
+	// (ADR-0008): Authorization: Bearer <client_credentials JWT>.
+	if path, handler := gateway.ExtensionInvokeHandler(extAuth, 0); handler != nil {
 		router.Handle(path, handler)
 		log.Info("extension gateway tunnel enabled", "path", path)
 	}

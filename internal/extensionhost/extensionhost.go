@@ -57,13 +57,13 @@ type Store struct{}
 
 func NewStore() *Store { return &Store{} }
 
-const extCols = `id, COALESCE(org_id, ''), name, version, kind, manifest, ui, endpoint, checksum, state, created_at, updated_at`
+const extCols = `id, COALESCE(org_id, ''), name, version, kind, manifest, ui, endpoint, checksum, state, client_id, created_at, updated_at`
 
 func scanExtension(row interface{ Scan(...any) error }) (*types.Extension, error) {
 	var e types.Extension
 	var ui json.RawMessage
 	err := row.Scan(&e.ID, &e.OrgID, &e.Name, &e.Version, &e.Kind, &e.Manifest, &ui,
-		&e.Endpoint, &e.Checksum, &e.State, &e.CreatedAt, &e.UpdatedAt)
+		&e.Endpoint, &e.Checksum, &e.State, &e.ClientID, &e.CreatedAt, &e.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -78,10 +78,10 @@ func scanExtension(row interface{ Scan(...any) error }) (*types.Extension, error
 }
 
 func (s *Store) create(ctx context.Context, q db.Querier, e *types.Extension) error {
-	const sql = `INSERT INTO extensions (id, org_id, name, version, kind, manifest, endpoint, checksum)
-	             VALUES ($1, NULLIF($2,''), $3, $4, $5, $6, $7, $8)
+	const sql = `INSERT INTO extensions (id, org_id, name, version, kind, manifest, endpoint, checksum, client_id)
+	             VALUES ($1, NULLIF($2,''), $3, $4, $5, $6, $7, $8, $9)
 	             RETURNING state, created_at, updated_at`
-	return q.QueryRow(ctx, sql, e.ID, e.OrgID, e.Name, e.Version, e.Kind, e.Manifest, e.Endpoint, e.Checksum).
+	return q.QueryRow(ctx, sql, e.ID, e.OrgID, e.Name, e.Version, e.Kind, e.Manifest, e.Endpoint, e.Checksum, e.ClientID).
 		Scan(&e.State, &e.CreatedAt, &e.UpdatedAt)
 }
 
@@ -99,6 +99,20 @@ func (s *Store) getByName(ctx context.Context, q db.Querier, name string) (*type
 		return nil, ErrNotFound
 	}
 	return e, err
+}
+
+func (s *Store) getByClientID(ctx context.Context, q db.Querier, clientID string) (*types.Extension, error) {
+	e, err := scanExtension(q.QueryRow(ctx, `SELECT `+extCols+` FROM extensions WHERE client_id = $1`, clientID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return e, err
+}
+
+func (s *Store) setClientID(ctx context.Context, q db.Querier, id, clientID string) error {
+	const sql = `UPDATE extensions SET client_id = $2, updated_at = now() WHERE id = $1`
+	_, err := q.Exec(ctx, sql, id, clientID)
+	return err
 }
 
 func (s *Store) list(ctx context.Context, q db.Querier, orgID string) ([]types.Extension, error) {
@@ -164,6 +178,10 @@ type Service struct {
 	db    *db.DB
 	store *Store
 	audit *audit.Store
+	// clients provisions per-extension Keycloak identity (ADR-0008); nil
+	// leaves registrations without a tunnel identity (dev/fake mode).
+	clients         ExtensionClientManager
+	gatewayAudience string
 }
 
 func NewService(d *db.DB, store *Store, auditStore *audit.Store) *Service {
@@ -184,28 +202,49 @@ type RegisterInput struct {
 }
 
 // Register adds an extension in pending state and emits
-// extension.registered (drives the FGA parent tuple).
-func (s *Service) Register(ctx context.Context, actor string, in RegisterInput) (*types.Extension, error) {
+// extension.registered (drives the FGA parent tuple). When the identity
+// client manager is wired, the extension's Keycloak client is provisioned
+// first and its credentials are returned exactly once (ADR-0008); creds is
+// nil when identity provisioning is not configured.
+func (s *Service) Register(ctx context.Context, actor string, in RegisterInput) (*types.Extension, *types.ExtensionCredentials, error) {
 	if in.Name == "" || in.Version == "" {
-		return nil, fmt.Errorf("%w: name and version are required", ErrInvalidInput)
+		return nil, nil, fmt.Errorf("%w: name and version are required", ErrInvalidInput)
 	}
 	if in.OrgID == "" {
-		return nil, fmt.Errorf("%w: orgID is required", ErrInvalidInput)
+		return nil, nil, fmt.Errorf("%w: orgID is required", ErrInvalidInput)
 	}
 	kind := in.Kind
 	if kind == "" {
 		kind = types.ExtensionKindBackend
 	}
 	if kind != types.ExtensionKindBackend {
-		return nil, fmt.Errorf("%w: kind must be backend", ErrInvalidInput)
+		return nil, nil, fmt.Errorf("%w: kind must be backend", ErrInvalidInput)
 	}
 	manifest := in.Manifest
 	if len(manifest) == 0 {
 		manifest = json.RawMessage(`{}`)
 	}
+	var creds *types.ExtensionCredentials
+	clientID := ""
+	// Fast-path name conflict against the registry so a duplicate fails
+	// before any Keycloak write (same pattern as identity clients).
+	if s.clients != nil {
+		if _, err := s.store.getByName(ctx, s.db.Pool, in.Name); err == nil {
+			return nil, nil, ErrConflict
+		} else if !errors.Is(err, ErrNotFound) {
+			return nil, nil, err
+		}
+		secret, err := s.clients.CreateClient(ctx, ExtensionClientSpec(in.Name, s.gatewayAudience))
+		if err != nil {
+			return nil, nil, fmt.Errorf("extensionhost: create extension keycloak client: %w", err)
+		}
+		clientID = ExtensionClientID(in.Name)
+		creds = &types.ExtensionCredentials{ClientID: clientID, Secret: secret}
+	}
 	e := &types.Extension{
 		ID: "extension:" + newUUID(), OrgID: in.OrgID, Name: in.Name, Version: in.Version,
 		Kind: kind, Manifest: manifest, Endpoint: in.Endpoint, Checksum: in.Checksum,
+		ClientID: clientID,
 	}
 	err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		if err := s.store.create(ctx, tx, e); err != nil {
@@ -222,9 +261,15 @@ func (s *Service) Register(ctx context.Context, actor string, in RegisterInput) 
 		})
 	})
 	if err != nil {
-		return nil, err
+		// Best-effort compensation for the external Keycloak write.
+		if clientID != "" {
+			if rbErr := s.clients.DisableClient(ctx, clientID); rbErr != nil {
+				return nil, nil, fmt.Errorf("extensionhost: %w (rollback keycloak client: %v)", err, rbErr)
+			}
+		}
+		return nil, nil, err
 	}
-	return e, nil
+	return e, creds, nil
 }
 
 // Get returns one extension scoped to the org (404 on mismatch).
@@ -242,6 +287,15 @@ func (s *Service) Get(ctx context.Context, orgID, id string) (*types.Extension, 
 // GetByName returns one extension by its unique name (proxy path lookup).
 func (s *Service) GetByName(ctx context.Context, name string) (*types.Extension, error) {
 	return s.store.getByName(ctx, s.db.Pool, name)
+}
+
+// GetByClientID resolves one extension by its Keycloak clientId (tunnel
+// authentication lookup).
+func (s *Service) GetByClientID(ctx context.Context, clientID string) (*types.Extension, error) {
+	if clientID == "" {
+		return nil, ErrNotFound
+	}
+	return s.store.getByClientID(ctx, s.db.Pool, clientID)
 }
 
 // List returns the org's extensions.
@@ -299,6 +353,13 @@ func (s *Service) Verify(ctx context.Context, actor, orgID, id string) (*types.E
 		}
 		return nil, err
 	}
+	// Lazy identity ensure for rows registered before ADR-0008 (the secret
+	// minted here is discarded; admins fetch one via the rotate route).
+	if s.clients != nil && e.ClientID == "" {
+		if _, err := s.ensureIdentity(ctx, actor, e); err != nil {
+			return nil, err
+		}
+	}
 	if err := s.SetState(ctx, actor, id, types.ExtensionStateReady); err != nil {
 		return nil, err
 	}
@@ -306,8 +367,15 @@ func (s *Service) Verify(ctx context.Context, actor, orgID, id string) (*types.E
 }
 
 // Unregister removes the extension and its FGA parent tuple (via outbox).
+// The extension's Keycloak client is disabled first (revocation); a client
+// disable failure does not block the registry deletion but is audited by
+// disableIdentity only on success.
 func (s *Service) Unregister(ctx context.Context, actor, orgID, id string) error {
-	if _, err := s.Get(ctx, orgID, id); err != nil {
+	e, err := s.Get(ctx, orgID, id)
+	if err != nil {
+		return err
+	}
+	if err := s.disableIdentity(ctx, actor, e); err != nil {
 		return err
 	}
 	return s.db.WithTx(ctx, func(tx pgx.Tx) error {

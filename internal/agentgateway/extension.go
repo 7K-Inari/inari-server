@@ -26,48 +26,59 @@ import (
 // cluster carried in the x-inari-tenant / x-inari-cluster metadata headers
 // (contract defined by 7K-Inari/inari-ext-argocd, the reference extension).
 //
-// The handler is mounted only when INARI_EXTENSION_GATEWAY_TOKEN is set and
-// callers must present it in the x-inari-extension-token header: the hop from
-// the extension backend to the gateway is platform-internal machine traffic
-// (the end user was already authenticated + authorized by the extension proxy
-// at /api/extensions/<name>/*). A per-extension identity model replaces the
-// shared token in the production design.
+// Authentication is per-extension identity (ADR-0008): the extension backend
+// presents a client_credentials JWT (Authorization: Bearer) minted for its
+// dedicated Keycloak service-account client; the ExtensionAuthenticator
+// resolves it to the registry row. The hop from the extension backend to the
+// gateway is platform-internal machine traffic (the end user was already
+// authenticated + authorized by the extension proxy at /api/extensions/<name>/*).
 const (
 	// ExtensionInvokeProcedure is the full gRPC method path.
 	ExtensionInvokeProcedure = "/inari.extensions.v1.AgentGateway/InvokeAction"
 	// MetadataTenant/MetadataCluster route the command to a cluster.
 	MetadataTenant    = "x-inari-tenant"
 	MetadataCluster   = "x-inari-cluster"
-	headerExtToken    = "x-inari-extension-token"
 	defaultInvokeWait = 60 * time.Second
 )
 
+// ExtensionAuthenticator resolves the calling extension from tunnel request
+// metadata (implemented by extensionhost.TunnelAuthenticator; faked in
+// tests). Implementations return connect-coded errors.
+type ExtensionAuthenticator interface {
+	AuthenticateExtension(ctx context.Context, header http.Header) (*types.Extension, error)
+}
+
 // ExtensionInvokeHandler returns the ConnectRPC handler for the extension
-// tunnel, or nil when the shared gate token is not configured (feature off).
-// clusterLookup resolves clusters; queue receives the command and the handler
-// polls it until the agent's CommandAck lands (the stream's dispatch/ack loop
-// does the transport).
-func (g *Gateway) ExtensionInvokeHandler(token string, wait time.Duration) (string, http.Handler) {
-	if token == "" {
+// tunnel, or nil when no authenticator is wired (feature off). queue
+// receives the command and the handler polls it until the agent's
+// CommandAck lands (the stream's dispatch/ack loop does the transport).
+func (g *Gateway) ExtensionInvokeHandler(auth ExtensionAuthenticator, wait time.Duration) (string, http.Handler) {
+	if auth == nil {
 		return "", nil
 	}
 	if wait <= 0 {
 		wait = defaultInvokeWait
 	}
 	fn := func(ctx context.Context, req *connect.Request[agentv1.InvokeAction]) (*connect.Response[agentv1.CommandAck], error) {
-		return g.invokeExtension(ctx, req, token, wait)
+		return g.invokeExtension(ctx, req, auth, wait)
 	}
 	return ExtensionInvokeProcedure, connect.NewUnaryHandler(ExtensionInvokeProcedure, fn)
 }
 
 // invokeExtension authenticates the extension, routes the command to the
 // cluster, and waits for the agent's ack.
-func (g *Gateway) invokeExtension(ctx context.Context, req *connect.Request[agentv1.InvokeAction], token string, wait time.Duration) (*connect.Response[agentv1.CommandAck], error) {
-	if req.Header().Get(headerExtToken) != token {
-		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("extension gateway token missing or invalid"))
+func (g *Gateway) invokeExtension(ctx context.Context, req *connect.Request[agentv1.InvokeAction], auth ExtensionAuthenticator, wait time.Duration) (*connect.Response[agentv1.CommandAck], error) {
+	ext, err := auth.AuthenticateExtension(ctx, req.Header())
+	if err != nil {
+		return nil, err
 	}
 	orgID := req.Header().Get(MetadataTenant)
 	clusterID := req.Header().Get(MetadataCluster)
+	// Org binding: an org-scoped extension may only invoke within its own
+	// tenant; platform-global extensions are unbound (ADR-0008).
+	if ext.OrgID != "" && ext.OrgID != orgID {
+		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("extension may not invoke in this tenant"))
+	}
 	if orgID == "" || clusterID == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("%s and %s metadata required", MetadataTenant, MetadataCluster))
 	}
@@ -92,6 +103,15 @@ func (g *Gateway) invokeExtension(ctx context.Context, req *connect.Request[agen
 	raw, err := protojson.Marshal(anyPayload)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	// Audit attribution (ADR-0008): every tunneled action is attributable to
+	// the extension's own identity before it is queued.
+	if err := g.audit.Record(ctx, g.db.Pool, &types.AuditEvent{
+		OrgID: orgID, Actor: ext.ClientID, Action: "extension.action_invoked",
+		ObjectType: "cluster", ObjectID: clusterID,
+		Payload: []byte(fmt.Sprintf(`{"extension":%q,"action":%q,"commandId":%q}`, ext.Name, req.Msg.Action, req.Msg.CommandId)),
+	}); err != nil {
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("audit: %w", err))
 	}
 	cmd := &types.AgentCommand{
 		ID:        req.Msg.CommandId,

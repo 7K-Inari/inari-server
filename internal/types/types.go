@@ -1138,18 +1138,29 @@ type UiExtensionDescriptor struct {
 // the sidecar HTTP base URL the authenticated reverse proxy targets. Checksum
 // is the sha256 of the plugin binary/artifact verified at handshake.
 type Extension struct {
-	ID        string                 `json:"id"`
-	OrgID     string                 `json:"orgId,omitempty"` // empty = platform-global
-	Name      string                 `json:"name"`
-	Version   string                 `json:"version"`
-	Kind      string                 `json:"kind"`
-	Manifest  json.RawMessage        `json:"manifest,omitempty"`
-	Ui        *UiExtensionDescriptor `json:"ui,omitempty"`
-	Endpoint  string                 `json:"endpoint"`
-	Checksum  string                 `json:"checksum"`
-	State     string                 `json:"state"`
-	CreatedAt time.Time              `json:"createdAt"`
-	UpdatedAt time.Time              `json:"updatedAt"`
+	ID       string                 `json:"id"`
+	OrgID    string                 `json:"orgId,omitempty"` // empty = platform-global
+	Name     string                 `json:"name"`
+	Version  string                 `json:"version"`
+	Kind     string                 `json:"kind"`
+	Manifest json.RawMessage        `json:"manifest,omitempty"`
+	Ui       *UiExtensionDescriptor `json:"ui,omitempty"`
+	Endpoint string                 `json:"endpoint"`
+	Checksum string                 `json:"checksum"`
+	State    string                 `json:"state"`
+	// ClientID is the dedicated Keycloak service-account client (ext-<name>)
+	// gating the extension-gateway tunnel (ADR-0008). The secret is never
+	// persisted — returned once at provision/rotate.
+	ClientID  string    `json:"clientId,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// ExtensionCredentials is the one-time secret material for an extension's
+// Keycloak client, returned only by register/rotate responses.
+type ExtensionCredentials struct {
+	ClientID string `json:"clientId"`
+	Secret   string `json:"secret"`
 }
 
 // ExtensionPayload is the outbox payload for extension lifecycle events.

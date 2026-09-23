@@ -75,6 +75,9 @@ type Gateway struct {
 	db         *db.DB
 	cfg        Config
 	statusSink StatusSink
+	// instanceFailures marks instances failed when the agent NACKs a
+	// delivery command (nil-safe).
+	instanceFailures InstanceFailureSink
 	// secrets delivers the OIDC client secret to the platform secret store
 	// (ESO path); nil means delivery is unconfigured and registration fails
 	// explicitly with CodeUnavailable instead of a false promise.
@@ -99,6 +102,9 @@ type SecretStoreLookup interface {
 // client as a platform-resource row (platformresources.Service seam, M7.W2).
 type PlatformResourceEnsurer interface {
 	EnsureDesired(ctx context.Context, orgID string, kind types.PlatformResourceKind, name string, desired json.RawMessage) (*types.PlatformResource, error)
+	// MarkProvisioned records a server-provisioned resource as ready (no
+	// operator CR exists for it; the control plane is the source of truth).
+	MarkProvisioned(ctx context.Context, orgID string, kind types.PlatformResourceKind, name, detail string) error
 }
 
 // WithPlatformResources wires the platform-resources module so cluster
@@ -147,6 +153,16 @@ type StatusSink interface {
 // SetStatusSink wires the inventory module post-construction (nil-safe:
 // status updates are drop-and-log until wired).
 func (g *Gateway) SetStatusSink(s StatusSink) { g.statusSink = s }
+
+// InstanceFailureSink surfaces agent delivery failures on resource
+// instances (inventory.Service seam).
+type InstanceFailureSink interface {
+	MarkFailed(ctx context.Context, instanceID, message string) error
+}
+
+// SetInstanceFailureSink wires the inventory failure sink (nil-safe: NACKed
+// app registrations only update the command row until wired).
+func (g *Gateway) SetInstanceFailureSink(s InstanceFailureSink) { g.instanceFailures = s }
 
 type agentIdentityKey struct{}
 

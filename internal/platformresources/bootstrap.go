@@ -77,35 +77,44 @@ func TenantManifestPaths(slug string) []string {
 // git-directories generator (see docs/platform-gitops.md). Filenames are
 // stable so repeat commits are no-ops when nothing changed.
 func RenderTenantManifests(org *types.Organization) []gitprovider.File {
-	realm := fmt.Sprintf(`apiVersion: inari.7k.io/v1alpha1
+	realm := fmt.Sprintf(`apiVersion: platform.inari.io/v1alpha1
 kind: KeycloakRealm
 metadata:
   name: %s
   labels:
-    inari.7k.io/org: %s
+    platform.inari.io/org: %s
 spec:
+  tenantID: %s
+  namespace: tenant-%s
   realm: inari
-  organization: %s
-`, org.Slug, org.ID, org.Slug)
-	dns := fmt.Sprintf(`apiVersion: inari.7k.io/v1alpha1
+  displayName: %s
+`, org.Slug, org.Slug, org.Slug, org.Slug, org.DisplayName)
+	dns := fmt.Sprintf(`apiVersion: platform.inari.io/v1alpha1
 kind: DNSRecord
 metadata:
   name: %s
   labels:
-    inari.7k.io/org: %s
+    platform.inari.io/org: %s
 spec:
-  mode: shared-record
-  recordPrefix: tenant-%s
-`, org.Slug, org.ID, org.Slug)
-	ns := fmt.Sprintf(`apiVersion: inari.7k.io/v1alpha1
+  tenantID: %s
+  namespace: tenant-%s
+  zoneRef: shared
+  endpoints:
+    - dnsName: tenant-%s.7kgroup.org
+      recordType: CNAME
+      targets:
+        - inari.7kgroup.org
+`, org.Slug, org.Slug, org.Slug, org.Slug, org.Slug)
+	ns := fmt.Sprintf(`apiVersion: platform.inari.io/v1alpha1
 kind: TenantNamespace
 metadata:
   name: tenant-%s
   labels:
-    inari.7k.io/org: %s
+    platform.inari.io/org: %s
 spec:
+  tenantID: %s
   namespace: tenant-%s
-`, org.Slug, org.ID, org.Slug)
+`, org.Slug, org.Slug, org.Slug, org.Slug)
 	paths := TenantManifestPaths(org.Slug)
 	return []gitprovider.File{
 		{Path: paths[0], Content: []byte(realm)},

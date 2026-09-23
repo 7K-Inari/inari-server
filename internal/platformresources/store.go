@@ -88,6 +88,17 @@ func (s *Store) UpsertDesired(ctx context.Context, q db.Querier, r *types.Platfo
 
 // ApplyStatus records the agent-reported status for the (kind, name) row.
 // Returns the updated resource and whether it matched an existing row.
+// MarkProvisioned sets a terminal ready status for server-provisioned
+// resources (e.g. the per-cluster keycloak client, which the control plane
+// creates directly via the Keycloak Admin API — no operator CR exists).
+func (s *Store) MarkProvisioned(ctx context.Context, q db.Querier, kind types.PlatformResourceKind, name, detail string) error {
+	const sql = `UPDATE platform_resources
+	             SET status = 'ready', detail = $3, reported_at = now(), updated_at = now()
+	             WHERE kind = $1 AND name = $2`
+	_, err := q.Exec(ctx, sql, kind, name, detail)
+	return err
+}
+
 func (s *Store) ApplyStatus(ctx context.Context, q db.Querier, kind types.PlatformResourceKind, name string,
 	status types.PlatformResourceStatus, detail string, reportedAt *time.Time) (*types.PlatformResource, bool, error) {
 	const sql = `UPDATE platform_resources

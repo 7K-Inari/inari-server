@@ -261,6 +261,11 @@ func run() error {
 			if err := platformResourcesSvc.EnsureBaseResources(ctx, &org); err != nil {
 				slog.Error("platform resources backfill failed", "org", org.Slug, "error", err)
 			}
+			// Retire keycloak-client rows stuck in reconciling from before the
+			// MarkProvisioned wiring (registration now marks them directly).
+			if err := platformResourcesSvc.BackfillServerProvisioned(ctx, &org, idp); err != nil {
+				slog.Error("platform resources server-provisioned backfill failed", "org", org.Slug, "error", err)
+			}
 		}
 	}
 
@@ -411,6 +416,7 @@ func run() error {
 	// service itself is constructed with the tenancy module above.
 	platformResourcesHandler := platformresources.NewHandler(platformResourcesSvc, svc, authorizer)
 	gateway.SetStatusSink(statusSinkRouter{inv: inventorySvc, plat: platformResourcesSvc})
+	gateway.SetInstanceFailureSink(inventorySvc)
 
 	git, err := buildGitResolver(cfg, database)
 	if err != nil {
@@ -419,6 +425,9 @@ func run() error {
 	// Modules that address repos directly (scaffold, TZF) resolve
 	// credentials per repo via the platform app.
 	gitPerRepo := gitprovider.PerRepo{R: git}
+	if cfg.PlatformGitOpsRepo != "" {
+		platformResourcesSvc.WithGitOps(cfg.PlatformGitOpsRepo, gitPerRepo)
+	}
 	orchestratorSvc := orchestrator.NewService(database, inventory.NewStore(), catalogSvc, registry,
 		approvalsSvc, gateway.Queue(), git, auditStore)
 	orchestratorHandler := orchestrator.NewHandler(orchestratorSvc, svc, authorizer).

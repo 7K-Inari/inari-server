@@ -348,11 +348,12 @@ func (p *Provider) commitTree(ctx context.Context, owner, name, branch string, f
 		} `json:"object"`
 	}
 	status, err := p.do(ctx, http.MethodGet, base+"/git/ref/heads/"+branch, nil, &ref)
-	if err != nil && status != http.StatusNotFound {
+	if err != nil && status != http.StatusNotFound && status != http.StatusConflict {
 		return "", err
 	}
-	if status == http.StatusNotFound {
-		// Empty repo: seed from a root tree with no parent.
+	if status == http.StatusNotFound || status == http.StatusConflict {
+		// Empty repo: GitHub answers 404 (missing ref) or 409 ("Git
+		// Repository is empty"); seed from a root tree with no parent.
 		baseSHA = ""
 	} else {
 		baseSHA = ref.Object.SHA

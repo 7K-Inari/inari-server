@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -53,6 +54,15 @@ func (g *Gateway) RegisterCluster(ctx context.Context, req *connect.Request[agen
 	}
 	if err := g.secrets.Put(ctx, secrets.ClusterOIDCPath(cluster.ID), g.cfg.ESOSecretKey, secret); err != nil {
 		return nil, connect.NewError(connect.CodeUnavailable, fmt.Errorf("pending_secret_delivery: write secret store: %w", err))
+	}
+	// The client is provisioned + its secret delivered: the control plane is
+	// the source of truth for this resource (no operator CR is rendered for
+	// keycloak-client rows), so mark it ready here.
+	if g.platform != nil {
+		if err := g.platform.MarkProvisioned(ctx, cluster.OrgID, types.PlatformKindKeycloakClient, clientID,
+			"oidc client provisioned via keycloak admin api"); err != nil {
+			slog.Warn("agentgateway: mark keycloak-client provisioned", "cluster", cluster.ID, "error", err)
+		}
 	}
 
 	cluster, err = g.consumeToken(ctx, req.Msg.RegistrationToken)

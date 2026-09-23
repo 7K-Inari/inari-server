@@ -21,6 +21,7 @@ import (
 
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -34,6 +35,11 @@ type Service struct {
 	queue    CommandQueue
 	clusters ClusterLister
 	tenants  TenantResolver
+
+	// git + platformGitOpsRepo render tenant CR manifests into the platform
+	// GitOps repo on ops reconcile; empty repo disables the commit.
+	git                gitprovider.Provider
+	platformGitOpsRepo string
 }
 
 // CommandQueue is the agentgateway command-queue seam (at-least-once agent
@@ -60,6 +66,14 @@ func (s *Service) WithClusterLister(l ClusterLister) *Service { s.clusters = l; 
 // WithTenantResolver wires the tenant lookup used to resolve the platform
 // pseudo-org.
 func (s *Service) WithTenantResolver(t TenantResolver) *Service { s.tenants = t; return s }
+
+// WithGitOps wires the platform GitOps repo (repo + provider) so an ops
+// reconcile re-renders and commits the tenant's CR manifests — the lever
+// when the CRs were never (or wrongly) materialized.
+func (s *Service) WithGitOps(repo string, p gitprovider.Provider) *Service {
+	s.platformGitOpsRepo, s.git = repo, p
+	return s
+}
 
 // List returns all platform resources for an org.
 func (s *Service) List(ctx context.Context, orgID string) ([]types.PlatformResource, error) {
@@ -133,6 +147,19 @@ func (s *Service) RequestReconcile(ctx context.Context, actor string, org *types
 	if err != nil {
 		return 0, 0, err
 	}
+	// Re-render + commit the tenant's CR manifests to the platform GitOps
+	// repo so the ArgoCD sync can actually materialize them (idempotent:
+	// unchanged content is a no-op commit the provider may still record).
+	if s.git != nil && s.platformGitOpsRepo != "" {
+		if _, err := s.git.EnsureRepo(ctx, s.platformGitOpsRepo); err != nil {
+			return 0, 0, fmt.Errorf("platformresources: ensure platform gitops repo: %w", err)
+		}
+		files := RenderTenantManifests(org)
+		if _, err := s.git.CommitFiles(ctx, s.platformGitOpsRepo, "main", files,
+			"chore: re-render tenant platform resources for "+org.Slug); err != nil {
+			return 0, 0, fmt.Errorf("platformresources: commit tenant manifests: %w", err)
+		}
+	}
 	notified := 0
 	if s.queue != nil && s.clusters != nil && s.tenants != nil {
 		platform, err := s.tenants.GetTenant(ctx, tenancy.PlatformOrgSlug)
@@ -143,6 +170,16 @@ func (s *Service) RequestReconcile(ctx context.Context, actor string, org *types
 			clusters, err := s.clusters.ListClusters(ctx, platform.ID)
 			if err != nil {
 				return 0, 0, fmt.Errorf("platformresources: list platform clusters: %w", err)
+			}
+			// Single-cluster deployments register the platform cluster under
+			// the tenant org itself (no clusters on the platform pseudo-org);
+			// fall back to the org's own clusters so the resync still reaches
+			// the agent that reconciles platform CRs.
+			if len(clusters) == 0 {
+				clusters, err = s.clusters.ListClusters(ctx, org.ID)
+				if err != nil {
+					return 0, 0, fmt.Errorf("platformresources: list org clusters: %w", err)
+				}
 			}
 			for _, c := range clusters {
 				if err := s.enqueueResync(ctx, c.ID, org); err != nil {
@@ -243,6 +280,52 @@ func deriveStatus(health string) types.PlatformResourceStatus {
 	default: // progressing, unknown
 		return types.PlatformStatusReconciling
 	}
+}
+
+// ClientVerifier checks that a server-provisioned keycloak client exists
+// (tenancy.KeycloakAdmin seam) — used by the startup backfill that retires
+// keycloak-client rows stuck in reconciling from before the
+// MarkProvisioned wiring.
+type ClientVerifier interface {
+	GetClient(ctx context.Context, clientID string) (*tenancy.ClientSpec, error)
+}
+
+// BackfillServerProvisioned marks keycloak-client rows whose client verifiably
+// exists in the IdP as ready. Best-effort per row; errors are logged by the
+// caller's loop, never fatal.
+func (s *Service) BackfillServerProvisioned(ctx context.Context, org *types.Organization, v ClientVerifier) error {
+	resources, err := s.List(ctx, org.ID)
+	if err != nil {
+		return err
+	}
+	for _, r := range resources {
+		if r.Kind != types.PlatformKindKeycloakClient || r.Status == types.PlatformStatusReady {
+			continue
+		}
+		spec, err := v.GetClient(ctx, r.Name)
+		if err != nil || spec == nil {
+			continue
+		}
+		if err := s.MarkProvisioned(ctx, org.ID, r.Kind, r.Name, "oidc client verified via keycloak admin api"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// MarkProvisioned records a server-provisioned resource as ready (the
+// control plane is the source of truth — no operator CR is rendered for it,
+// e.g. the per-cluster keycloak client created via the Admin API).
+func (s *Service) MarkProvisioned(ctx context.Context, orgID string, kind types.PlatformResourceKind, name, detail string) error {
+	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		if err := s.store.MarkProvisioned(ctx, tx, kind, name, detail); err != nil {
+			return err
+		}
+		return s.audit.Record(ctx, tx, &types.AuditEvent{
+			OrgID: orgID, Actor: "inari-server", Action: "platform-resource.provisioned",
+			ObjectType: "platform_resource", ObjectID: string(kind) + "/" + name,
+		})
+	})
 }
 
 // ApplyStatus folds one agent status-update into the matching platform

@@ -35,7 +35,9 @@ func NewDeletionResumeHandler(svc *Service, deleter *Deleter, approvals Deletion
 }
 
 // EventTypes implements audit.Handler.
-func (h *DeletionResumeHandler) EventTypes() []string { return []string{types.EventApprovalDecided} }
+func (h *DeletionResumeHandler) EventTypes() []string {
+	return []string{types.EventApprovalDecided, types.EventApprovalCancelled}
+}
 
 // Handle starts teardown on approval or restores the org on denial.
 func (h *DeletionResumeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) error {
@@ -57,8 +59,12 @@ func (h *DeletionResumeHandler) Handle(ctx context.Context, ev *types.OutboxEven
 	if err := json.Unmarshal(req.Spec, &lc); err != nil || lc.OrgID == "" {
 		return fmt.Errorf("tenancy: deletion resume: approval %s missing org context", p.ApprovalID)
 	}
-	if p.State != types.ApprovalStateApproved {
+	switch p.State {
+	case types.ApprovalStateApproved:
+		return h.deleter.Run(ctx, lc.OrgID)
+	case types.ApprovalStateCancelled:
+		return h.svc.abortDeletion(ctx, lc.OrgID, p.ApprovalID)
+	default:
 		return h.svc.denyDeletion(ctx, lc.OrgID, p.ApprovalID)
 	}
-	return h.deleter.Run(ctx, lc.OrgID)
 }

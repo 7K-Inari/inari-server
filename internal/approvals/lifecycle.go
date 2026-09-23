@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/7K-Inari/inari-server/internal/audit"
+	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -26,11 +27,31 @@ func ValidLifecycleAction(action string) bool {
 	return false
 }
 
-// checkLifecycleApprover enforces the platform-admin policy on lifecycle
-// decisions; the requester may never decide their own request.
-func checkLifecycleApprover(req *types.ApprovalRequest, approver string, role types.Role) error {
+// authorizeLifecycleApprover enforces the platform-admin policy on lifecycle
+// decisions. A tenant freeze sweeps the org's FGA tuples before its lifecycle
+// approval is decided (ADR-0006), so authorization accepts a platform
+// org_creator (FGA, platform:inari) OR a DB-backed org-admin/platform-engineer
+// role (RoleOf reads org_memberships, which survives the tuple sweep). The
+// requester may never decide their own request.
+func (s *Service) authorizeLifecycleApprover(ctx context.Context, req *types.ApprovalRequest, approver string) error {
 	if sameActor(req.Requester, approver) {
 		return ErrSelfApproval
+	}
+	if s.platform != nil {
+		ok, err := s.platform.Check(ctx, authz.UserObject(approver), authz.RelationOrgCreator, authz.ObjectPlatform)
+		if err != nil {
+			return err
+		}
+		if ok {
+			return nil
+		}
+	}
+	if s.roles == nil {
+		return ErrApproverRole
+	}
+	role, err := s.roles.RoleOf(ctx, req.OrgID, approver)
+	if err != nil {
+		return err
 	}
 	if role != types.RoleOrgAdmin && role != types.RolePlatformEngineer {
 		return ErrApproverRole

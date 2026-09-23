@@ -17,7 +17,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/7K-Inari/inari-server/internal/audit"
-	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -403,29 +402,8 @@ func (s *Service) Decide(ctx context.Context, orgID, approvalID, approver string
 		return nil, ErrAlreadyDecided
 	}
 	if req.Action != "" {
-		// Lifecycle approval: platform-admin policy. Prefer the platform
-		// org_creator check — a tenant freeze sweeps org tuples, so org
-		// roles may already be gone by decision time. Fall back to the
-		// org-role check when the platform seam is not wired.
-		if s.platform != nil {
-			ok, err := s.platform.Check(ctx, authz.UserObject(approver), authz.RelationOrgCreator, authz.ObjectPlatform)
-			if err != nil {
-				return nil, err
-			}
-			if !ok {
-				return nil, ErrApproverRole
-			}
-			if sameActor(req.Requester, approver) {
-				return nil, ErrSelfApproval
-			}
-		} else {
-			role, err := s.roles.RoleOf(ctx, req.OrgID, approver)
-			if err != nil {
-				return nil, err
-			}
-			if err := checkLifecycleApprover(req, approver, role); err != nil {
-				return nil, err
-			}
+		if err := s.authorizeLifecycleApprover(ctx, req, approver); err != nil {
+			return nil, err
 		}
 	} else {
 		role, err := s.roles.RoleOf(ctx, req.OrgID, approver)

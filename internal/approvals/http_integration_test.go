@@ -84,7 +84,7 @@ func allowAll() itAuthorizer {
 	return itAuthorizer{allow: map[string]bool{"organization:1": true, "organization:2": true, "organization:3": true}}
 }
 
-func itServer(t *testing.T, az itAuthorizer) (*httptest.Server, *db.DB) {
+func itDB(t *testing.T) *db.DB {
 	t.Helper()
 	ctx := context.Background()
 	pg, err := postgres.Run(ctx, "postgres:16-alpine",
@@ -109,6 +109,13 @@ func itServer(t *testing.T, az itAuthorizer) (*httptest.Server, *db.DB) {
 	if err := database.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
+	return database
+}
+
+func itServer(t *testing.T, az itAuthorizer) (*httptest.Server, *db.DB) {
+	t.Helper()
+	database := itDB(t)
+	ctx := context.Background()
 	if _, err := database.Pool.Exec(ctx,
 		`INSERT INTO organizations (id, slug, display_name, keycloak_org_id) VALUES
 		 ('org:1','acme','Acme','kc-1'), ('org:2','acme2','Acme2','kc-2'), ('org:3','other','Other','kc-3')`); err != nil {
@@ -119,7 +126,7 @@ func itServer(t *testing.T, az itAuthorizer) (*httptest.Server, *db.DB) {
 		"acme":  {ID: "org:1", Slug: "acme"},
 		"acme2": {ID: "org:2", Slug: "acme2"},
 		"other": {ID: "org:3", Slug: "other"},
-	}, az)
+	}, az, nil)
 	router, api := httpserver.NewRouter(slog.Default(), itValidator{}, database)
 	h.RegisterRoutes(api)
 	return httptest.NewServer(router), database

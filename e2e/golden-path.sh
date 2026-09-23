@@ -531,9 +531,10 @@ deny contains {"rule": "deny-latest-image", "reason": "image uses the :latest ta
 }
 
 deny contains {"rule": "deny-latest-image", "reason": "image has no tag or digest", "remediation": "pin an immutable tag or digest"} if {
-	img := input.spec.image
-	not contains(img, ":")
-	not contains(img, "@")
+	parts := split(input.spec.image, "/")
+	last := parts[count(parts) - 1]
+	not contains(last, ":")
+	not contains(last, "@")
 }
 REGO
 )
@@ -557,6 +558,9 @@ jq -e '.decision.allow == false and ([.decision.violations[]?.rule] | index("den
 D=$(eval_image "ghcr.io/acme/app")
 jq -e '.decision.allow == false' <<<"$D" >/dev/null \
   || die "untagged image must be denied: $D"
+D=$(eval_image "registry:5000/acme/app")
+jq -e '.decision.allow == false' <<<"$D" >/dev/null \
+  || die "untagged image with a registry port must be denied: $D"
 D=$(eval_image "ghcr.io/acme/app:1.4.2")
 jq -e '.decision.allow == true and (.decision.violations | length == 0)' <<<"$D" >/dev/null \
   || die "pinned tag must be allowed: $D"

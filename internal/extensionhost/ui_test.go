@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -211,4 +212,47 @@ func TestUiAssetServer(t *testing.T) {
 			t.Errorf("code = %d", rec.Code)
 		}
 	})
+}
+
+func TestUiAssetServerSiblingChunks(t *testing.T) {
+	chunk := []byte(`/* chunk 616 */`)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/616.js") {
+			_, _ = w.Write(chunk)
+			return
+		}
+		_, _ = w.Write([]byte(`/* remoteEntry */`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	org := &types.Organization{ID: "org:1", Slug: "acme"}
+	e := &types.Extension{
+		ID: "extension:1", OrgID: "org:1", Name: "argocd", Version: "0.1.0",
+		Ui: &types.UiExtensionDescriptor{RemoteEntry: upstream.URL + "/ui/remoteEntry.js", Enabled: true},
+	}
+	f := &RemoteEntryFetcher{}
+	s := NewUiAssetServer(fakeUiRegistry{e}, fakeTenants{org}, f)
+	r := chi.NewRouter()
+	s.Mount(r)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants/acme/extensions/ui/argocd/616.js", nil)
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d body = %q", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != string(chunk) {
+		t.Errorf("body = %q", rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/javascript; charset=utf-8" {
+		t.Errorf("content-type = %q", ct)
+	}
+
+	// Path traversal is rejected.
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/tenants/acme/extensions/ui/argocd/..%2Fsecret", nil)
+	r.ServeHTTP(rec2, req2)
+	if rec2.Code == http.StatusOK {
+		t.Errorf("traversal must not be served")
+	}
 }

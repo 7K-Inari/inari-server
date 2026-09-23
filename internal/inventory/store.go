@@ -141,14 +141,13 @@ func (s *Store) MarkDeployed(ctx context.Context, q db.Querier, id, version, com
 }
 
 // ApplyAppStatus updates an instance from its backing ArgoCD Application
-// (matched by ID). Only touches rows still in an active delivery state so a
-// running instance is never regressed by app-churn; the message always
-// updates so sync/render errors reach the console.
+// (matched by ID). The app is the source of truth for app-backed instances,
+// so state always follows it (a bogus healthy can be corrected on the next
+// update); the message always updates so sync/render errors reach the
+// console.
 func (s *Store) ApplyAppStatus(ctx context.Context, q db.Querier, id, health, syncState, message string, state types.InstanceState) error {
 	const sql = `UPDATE resource_instances
-	             SET health = $2, sync_state = $3, status_message = $4,
-	                 state = CASE WHEN state IN ('deploying','upgrading','pending','degraded') THEN $5 ELSE state END,
-	                 updated_at = now()
+	             SET health = $2, sync_state = $3, status_message = $4, state = $5, updated_at = now()
 	             WHERE id = $1`
 	_, err := q.Exec(ctx, sql, id, health, syncState, message, state)
 	return err

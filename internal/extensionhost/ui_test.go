@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -254,5 +255,132 @@ func TestUiAssetServerSiblingChunks(t *testing.T) {
 	r.ServeHTTP(rec2, req2)
 	if rec2.Code == http.StatusOK {
 		t.Errorf("traversal must not be served")
+	}
+}
+
+// TestUiAssetServerHandlerMatrix pins the /extensions/ui/* serving contract
+// (issue #76, guards PR #73): remoteEntry.js 200, arbitrary sibling chunks
+// 200 with per-suffix content types, and a battery of path-traversal vectors
+// rejected without ever reaching the upstream source.
+func TestUiAssetServerHandlerMatrix(t *testing.T) {
+	files := map[string][]byte{
+		"/ui/remoteEntry.js": []byte(`/* remoteEntry */`),
+		"/ui/616.js":         []byte(`/* chunk 616 */`),
+		"/ui/styles.css":     []byte(`body { color: red }`),
+		"/ui/chunk.js.map":   []byte(`{"version":3}`),
+	}
+	var mu sync.Mutex
+	upstreamHits := map[string]int{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		upstreamHits[r.URL.Path]++
+		mu.Unlock()
+		if body, ok := files[r.URL.Path]; ok {
+			_, _ = w.Write(body)
+			return
+		}
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	t.Cleanup(upstream.Close)
+	hits := func(p string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return upstreamHits[p]
+	}
+
+	org := &types.Organization{ID: "org:1", Slug: "acme"}
+	e := &types.Extension{
+		ID: "extension:1", OrgID: "org:1", Name: "argocd", Version: "0.1.0",
+		Ui: &types.UiExtensionDescriptor{RemoteEntry: upstream.URL + "/ui/remoteEntry.js", Enabled: true},
+	}
+	s := NewUiAssetServer(fakeUiRegistry{e}, fakeTenants{org}, &RemoteEntryFetcher{})
+	r := chi.NewRouter()
+	s.Mount(r)
+
+	get := func(path string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		r.ServeHTTP(rec, req)
+		return rec
+	}
+	const base = "/api/v1/tenants/acme/extensions/ui/argocd/"
+
+	t.Run("remoteEntry.js 200", func(t *testing.T) {
+		rec := get(base + "remoteEntry.js")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("code = %d body = %q", rec.Code, rec.Body.String())
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != "application/javascript; charset=utf-8" {
+			t.Errorf("content-type = %q", ct)
+		}
+		if cc := rec.Header().Get("Cache-Control"); cc != "public, max-age=60" {
+			t.Errorf("cache-control = %q", cc)
+		}
+		if rec.Body.String() != string(files["/ui/remoteEntry.js"]) {
+			t.Errorf("body = %q", rec.Body.String())
+		}
+	})
+
+	siblings := []struct {
+		name  string
+		file  string
+		ctype string
+	}{
+		{"webpack chunk", "616.js", "application/javascript; charset=utf-8"},
+		{"stylesheet", "styles.css", "text/css; charset=utf-8"},
+		{"source map", "chunk.js.map", "application/json; charset=utf-8"},
+	}
+	for _, tc := range siblings {
+		t.Run("sibling "+tc.name+" 200", func(t *testing.T) {
+			rec := get(base + tc.file)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("code = %d body = %q", rec.Code, rec.Body.String())
+			}
+			if ct := rec.Header().Get("Content-Type"); ct != tc.ctype {
+				t.Errorf("content-type = %q, want %q", ct, tc.ctype)
+			}
+			if rec.Body.String() != string(files["/ui/"+tc.file]) {
+				t.Errorf("body = %q", rec.Body.String())
+			}
+			if n := hits("/ui/" + tc.file); n != 1 {
+				t.Errorf("upstream hits for /ui/%s = %d, want 1 (sibling must resolve next to remoteEntry.js)", tc.file, n)
+			}
+		})
+	}
+
+	longName := strings.Repeat("a", 200) + ".js"
+	traversals := []struct {
+		name string
+		path string
+	}{
+		{"encoded slash", base + "..%2Fsecret"},
+		{"encoded dots", base + "%2e%2e%2fsecret"},
+		{"double-dot slash combo", base + "....//secret"},
+		{"nested subdirectory", base + "sub/dir.js"},
+		{"leading dash", base + "-bad.js"},
+		{"oversized name", base + longName},
+	}
+	for _, tc := range traversals {
+		t.Run("traversal rejected: "+tc.name, func(t *testing.T) {
+			before := 0
+			mu.Lock()
+			for _, n := range upstreamHits {
+				before += n
+			}
+			mu.Unlock()
+			rec := get(tc.path)
+			if rec.Code == http.StatusOK {
+				t.Fatalf("traversal %q must not be served", tc.path)
+			}
+			after := 0
+			mu.Lock()
+			for _, n := range upstreamHits {
+				after += n
+			}
+			mu.Unlock()
+			if after != before {
+				t.Errorf("traversal %q reached the upstream source (%d -> %d hits)", tc.path, before, after)
+			}
+		})
 	}
 }

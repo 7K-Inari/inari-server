@@ -60,6 +60,24 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("gitprovider github: %s %s: status %d: %s", e.Method, e.Path, e.Status, e.Body)
 }
 
+// indicatesRevoked reports whether a 401/403 plausibly means the app's
+// credentials were suspended/revoked (vs. a permission-scope or rate-limit
+// rejection, whose message GitHub includes in the body).
+func (e *APIError) indicatesRevoked() bool {
+	b := strings.ToLower(e.Body)
+	switch {
+	case strings.Contains(b, "rate limit"):
+		return false
+	case strings.Contains(b, "permission"):
+		return false
+	case strings.Contains(b, "workflow"):
+		return false
+	case strings.Contains(b, "not installed"):
+		return false
+	}
+	return true
+}
+
 func New(cfg Config) (*Provider, error) {
 	raw, err := os.ReadFile(cfg.PrivateKeyFile)
 	if err != nil {

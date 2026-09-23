@@ -73,6 +73,13 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Security:    httpserver.SecurityRequirement(),
 	}, h.unregister)
 	huma.Register(api, huma.Operation{
+		OperationID: "rotateExtensionIdentity",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/tenants/{org}/extensions/{id}/identity/rotate",
+		Summary:     "Rotate the extension's gateway identity secret (returned once; also lazily provisions identity for pre-ADR-0008 rows)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.rotateIdentity)
+	huma.Register(api, huma.Operation{
 		OperationID: "verifyExtension",
 		Method:      http.MethodPost,
 		Path:        "/api/v1/tenants/{org}/extensions/{id}/verify",
@@ -163,6 +170,10 @@ type registerInput struct {
 type extensionOutput struct {
 	Body struct {
 		Extension types.Extension `json:"extension"`
+		// Credentials carries the extension's Keycloak client secret exactly
+		// once (register responses only); it is never persisted server-side
+		// and omitted from every other response (ADR-0008).
+		Credentials *types.ExtensionCredentials `json:"credentials,omitempty"`
 	}
 }
 
@@ -171,7 +182,7 @@ func (h *Handler) register(ctx context.Context, in *registerInput) (*extensionOu
 	if err != nil {
 		return nil, err
 	}
-	e, err := h.svc.Register(ctx, id.Subject, RegisterInput{
+	e, creds, err := h.svc.Register(ctx, id.Subject, RegisterInput{
 		OrgID: org.ID, Name: in.Body.Name, Version: in.Body.Version, Kind: in.Body.Kind,
 		Manifest: in.Body.Manifest, Endpoint: in.Body.Endpoint, Checksum: in.Body.Checksum,
 	})
@@ -180,6 +191,27 @@ func (h *Handler) register(ctx context.Context, in *registerInput) (*extensionOu
 	}
 	out := &extensionOutput{}
 	out.Body.Extension = *e
+	out.Body.Credentials = creds
+	return out, nil
+}
+
+type rotateIdentityOutput struct {
+	Body struct {
+		Credentials types.ExtensionCredentials `json:"credentials"`
+	}
+}
+
+func (h *Handler) rotateIdentity(ctx context.Context, in *idInput) (*rotateIdentityOutput, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	if err != nil {
+		return nil, err
+	}
+	creds, err := h.svc.RotateIdentitySecret(ctx, id.Subject, org.ID, in.ID)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	out := &rotateIdentityOutput{}
+	out.Body.Credentials = *creds
 	return out, nil
 }
 

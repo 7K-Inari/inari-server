@@ -24,6 +24,10 @@ type Identity struct {
 	// ClusterID is the hardcoded `cluster_id` claim on per-cluster agent
 	// client-credentials tokens (plan §5.3). Empty for user tokens.
 	ClusterID string
+	// AuthorizedParty is the `azp` claim: the OAuth clientId the token was
+	// issued to. Per-extension service-account tokens (ADR-0008) are
+	// attributed to the extension through it.
+	AuthorizedParty string
 }
 
 // MemberOf reports whether the identity belongs to the given org (slug/alias).
@@ -64,6 +68,7 @@ type Claims struct {
 	Organization json.RawMessage `json:"organization"`
 	Groups       []string        `json:"groups"`
 	ClusterID    string          `json:"cluster_id"`
+	Azp          string          `json:"azp"`
 }
 
 // ParseOrganizations accepts the Keycloak organization claim as a JSON array
@@ -105,11 +110,12 @@ func (v *OIDCValidator) Validate(ctx context.Context, rawToken string) (*Identit
 		return nil, err
 	}
 	return &Identity{
-		Subject:       claims.Subject,
-		Email:         claims.Email,
-		Organizations: orgs,
-		Groups:        claims.Groups,
-		ClusterID:     claims.ClusterID,
+		Subject:         claims.Subject,
+		Email:           claims.Email,
+		Organizations:   orgs,
+		Groups:          claims.Groups,
+		ClusterID:       claims.ClusterID,
+		AuthorizedParty: claims.Azp,
 	}, nil
 }
 

@@ -59,13 +59,13 @@ type Config struct {
 	EnrollmentApprovalRequired bool
 	AgentImageRepo             string
 	AgentGatewayAddress        string
-	// ExtensionGatewayToken gates the extension-gateway tunnel
-	// (/inari.extensions.v1.AgentGateway/InvokeAction). Empty disables the
-	// endpoint entirely. Callers (extension backends) present it in the
-	// x-inari-extension-token header; the end user was already authorized by
-	// the extension proxy.
-	ExtensionGatewayToken string
-	ESOSecretStore        string
+	// ExtensionGatewayAudience is the audience scope pinned on per-extension
+	// Keycloak service-account clients and enforced by the extension-gateway
+	// tunnel validator (ADR-0008): only client_credentials JWTs minted for an
+	// ext-<name> client with this audience may invoke actions. The interim
+	// shared INARI_EXTENSION_GATEWAY_TOKEN was removed (issue #75).
+	ExtensionGatewayAudience string
+	ESOSecretStore           string
 
 	// Platform Vault (ESO delivery of per-cluster OIDC client secrets, plan
 	// §5.3). Empty VaultAddr disables delivery; registration then fails
@@ -203,7 +203,7 @@ func Load() (*Config, error) {
 		EnrollmentApprovalRequired: boolEnv("INARI_ENROLLMENT_APPROVAL_REQUIRED", false),
 		AgentImageRepo:             env("INARI_AGENT_IMAGE_REPO", "ghcr.io/7k-inari/inari-agent"),
 		AgentGatewayAddress:        env("INARI_AGENT_GATEWAY_ADDRESS", "https://inari-server.example.com"),
-		ExtensionGatewayToken:      env("INARI_EXTENSION_GATEWAY_TOKEN", ""),
+		ExtensionGatewayAudience:   env("INARI_EXTENSION_GATEWAY_AUDIENCE", "inari-extension-gateway"),
 		ESOSecretStore:             env("INARI_ESO_SECRET_STORE", "inari-platform"),
 
 		VaultAddr:        env("INARI_VAULT_ADDR", ""),

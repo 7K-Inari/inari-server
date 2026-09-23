@@ -6,12 +6,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -27,7 +30,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
-func itService(t *testing.T) *extensionhost.Service {
+func itDB(t *testing.T) *db.DB {
 	t.Helper()
 	ctx := context.Background()
 	pg, err := postgres.Run(ctx, "postgres:16-alpine",
@@ -52,10 +55,21 @@ func itService(t *testing.T) *extensionhost.Service {
 	if err := database.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	if _, err := database.Pool.Exec(ctx,
-		`INSERT INTO organizations (id, slug, display_name, keycloak_org_id) VALUES ('org:1','acme','Acme','kc-1')`); err != nil {
+	return database
+}
+
+func seedOrg(t *testing.T, database *db.DB, id string) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(),
+		`INSERT INTO organizations (id, slug, display_name, keycloak_org_id) VALUES ($1,'acme','Acme','kc-1')`, id); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func itService(t *testing.T) *extensionhost.Service {
+	t.Helper()
+	database := itDB(t)
+	seedOrg(t, database, "org:1")
 	return extensionhost.NewService(database, extensionhost.NewStore(), audit.NewStore())
 }
 
@@ -63,7 +77,7 @@ func TestExtensionRegistryLifecycle(t *testing.T) {
 	svc := itService(t)
 	ctx := context.Background()
 
-	e, err := svc.Register(ctx, "user-1", extensionhost.RegisterInput{
+	e, _, err := svc.Register(ctx, "user-1", extensionhost.RegisterInput{
 		OrgID: "org:1", Name: "argocd", Version: "0.1.0", Endpoint: "http://127.0.0.1:9001",
 	})
 	if err != nil {
@@ -181,7 +195,7 @@ func TestUiExtensionRegistryLifecycle(t *testing.T) {
 	}
 
 	// Paired backend: UI registration on a backend row keeps the row.
-	b, err := svc.Register(ctx, "user-1", extensionhost.RegisterInput{
+	b, _, err := svc.Register(ctx, "user-1", extensionhost.RegisterInput{
 		OrgID: "org:1", Name: "argocd", Version: "0.1.0", Endpoint: "http://127.0.0.1:9001",
 	})
 	if err != nil {
@@ -212,13 +226,13 @@ func TestUiExtensionRegistryLifecycle(t *testing.T) {
 func TestExtensionRegisterValidation(t *testing.T) {
 	svc := itService(t)
 	ctx := context.Background()
-	if _, err := svc.Register(ctx, "user-1", extensionhost.RegisterInput{OrgID: "org:1", Name: "x"}); err == nil {
+	if _, _, err := svc.Register(ctx, "user-1", extensionhost.RegisterInput{OrgID: "org:1", Name: "x"}); err == nil {
 		t.Error("expected version required error")
 	}
-	if _, err := svc.Register(ctx, "user-1", extensionhost.RegisterInput{Name: "x", Version: "1"}); err == nil {
+	if _, _, err := svc.Register(ctx, "user-1", extensionhost.RegisterInput{Name: "x", Version: "1"}); err == nil {
 		t.Error("expected orgID required error")
 	}
-	if _, err := svc.Register(ctx, "user-1", extensionhost.RegisterInput{
+	if _, _, err := svc.Register(ctx, "user-1", extensionhost.RegisterInput{
 		OrgID: "org:1", Name: "x", Version: "1", Kind: "ui",
 	}); err == nil {
 		t.Error("expected kind error")
@@ -449,4 +463,202 @@ func TestUiExtensionHTTPRoutes(t *testing.T) {
 			t.Errorf("permissions = %v, want [extensions:invoke:allowed-ext]", out.Permissions)
 		}
 	})
+}
+
+// fakeExtensionClients fakes the Keycloak client CRUD seam (identity
+// lifecycle assertions without a realm).
+type fakeExtensionClients struct {
+	created  []tenancy.ClientSpec
+	rotated  []string
+	disabled []string
+	secretN  int
+}
+
+func (f *fakeExtensionClients) CreateClient(_ context.Context, spec tenancy.ClientSpec) (string, error) {
+	f.created = append(f.created, spec)
+	f.secretN++
+	return fmt.Sprintf("secret-%d", f.secretN), nil
+}
+func (f *fakeExtensionClients) RotateClientSecret(_ context.Context, clientID string) (string, error) {
+	f.rotated = append(f.rotated, clientID)
+	f.secretN++
+	return fmt.Sprintf("secret-%d", f.secretN), nil
+}
+func (f *fakeExtensionClients) DisableClient(_ context.Context, clientID string) error {
+	f.disabled = append(f.disabled, clientID)
+	return nil
+}
+
+// Per-extension identity lifecycle (ADR-0008): register provisions a
+// service-account client and returns the secret once, rotate regenerates it,
+// unregister disables the client.
+func TestExtensionIdentityLifecycle(t *testing.T) {
+	database := itDB(t)
+	seedOrg(t, database, "org:1")
+	svc := extensionhost.NewService(database, extensionhost.NewStore(), audit.NewStore())
+	clients := &fakeExtensionClients{}
+	svc.WithExtensionClientManager(clients, "inari-extension-gateway")
+	ctx := context.Background()
+
+	e, creds, err := svc.Register(ctx, "user-1", extensionhost.RegisterInput{
+		OrgID: "org:1", Name: "argocd", Version: "0.1.0", Endpoint: "http://127.0.0.1:9001",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if creds == nil || creds.ClientID != "ext-argocd" || creds.Secret != "secret-1" {
+		t.Fatalf("creds = %+v", creds)
+	}
+	if len(clients.created) != 1 {
+		t.Fatalf("created = %+v", clients.created)
+	}
+	spec := clients.created[0]
+	if spec.ClientType != tenancy.ClientTypeService || len(spec.Audiences) != 1 ||
+		spec.Audiences[0] != "inari-extension-gateway" {
+		t.Fatalf("spec = %+v", spec)
+	}
+
+	got, err := svc.GetByClientID(ctx, "ext-argocd")
+	if err != nil || got.ID != e.ID {
+		t.Fatalf("GetByClientID = %+v, %v", got, err)
+	}
+	rot, err := svc.RotateIdentitySecret(ctx, "user-1", "org:1", e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rot.Secret != "secret-2" || clients.rotated[0] != "ext-argocd" {
+		t.Fatalf("rotate = %+v, rotated = %v", rot, clients.rotated)
+	}
+
+	if err := svc.Unregister(ctx, "user-1", "org:1", e.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(clients.disabled) != 1 || clients.disabled[0] != "ext-argocd" {
+		t.Fatalf("disabled = %v", clients.disabled)
+	}
+}
+
+// Without a wired client manager, register provisions no identity (dev/fake
+// mode) and returns nil credentials.
+func TestExtensionRegisterWithoutIdentityManager(t *testing.T) {
+	svc := itService(t)
+	_, creds, err := svc.Register(context.Background(), "user-1", extensionhost.RegisterInput{
+		OrgID: "org:1", Name: "argocd", Version: "0.1.0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if creds != nil {
+		t.Fatalf("creds = %+v, want nil", creds)
+	}
+}
+
+// Duplicate name with the identity manager wired fails with ErrConflict
+// before any Keycloak write.
+func TestExtensionRegisterDuplicateConflict(t *testing.T) {
+	database := itDB(t)
+	seedOrg(t, database, "org:1")
+	svc := extensionhost.NewService(database, extensionhost.NewStore(), audit.NewStore())
+	clients := &fakeExtensionClients{}
+	svc.WithExtensionClientManager(clients, "inari-extension-gateway")
+	ctx := context.Background()
+
+	in := extensionhost.RegisterInput{OrgID: "org:1", Name: "argocd", Version: "0.1.0"}
+	if _, _, err := svc.Register(ctx, "user-1", in); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.Register(ctx, "user-1", in); !errors.Is(err, extensionhost.ErrConflict) {
+		t.Fatalf("duplicate register: err = %v, want ErrConflict", err)
+	}
+	if len(clients.created) != 1 {
+		t.Fatalf("created = %v, want exactly one client", clients.created)
+	}
+	if len(clients.disabled) != 0 {
+		t.Fatalf("disabled = %v, want none", clients.disabled)
+	}
+}
+
+// A TX failure after the Keycloak write (here: FK violation from an unknown
+// org) rolls back by disabling the freshly created client.
+func TestExtensionRegisterRollbackDisablesClient(t *testing.T) {
+	database := itDB(t)
+	seedOrg(t, database, "org:1")
+	svc := extensionhost.NewService(database, extensionhost.NewStore(), audit.NewStore())
+	clients := &fakeExtensionClients{}
+	svc.WithExtensionClientManager(clients, "inari-extension-gateway")
+
+	_, _, err := svc.Register(context.Background(), "user-1", extensionhost.RegisterInput{
+		OrgID: "org:ghost", Name: "argocd", Version: "0.1.0",
+	})
+	if err == nil || errors.Is(err, extensionhost.ErrConflict) {
+		t.Fatalf("err = %v, want FK failure", err)
+	}
+	if len(clients.disabled) != 1 || clients.disabled[0] != "ext-argocd" {
+		t.Fatalf("disabled = %v, want [ext-argocd]", clients.disabled)
+	}
+}
+
+// gatingClients blocks CreateClient until both concurrent registrations have
+// passed the fast-path name check, forcing the unique-violation race.
+type gatingClients struct {
+	fakeExtensionClients
+	arrived chan struct{}
+	gate    chan struct{}
+}
+
+func (g *gatingClients) CreateClient(ctx context.Context, spec tenancy.ClientSpec) (string, error) {
+	g.arrived <- struct{}{}
+	<-g.gate
+	return g.fakeExtensionClients.CreateClient(ctx, spec)
+}
+
+// Two concurrent Register calls with the same name: the loser must get
+// ErrConflict and must NOT disable the winner's live client
+// (KeycloakAdmin.CreateClient is 409-tolerant, so both creates "succeed").
+func TestExtensionConcurrentRegisterKeepsWinnerClient(t *testing.T) {
+	database := itDB(t)
+	seedOrg(t, database, "org:1")
+	svc := extensionhost.NewService(database, extensionhost.NewStore(), audit.NewStore())
+	clients := &gatingClients{arrived: make(chan struct{}, 2), gate: make(chan struct{})}
+	svc.WithExtensionClientManager(clients, "inari-extension-gateway")
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, _, errs[i] = svc.Register(ctx, "user-1", extensionhost.RegisterInput{
+				OrgID: "org:1", Name: "argocd", Version: "0.1.0",
+			})
+		}(i)
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-clients.arrived:
+		case <-time.After(10 * time.Second):
+			t.Fatal("timed out waiting for both registrations to reach CreateClient")
+		}
+	}
+	close(clients.gate)
+	wg.Wait()
+
+	var conflicts, oks int
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			oks++
+		case errors.Is(err, extensionhost.ErrConflict):
+			conflicts++
+		default:
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if oks != 1 || conflicts != 1 {
+		t.Fatalf("errs = %v, want one success and one ErrConflict", errs)
+	}
+	if len(clients.disabled) != 0 {
+		t.Fatalf("loser disabled winner's client: %v", clients.disabled)
+	}
 }

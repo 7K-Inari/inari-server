@@ -161,6 +161,48 @@ func TestDecideLifecycleFrozenOrg(t *testing.T) {
 			t.Fatalf("self-decide = %d: %s, want 403", code, body)
 		}
 	})
+
+	t.Run("platform-engineer approves via DB role after the sweep", func(t *testing.T) {
+		srv, database := itDecideServer(t, denyAll, decideRoles{"user-3": types.RolePlatformEngineer}, nil)
+		defer srv.Close()
+		id := itSeedRequest(t, database, "org:1", "", types.ApprovalActionTenantDecommission, "user:req-1")
+		if code, body := itDecide(t, srv, "acme", id, "acme-only"); code != http.StatusOK {
+			t.Fatalf("platform-engineer decide = %d: %s", code, body)
+		}
+	})
+
+	t.Run("viewer is denied at the handler floor after the sweep", func(t *testing.T) {
+		srv, database := itDecideServer(t, denyAll, decideRoles{"user-3": types.RoleViewer}, nil)
+		defer srv.Close()
+		id := itSeedRequest(t, database, "org:1", "", types.ApprovalActionTenantDecommission, "user:req-1")
+		if code, body := itDecide(t, srv, "acme", id, "acme-only"); code != http.StatusForbidden {
+			t.Fatalf("viewer decide = %d: %s, want 403", code, body)
+		}
+	})
+
+	t.Run("second decide on the same approval conflicts", func(t *testing.T) {
+		srv, database := itDecideServer(t, denyAll, decideRoles{"user-3": types.RoleOrgAdmin}, nil)
+		defer srv.Close()
+		id := itSeedRequest(t, database, "org:1", "", types.ApprovalActionTenantDecommission, "user:req-1")
+		if code, body := itDecide(t, srv, "acme", id, "acme-only"); code != http.StatusOK {
+			t.Fatalf("first decide = %d: %s", code, body)
+		}
+		if code, body := itDecide(t, srv, "acme", id, "acme-only"); code != http.StatusConflict {
+			t.Fatalf("second decide = %d: %s, want 409", code, body)
+		}
+	})
+
+	t.Run("unauthenticated decide is rejected", func(t *testing.T) {
+		srv, database := itDecideServer(t, denyAll, decideRoles{"user-3": types.RoleOrgAdmin}, nil)
+		defer srv.Close()
+		id := itSeedRequest(t, database, "org:1", "", types.ApprovalActionTenantDecommission, "user:req-1")
+		if code, _ := itDecide(t, srv, "acme", id, ""); code != http.StatusUnauthorized {
+			t.Fatalf("no-token decide = %d, want 401", code)
+		}
+		if code, _ := itDecide(t, srv, "acme", id, "bogus"); code != http.StatusUnauthorized {
+			t.Fatalf("bad-token decide = %d, want 401", code)
+		}
+	})
 }
 
 // TestDecideCatalogPlatformAdminPolicy covers the non-frozen path: an

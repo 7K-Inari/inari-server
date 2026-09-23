@@ -319,6 +319,88 @@ func TestTenantDeletionDeniedRestoresOrg(t *testing.T) {
 	if n != 1 {
 		t.Errorf("denial audit rows = %d, want 1", n)
 	}
+	// The restore must emit tenant.restored carrying the freeze-time
+	// snapshot so the tuple writer re-seeds the swept FGA tuples.
+	var restoredPayload []byte
+	if err := database.Pool.QueryRow(ctx,
+		`SELECT payload FROM outbox WHERE org_id = $1 AND event_type = 'tenant.restored'`, org.ID).Scan(&restoredPayload); err != nil {
+		t.Fatalf("tenant.restored outbox row: %v", err)
+	}
+	var rp types.TenantDeletingPayload
+	if err := json.Unmarshal(restoredPayload, &rp); err != nil {
+		t.Fatal(err)
+	}
+	if rp.OrgID != org.ID || len(rp.Teams) == 0 {
+		t.Errorf("restored snapshot = %+v, want org %q with its teams", rp, org.ID)
+	}
+}
+
+// TestTenantDeletionCancelledRestoresOrg covers the abort path: the
+// requester withdraws the pending decommission approval and the org must
+// come back active with the deletion row removed and a restore event.
+func TestTenantDeletionCancelledRestoresOrg(t *testing.T) {
+	database := setupDB(t)
+	ctx := context.Background()
+	idp := newFakeIdP()
+	store := tenancy.NewStore()
+	auditStore := audit.NewStore()
+	gate := &fakeGate{}
+	rec := &recordingStore{}
+	svc := tenancy.NewService(database, idp, store, auditStore).WithDeletionApprovalGate(gate)
+	deleter := tenancy.NewDeleter(database, idp, store, auditStore, rec, nil, slog.Default())
+	svc.WithDeleter(deleter)
+
+	org, _, err := svc.CreateTenant(ctx, "user-1", "acme", "Acme Corp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	approvalID, err := svc.DeleteTenant(ctx, "user-1", "acme", false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	spec, _ := json.Marshal(map[string]string{"orgId": org.ID, "slug": "acme"})
+	loader := fakeApprovalLoader{req: &types.ApprovalRequest{
+		ID: approvalID, OrgID: org.ID, Action: types.ApprovalActionTenantDecommission, Spec: spec,
+	}}
+	handler := tenancy.NewDeletionResumeHandler(svc, deleter, loader, slog.Default())
+	payload, _ := json.Marshal(types.ApprovalPayload{
+		OrgID: org.ID, ApprovalID: approvalID, State: types.ApprovalStateCancelled,
+	})
+	if err := handler.Handle(ctx, &types.OutboxEvent{
+		EventType: types.EventApprovalCancelled, Payload: payload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	restored, err := store.GetOrganizationBySlug(ctx, database.Pool, "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Status != types.OrgStatusActive {
+		t.Errorf("status after cancel = %q, want active", restored.Status)
+	}
+	if _, err := store.GetTenantDeletion(ctx, database.Pool, org.ID); !errors.Is(err, tenancy.ErrDeletionNotFound) {
+		t.Errorf("deletion row after cancel: err = %v, want ErrDeletionNotFound", err)
+	}
+	var n int
+	if err := database.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit_events WHERE org_id = $1 AND action = 'tenant.decommission_cancelled'`, org.ID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("cancel audit rows = %d, want 1", n)
+	}
+	if err := database.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM outbox WHERE org_id = $1 AND event_type = 'tenant.restored'`, org.ID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("tenant.restored outbox rows = %d, want 1", n)
+	}
+	if len(rec.written) != 0 || len(rec.deleted) != 0 {
+		t.Errorf("resume handler must not touch FGA directly; got %+v written %+v deleted", rec.written, rec.deleted)
+	}
 }
 
 func TestTenantDeletionResumeAfterFailure(t *testing.T) {

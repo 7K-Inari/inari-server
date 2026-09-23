@@ -244,7 +244,10 @@ func (h *Handler) get(ctx context.Context, in *approvalPathInput) (*approvalOutp
 func (h *Handler) cancel(ctx context.Context, in *approvalPathInput) (*approvalOutput, error) {
 	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
 	if err != nil {
-		return nil, err
+		org, id, err = h.authorizeOrgFallback(ctx, in.Org, types.RoleDeveloper, err)
+		if err != nil {
+			return nil, err
+		}
 	}
 	req, err := h.svc.Cancel(ctx, org.ID, in.ID, "user:"+id.Subject)
 	if errors.Is(err, ErrNotFound) {
@@ -386,29 +389,37 @@ func (h *Handler) authorizeOrgRole(ctx context.Context, orgID string, floor type
 	return nil
 }
 
+// authorizeOrgFallback authorizes org access when the primary FGA check
+// fails: platform org_creator first, then the DB-backed org role (issue
+// #74: a tenant freeze sweeps the org's FGA tuples before its lifecycle
+// approval is resolved, so even legitimate actors lose org-level access;
+// org-admins are not org_creators and the DB role survives the sweep).
+// Returns the original cause when every layer denies.
+func (h *Handler) authorizeOrgFallback(ctx context.Context, slug string, floor types.Role, cause error) (*types.Organization, *authn.Identity, error) {
+	if perr := h.authorizePlatform(ctx); perr != nil {
+		orgID := ""
+		if org, rerr := h.tenants.GetTenant(ctx, slug); rerr == nil {
+			orgID = org.ID
+		}
+		if orgID == "" {
+			return nil, nil, cause
+		}
+		if rerr := h.authorizeOrgRole(ctx, orgID, floor); rerr != nil {
+			return nil, nil, cause
+		}
+	}
+	id := httpserver.IdentityFromContext(ctx)
+	org, err := h.tenants.GetTenant(ctx, slug)
+	if err != nil {
+		return nil, nil, err
+	}
+	return org, id, nil
+}
+
 func (h *Handler) decide(ctx context.Context, in *decideInput) (*decideOutput, error) {
 	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
 	if err != nil {
-		// A tenant freeze sweeps the org's FGA tuples before its lifecycle
-		// approval is decided, so even legitimate approvers lose org-level
-		// access. Fall back to the platform org_creator check, then to the
-		// DB-backed org role (issue #74: both are needed — org-admins are
-		// not org_creators, and lifecycle approvals are platform-admin
-		// gated by design).
-		if perr := h.authorizePlatform(ctx); perr != nil {
-			orgID := ""
-			if org, rerr := h.tenants.GetTenant(ctx, in.Org); rerr == nil {
-				orgID = org.ID
-			}
-			if orgID == "" {
-				return nil, err
-			}
-			if rerr := h.authorizeOrgRole(ctx, orgID, types.RoleDeveloper); rerr != nil {
-				return nil, err
-			}
-		}
-		id = httpserver.IdentityFromContext(ctx)
-		org, err = h.tenants.GetTenant(ctx, in.Org)
+		org, id, err = h.authorizeOrgFallback(ctx, in.Org, types.RoleDeveloper, err)
 		if err != nil {
 			return nil, err
 		}

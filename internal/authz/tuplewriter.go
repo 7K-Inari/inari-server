@@ -34,6 +34,7 @@ func (w *TupleWriter) EventTypes() []string {
 	return []string{
 		types.EventTenantCreated,
 		types.EventTenantDeleting,
+		types.EventTenantRestored,
 		types.EventTeamCreated,
 		types.EventTeamDeleted,
 		types.EventMembershipAdded,
@@ -84,6 +85,21 @@ func (w *TupleWriter) Handle(ctx context.Context, ev *types.OutboxEvent) error {
 			return nil
 		}
 		return w.store.DeleteTuples(ctx, tuples)
+	case types.EventTenantRestored:
+		// Decommission denied or cancelled: re-seed the tuples swept at
+		// freeze time from the same snapshot (writes are idempotent).
+		var p types.TenantDeletingPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		tuples, err := TuplesForTenantDeletion(&p)
+		if err != nil {
+			return err
+		}
+		if len(tuples) == 0 {
+			return nil
+		}
+		return w.store.WriteTuples(ctx, tuples)
 	case types.EventTeamCreated:
 		var p types.TeamCreatedPayload
 		if err := json.Unmarshal(ev.Payload, &p); err != nil {

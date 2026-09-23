@@ -91,6 +91,7 @@ type OutboxEvent struct {
 const (
 	EventTenantCreated         = "tenant.created"
 	EventTenantDeleting        = "tenant.deleting"
+	EventTenantRestored        = "tenant.restored"
 	EventTenantDeleted         = "tenant.deleted"
 	EventTenantGitAuthResolved = "tenant.git.auth.resolved"
 	EventTeamCreated           = "team.created"

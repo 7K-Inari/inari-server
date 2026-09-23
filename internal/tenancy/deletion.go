@@ -587,20 +587,48 @@ func slugFromSnapshot(raw json.RawMessage) string {
 	return p.Slug
 }
 
-// denyDeletion restores an org whose decommission approval was rejected:
-// back to active, tracking row removed, denial audited.
+// denyDeletion restores an org whose decommission approval was rejected.
 func (s *Service) denyDeletion(ctx context.Context, orgID, approvalID string) error {
+	return s.restoreOrg(ctx, orgID, approvalID, "tenant.decommission_denied")
+}
+
+// abortDeletion restores an org whose decommission approval was withdrawn
+// by the requester.
+func (s *Service) abortDeletion(ctx context.Context, orgID, approvalID string) error {
+	return s.restoreOrg(ctx, orgID, approvalID, "tenant.decommission_cancelled")
+}
+
+// restoreOrg returns an org whose decommission was denied or cancelled to
+// active: status restored, tracking row removed, restore audited, and a
+// tenant.restored outbox event carrying the freeze-time snapshot so the
+// tuple writer re-seeds the FGA tuples swept at request time (without it
+// the org comes back active but every org-scoped FGA check keeps failing).
+func (s *Service) restoreOrg(ctx context.Context, orgID, approvalID, action string) error {
+	var snapshot json.RawMessage
+	if del, err := s.store.GetTenantDeletion(ctx, s.db.Pool, orgID); err == nil {
+		snapshot = del.Snapshot
+	}
 	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		if err := s.store.SetOrgStatus(ctx, tx, orgID, types.OrgStatusActive); err != nil {
 			return err
 		}
 		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
-			OrgID: orgID, Actor: "system:approvals", Action: "tenant.decommission_denied",
+			OrgID: orgID, Actor: "system:approvals", Action: action,
 			ObjectType: "organization", ObjectID: orgID,
 			Payload: []byte(fmt.Sprintf(`{"approvalId":%q}`, approvalID)),
 		}); err != nil {
 			return err
 		}
-		return s.store.DeleteTenantDeletionRow(ctx, tx, orgID)
+		if err := s.store.DeleteTenantDeletionRow(ctx, tx, orgID); err != nil {
+			return err
+		}
+		if len(snapshot) == 0 {
+			return nil
+		}
+		var p types.TenantDeletingPayload
+		if err := json.Unmarshal(snapshot, &p); err != nil {
+			return fmt.Errorf("tenancy: restore org: snapshot: %w", err)
+		}
+		return audit.AppendOutbox(ctx, tx, orgID, types.EventTenantRestored, &p)
 	})
 }

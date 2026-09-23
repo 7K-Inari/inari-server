@@ -74,6 +74,26 @@ func itDecide(t *testing.T, srv *httptest.Server, org, id, token string) (int, s
 	return resp.StatusCode, b.String()
 }
 
+func itCancel(t *testing.T, srv *httptest.Server, org, id, token string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost,
+		srv.URL+"/api/v1/tenants/"+org+"/approvals/"+id+"/cancel", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var b bytes.Buffer
+	_, _ = b.ReadFrom(resp.Body)
+	return resp.StatusCode, b.String()
+}
+
 // itSeedRequest inserts an approval request with an explicit requester and
 // action ("" = catalog approval). Returns the generated id.
 func itSeedRequest(t *testing.T, database *db.DB, orgID, itemID, action, requester string) string {
@@ -201,6 +221,62 @@ func TestDecideLifecycleFrozenOrg(t *testing.T) {
 		}
 		if code, _ := itDecide(t, srv, "acme", id, "bogus"); code != http.StatusUnauthorized {
 			t.Fatalf("bad-token decide = %d, want 401", code)
+		}
+	})
+}
+
+// TestCancelLifecycleFrozenOrg pins the abort path for a stuck tenant
+// deletion (issue #74 follow-up): after the freeze sweeps the org's FGA
+// tuples, the requester must still be able to withdraw the pending
+// decommission approval via the platform or DB-role fallback.
+func TestCancelLifecycleFrozenOrg(t *testing.T) {
+	denyAll := itAuthorizer{allow: map[string]bool{}}
+	platformOnly := itAuthorizer{allow: map[string]bool{authz.ObjectPlatform: true}}
+
+	t.Run("platform-admin requester cancels after the sweep", func(t *testing.T) {
+		srv, database := itDecideServer(t, platformOnly, decideRoles{}, nil)
+		defer srv.Close()
+		// "outsider" (user-2) requested the decommission and holds org_creator.
+		id := itSeedRequest(t, database, "org:1", "", types.ApprovalActionTenantDecommission, "user:user-2")
+		code, body := itCancel(t, srv, "acme", id, "outsider")
+		if code != http.StatusOK {
+			t.Fatalf("platform-admin cancel = %d: %s", code, body)
+		}
+		var out struct {
+			Approval types.ApprovalRequest `json:"approval"`
+		}
+		if err := json.Unmarshal([]byte(body), &out); err != nil {
+			t.Fatal(err)
+		}
+		if out.Approval.State != types.ApprovalStateCancelled {
+			t.Errorf("state = %q, want cancelled", out.Approval.State)
+		}
+	})
+
+	t.Run("org-admin requester cancels via DB role after the sweep", func(t *testing.T) {
+		srv, database := itDecideServer(t, denyAll, decideRoles{"user-3": types.RoleOrgAdmin}, nil)
+		defer srv.Close()
+		id := itSeedRequest(t, database, "org:1", "", types.ApprovalActionTenantDecommission, "user:user-3")
+		if code, body := itCancel(t, srv, "acme", id, "acme-only"); code != http.StatusOK {
+			t.Fatalf("org-admin cancel = %d: %s", code, body)
+		}
+	})
+
+	t.Run("non-requester org-admin cannot cancel", func(t *testing.T) {
+		srv, database := itDecideServer(t, denyAll, decideRoles{"user-3": types.RoleOrgAdmin}, nil)
+		defer srv.Close()
+		id := itSeedRequest(t, database, "org:1", "", types.ApprovalActionTenantDecommission, "user:req-1")
+		if code, body := itCancel(t, srv, "acme", id, "acme-only"); code != http.StatusForbidden {
+			t.Fatalf("non-requester cancel = %d: %s, want 403", code, body)
+		}
+	})
+
+	t.Run("outsider with no grant cannot cancel", func(t *testing.T) {
+		srv, database := itDecideServer(t, denyAll, decideRoles{}, nil)
+		defer srv.Close()
+		id := itSeedRequest(t, database, "org:1", "", types.ApprovalActionTenantDecommission, "user:req-1")
+		if code, body := itCancel(t, srv, "acme", id, "outsider"); code != http.StatusForbidden {
+			t.Fatalf("outsider cancel = %d: %s, want 403", code, body)
 		}
 	})
 }

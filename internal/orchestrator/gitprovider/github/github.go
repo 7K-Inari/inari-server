@@ -74,6 +74,10 @@ func (e *APIError) indicatesRevoked() bool {
 		return false
 	case strings.Contains(b, "not installed"):
 		return false
+	case strings.Contains(b, "resource not accessible by integration"):
+		return false
+	case strings.Contains(b, "integration"):
+		return false
 	}
 	return true
 }

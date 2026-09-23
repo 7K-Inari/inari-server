@@ -548,7 +548,7 @@ POLICY_ID=$(jq -r '.policy.id // empty' <<<"$POLICY_RESP")
 eval_image() { # image -> evaluate response JSON
   kubectl -n "$NAMESPACE" exec "$TOOLS" -- curl -s -m 20 -X POST \
     -H "Authorization: Bearer $(user_token)" -H "Content-Type: application/json" \
-    -d "$(jq -n --arg img "$1" '{itemId:"demo",version:"1.0.0",spec:{image:$img}}')" \
+    -d "$(jq -n --arg img "$1" --arg cid "$CLUSTER_ID" '{itemId:"demo",version:"1.0.0",clusterId:$cid,spec:{image:$img}}')" \
     "$API/tenants/$TENANT/policies/evaluate"
 }
 

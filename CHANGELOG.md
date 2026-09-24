@@ -1,5 +1,25 @@
 # Changelog
 
+## [3.0.0](https://github.com/7K-Inari/inari-server/compare/v2.0.0...v3.0.0) (2026-09-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **extensionhost:** INARI_EXTENSION_GATEWAY_TOKEN and the x-inari-extension-token header are removed; extension backends must fetch a client_credentials token for their ext-<name> client and present it as a Bearer JWT.
+
+### Features
+
+* **extensionhost:** per-extension Keycloak identity for the extension-gateway tunnel ([#75](https://github.com/7K-Inari/inari-server/issues/75)) ([#79](https://github.com/7K-Inari/inari-server/issues/79)) ([c311686](https://github.com/7K-Inari/inari-server/commit/c311686eff26897625a0a3fe854252322ac98105))
+* **extensionhost:** serve UI remote sibling assets (webpack chunks) ([#73](https://github.com/7K-Inari/inari-server/issues/73)) ([0f3e933](https://github.com/7K-Inari/inari-server/commit/0f3e93335c229c9f3edcd199a25b0807cffa4578))
+* **extensionhost:** UI extension registry, remoteEntry serving, extension-gateway tunnel ([#71](https://github.com/7K-Inari/inari-server/issues/71)) ([101214a](https://github.com/7K-Inari/inari-server/commit/101214aac396cfe478a7081db6580d0ab98e7870))
+
+
+### Bug Fixes
+
+* **approvals:** authorize lifecycle decide/cancel after tenant-freeze FGA sweep ([#74](https://github.com/7K-Inari/inari-server/issues/74)) ([#78](https://github.com/7K-Inari/inari-server/issues/78)) ([5aeeb7d](https://github.com/7K-Inari/inari-server/commit/5aeeb7d8b403a6b2fd0d12a05d58bfaf972129c2))
+* **export-openapi:** close REST surface drift via shared restsurface registry ([#83](https://github.com/7K-Inari/inari-server/issues/83)) ([02c1d00](https://github.com/7K-Inari/inari-server/commit/02c1d00a3107b453dfda7a5903a6595b0eedc510))
+* **server:** platform resources reconciliation, deploy error surfacing, extension OCI assets, templates in image ([#81](https://github.com/7K-Inari/inari-server/issues/81)) ([40df092](https://github.com/7K-Inari/inari-server/commit/40df092fde06b696f353a70e599f167cb6c193a5))
+
 ## [2.0.0](https://github.com/7K-Inari/inari-server/compare/v1.8.0...v2.0.0) (2026-09-19)
 
 

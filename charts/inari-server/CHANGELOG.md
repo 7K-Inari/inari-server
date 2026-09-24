@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.9](https://github.com/7K-Inari/inari-server/compare/inari-server-chart-v0.1.8...inari-server-chart-v0.1.9) (2026-09-24)
+
+
+### Features
+
+* **extensionhost:** UI extension registry, remoteEntry serving, extension-gateway tunnel ([#71](https://github.com/7K-Inari/inari-server/issues/71)) ([101214a](https://github.com/7K-Inari/inari-server/commit/101214aac396cfe478a7081db6580d0ab98e7870))
+
 ## [0.1.8](https://github.com/7K-Inari/inari-server/compare/inari-server-chart-v0.1.7...inari-server-chart-v0.1.8) (2026-09-19)
 
 

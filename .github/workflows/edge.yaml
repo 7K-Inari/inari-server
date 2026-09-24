@@ -7,6 +7,7 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write
 
 env:
   IMAGE: ghcr.io/7k-inari/inari-server
@@ -34,3 +35,46 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:edge
             ${{ env.IMAGE }}:edge-${{ github.sha }}
+
+  # Publish the huma-generated OpenAPI contract as an edge OCI artifact so
+  # inari-ui can sync its pinned client types between releases. The :edge
+  # tag moves with main; :main-<shortsha> is the immutable, signed pin.
+  openapi:
+    runs-on: ubuntu-latest
+    env:
+      SPEC_IMAGE: ghcr.io/7k-inari/inari-server-openapi
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: render spec
+        run: make export-openapi
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: oras-project/setup-oras@v1
+
+      - name: push spec to GHCR
+        id: push
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          for tag in "edge" "main-${short_sha}"; do
+            out="$(oras push "${SPEC_IMAGE}:${tag}" \
+              dist/openapi.yaml:application/vnd.oai.openapi+yaml)"
+            echo "${out}"
+            if [ "${tag}" = "main-${short_sha}" ]; then
+              echo "digest=$(echo "${out}" | grep -oE 'sha256:[a-f0-9]{64}' | tail -1)" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: sign spec (keyless)
+        run: cosign sign --yes ${{ env.SPEC_IMAGE }}@${{ steps.push.outputs.digest }}

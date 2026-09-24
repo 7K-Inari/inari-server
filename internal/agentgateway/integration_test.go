@@ -414,7 +414,7 @@ func TestCommandDispatchAtLeastOnce(t *testing.T) {
 	}
 
 	// Unacked command is redelivered after the retry window.
-	r.gw.queue.retryAfter = 0
+	r.gw.queue.(*Queue).retryAfter = 0
 	if err := sess.dispatchDue(ctx, conn); err != nil {
 		t.Fatal(err)
 	}
@@ -484,7 +484,7 @@ func TestResyncResponseRetiresQueuedResync(t *testing.T) {
 	}
 
 	// The resync command is retired — no redelivery past the retry window.
-	r.gw.queue.retryAfter = 0
+	r.gw.queue.(*Queue).retryAfter = 0
 	if err := sess.dispatchDue(ctx, conn); err != nil {
 		t.Fatal(err)
 	}
@@ -538,6 +538,10 @@ type platformEnsureCall struct {
 	orgID string
 	kind  types.PlatformResourceKind
 	name  string
+}
+
+func (f *fakePlatformEnsurer) MarkProvisioned(context.Context, string, types.PlatformResourceKind, string, string) error {
+	return nil
 }
 
 func (f *fakePlatformEnsurer) EnsureDesired(_ context.Context, orgID string, kind types.PlatformResourceKind, name string, _ json.RawMessage) (*types.PlatformResource, error) {

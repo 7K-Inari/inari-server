@@ -19,7 +19,6 @@ import (
 	"github.com/7K-Inari/inari-server/internal/agentgateway"
 	"github.com/7K-Inari/inari-server/internal/approvals"
 	"github.com/7K-Inari/inari-server/internal/audit"
-	"github.com/7K-Inari/inari-server/internal/auditapi"
 	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/capabilities"
@@ -40,6 +39,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/platformresources"
 	"github.com/7K-Inari/inari-server/internal/policyservice"
 	"github.com/7K-Inari/inari-server/internal/rbacmaterialize"
+	"github.com/7K-Inari/inari-server/internal/restsurface"
 	"github.com/7K-Inari/inari-server/internal/scaffold"
 	"github.com/7K-Inari/inari-server/internal/secrets"
 	"github.com/7K-Inari/inari-server/internal/secretstores"
@@ -240,9 +240,6 @@ func run() error {
 		WithClientManager(idp).
 		WithIdentityProviderManager(idp).
 		WithPlatformResources(platformResourcesSvc)
-	handler := tenancy.NewHandler(svc, authorizer).WithScopesCatalog(cfg.IdentityScopes)
-	meHandler := tenancy.NewMeHandler(authorizer, svc)
-
 	// Platform pseudo-org (ADR-0005, D1): seed the reserved "platform" org so
 	// the 7kgroup platform cluster registers through the standard org-scoped
 	// cluster registry flow. Idempotent; mirrors SeedPlatformApps below.
@@ -328,9 +325,6 @@ func run() error {
 		ESOSecretKey:   "client-secret",
 		ESOSecretName:  "inari-agent-oidc-client",
 	}
-	registryHandler := clusterregistry.NewHandler(registry, svc, authorizer, clusterregistry.CapabilitiesListerFunc(func(ctx context.Context, clusterID string) ([]types.Capability, error) {
-		return capsStore.List(ctx, database.Pool, clusterID)
-	})).WithAccessInfo(cfg.OIDCIssuerURL)
 	caps := capabilities.NewService(database, capsStore, auditStore)
 	gateway := agentgateway.NewGateway(database, registry, idp, caps, auditStore, agentgateway.Config{
 		OIDCIssuerURL:       cfg.OIDCIssuerURL,
@@ -349,7 +343,6 @@ func run() error {
 		puller = &catalog.FixturePuller{Root: cfg.CatalogOCIPath}
 	}
 	catalogSvc := catalog.NewService(database, catalog.NewStore(), capabilities.NewStore(), auditStore, puller)
-	catalogHandler := catalog.NewHandler(catalogSvc, svc, authorizer)
 	if err := catalogSvc.SeedPlatformApps(ctx); err != nil {
 		return err
 	}
@@ -398,7 +391,6 @@ func run() error {
 	}
 
 	approvalsSvc := approvals.NewService(database, approvals.NewStore(database), auditStore, svc, catalogSvc).WithPlatformChecker(authorizer)
-	approvalsHandler := approvals.NewHandler(approvalsSvc, svc, authorizer, svc)
 	go approvalsSvc.RunExpiryLoop(ctx, time.Minute)
 
 	// Tenant deletion (ADR-0006): approval-gated, resumable teardown state
@@ -409,12 +401,9 @@ func run() error {
 	go tenantDeleter.ResumePendingDeletions(ctx)
 
 	inventorySvc := inventory.NewService(database, inventory.NewStore(), auditStore, catalogSvc)
-	inventoryHandler := inventory.NewHandler(inventorySvc, svc, authorizer)
 
 	// Platform resources (M7): the composite status sink routes platform CRD
-	// updates to platformresources and everything else to the inventory. The
-	// service itself is constructed with the tenancy module above.
-	platformResourcesHandler := platformresources.NewHandler(platformResourcesSvc, svc, authorizer)
+	// updates to platformresources and everything else to the inventory.
 	gateway.SetStatusSink(statusSinkRouter{inv: inventorySvc, plat: platformResourcesSvc})
 	gateway.SetInstanceFailureSink(inventorySvc)
 
@@ -430,19 +419,14 @@ func run() error {
 	}
 	orchestratorSvc := orchestrator.NewService(database, inventory.NewStore(), catalogSvc, registry,
 		approvalsSvc, gateway.Queue(), git, auditStore)
-	orchestratorHandler := orchestrator.NewHandler(orchestratorSvc, svc, authorizer).
-		WithAllowedAPIBases(cfg.GitHubAllowedAPIBases)
 
 	cloudAccountsSvc := cloudaccounts.NewService(database, cloudaccounts.NewStore(), auditStore, cloudaccounts.NewSTSValidator())
-	cloudAccountsHandler := cloudaccounts.NewHandler(cloudAccountsSvc, svc, registry, authorizer)
 
 	notificationsSvc := notifications.NewService(database, notifications.NewStore(), auditStore,
 		notifications.NewSlackSender(nil), notifications.NewWebhookSender(nil))
-	notificationsHandler := notifications.NewHandler(notificationsSvc, svc, authorizer)
 
 	policySvc := policyservice.NewService(database, policyservice.NewStore(),
 		policyservice.NewOPAEvaluator(), registry, gateway.Queue(), auditStore)
-	policyHandler := policyservice.NewHandler(policySvc, svc, authorizer)
 	orchestratorSvc.WithPolicyChecker(policyCheckerAdapter{policySvc})
 
 	// Scaffolding / Software Templates (M8, plan §4/§10): template browsing
@@ -453,7 +437,6 @@ func run() error {
 	// → OpenFGA tuple).
 	scaffoldSvc := scaffold.NewService(database, scaffold.NewStore(), auditStore, catalogSvc,
 		scaffold.Config{MaxAttempts: int(cfg.ScaffoldStepMaxAttempts), GitOrg: cfg.ScaffoldGitOrg, RunTTL: cfg.ScaffoldRunTTL}, log)
-	scaffoldHandler := scaffold.NewHandler(scaffoldSvc, svc, authorizer)
 	if templateSource != nil {
 		scaffoldSvc.WithExecEnv(&scaffold.ExecEnv{
 			Git:        gitPerRepo,
@@ -475,7 +458,6 @@ func run() error {
 	fleetSvc := fleetmanager.NewService(database, fleetmanager.NewStore(), auditStore, registry, gateway.Queue()).
 		WithGateRequester(approvalsSvc).
 		WithBulkSeams(approvalsSvc, policySvc, catalogSvc)
-	fleetHandler := fleetmanager.NewHandler(fleetSvc, svc, authorizer)
 	policySvc.WithSetResolver(fleetSvc)
 	go fleetSvc.RunAdvanceLoop(ctx, cfg.FleetAdvanceInterval)
 	go fleetSvc.RunDriftLoop(ctx, cfg.DriftSweepInterval)
@@ -485,7 +467,6 @@ func run() error {
 	// it is constructed after the fleet manager.
 	secretStoresSvc := secretstores.NewService(database, secretstores.NewStore(), auditStore,
 		gateway.Queue(), registry, fleetSvc)
-	secretStoresHandler := secretstores.NewHandler(secretStoresSvc, svc, authorizer)
 	gateway.WithSecretStoreLookup(secretStoresSvc)
 
 	// Extension Host (plan §5.8): plugin registry + authenticated reverse
@@ -510,7 +491,6 @@ func run() error {
 			CertOidcIssuerRegexp: cfg.UiExtensionCosignIssuer,
 		}
 	}
-	extHandler := extensionhost.NewHandler(extSvc, svc, authorizer).WithRemoteEntryFetcher(remoteEntries)
 	extProxy := extensionhost.NewProxy(extSvc, validator, authorizer)
 	extUiAssets := extensionhost.NewUiAssetServer(extSvc, svc, remoteEntries)
 
@@ -554,7 +534,6 @@ func run() error {
 	}
 	tzfEnv.Clusters = tzfClusterLifecycle{registry}
 	tzfSvc := tenantzonefactory.NewService(database, tenantzonefactory.NewStore(), auditStore, tzfEnv, approvalsSvc, log)
-	tzfHandler := tenantzonefactory.NewHandler(tzfSvc, svc, authorizer)
 	go tzfSvc.RunReconcileLoop(ctx, cfg.TZFReconcileInterval)
 
 	// Outbox consumers: FGA tuple writer, notifications, approval-gated
@@ -579,23 +558,36 @@ func run() error {
 	go dispatcher.Run(ctx)
 
 	router, api := httpserver.NewRouter(log, validator, database)
-	handler.RegisterRoutes(api)
-	meHandler.RegisterRoutes(api)
-	registryHandler.RegisterRoutes(api)
-	catalogHandler.RegisterRoutes(api)
-	approvalsHandler.RegisterRoutes(api)
-	inventoryHandler.RegisterRoutes(api)
-	platformResourcesHandler.RegisterRoutes(api)
-	orchestratorHandler.RegisterRoutes(api)
-	cloudAccountsHandler.RegisterRoutes(api)
-	notificationsHandler.RegisterRoutes(api)
-	policyHandler.RegisterRoutes(api)
-	scaffoldHandler.RegisterRoutes(api)
-	tzfHandler.RegisterRoutes(api)
-	fleetHandler.RegisterRoutes(api)
-	secretStoresHandler.RegisterRoutes(api)
-	extHandler.RegisterRoutes(api)
-	auditapi.NewHandler(database, auditStore, svc, authorizer).RegisterRoutes(api)
+	// REST route registration is shared with cmd/export-openapi via
+	// restsurface.Register so the published OpenAPI spec can never drift
+	// from the served surface. Handlers are constructed inside Register.
+	restsurface.Register(api, restsurface.Deps{
+		Tenancy:  svc,
+		Authz:    authorizer,
+		Clusters: registry,
+		CapabilitiesLister: clusterregistry.CapabilitiesListerFunc(func(ctx context.Context, clusterID string) ([]types.Capability, error) {
+			return capsStore.List(ctx, database.Pool, clusterID)
+		}),
+		Catalog:           catalogSvc,
+		Approvals:         approvalsSvc,
+		Inventory:         inventorySvc,
+		PlatformResources: platformResourcesSvc,
+		Orchestrator:      orchestratorSvc,
+		CloudAccounts:     cloudAccountsSvc,
+		Notifications:     notificationsSvc,
+		Policies:          policySvc,
+		Scaffold:          scaffoldSvc,
+		TenantZones:       tzfSvc,
+		Fleet:             fleetSvc,
+		SecretStores:      secretStoresSvc,
+		Extensions:        extSvc,
+		DB:                database,
+		AuditStore:        auditStore,
+		IdentityScopes:    cfg.IdentityScopes,
+		OIDCIssuerURL:     cfg.OIDCIssuerURL,
+		AllowedAPIBases:   cfg.GitHubAllowedAPIBases,
+		RemoteEntries:     remoteEntries,
+	})
 
 	// Agent-facing Connect-RPC services mount on chi directly, outside the
 	// huma bearer middleware: registration is token-authenticated, the event

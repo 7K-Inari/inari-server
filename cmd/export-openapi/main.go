@@ -1,8 +1,12 @@
 // export-openapi renders the full REST surface of the inari-server control
 // plane to OpenAPI YAML without requiring any infrastructure (PostgreSQL,
-// Keycloak, OpenFGA, NATS). Module handlers are constructed with nil
-// services/dependencies: constructors and route registration never
-// dereference them (dependencies are only touched per-request).
+// Keycloak, OpenFGA, NATS). Routes are registered through the shared
+// restsurface registry — the same function the live binary
+// (cmd/inari-server) uses — with nil services/dependencies: constructors
+// and route registration never dereference them (dependencies are only
+// touched per-request). A route that must not appear in this spec is marked
+// huma Hidden: true on its Operation; omitting a module from the registry
+// is never the mechanism for hiding routes.
 package main
 
 import (
@@ -13,39 +17,17 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 
-	"github.com/7K-Inari/inari-server/internal/approvals"
-	"github.com/7K-Inari/inari-server/internal/catalog"
-	"github.com/7K-Inari/inari-server/internal/cloudaccounts"
-	"github.com/7K-Inari/inari-server/internal/clusterregistry"
-	"github.com/7K-Inari/inari-server/internal/extensionhost"
-	"github.com/7K-Inari/inari-server/internal/fleetmanager"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
-	"github.com/7K-Inari/inari-server/internal/inventory"
-	"github.com/7K-Inari/inari-server/internal/notifications"
-	"github.com/7K-Inari/inari-server/internal/orchestrator"
-	"github.com/7K-Inari/inari-server/internal/policyservice"
-	"github.com/7K-Inari/inari-server/internal/tenancy"
-	"github.com/7K-Inari/inari-server/internal/tenantzonefactory"
+	"github.com/7K-Inari/inari-server/internal/restsurface"
 )
 
 // buildAPI constructs the huma API exactly like cmd/inari-server does and
-// registers every module's routes with nil services/dependencies.
+// registers every module's routes (with nil services/dependencies) via the
+// shared restsurface registry.
 func buildAPI() huma.API {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	_, api := httpserver.NewRouter(log, nil, nil)
-
-	tenancy.NewHandler(nil, nil).RegisterRoutes(api)
-	clusterregistry.NewHandler(nil, nil, nil, nil).RegisterRoutes(api)
-	catalog.NewHandler(nil, nil, nil).RegisterRoutes(api)
-	approvals.NewHandler(nil, nil, nil, nil).RegisterRoutes(api)
-	inventory.NewHandler(nil, nil, nil).RegisterRoutes(api)
-	orchestrator.NewHandler(nil, nil, nil).RegisterRoutes(api)
-	cloudaccounts.NewHandler(nil, nil, nil, nil).RegisterRoutes(api)
-	notifications.NewHandler(nil, nil, nil).RegisterRoutes(api)
-	policyservice.NewHandler(nil, nil, nil).RegisterRoutes(api)
-	tenantzonefactory.NewHandler(nil, nil, nil).RegisterRoutes(api)
-	fleetmanager.NewHandler(nil, nil, nil).RegisterRoutes(api)
-	extensionhost.NewHandler(nil, nil, nil).RegisterRoutes(api)
+	restsurface.Register(api, restsurface.Deps{})
 	return api
 }
 

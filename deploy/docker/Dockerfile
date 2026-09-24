@@ -8,6 +8,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/inari-server ./cmd
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/inari-server /inari-server
+COPY --from=build /src/templates /templates
 USER nonroot:nonroot
 EXPOSE 8080
 ENTRYPOINT ["/inari-server"]

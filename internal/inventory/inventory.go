@@ -5,7 +5,9 @@ package inventory
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -66,6 +68,13 @@ func deriveState(health string) types.InstanceState {
 // ApplyStatus folds one agent status-update into the matching instance.
 // Unknown resources (not Inari-managed) are ignored without error.
 func (s *Service) ApplyStatus(ctx context.Context, clusterID string, upd StatusUpdate) (bool, error) {
+	// ArgoCD Applications backing an instance are named inari-<instanceID>:
+	// their health/sync (incl. render failures like a missing CRD or an
+	// unreadable repo) report against the instance itself, so a broken
+	// delivery surfaces a message instead of sitting silent in deploying.
+	if instanceID, ok := instanceIDForAppRef(upd.Resource); ok {
+		return s.applyAppStatus(ctx, clusterID, instanceID, upd)
+	}
 	state := deriveState(upd.Health)
 	var matched bool
 	var inst *types.ResourceInstance
@@ -90,6 +99,80 @@ func (s *Service) ApplyStatus(ctx context.Context, clusterID string, upd StatusU
 		return false, fmt.Errorf("inventory: apply status: %w", err)
 	}
 	return matched, nil
+}
+
+// applyAppStatus folds the backing ArgoCD Application's health/sync into the
+// instance row keyed by ID. Message is always recorded (even when the state
+// stays deploying) so render/sync errors are visible in the console.
+// instanceIDForAppRef maps an ArgoCD Application resource ref to the backing
+// instance ID ("inari-<id>" naming contract from the orchestrator).
+func instanceIDForAppRef(ref types.ResourceRef) (string, bool) {
+	if ref.Kind != "Application" {
+		return "", false
+	}
+	return strings.CutPrefix(ref.Name, "inari-")
+}
+
+// appInstanceState folds Application health+sync into an instance state: an
+// app can read Healthy without ever having synced (or with a broken source),
+// so only synced+healthy marks the instance running.
+func appInstanceState(health, sync string) types.InstanceState {
+	state := deriveState(health)
+	if state == types.InstanceStateRunning && sync != "" && sync != "synced" {
+		return types.InstanceStateDeploying
+	}
+	return state
+}
+
+func (s *Service) applyAppStatus(ctx context.Context, clusterID, instanceID string, upd StatusUpdate) (bool, error) {
+	state := appInstanceState(upd.Health, upd.Sync)
+	inst, err := s.store.Get(ctx, s.db.Pool, instanceID)
+	if err != nil {
+		// Not an Inari-managed instance (or wrong cluster): drop-and-log.
+		return false, nil
+	}
+	if inst.ClusterID != clusterID {
+		return false, nil
+	}
+	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		if err := s.store.ApplyAppStatus(ctx, tx, instanceID, upd.Health, upd.Sync, upd.Message, state); err != nil {
+			return err
+		}
+		return s.audit.Record(ctx, tx, &types.AuditEvent{
+			OrgID: inst.OrgID, Actor: "agent:" + clusterID, Action: "instance.app_status",
+			ObjectType: "resource_instance", ObjectID: inst.ID,
+		})
+	})
+	if err != nil {
+		return false, fmt.Errorf("inventory: apply app status: %w", err)
+	}
+	return true, nil
+}
+
+// MarkFailed surfaces a delivery failure (e.g. the agent NACKed the
+// register-argocd-app command) on the instance instead of leaving it
+// silently stuck in deploying. Audit + outbox mirror ApplyStatus.
+func (s *Service) MarkFailed(ctx context.Context, instanceID, message string) error {
+	inst, err := s.store.Get(ctx, s.db.Pool, instanceID)
+	if err != nil {
+		return err
+	}
+	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		if err := s.store.MarkFailed(ctx, tx, instanceID, message); err != nil {
+			return err
+		}
+		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
+			OrgID: inst.OrgID, Actor: "agentgateway", Action: "instance.delivery_failed",
+			ObjectType: "resource_instance", ObjectID: instanceID,
+			Payload: json.RawMessage(fmt.Sprintf(`{"message":%q}`, message)),
+		}); err != nil {
+			return err
+		}
+		return audit.AppendOutbox(ctx, tx, inst.OrgID, types.EventInstanceStatus, types.InstancePayload{
+			OrgID: inst.OrgID, InstanceID: instanceID, ItemID: inst.CatalogItemID,
+			ClusterID: inst.ClusterID, Health: "failed",
+		})
+	})
 }
 
 // Get returns one instance with the version badge computed.

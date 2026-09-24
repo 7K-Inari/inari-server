@@ -86,18 +86,19 @@ func TestRenderTenantManifests(t *testing.T) {
 		}
 		c := string(f.Content)
 		for _, want := range []string{
-			"apiVersion: inari.7k.io/v1alpha1",
+			"apiVersion: platform.inari.io/v1alpha1",
 			"kind: " + wantKinds[i],
 			"name: ",
-			"inari.7k.io/org: org:kc-123",
-			"acme",
+			"platform.inari.io/org: acme",
+			"tenantID: acme",
+			"namespace: tenant-acme",
 		} {
 			if !strings.Contains(c, want) {
 				t.Errorf("%s missing %q:\n%s", f.Path, want, c)
 			}
 		}
 	}
-	if !strings.Contains(string(files[1].Content), "mode: shared-record") {
+	if !strings.Contains(string(files[1].Content), "zoneRef: shared") {
 		t.Errorf("dns-record manifest must use the shared-zone model:\n%s", files[1].Content)
 	}
 	// Deterministic: same input renders byte-identical output.

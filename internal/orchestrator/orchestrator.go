@@ -566,10 +566,26 @@ func (s *Service) GetGitConfig(ctx context.Context, orgID string) (*types.Tenant
 }
 
 func repoURL(repo string) string {
-	if len(repo) > 8 && repo[:8] == "https://" {
-		return repo
+	u := repo
+	if len(u) > 8 && u[:8] == "https://" {
+	} else {
+		u = "https://github.com/" + u
 	}
-	return "https://github.com/" + repo
+	// GitHub is case-insensitive but ArgoCD repo-creds prefix matching is
+	// not: normalize scheme+host+org to lowercase so credentials configured
+	// for the canonical org casing apply (7K-Group == 7k-group upstream).
+	if i := strings.Index(u, "://"); i >= 0 {
+		rest := u[i+3:]
+		if j := strings.Index(rest, "/"); j >= 0 {
+			host := rest[:j]
+			path := rest[j+1:]
+			if k := strings.Index(path, "/"); k >= 0 {
+				return strings.ToLower(u[:i+3]+host) + "/" + strings.ToLower(path[:k]) + path[k:]
+			}
+			return strings.ToLower(u[:i+3]+host) + "/" + strings.ToLower(path)
+		}
+	}
+	return u
 }
 
 func kindOf(manifest []byte) string {

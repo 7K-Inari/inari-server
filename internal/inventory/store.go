@@ -140,6 +140,36 @@ func (s *Store) MarkDeployed(ctx context.Context, q db.Querier, id, version, com
 	return nil
 }
 
+// ApplyAppStatus updates an instance from its backing ArgoCD Application
+// (matched by ID). The app is the source of truth for app-backed instances,
+// so state always follows it (a bogus healthy can be corrected on the next
+// update); the message always updates so sync/render errors reach the
+// console.
+func (s *Store) ApplyAppStatus(ctx context.Context, q db.Querier, id, health, syncState, message string, state types.InstanceState) error {
+	const sql = `UPDATE resource_instances
+	             SET health = $2, sync_state = $3, status_message = $4, state = $5, updated_at = now()
+	             WHERE id = $1`
+	_, err := q.Exec(ctx, sql, id, health, syncState, message, state)
+	return err
+}
+
+// MarkFailed moves an instance out of deploying/upgrading into failed with
+// the given message (e.g. the agent NACKed the app registration). It never
+// clobbers running/degraded instances whose status came from live reports.
+func (s *Store) MarkFailed(ctx context.Context, q db.Querier, id, message string) error {
+	const sql = `UPDATE resource_instances
+	             SET state = 'failed', status_message = $2, updated_at = now()
+	             WHERE id = $1 AND state IN ('deploying', 'upgrading', 'pending')`
+	tag, err := q.Exec(ctx, sql, id, message)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrInstanceNotFound
+	}
+	return nil
+}
+
 // GitConfig reads the tenant's git target.
 func (s *Store) GitConfig(ctx context.Context, q db.Querier, orgID string) (*types.TenantGitConfig, error) {
 	var c types.TenantGitConfig

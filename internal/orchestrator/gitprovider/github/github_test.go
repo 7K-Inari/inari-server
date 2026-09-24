@@ -132,11 +132,18 @@ func TestCommitFilesWritesTreeAndAdvancesRef(t *testing.T) {
 }
 
 func TestCommitFilesSeedsEmptyRepo(t *testing.T) {
-	var createdRef bool
+	var createdRef, seeded bool
 	p := testProvider(t, mux(t, nil, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/git/ref/heads/"):
-			w.WriteHeader(http.StatusNotFound)
+			if !seeded {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": map[string]string{"sha": "seed123"}})
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/.inari-init"):
+			seeded = true
+			_ = json.NewEncoder(w).Encode(map[string]any{})
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git/blobs"):
 			_ = json.NewEncoder(w).Encode(map[string]string{"sha": "blob1"})
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git/trees"):
@@ -144,6 +151,9 @@ func TestCommitFilesSeedsEmptyRepo(t *testing.T) {
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git/commits"):
 			_ = json.NewEncoder(w).Encode(map[string]string{"sha": "commit1"})
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git/refs"):
+			createdRef = true
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		case r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/git/refs/heads/"):
 			createdRef = true
 			_ = json.NewEncoder(w).Encode(map[string]any{})
 		default:
@@ -156,6 +166,46 @@ func TestCommitFilesSeedsEmptyRepo(t *testing.T) {
 	}
 	if !createdRef {
 		t.Error("expected POST /git/refs for empty repo")
+	}
+}
+
+func TestCommitFilesSeedsEmptyRepoOnConflict(t *testing.T) {
+	// GitHub answers 409 "Git Repository is empty" (not 404) when reading a
+	// ref on a repo with no commits; the provider must seed a root commit.
+	var createdRef, seeded bool
+	p := testProvider(t, mux(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/git/ref/heads/"):
+			if !seeded {
+				w.WriteHeader(http.StatusConflict)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": map[string]string{"sha": "seed123"}})
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/.inari-init"):
+			seeded = true
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git/blobs"):
+			_ = json.NewEncoder(w).Encode(map[string]string{"sha": "blob1"})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git/trees"):
+			_ = json.NewEncoder(w).Encode(map[string]string{"sha": "tree1"})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git/commits"):
+			_ = json.NewEncoder(w).Encode(map[string]string{"sha": "commit1"})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git/refs"):
+			createdRef = true
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		case r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/git/refs/heads/"):
+			createdRef = true
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	if _, err := p.CommitFiles(context.Background(), "acme/state", "main",
+		[]gitprovider.File{{Path: "x.yaml", Content: []byte("x")}}, "init"); err != nil {
+		t.Fatal(err)
+	}
+	if !createdRef {
+		t.Error("expected POST /git/refs for empty repo (409)")
 	}
 }
 

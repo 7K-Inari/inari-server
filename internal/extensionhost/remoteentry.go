@@ -26,6 +26,12 @@ import (
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
+// DirFetcher pulls an oras directory-push artifact into name→content
+// (oci.Fetcher seam; an interface so tests can fake registries).
+type DirFetcher interface {
+	FetchDir(ctx context.Context, ref string) (map[string][]byte, error)
+}
+
 // ErrRemoteEntryFetch is returned when the remoteEntry source cannot be
 // fetched or fails integrity verification.
 var ErrRemoteEntryFetch = errors.New("extensionhost: remoteEntry fetch failed")
@@ -45,8 +51,8 @@ type RemoteEntryFetcher struct {
 	// HTTPClient fetches external URLs (default: 15s timeout, redirects
 	// restricted to https).
 	HTTPClient *http.Client
-	// OCI pulls oras directory-push artifacts (default: oci.Fetcher{}).
-	OCI *oci.Fetcher
+	// OCI pulls oras directory-push artifacts (default: &oci.Fetcher{}).
+	OCI DirFetcher
 	// Verifier, when set, runs cosign verification on OCI sources before
 	// the layer is extracted (INARI_UI_EXTENSION_VERIFY=true).
 	Verifier SignatureVerifier
@@ -145,9 +151,6 @@ func (f *RemoteEntryFetcher) FetchAsset(ctx context.Context, desc *types.UiExten
 	if !assetFileRe.MatchString(file) || strings.Contains(file, "..") {
 		return nil, fmt.Errorf("%w: invalid asset name %q", ErrRemoteEntryFetch, file)
 	}
-	if desc.RemoteEntry == "" {
-		return nil, fmt.Errorf("%w: sibling assets require a remoteEntry URL source", ErrRemoteEntryFetch)
-	}
 	key := cacheKey(desc) + "|" + file
 	f.mu.Lock()
 	if f.cache == nil {
@@ -159,6 +162,38 @@ func (f *RemoteEntryFetcher) FetchAsset(ctx context.Context, desc *types.UiExten
 		return body, nil
 	}
 	f.mu.Unlock()
+
+	// OCI remotes: serve the sibling from the same directory-push artifact
+	// (layers keyed by title) instead of requiring a self-contained entry.
+	if desc.RemoteEntryOci != "" {
+		if f.Verifier != nil {
+			if err := f.Verifier.Verify(ctx, desc.RemoteEntryOci); err != nil {
+				return nil, fmt.Errorf("%w: %v", ErrRemoteEntryFetch, err)
+			}
+		}
+		oc := f.OCI
+		if oc == nil {
+			oc = &oci.Fetcher{}
+		}
+		files, err := oc.FetchDir(ctx, desc.RemoteEntryOci)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrRemoteEntryFetch, err)
+		}
+		body, ok := files[file]
+		if !ok {
+			return nil, fmt.Errorf("%w: asset %s not in artifact %s", ErrRemoteEntryFetch, file, desc.RemoteEntryOci)
+		}
+		if len(body) > maxAssetFileBytes {
+			return nil, fmt.Errorf("%w: asset %s exceeds %d bytes", ErrRemoteEntryFetch, file, maxAssetFileBytes)
+		}
+		f.mu.Lock()
+		f.cache[key] = remoteEntryCacheEntry{body: body, fetchedAt: time.Now()}
+		f.mu.Unlock()
+		return body, nil
+	}
+	if desc.RemoteEntry == "" {
+		return nil, fmt.Errorf("%w: sibling assets require a remoteEntry URL source", ErrRemoteEntryFetch)
+	}
 
 	u, err := url.Parse(desc.RemoteEntry)
 	if err != nil || u.Host == "" {

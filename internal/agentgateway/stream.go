@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -18,6 +19,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/7K-Inari/inari-server/internal/fleetmanager"
+	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -149,8 +151,31 @@ func (s *session) handleEvent(ctx context.Context, ev *agentv1.Event) ([]*agentv
 		if agentv1.EventTypeFromString(ev.Type) == agentv1.EventType_EVENT_TYPE_COMMAND_NACK || ack.Result == agentv1.CommandResult_COMMAND_RESULT_FAILED {
 			status = types.CommandStatusNacked
 		}
-		if err := s.gw.queue.Complete(ctx, ack.CommandId, status, ack.Message); err != nil {
+		// The agent echoes the payload's CommandId (bare logical ID), while
+		// queue rows are namespaced ("register-argocd-app:<id>"). Resolve the
+		// queued command ID before completing so acks actually retire.
+		cmdID := ack.CommandId
+		if _, err := s.gw.queue.Get(ctx, cmdID); err != nil {
+			if _, err := s.gw.queue.Get(ctx, "register-argocd-app:"+cmdID); err == nil {
+				cmdID = "register-argocd-app:" + cmdID
+			}
+		}
+		if err := s.gw.queue.Complete(ctx, cmdID, status, ack.Message); err != nil {
 			return nil, fmt.Errorf("complete command: %w", err)
+		}
+		// A failed register-argocd-app delivery must surface on the instance
+		// (state=failed + the agent's message) instead of leaving it stuck in
+		// deploying with no error information.
+		if status == types.CommandStatusNacked && s.gw.instanceFailures != nil {
+			if instanceID, ok := strings.CutPrefix(cmdID, "register-argocd-app:"); ok {
+				msg := ack.Message
+				if msg == "" {
+					msg = "agent failed to register the ArgoCD application"
+				}
+				if err := s.gw.instanceFailures.MarkFailed(ctx, instanceID, msg); err != nil && !errors.Is(err, inventory.ErrInstanceNotFound) {
+					slog.Warn("agentgateway: mark instance failed", "cluster", s.cluster.ID, "instance", instanceID, "error", err)
+				}
+			}
 		}
 
 	case agentv1.EventType_EVENT_TYPE_RESYNC_RESPONSE:

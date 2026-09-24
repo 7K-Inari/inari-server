@@ -60,6 +60,28 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("gitprovider github: %s %s: status %d: %s", e.Method, e.Path, e.Status, e.Body)
 }
 
+// indicatesRevoked reports whether a 401/403 plausibly means the app's
+// credentials were suspended/revoked (vs. a permission-scope or rate-limit
+// rejection, whose message GitHub includes in the body).
+func (e *APIError) indicatesRevoked() bool {
+	b := strings.ToLower(e.Body)
+	switch {
+	case strings.Contains(b, "rate limit"):
+		return false
+	case strings.Contains(b, "permission"):
+		return false
+	case strings.Contains(b, "workflow"):
+		return false
+	case strings.Contains(b, "not installed"):
+		return false
+	case strings.Contains(b, "resource not accessible by integration"):
+		return false
+	case strings.Contains(b, "integration"):
+		return false
+	}
+	return true
+}
+
 func New(cfg Config) (*Provider, error) {
 	raw, err := os.ReadFile(cfg.PrivateKeyFile)
 	if err != nil {
@@ -348,12 +370,25 @@ func (p *Provider) commitTree(ctx context.Context, owner, name, branch string, f
 		} `json:"object"`
 	}
 	status, err := p.do(ctx, http.MethodGet, base+"/git/ref/heads/"+branch, nil, &ref)
-	if err != nil && status != http.StatusNotFound {
+	if err != nil && status != http.StatusNotFound && status != http.StatusConflict {
 		return "", err
 	}
-	if status == http.StatusNotFound {
-		// Empty repo: seed from a root tree with no parent.
-		baseSHA = ""
+	if status == http.StatusNotFound || status == http.StatusConflict {
+		// Empty repo: GitHub answers 404 (missing ref) or 409 ("Git
+		// Repository is empty"). The git-database API (blobs/trees) also 409s
+		// while a repo has zero commits, so seed it through the Contents API
+		// (which accepts the first commit) and then take the normal path.
+		if s, err := p.do(ctx, http.MethodPut, base+"/contents/.inari-init", map[string]any{
+			"message": "chore: initialize repository",
+			"content":  base64.StdEncoding.EncodeToString([]byte("initialized by inari\n")),
+			"branch":   branch,
+		}, nil); err != nil && s != http.StatusUnprocessableEntity {
+			return "", fmt.Errorf("gitprovider github: seed empty repo: %w", err)
+		}
+		if _, err := p.do(ctx, http.MethodGet, base+"/git/ref/heads/"+branch, nil, &ref); err != nil {
+			return "", err
+		}
+		baseSHA = ref.Object.SHA
 	} else {
 		baseSHA = ref.Object.SHA
 	}

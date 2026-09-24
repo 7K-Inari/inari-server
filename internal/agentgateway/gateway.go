@@ -65,16 +65,30 @@ func (c *Config) withDefaults() Config {
 	return out
 }
 
+// commandQueue is the session-facing command-queue seam (*Queue implements
+// it; tests fake it).
+type commandQueue interface {
+	Enqueue(ctx context.Context, cmd *types.AgentCommand) error
+	Due(ctx context.Context, clusterID string, limit int) ([]types.AgentCommand, error)
+	MarkDelivered(ctx context.Context, id string) error
+	Complete(ctx context.Context, id string, status types.CommandStatus, message string) error
+	CompletePendingByType(ctx context.Context, clusterID, cmdType, message string) error
+	Get(ctx context.Context, id string) (*types.AgentCommand, error)
+}
+
 // Gateway bundles the Agent Gateway dependencies.
 type Gateway struct {
 	registry   *clusterregistry.Service
 	clients    clusterregistry.ClientManager
 	caps       *capabilities.Service
-	queue      *Queue
+	queue      commandQueue
 	audit      *audit.Store
 	db         *db.DB
 	cfg        Config
 	statusSink StatusSink
+	// instanceFailures marks instances failed when the agent NACKs a
+	// delivery command (nil-safe).
+	instanceFailures InstanceFailureSink
 	// secrets delivers the OIDC client secret to the platform secret store
 	// (ESO path); nil means delivery is unconfigured and registration fails
 	// explicitly with CodeUnavailable instead of a false promise.
@@ -99,6 +113,9 @@ type SecretStoreLookup interface {
 // client as a platform-resource row (platformresources.Service seam, M7.W2).
 type PlatformResourceEnsurer interface {
 	EnsureDesired(ctx context.Context, orgID string, kind types.PlatformResourceKind, name string, desired json.RawMessage) (*types.PlatformResource, error)
+	// MarkProvisioned records a server-provisioned resource as ready (no
+	// operator CR exists for it; the control plane is the source of truth).
+	MarkProvisioned(ctx context.Context, orgID string, kind types.PlatformResourceKind, name, detail string) error
 }
 
 // WithPlatformResources wires the platform-resources module so cluster
@@ -137,7 +154,7 @@ func (g *Gateway) WithSecretWriter(w secrets.Writer) *Gateway {
 }
 
 // Queue exposes the durable command queue for future modules (Orchestrator).
-func (g *Gateway) Queue() *Queue { return g.queue }
+func (g *Gateway) Queue() *Queue { return g.queue.(*Queue) }
 
 // StatusSink consumes agent status-update events (Resources Inventory).
 type StatusSink interface {
@@ -147,6 +164,16 @@ type StatusSink interface {
 // SetStatusSink wires the inventory module post-construction (nil-safe:
 // status updates are drop-and-log until wired).
 func (g *Gateway) SetStatusSink(s StatusSink) { g.statusSink = s }
+
+// InstanceFailureSink surfaces agent delivery failures on resource
+// instances (inventory.Service seam).
+type InstanceFailureSink interface {
+	MarkFailed(ctx context.Context, instanceID, message string) error
+}
+
+// SetInstanceFailureSink wires the inventory failure sink (nil-safe: NACKed
+// app registrations only update the command row until wired).
+func (g *Gateway) SetInstanceFailureSink(s InstanceFailureSink) { g.instanceFailures = s }
 
 type agentIdentityKey struct{}
 

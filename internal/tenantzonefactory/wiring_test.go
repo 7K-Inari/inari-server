@@ -45,7 +45,7 @@ func TestWireZoneEnsuresPlatformResourcesAndCommitsManifests(t *testing.T) {
 			t.Errorf("platform gitops repo missing %s (has %v)", want, files)
 		}
 	}
-	if !strings.Contains(files["tenants/acme/dns-record.yaml"], "mode: shared-record") {
+	if !strings.Contains(files["tenants/acme/dns-record.yaml"], "zoneRef: shared") {
 		t.Errorf("dns-record manifest = %s", files["tenants/acme/dns-record.yaml"])
 	}
 

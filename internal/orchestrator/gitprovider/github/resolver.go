@@ -259,6 +259,13 @@ func (r *Resolver) wrapPlatform(inner *Provider, orgID, owner string, info *gitp
 		}
 		switch {
 		case apiErr.Status == http.StatusUnauthorized || apiErr.Status == http.StatusForbidden:
+			// Permission-scope and rate-limit 403s are not credential
+			// failures: surface GitHub's message (e.g. "refusing to allow a
+			// GitHub App to create or update workflow ... without the
+			// workflows permission") instead of misreporting revoked creds.
+			if apiErr.Status == http.StatusForbidden && !apiErr.indicatesRevoked() {
+				return fmt.Errorf("gitprovider github: %s %s: %s", apiErr.Method, apiErr.Path, apiErr.Body)
+			}
 			r.invalidate(owner)
 			return &ErrAppCredentialsRevoked{OrgID: orgID, AppID: info.AppID, InstallationID: info.InstallationID, APIBase: info.APIBase}
 		case apiErr.Status == http.StatusNotFound && strings.Contains(apiErr.Path, "/access_tokens"):
@@ -313,6 +320,9 @@ func (r *Resolver) wrapBYO(inner *Provider, orgID string, info *gitprovider.Auth
 		}
 		switch {
 		case apiErr.Status == http.StatusUnauthorized || apiErr.Status == http.StatusForbidden:
+			if apiErr.Status == http.StatusForbidden && !apiErr.indicatesRevoked() {
+				return fmt.Errorf("gitprovider github: %s %s: %s", apiErr.Method, apiErr.Path, apiErr.Body)
+			}
 			r.EvictTenant(orgID)
 			return &ErrAppCredentialsRevoked{OrgID: orgID, AppID: info.AppID, InstallationID: info.InstallationID, APIBase: info.APIBase}
 		case apiErr.Status == http.StatusNotFound && strings.Contains(apiErr.Path, "/access_tokens"):

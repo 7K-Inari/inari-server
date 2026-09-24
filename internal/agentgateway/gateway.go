@@ -65,12 +65,23 @@ func (c *Config) withDefaults() Config {
 	return out
 }
 
+// commandQueue is the session-facing command-queue seam (*Queue implements
+// it; tests fake it).
+type commandQueue interface {
+	Enqueue(ctx context.Context, cmd *types.AgentCommand) error
+	Due(ctx context.Context, clusterID string, limit int) ([]types.AgentCommand, error)
+	MarkDelivered(ctx context.Context, id string) error
+	Complete(ctx context.Context, id string, status types.CommandStatus, message string) error
+	CompletePendingByType(ctx context.Context, clusterID, cmdType, message string) error
+	Get(ctx context.Context, id string) (*types.AgentCommand, error)
+}
+
 // Gateway bundles the Agent Gateway dependencies.
 type Gateway struct {
 	registry   *clusterregistry.Service
 	clients    clusterregistry.ClientManager
 	caps       *capabilities.Service
-	queue      *Queue
+	queue      commandQueue
 	audit      *audit.Store
 	db         *db.DB
 	cfg        Config
@@ -143,7 +154,7 @@ func (g *Gateway) WithSecretWriter(w secrets.Writer) *Gateway {
 }
 
 // Queue exposes the durable command queue for future modules (Orchestrator).
-func (g *Gateway) Queue() *Queue { return g.queue }
+func (g *Gateway) Queue() *Queue { return g.queue.(*Queue) }
 
 // StatusSink consumes agent status-update events (Resources Inventory).
 type StatusSink interface {

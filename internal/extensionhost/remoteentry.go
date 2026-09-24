@@ -26,6 +26,12 @@ import (
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
+// DirFetcher pulls an oras directory-push artifact into name→content
+// (oci.Fetcher seam; an interface so tests can fake registries).
+type DirFetcher interface {
+	FetchDir(ctx context.Context, ref string) (map[string][]byte, error)
+}
+
 // ErrRemoteEntryFetch is returned when the remoteEntry source cannot be
 // fetched or fails integrity verification.
 var ErrRemoteEntryFetch = errors.New("extensionhost: remoteEntry fetch failed")
@@ -45,8 +51,8 @@ type RemoteEntryFetcher struct {
 	// HTTPClient fetches external URLs (default: 15s timeout, redirects
 	// restricted to https).
 	HTTPClient *http.Client
-	// OCI pulls oras directory-push artifacts (default: oci.Fetcher{}).
-	OCI *oci.Fetcher
+	// OCI pulls oras directory-push artifacts (default: &oci.Fetcher{}).
+	OCI DirFetcher
 	// Verifier, when set, runs cosign verification on OCI sources before
 	// the layer is extracted (INARI_UI_EXTENSION_VERIFY=true).
 	Verifier SignatureVerifier

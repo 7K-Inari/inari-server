@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -383,4 +384,60 @@ func TestUiAssetServerHandlerMatrix(t *testing.T) {
 			}
 		})
 	}
+}
+
+type fakeDirFetcher struct {
+	files map[string][]byte
+	err   error
+}
+
+func (f fakeDirFetcher) FetchDir(context.Context, string) (map[string][]byte, error) {
+	return f.files, f.err
+}
+
+func TestFetchAssetOCI(t *testing.T) {
+	desc := &types.UiExtensionDescriptor{
+		RemoteEntryOci: "registry.example/ui/ext:v1", Enabled: true,
+	}
+	files := map[string][]byte{
+		"remoteEntry.js": []byte("/* entry */"),
+		"616.js":         []byte("/* chunk */"),
+	}
+
+	t.Run("serves sibling chunk from the OCI dir artifact", func(t *testing.T) {
+		f := &RemoteEntryFetcher{OCI: fakeDirFetcher{files: files}}
+		body, err := f.FetchAsset(context.Background(), desc, "616.js")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(body) != "/* chunk */" {
+			t.Errorf("body = %q", body)
+		}
+	})
+
+	t.Run("missing asset in artifact errors", func(t *testing.T) {
+		f := &RemoteEntryFetcher{OCI: fakeDirFetcher{files: files}}
+		if _, err := f.FetchAsset(context.Background(), desc, "nope.js"); err == nil {
+			t.Fatal("want error")
+		}
+	})
+
+	t.Run("OCI source is cached per file", func(t *testing.T) {
+		f := &RemoteEntryFetcher{OCI: fakeDirFetcher{files: files}, CacheTTL: time.Minute}
+		if _, err := f.FetchAsset(context.Background(), desc, "616.js"); err != nil {
+			t.Fatal(err)
+		}
+		// Second call must come from cache: swap the fake's files.
+		f.OCI = fakeDirFetcher{err: errors.New("registry down")}
+		if _, err := f.FetchAsset(context.Background(), desc, "616.js"); err != nil {
+			t.Fatalf("cache miss: %v", err)
+		}
+	})
+
+	t.Run("invalid asset names rejected", func(t *testing.T) {
+		f := &RemoteEntryFetcher{OCI: fakeDirFetcher{files: files}}
+		if _, err := f.FetchAsset(context.Background(), desc, "../escape.js"); err == nil {
+			t.Fatal("want error")
+		}
+	})
 }

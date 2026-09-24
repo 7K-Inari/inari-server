@@ -72,10 +72,8 @@ func (s *Service) ApplyStatus(ctx context.Context, clusterID string, upd StatusU
 	// their health/sync (incl. render failures like a missing CRD or an
 	// unreadable repo) report against the instance itself, so a broken
 	// delivery surfaces a message instead of sitting silent in deploying.
-	if upd.Resource.Kind == "Application" {
-		if instanceID, ok := strings.CutPrefix(upd.Resource.Name, "inari-"); ok {
-			return s.applyAppStatus(ctx, clusterID, instanceID, upd)
-		}
+	if instanceID, ok := instanceIDForAppRef(upd.Resource); ok {
+		return s.applyAppStatus(ctx, clusterID, instanceID, upd)
 	}
 	state := deriveState(upd.Health)
 	var matched bool
@@ -106,14 +104,28 @@ func (s *Service) ApplyStatus(ctx context.Context, clusterID string, upd StatusU
 // applyAppStatus folds the backing ArgoCD Application's health/sync into the
 // instance row keyed by ID. Message is always recorded (even when the state
 // stays deploying) so render/sync errors are visible in the console.
-func (s *Service) applyAppStatus(ctx context.Context, clusterID, instanceID string, upd StatusUpdate) (bool, error) {
-	state := deriveState(upd.Health)
-	// An ArgoCD app can read Healthy without ever having synced (or with a
-	// broken source): only a synced+healthy app may mark the instance
-	// running; a sync error keeps it out of running with the error visible.
-	if state == types.InstanceStateRunning && upd.Sync != "" && upd.Sync != "synced" {
-		state = types.InstanceStateDeploying
+// instanceIDForAppRef maps an ArgoCD Application resource ref to the backing
+// instance ID ("inari-<id>" naming contract from the orchestrator).
+func instanceIDForAppRef(ref types.ResourceRef) (string, bool) {
+	if ref.Kind != "Application" {
+		return "", false
 	}
+	return strings.CutPrefix(ref.Name, "inari-")
+}
+
+// appInstanceState folds Application health+sync into an instance state: an
+// app can read Healthy without ever having synced (or with a broken source),
+// so only synced+healthy marks the instance running.
+func appInstanceState(health, sync string) types.InstanceState {
+	state := deriveState(health)
+	if state == types.InstanceStateRunning && sync != "" && sync != "synced" {
+		return types.InstanceStateDeploying
+	}
+	return state
+}
+
+func (s *Service) applyAppStatus(ctx context.Context, clusterID, instanceID string, upd StatusUpdate) (bool, error) {
+	state := appInstanceState(upd.Health, upd.Sync)
 	inst, err := s.store.Get(ctx, s.db.Pool, instanceID)
 	if err != nil {
 		// Not an Inari-managed instance (or wrong cluster): drop-and-log.

@@ -560,8 +560,7 @@ func run() error {
 	router, api := httpserver.NewRouter(log, validator, database)
 	// REST route registration is shared with cmd/export-openapi via
 	// restsurface.Register so the published OpenAPI spec can never drift
-	// from the served surface. Handlers are constructed inside Register;
-	// the local handler variables above remain for service wiring.
+	// from the served surface. Handlers are constructed inside Register.
 	restsurface.Register(api, restsurface.Deps{
 		Tenancy:  svc,
 		Authz:    authorizer,

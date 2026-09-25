@@ -499,6 +499,7 @@ type Service struct {
 	deleter  *Deleter
 	store    *Store
 	audit    *audit.Store
+	orgCache *OrgCache
 }
 
 func NewService(d *db.DB, idp IdentityProvider, store *Store, auditStore *audit.Store) *Service {
@@ -524,6 +525,22 @@ func (s *Service) WithDeletionApprovalGate(g DeletionApprovalGate) *Service {
 func (s *Service) WithDeleter(d *Deleter) *Service {
 	s.deleter = d
 	return s
+}
+
+// WithOrgCache wires the slug→org cache (ADR-0010) consulted by GetTenant,
+// the funnel every module's authorizeOrg calls per request. Mutations
+// invalidate; all cache failures are fail-open.
+func (s *Service) WithOrgCache(c *OrgCache) *Service {
+	s.orgCache = c
+	return s
+}
+
+// invalidateOrgCache evicts the cached org row after a mutation. Safe to
+// call with a nil cache (tests and export-openapi wire no cache).
+func (s *Service) invalidateOrgCache(ctx context.Context, slug string) {
+	if s.orgCache != nil {
+		s.orgCache.Invalidate(ctx, slug)
+	}
 }
 
 // CreateTenant creates the Keycloak org + default groups, the DB projection,
@@ -659,6 +676,9 @@ func (s *Service) CreateTenant(ctx context.Context, actor, slug, displayName str
 			return nil, nil, err
 		}
 	}
+	// Defensive: nothing should be cached for a brand-new slug, but a prior
+	// delete/recreate race could have left an entry.
+	s.invalidateOrgCache(ctx, slug)
 	return org, teams, nil
 }
 
@@ -668,6 +688,11 @@ func (s *Service) ListTenants(ctx context.Context) ([]types.Organization, error)
 }
 
 func (s *Service) GetTenant(ctx context.Context, slug string) (*types.Organization, error) {
+	if s.orgCache != nil {
+		return s.orgCache.Lookup(ctx, slug, func(ctx context.Context) (*types.Organization, error) {
+			return s.store.GetOrganizationBySlug(ctx, s.db.Pool, slug)
+		})
+	}
 	return s.store.GetOrganizationBySlug(ctx, s.db.Pool, slug)
 }
 
@@ -719,6 +744,7 @@ func (s *Service) UpdateTenantProfile(ctx context.Context, actor, slug, displayN
 	if err != nil {
 		return nil, err
 	}
+	s.invalidateOrgCache(ctx, slug)
 	org.DisplayName = displayName
 	return org, nil
 }

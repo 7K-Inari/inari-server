@@ -9,3 +9,11 @@ appVersion: 3.0.0
 maintainers:
   - name: 7K-Inari
     url: https://github.com/7K-Inari
+# Optional in-cluster Redis for the cache layer (ADR-0010). Disabled by
+# default; enable with --set redis.enabled=true (or set cache.backend=redis
+# with redis.url for an external instance).
+dependencies:
+  - name: redis
+    version: 28.2.4
+    repository: https://charts.bitnami.com/bitnami
+    condition: redis.enabled

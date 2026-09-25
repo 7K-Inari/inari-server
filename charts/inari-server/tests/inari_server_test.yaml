@@ -408,3 +408,49 @@ tests:
       - equal:
           path: spec.template.spec.topologySpreadConstraints[0].whenUnsatisfiable
           value: ScheduleAnyway
+  - it: defaults the cache backend to memory without a Redis URL
+    template: deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_CACHE_BACKEND
+            value: memory
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_REDIS_URL
+  - it: renders the subchart Redis URL when cache.backend=redis and redis.enabled
+    template: deployment.yaml
+    set:
+      cache.backend: redis
+      redis.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_CACHE_BACKEND
+            value: redis
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_REDIS_URL
+            value: redis://RELEASE-NAME-inari-server-redis-master:6379/0
+  - it: honors an external Redis URL when cache.backend=redis
+    template: deployment.yaml
+    set:
+      cache.backend: redis
+      redis.url: redis://cache.example.com:6379/2
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_REDIS_URL
+            value: redis://cache.example.com:6379/2
+  - it: fails when cache.backend=redis has neither subchart nor external URL
+    template: deployment.yaml
+    set:
+      cache.backend: redis
+    asserts:
+      - failedTemplate:
+          errorMessage: cache.backend=redis requires redis.enabled=true (subchart) or redis.url (external Redis)

@@ -57,3 +57,15 @@ OIDC issuer URL: explicit value, or derived from the Keycloak base URL+realm.
 {{- printf "%s/realms/%s" .Values.keycloak.baseUrl .Values.keycloak.realm }}
 {{- end }}
 {{- end }}
+
+{{/*
+Redis URL for the cache backend: explicit redis.url (BYO), else the bitnami
+subchart's standalone master service (<fullname>-redis-master).
+*/}}
+{{- define "inari-server.redisUrl" -}}
+{{- if .Values.redis.url }}
+{{- .Values.redis.url }}
+{{- else }}
+{{- printf "redis://%s-redis-master:6379/0" (include "inari-server.fullname" .) }}
+{{- end }}
+{{- end }}

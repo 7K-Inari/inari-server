@@ -1,6 +1,56 @@
 # Default values for inari-server.
 
+# Keep at 1 for dev/e2e. Scaling to >= 2 automatically enables the PDB and
+# pod anti-affinity below.
 replicaCount: 1
+
+# Health probes against the binary's /healthz and /readyz endpoints. Each
+# probe can be disabled individually; ports follow service.port (named "http").
+probes:
+  # Startup probe protects slow boots (~60s budget) from the liveness probe.
+  startup:
+    enabled: true
+    periodSeconds: 2
+    timeoutSeconds: 2
+    failureThreshold: 30
+  readiness:
+    enabled: true
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+  liveness:
+    enabled: true
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+
+# Rolling updates never take the control plane below capacity: surge a new
+# pod first, only then stop the old one.
+strategy:
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
+
+terminationGracePeriodSeconds: 30
+
+# PodDisruptionBudget, rendered only when replicaCount >= 2.
+pdb:
+  enabled: true
+  minAvailable: 1
+
+# Preferred pod anti-affinity across nodes, rendered only when
+# replicaCount >= 2.
+podAntiAffinity:
+  enabled: true
+  topologyKey: kubernetes.io/hostname
+
+# Strictly opt-in (cluster topology dependent). Complements the hostname
+# anti-affinity with zone-level spreading.
+topologySpreadConstraints:
+  enabled: false
+  maxSkew: 1
+  topologyKey: topology.kubernetes.io/zone
+  whenUnsatisfiable: ScheduleAnyway
 
 image:
   repository: ghcr.io/7k-inari/inari-server
@@ -113,7 +163,16 @@ route:
   # Extra annotations (e.g. external-dns/cloudflare-proxy).
   annotations: {}
 
-resources: {}
+# Sane defaults sized for the control-plane binary; override per environment.
+# Set to {} or null to render no requests/limits at all.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    # No CPU limit: CPU throttling on the API server hurts latency more than
+    # burstable scheduling helps here.
+    memory: 512Mi
 
 serviceAccount:
   annotations: {}

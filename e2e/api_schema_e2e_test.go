@@ -220,7 +220,8 @@ func TestAPISchemaConformance(t *testing.T) {
 		if ep.path == "/api/v1/tenants" && org == "" {
 			// Derive the tenant slug for the per-tenant checks from the
 			// tenant switcher list.
-			tenants, _ := bodies[ep.path].(map[string]any)["tenants"].([]any)
+			tenantsBody, _ := bodies[ep.path].(map[string]any)
+			tenants, _ := tenantsBody["tenants"].([]any)
 			for _, it := range tenants {
 				if m, ok := it.(map[string]any); ok {
 					if slug, ok := m["slug"].(string); ok && slug != "" {

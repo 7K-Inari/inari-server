@@ -19,6 +19,7 @@ import (
 
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/authn"
+	"github.com/7K-Inari/inari-server/internal/capabilities"
 	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
@@ -67,6 +68,11 @@ func (t itTenants) GetTenant(_ context.Context, slug string) (*types.Organizatio
 
 func itServer(t *testing.T) (*httptest.Server, *db.DB) {
 	t.Helper()
+	return itServerWithCaps(t, nil)
+}
+
+func itServerWithCaps(t *testing.T, caps catalog.CapabilityLister) (*httptest.Server, *db.DB) {
+	t.Helper()
 	ctx := context.Background()
 	pg, err := postgres.Run(ctx, "postgres:16-alpine",
 		postgres.WithDatabase("inari"),
@@ -96,7 +102,7 @@ func itServer(t *testing.T) (*httptest.Server, *db.DB) {
 	}
 
 	auditStore := audit.NewStore()
-	catalogSvc := catalog.NewService(database, catalog.NewStore(), nil, auditStore,
+	catalogSvc := catalog.NewService(database, catalog.NewStore(), caps, auditStore,
 		&catalog.FixturePuller{Root: "testdata/oci"})
 	if _, err := catalogSvc.Sync(ctx); err != nil {
 		t.Fatalf("catalog sync: %v", err)
@@ -193,6 +199,10 @@ func TestListCatalogFiltering(t *testing.T) {
 	if got := itListCatalog(t, srv, "?q=nomatch"); got.Total != 0 || len(got.Items) != 0 {
 		t.Errorf("q=nomatch = %+v", got)
 	}
+	// ILIKE wildcards in q are escaped, not treated as patterns.
+	if got := itListCatalog(t, srv, "?q=%25"); got.Total != 0 {
+		t.Errorf("q=%% total = %d, want 0 (literal %% matches nothing)", got.Total)
+	}
 
 	// Source and category facets.
 	if got := itListCatalog(t, srv, "?source=curated"); got.Total != 2 {
@@ -228,6 +238,60 @@ func TestListCatalogFiltering(t *testing.T) {
 	}
 	if code, _ := itReq(t, srv, "GET", "/api/v1/tenants/acme/catalog?source=bogus", "viewer", ""); code != http.StatusUnprocessableEntity {
 		t.Errorf("bogus source: got %d, want 422", code)
+	}
+}
+
+// Discovered projections merge with persisted items before filtering,
+// sorting, and pagination — the "what can I run here?" path (ADR-0009).
+func TestListCatalogDiscoveredMerge(t *testing.T) {
+	srv, database := itServerWithCaps(t, capabilities.NewStore())
+	defer srv.Close()
+	ctx := context.Background()
+
+	if _, err := database.Pool.Exec(ctx,
+		`INSERT INTO clusters (id, org_id, name, state) VALUES ('cl-1','org:1','eks-prod','active')`); err != nil {
+		t.Fatal(err)
+	}
+	caps := capabilities.NewStore()
+	for _, item := range []types.CapabilityItem{
+		{Kind: types.CapabilityKindCRD, Name: "aardvark", Group: "example.io", Version: "v1"},
+		{Kind: types.CapabilityKindCRD, Name: "zebra", Group: "example.io", Version: "v1"},
+	} {
+		if err := caps.Upsert(ctx, database.Pool, "cl-1", item); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Merged: persisted fixture items plus the two discovered projections.
+	plain := itListCatalog(t, srv, "")
+	merged := itListCatalog(t, srv, "?cluster=cl-1")
+	if merged.Total != plain.Total+2 {
+		t.Fatalf("merged total = %d, want %d (persisted %d + 2 discovered)", merged.Total, plain.Total+2, plain.Total)
+	}
+
+	// Facets apply to projections: source filter isolates them.
+	got := itListCatalog(t, srv, "?cluster=cl-1&source=discovered")
+	if got.Total != 2 {
+		t.Errorf("source=discovered total = %d, want 2 (%+v)", got.Total, got.Items)
+	}
+	// Projections have no category: excluded when a category filter is active.
+	if got := itListCatalog(t, srv, "?cluster=cl-1&category=database"); got.Total != 1 {
+		t.Errorf("category=database with cluster total = %d, want 1", got.Total)
+	}
+	// Free-text search reaches projection names.
+	if got := itListCatalog(t, srv, "?cluster=cl-1&q=aardvark"); got.Total != 1 {
+		t.Errorf("q=aardvark total = %d, want 1", got.Total)
+	}
+
+	// Pagination slices the merged, sorted result; total stays un-paginated.
+	page := itListCatalog(t, srv, "?cluster=cl-1&limit=1&offset=0")
+	if page.Total != merged.Total || len(page.Items) != 1 || page.Items[0].Name != "aardvark.example.io" {
+		t.Errorf("first merged page = %+v, want aardvark.example.io of %d", page, merged.Total)
+	}
+
+	// Without the cluster param nothing leaks into other clusters' views.
+	if got := itListCatalog(t, srv, "?cluster=cl-unknown"); got.Total != plain.Total {
+		t.Errorf("unknown cluster total = %d, want %d", got.Total, plain.Total)
 	}
 }
 

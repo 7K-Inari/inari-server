@@ -54,6 +54,10 @@ type Config struct {
 	OrgGroupSyncInterval time.Duration
 	OutboxPollInterval   time.Duration
 	ShutdownTimeout      time.Duration
+	// LeaderLeaseTTL is the leader-lease validity period (ADR-0011): it
+	// bounds failover of the gated singleton loops when a replica dies
+	// without releasing. Renewal runs at TTL/3.
+	LeaderLeaseTTL time.Duration
 
 	RegistrationTokenTTL       time.Duration
 	EnrollmentApprovalRequired bool
@@ -198,6 +202,7 @@ func Load() (*Config, error) {
 		OrgGroupSyncInterval:      durEnv("INARI_ORG_GROUP_SYNC_INTERVAL", 30*time.Second),
 		OutboxPollInterval:        durEnv("INARI_OUTBOX_POLL_INTERVAL", time.Second),
 		ShutdownTimeout:           durEnv("INARI_SHUTDOWN_TIMEOUT", 10*time.Second),
+		LeaderLeaseTTL:            durEnv("INARI_LEADER_LEASE_TTL", 10*time.Second),
 
 		RegistrationTokenTTL:       durEnv("INARI_REGISTRATION_TOKEN_TTL", time.Hour),
 		EnrollmentApprovalRequired: boolEnv("INARI_ENROLLMENT_APPROVAL_REQUIRED", false),

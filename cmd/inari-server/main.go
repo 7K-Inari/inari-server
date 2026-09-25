@@ -31,6 +31,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/fleetmanager"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/inventory"
+	"github.com/7K-Inari/inari-server/internal/leaderlease"
 	"github.com/7K-Inari/inari-server/internal/logging"
 	"github.com/7K-Inari/inari-server/internal/notifications"
 	"github.com/7K-Inari/inari-server/internal/orchestrator"
@@ -234,6 +235,13 @@ func run() error {
 
 	auditStore := audit.NewStore()
 
+	// Multi-replica safety (ADR-0011): DB-backed leader leases gate the
+	// singleton background loops below so exactly one replica drives each at
+	// a time; failover is bounded by the lease TTL. Claim-based SKIP LOCKED
+	// loops (outbox dispatcher, scaffold reconcile) are already safe and are
+	// intentionally NOT gated.
+	leaser := leaderlease.New(database, leaderlease.Config{TTL: cfg.LeaderLeaseTTL})
+
 	idp := tenancy.NewKeycloakAdmin(cfg.KeycloakBaseURL, cfg.KeycloakRealm, cfg.KeycloakClientID, cfg.KeycloakClientSecret)
 	platformResourcesSvc := platformresources.NewService(database, platformresources.NewStore(), auditStore)
 	svc := tenancy.NewService(database, idp, tenancy.NewStore(), auditStore).
@@ -269,7 +277,9 @@ func run() error {
 	// Platform group sync (M1.W2, ADR-0003): Keycloak realm group →
 	// platform:inari org_creator tuples. Single writer for those tuples.
 	platformSync := authz.NewPlatformGroupSync(fgaStore, idp, cfg.PlatformAdminGroup)
-	go platformSync.Run(ctx, cfg.PlatformGroupSyncInterval)
+	go leaderlease.Run(ctx, leaser, "authz-platform-group-sync", func(lctx context.Context) {
+		platformSync.Run(lctx, cfg.PlatformGroupSyncInterval)
+	}, log)
 
 	// Org team group sync (M6.W7, ADR-0004): every tenant's team groups
 	// (tenant-<slug>/<team>) → team:<id>#member tuples, both directions.
@@ -290,7 +300,9 @@ func run() error {
 			}
 			return refs, nil
 		}))
-	go teamSync.Run(ctx, cfg.OrgGroupSyncInterval)
+	go leaderlease.Run(ctx, leaser, "authz-org-team-sync", func(lctx context.Context) {
+		teamSync.Run(lctx, cfg.OrgGroupSyncInterval)
+	}, log)
 
 	registry := clusterregistry.NewService(database, idp, clusterregistry.NewStore(), auditStore,
 		cfg.RegistrationTokenTTL, cfg.EnrollmentApprovalRequired)
@@ -355,7 +367,9 @@ func run() error {
 			slog.Info("catalog sync complete", "packages", n)
 		}
 		if cfg.CatalogSyncInterval > 0 {
-			go runCatalogSyncLoop(ctx, catalogSvc, cfg.CatalogSyncInterval)
+			go leaderlease.Run(ctx, leaser, "catalog-oci-sync", func(lctx context.Context) {
+				runCatalogSyncLoop(lctx, catalogSvc, cfg.CatalogSyncInterval)
+			}, log)
 		}
 	}
 
@@ -391,14 +405,22 @@ func run() error {
 	}
 
 	approvalsSvc := approvals.NewService(database, approvals.NewStore(database), auditStore, svc, catalogSvc).WithPlatformChecker(authorizer)
-	go approvalsSvc.RunExpiryLoop(ctx, time.Minute)
+	go leaderlease.Run(ctx, leaser, "approvals-expiry", func(lctx context.Context) {
+		approvalsSvc.RunExpiryLoop(lctx, time.Minute)
+	}, log)
 
 	// Tenant deletion (ADR-0006): approval-gated, resumable teardown state
 	// machine. FGA tuple cleanup is a synchronous Deleter step; the
 	// clusterregistry provides the force-revoke seam.
 	tenantDeleter := tenancy.NewDeleter(database, idp, tenancy.NewStore(), auditStore, fgaStore, registry, log)
 	svc.WithDeletionApprovalGate(deletionApprovalGate{approvalsSvc}).WithDeleter(tenantDeleter)
-	go tenantDeleter.ResumePendingDeletions(ctx)
+	// Lease-gated: the resume scan runs once per lease acquisition (so a
+	// failover re-scans and picks up crashed teardowns), then the leader
+	// holds the lease idle to keep non-leaders out.
+	go leaderlease.Run(ctx, leaser, "tenant-deletion-resume", func(lctx context.Context) {
+		tenantDeleter.ResumePendingDeletions(lctx)
+		<-lctx.Done()
+	}, log)
 
 	inventorySvc := inventory.NewService(database, inventory.NewStore(), auditStore, catalogSvc)
 
@@ -459,8 +481,12 @@ func run() error {
 		WithGateRequester(approvalsSvc).
 		WithBulkSeams(approvalsSvc, policySvc, catalogSvc)
 	policySvc.WithSetResolver(fleetSvc)
-	go fleetSvc.RunAdvanceLoop(ctx, cfg.FleetAdvanceInterval)
-	go fleetSvc.RunDriftLoop(ctx, cfg.DriftSweepInterval)
+	go leaderlease.Run(ctx, leaser, "fleet-advance", func(lctx context.Context) {
+		fleetSvc.RunAdvanceLoop(lctx, cfg.FleetAdvanceInterval)
+	}, log)
+	go leaderlease.Run(ctx, leaser, "fleet-drift", func(lctx context.Context) {
+		fleetSvc.RunDriftLoop(lctx, cfg.DriftSweepInterval)
+	}, log)
 
 	// Secret Stores (M6.W4, Settings design §3.2): ESO SecretStore registry.
 	// Needs fleetSvc (ClusterSet resolution) and the agent command queue, so
@@ -534,7 +560,9 @@ func run() error {
 	}
 	tzfEnv.Clusters = tzfClusterLifecycle{registry}
 	tzfSvc := tenantzonefactory.NewService(database, tenantzonefactory.NewStore(), auditStore, tzfEnv, approvalsSvc, log)
-	go tzfSvc.RunReconcileLoop(ctx, cfg.TZFReconcileInterval)
+	go leaderlease.Run(ctx, leaser, "tzf-reconcile", func(lctx context.Context) {
+		tzfSvc.RunReconcileLoop(lctx, cfg.TZFReconcileInterval)
+	}, log)
 
 	// Outbox consumers: FGA tuple writer, notifications, approval-gated
 	// deploy resume (plan §5.2, §5.4). Constructed after every handler

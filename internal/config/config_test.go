@@ -38,6 +38,9 @@ func TestLoadDefaults(t *testing.T) {
 	if c.ScaffoldRunTTL.Hours() != 168 {
 		t.Errorf("ScaffoldRunTTL = %v, want 168h", c.ScaffoldRunTTL)
 	}
+	if c.LeaderLeaseTTL.Seconds() != 10 {
+		t.Errorf("LeaderLeaseTTL = %v, want 10s", c.LeaderLeaseTTL)
+	}
 }
 
 func TestLoadEnvOverride(t *testing.T) {

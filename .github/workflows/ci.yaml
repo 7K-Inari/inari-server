@@ -65,7 +65,9 @@ jobs:
       - name: Install helm-unittest
         run: helm plugin install https://github.com/helm-unittest/helm-unittest --version v0.8.2
       - name: helm dependency build
-        run: helm dependency build charts/inari-server
+        run: |
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+          helm dependency build charts/inari-server
       - name: helm lint
         run: helm lint charts/inari-server
       - name: ct lint

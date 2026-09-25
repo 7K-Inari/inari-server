@@ -1,0 +1,13 @@
+{{- if and .Values.pdb.enabled (ge (int .Values.replicaCount) 2) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "inari-server.fullname" . }}
+  labels:
+    {{- include "inari-server.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "inari-server.selectorLabels" . | nindent 6 }}
+{{- end }}

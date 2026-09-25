@@ -4,3 +4,5 @@ dist/
 coverage.out
 coverage.html
 .DS_Store
+# Subchart tarballs produced by helm dependency build (Chart.lock is committed)
+charts/*/charts/*.tgz

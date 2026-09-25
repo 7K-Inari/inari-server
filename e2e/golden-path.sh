@@ -20,6 +20,8 @@
 #   AGENT_CHART_DIR (default ../inari-agent/charts/inari-agent — the
 #     inari-agent repo checkout the e2e workflow nests in the repo root)
 #   KEEP_CLUSTER=true to skip teardown
+#   INARI_E2E_CACHE_BACKEND=memory|redis (default memory) — redis installs
+#     the chart's bitnami/redis subchart and points the cache layer at it
 set -euo pipefail
 
 CLUSTER_NAME="${CLUSTER_NAME:-inari-e2e}"
@@ -36,6 +38,9 @@ TOOLS=golden-path-tools
 KC_FQDN="keycloak-service.${NAMESPACE}.svc:8080"
 SERVER_SVC="inari-server"
 VAULT_DEV_TOKEN="${VAULT_DEV_TOKEN:-e2e-root-token}"
+CACHE_BACKEND="${INARI_E2E_CACHE_BACKEND:-memory}"
+[ "$CACHE_BACKEND" = "memory" ] || [ "$CACHE_BACKEND" = "redis" ] || \
+  die "INARI_E2E_CACHE_BACKEND must be memory or redis (got: $CACHE_BACKEND)"
 
 log() { printf '\033[1;34m[e2e]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[e2e] %s\033[0m\n' "$*" >&2; exit 1; }
@@ -163,7 +168,15 @@ kubectl wait --for=condition=established crd/externalsecrets.external-secrets.io
 kubectl -n "$NAMESPACE" create secret generic inari-vault \
   --from-literal=token="$VAULT_DEV_TOKEN" --dry-run=client -o yaml | kubectl apply -f -
 
-log "installing inari-server chart (e2e image)"
+log "installing inari-server chart (e2e image, cache backend: $CACHE_BACKEND)"
+# The optional redis subchart must be vendored even when disabled: helm
+# verifies all Chart.yaml dependencies are present in charts/ on install.
+helm repo add bitnami https://charts.bitnami.com/bitnami >/dev/null
+helm dependency build "$SERVER_CHART_DIR" >/dev/null
+CACHE_HELM_ARGS=()
+if [ "$CACHE_BACKEND" = "redis" ]; then
+  CACHE_HELM_ARGS+=(--set redis.enabled=true --set cache.backend=redis)
+fi
 helm upgrade --install inari-server "$SERVER_CHART_DIR" \
   --namespace "$NAMESPACE" \
   --set image.repository="${SERVER_IMAGE%:*}" \
@@ -171,6 +184,7 @@ helm upgrade --install inari-server "$SERVER_CHART_DIR" \
   --set image.pullPolicy=IfNotPresent \
   --set keycloak.baseUrl="http://$KC_FQDN" \
   --set vault.addr="http://vault.${NAMESPACE}.svc:8200" \
+  ${CACHE_HELM_ARGS[@]+"${CACHE_HELM_ARGS[@]}"} \
   --set-json "extraEnv=[
     {\"name\":\"INARI_AGENT_GATEWAY_ADDRESS\",\"value\":\"http://$SERVER_SVC.${NAMESPACE}.svc:8080\"},
     {\"name\":\"INARI_AGENT_IMAGE_REPO\",\"value\":\"inari/agent\"},
@@ -318,6 +332,15 @@ for i in $(seq 1 18); do
   sleep 5
 done
 [ "$ALLOWED" = "true" ] || die "OpenFGA check failed (creator auto-membership did not propagate via outbox)"
+
+log "verifying /metrics exposes the cache layer series (backend: $CACHE_BACKEND)"
+# Tenant creation above already drove org lookups + FGA checks through the
+# caches, so the series exist; the scrape just must surface them.
+METRICS_BODY=$(xcurl "http://$SERVER_SVC:8080/metrics")
+grep -q "inari_cache_operations_total" <<<"$METRICS_BODY" \
+  || die "/metrics missing inari_cache_operations_total"
+grep -q "inari_fga_check_duration_seconds" <<<"$METRICS_BODY" \
+  || die "/metrics missing inari_fga_check_duration_seconds"
 
 log "registering cluster + issuing token"
 TOKEN="$(user_token)"

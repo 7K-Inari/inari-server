@@ -23,6 +23,26 @@ database:
 openfga:
   url: http://openfga:8080
 
+# Cache layer (ADR-0010): PEP cache for OpenFGA checks + tenant slug->org
+# cache. backend: "memory" (default, in-process) or "redis" (shared;
+# required for multi-replica invalidation). All cache failures are
+# fail-open to direct OpenFGA/Postgres calls.
+cache:
+  backend: memory
+
+# Optional in-cluster Redis (bitnami subchart) backing cache.backend=redis.
+# Disabled by default. Single standalone instance, no auth — intended for
+# e2e/dev; for production use redis.url pointing at a managed instance
+# (and harden auth/TLS there).
+redis:
+  enabled: false
+  architecture: standalone
+  auth:
+    enabled: false
+  # BYO Redis URL (redis://[:password@]host:6379/db). When set with
+  # cache.backend=redis, used instead of the subchart service URL.
+  url: ""
+
 # OIDC issuer for token validation. Defaults to
 # <keycloak.baseUrl>/realms/<keycloak.realm> when empty.
 oidc:

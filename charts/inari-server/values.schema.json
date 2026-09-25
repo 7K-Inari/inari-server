@@ -66,6 +66,21 @@
       },
       "required": ["realm", "adminRole", "adminSecret"]
     },
+    "cache": {
+      "type": "object",
+      "properties": {
+        "backend": { "type": "string", "enum": ["memory", "redis"] }
+      },
+      "required": ["backend"]
+    },
+    "redis": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "architecture": { "type": "string", "enum": ["standalone", "replication"] },
+        "url": { "type": "string" }
+      }
+    },
     "extraEnv": { "type": "array" },
     "vault": {
       "type": "object",

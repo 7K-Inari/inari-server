@@ -30,6 +30,15 @@ spec:
                   key: {{ .Values.database.secret.uriKey }}
             - name: INARI_OPENFGA_API_URL
               value: {{ .Values.openfga.url | quote }}
+            {{- if and (eq .Values.cache.backend "redis") (not .Values.redis.enabled) (not .Values.redis.url) }}
+            {{- fail "cache.backend=redis requires redis.enabled=true (subchart) or redis.url (external Redis)" }}
+            {{- end }}
+            - name: INARI_CACHE_BACKEND
+              value: {{ .Values.cache.backend | quote }}
+            {{- if eq .Values.cache.backend "redis" }}
+            - name: INARI_REDIS_URL
+              value: {{ include "inari-server.redisUrl" . | quote }}
+            {{- end }}
             - name: INARI_OIDC_ISSUER_URL
               value: {{ include "inari-server.oidcIssuerUrl" . | quote }}
             - name: INARI_KEYCLOAK_BASE_URL

@@ -153,6 +153,84 @@ func visEntry(t *testing.T, srv *httptest.Server, token, itemID string) catalog.
 	return catalog.OrgVisibilityEntry{}
 }
 
+type catalogList struct {
+	Items []struct {
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		Source   string `json:"source"`
+		Category string `json:"category"`
+	} `json:"items"`
+	Total int `json:"total"`
+}
+
+func itListCatalog(t *testing.T, srv *httptest.Server, query string) catalogList {
+	t.Helper()
+	code, body := itReq(t, srv, "GET", "/api/v1/tenants/acme/catalog"+query, "viewer", "")
+	if code != http.StatusOK {
+		t.Fatalf("GET catalog%s: %d %s", query, code, body)
+	}
+	var out catalogList
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestListCatalogFiltering(t *testing.T) {
+	srv, _ := itServer(t)
+	defer srv.Close()
+
+	all := itListCatalog(t, srv, "")
+	if all.Total != len(all.Items) || all.Total < 2 {
+		t.Fatalf("unfiltered: total=%d items=%d", all.Total, len(all.Items))
+	}
+
+	// Free-text search matches name/display name/description.
+	got := itListCatalog(t, srv, "?q=postgres")
+	if got.Total != 1 || got.Items[0].Name != "postgres-aws" {
+		t.Errorf("q=postgres = %+v", got)
+	}
+	if got := itListCatalog(t, srv, "?q=nomatch"); got.Total != 0 || len(got.Items) != 0 {
+		t.Errorf("q=nomatch = %+v", got)
+	}
+
+	// Source and category facets.
+	if got := itListCatalog(t, srv, "?source=curated"); got.Total != 2 {
+		t.Errorf("source=curated total = %d, want 2 (both fixture packages)", got.Total)
+	}
+	got = itListCatalog(t, srv, "?category=database")
+	if got.Total != 1 || got.Items[0].Category != "database" {
+		t.Errorf("category=database = %+v", got)
+	}
+	if got := itListCatalog(t, srv, "?category=bogus"); got.Total != 0 {
+		t.Errorf("category=bogus total = %d, want 0", got.Total)
+	}
+
+	// Sort: name descending reverses the default order.
+	asc := itListCatalog(t, srv, "?sort=name")
+	desc := itListCatalog(t, srv, "?sort=name-desc")
+	if asc.Items[0].Name != desc.Items[len(desc.Items)-1].Name {
+		t.Errorf("name-desc is not the reverse of name: %v vs %v", asc.Items, desc.Items)
+	}
+
+	// Pagination slices the sorted result; total stays un-paginated.
+	page := itListCatalog(t, srv, "?limit=1&offset=1")
+	if page.Total != all.Total || len(page.Items) != 1 || page.Items[0].Name != all.Items[1].Name {
+		t.Errorf("limit=1&offset=1 = %+v, want second of %v", page, all.Items)
+	}
+	if got := itListCatalog(t, srv, "?offset=999"); got.Total != all.Total || len(got.Items) != 0 {
+		t.Errorf("offset past end = %+v", got)
+	}
+
+	// Invalid enum values are rejected by huma validation.
+	if code, _ := itReq(t, srv, "GET", "/api/v1/tenants/acme/catalog?sort=name;DROP", "viewer", ""); code != http.StatusUnprocessableEntity {
+		t.Errorf("sort injection: got %d, want 422", code)
+	}
+	if code, _ := itReq(t, srv, "GET", "/api/v1/tenants/acme/catalog?source=bogus", "viewer", ""); code != http.StatusUnprocessableEntity {
+		t.Errorf("bogus source: got %d, want 422", code)
+	}
+}
+
 func TestOrgVisibilityOverlay(t *testing.T) {
 	srv, database := itServer(t)
 	defer srv.Close()

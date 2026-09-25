@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -36,16 +38,17 @@ func (s *Store) UpsertItem(ctx context.Context, q db.Querier, it *types.CatalogI
 	if policy == "" {
 		policy = types.ApprovalPolicyAuto
 	}
-	const sql = `INSERT INTO catalog_items (id, source, name, display_name, description, capability_ref, oci_ref, approval_policy)
-	             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+	const sql = `INSERT INTO catalog_items (id, source, name, display_name, description, category, capability_ref, oci_ref, approval_policy)
+	             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 	             ON CONFLICT (id) DO UPDATE SET
 	               source = EXCLUDED.source,
 	               name = EXCLUDED.name,
 	               display_name = EXCLUDED.display_name,
 	               description = EXCLUDED.description,
+	               category = EXCLUDED.category,
 	               capability_ref = EXCLUDED.capability_ref,
 	               oci_ref = EXCLUDED.oci_ref`
-	_, err := q.Exec(ctx, sql, it.ID, it.Source, it.Name, it.DisplayName, it.Description, ref, it.OCIRef, policy)
+	_, err := q.Exec(ctx, sql, it.ID, it.Source, it.Name, it.DisplayName, it.Description, it.Category, ref, it.OCIRef, policy)
 	return err
 }
 
@@ -69,7 +72,7 @@ func scanItem(row pgx.Row) (*types.CatalogItem, error) {
 	var it types.CatalogItem
 	var ref json.RawMessage
 	err := row.Scan(&it.ID, &it.Source, &it.Name, &it.DisplayName, &it.Description,
-		&ref, &it.OCIRef, &it.ApprovalPolicy, &it.CreatedAt)
+		&it.Category, &ref, &it.OCIRef, &it.ApprovalPolicy, &it.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +85,7 @@ func scanItem(row pgx.Row) (*types.CatalogItem, error) {
 	return &it, nil
 }
 
-const itemCols = `id, source, name, display_name, description, capability_ref, oci_ref, approval_policy, created_at`
+const itemCols = `id, source, name, display_name, description, category, capability_ref, oci_ref, approval_policy, created_at`
 
 func (s *Store) GetItem(ctx context.Context, q db.Querier, itemID string) (*types.CatalogItem, error) {
 	it, err := scanItem(q.QueryRow(ctx, `SELECT `+itemCols+` FROM catalog_items WHERE id = $1`, itemID))
@@ -93,7 +96,50 @@ func (s *Store) GetItem(ctx context.Context, q db.Querier, itemID string) (*type
 }
 
 func (s *Store) ListItems(ctx context.Context, q db.Querier) ([]types.CatalogItem, error) {
-	rows, err := q.Query(ctx, `SELECT `+itemCols+` FROM catalog_items ORDER BY name`)
+	return s.listItems(ctx, q, `SELECT `+itemCols+` FROM catalog_items ORDER BY name`)
+}
+
+// orderByClause maps the whitelisted sort values to ORDER BY clauses.
+// Anything unknown falls back to name ascending — never interpolate client
+// input into SQL.
+func orderByClause(sort string) string {
+	switch sort {
+	case types.CatalogSortNameDesc:
+		return ` ORDER BY name DESC`
+	case types.CatalogSortNewest:
+		return ` ORDER BY created_at DESC, name ASC`
+	case types.CatalogSortOldest:
+		return ` ORDER BY created_at ASC, name ASC`
+	default:
+		return ` ORDER BY name ASC`
+	}
+}
+
+// ListItemsFiltered applies the browse facets (q/source/category) and sort
+// in SQL (ADR-0009). Pagination happens in the service after discovered
+// projections are merged, so no LIMIT/OFFSET here.
+func (s *Store) ListItemsFiltered(ctx context.Context, q db.Querier, opts types.CatalogListOptions) ([]types.CatalogItem, error) {
+	sql := `SELECT ` + itemCols + ` FROM catalog_items WHERE true`
+	args := []any{}
+	if opts.Source != "" {
+		args = append(args, opts.Source)
+		sql += fmt.Sprintf(` AND source = $%d`, len(args))
+	}
+	if opts.Category != "" {
+		args = append(args, opts.Category)
+		sql += fmt.Sprintf(` AND category = $%d`, len(args))
+	}
+	if opts.Query != "" {
+		esc := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(opts.Query)
+		args = append(args, "%"+esc+"%")
+		sql += fmt.Sprintf(` AND (name ILIKE $%d OR display_name ILIKE $%d OR description ILIKE $%d)`, len(args), len(args), len(args))
+	}
+	sql += orderByClause(opts.Sort)
+	return s.listItems(ctx, q, sql, args...)
+}
+
+func (s *Store) listItems(ctx context.Context, q db.Querier, sql string, args ...any) ([]types.CatalogItem, error) {
+	rows, err := q.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -415,6 +415,9 @@ type CatalogItem struct {
 	Name        string        `json:"name"`
 	DisplayName string        `json:"displayName"`
 	Description string        `json:"description"`
+	// Category is the package.yaml facet (e.g. "database", "observability");
+	// empty for items that declare none and for discovered projections.
+	Category string `json:"category,omitempty"`
 	// OrgID is the owning tenant for org-scoped items (e.g. scaffolded
 	// components); empty for global curated/platform items. The outbox
 	// payload carries it so the tuple writer grants the org parent tuple.
@@ -423,6 +426,28 @@ type CatalogItem struct {
 	OCIRef         string         `json:"ociRef,omitempty"`
 	ApprovalPolicy ApprovalPolicy `json:"approvalPolicy"`
 	CreatedAt      time.Time      `json:"createdAt"`
+}
+
+// Catalog sort values accepted by the browse API (whitelisted server-side;
+// never raw column names from the client).
+const (
+	CatalogSortName     = "name"
+	CatalogSortNameDesc = "name-desc"
+	CatalogSortNewest   = "newest"
+	CatalogSortOldest   = "oldest"
+)
+
+// CatalogListOptions are the browse filters/sort/pagination for the catalog
+// list endpoint (ADR-0009). Limit 0 means "no pagination" (full result).
+type CatalogListOptions struct {
+	Query    string // free-text over name/display_name/description
+	Source   string
+	Category string
+	// ClusterID intersects discovered capabilities ("what can I run here?").
+	ClusterID string
+	Sort      string
+	Limit     int
+	Offset    int
 }
 
 // CatalogItemVersion is one versioned revision of an item with its OpenAPI

@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
-	"log/slog"
 	"sort"
 
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -31,9 +31,10 @@ type Package struct {
 	Description string
 	// Type is the package.yaml/index type: "platform-app", "kro-rgd",
 	// "policy-pack". Empty behaves as "kro-rgd".
-	Type    string
-	Version string
-	Channel string
+	Type     string
+	Version  string
+	Channel  string
+	Category string
 	// OCIRef is the image reference this package version was pulled from.
 	OCIRef string
 	// Chart is set for platform-app packages.
@@ -79,6 +80,7 @@ type packageMetadata struct {
 	DisplayName string `json:"displayName"`
 	Description string `json:"description"`
 	Channel     string `json:"channel"`
+	Category    string `json:"category"`
 }
 
 // packageYAML mirrors packages/<name>/package.yaml in inari-catalog.
@@ -171,6 +173,7 @@ func readPackageDir(dir string) (*Package, error) {
 	pkg.DisplayName = meta.DisplayName
 	pkg.Description = meta.Description
 	pkg.Channel = meta.Channel
+	pkg.Category = meta.Category
 	if pkg.RGD, err = os.ReadFile(filepath.Join(dir, "rgd.yaml")); err != nil {
 		return nil, fmt.Errorf("catalog: %s: rgd.yaml: %w", dir, err)
 	}
@@ -266,6 +269,7 @@ func packageFromFiles(name, typ, indexDesc, ref string, files map[string][]byte)
 		}
 		base.Version = py.Version
 		base.Channel = py.Channel
+		base.Category = py.Category
 	}
 	base.Schema = files["schema.json"]
 	// Packages ship no schema.json layer; fall back to deriving the instance
@@ -362,6 +366,7 @@ func syncPlan(pkgs []Package) ([]*types.CatalogItem, []*types.CatalogItemVersion
 			Name:        p.Name,
 			DisplayName: p.DisplayName,
 			Description: p.Description,
+			Category:    p.Category,
 			OCIRef:      ociRef,
 		})
 		versions = append(versions, &types.CatalogItemVersion{

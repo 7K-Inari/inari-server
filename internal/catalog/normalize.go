@@ -5,6 +5,7 @@
 package catalog
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 
@@ -127,6 +128,84 @@ func effectiveVisibility(items []types.CatalogItem, platform map[string][]types.
 		})
 	}
 	return out
+}
+
+// matchesFacet reports whether an item passes the browse facets. Persisted
+// items are already filtered in SQL; this runs in Go for discovered
+// projections, which have no category (excluded when a category filter is
+// active) and no description.
+func matchesFacet(it types.CatalogItem, opts types.CatalogListOptions) bool {
+	if opts.Source != "" && string(it.Source) != opts.Source {
+		return false
+	}
+	if opts.Category != "" && it.Category != opts.Category {
+		return false
+	}
+	if opts.Query != "" {
+		q := strings.ToLower(opts.Query)
+		hay := strings.ToLower(it.Name + " " + it.DisplayName + " " + it.Description)
+		if !strings.Contains(hay, q) {
+			return false
+		}
+	}
+	return true
+}
+
+// sortCatalogItems orders the merged (persisted + discovered) result so the
+// page slice stays correct across both kinds (ADR-0009). Discovered items
+// carry capability FirstSeenAt as createdAt; zero times sort last under
+// "newest" and first under "oldest".
+func sortCatalogItems(items []types.CatalogItem, sortBy string) {
+	lessName := func(a, b types.CatalogItem) bool { return a.Name < b.Name }
+	var less func(a, b types.CatalogItem) bool
+	switch sortBy {
+	case types.CatalogSortNameDesc:
+		less = func(a, b types.CatalogItem) bool { return b.Name < a.Name }
+	case types.CatalogSortNewest:
+		less = func(a, b types.CatalogItem) bool {
+			if !a.CreatedAt.Equal(b.CreatedAt) {
+				if a.CreatedAt.IsZero() {
+					return false
+				}
+				if b.CreatedAt.IsZero() {
+					return true
+				}
+				return a.CreatedAt.After(b.CreatedAt)
+			}
+			return lessName(a, b)
+		}
+	case types.CatalogSortOldest:
+		less = func(a, b types.CatalogItem) bool {
+			if !a.CreatedAt.Equal(b.CreatedAt) {
+				if a.CreatedAt.IsZero() {
+					return true
+				}
+				if b.CreatedAt.IsZero() {
+					return false
+				}
+				return a.CreatedAt.Before(b.CreatedAt)
+			}
+			return lessName(a, b)
+		}
+	default:
+		less = lessName
+	}
+	sort.SliceStable(items, func(i, j int) bool { return less(items[i], items[j]) })
+}
+
+// pageSlice applies offset/limit pagination to an already-sorted slice.
+// Limit 0 means "no limit".
+func pageSlice[T any](items []T, limit, offset int) []T {
+	if offset >= len(items) {
+		return nil
+	}
+	if offset > 0 {
+		items = items[offset:]
+	}
+	if limit > 0 && limit < len(items) {
+		items = items[:limit]
+	}
+	return items
 }
 
 // projectDiscovered turns live cluster capabilities into catalog item views

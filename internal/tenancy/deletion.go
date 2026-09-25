@@ -291,6 +291,9 @@ func (s *Service) DeleteTenant(ctx context.Context, actor, slug string, force bo
 	if err != nil {
 		return "", err
 	}
+	// The org is now frozen (status=deleting): evict the cached row so
+	// ensureOrgActive rejects mutations immediately, not after cache TTL.
+	s.invalidateOrgCache(ctx, slug)
 	if s.gate == nil {
 		return "", errors.New("tenancy: deletion approval gate not wired")
 	}
@@ -384,6 +387,14 @@ type Deleter struct {
 	fga      TupleStore
 	clusters ClusterRevoker
 	log      *slog.Logger
+	orgCache *OrgCache
+}
+
+// WithOrgCache wires the slug→org cache so the teardown can evict the org
+// row it deletes (ADR-0010). Fail-open; optional.
+func (d *Deleter) WithOrgCache(c *OrgCache) *Deleter {
+	d.orgCache = c
+	return d
 }
 
 func NewDeleter(d *db.DB, idp IdentityProvider, store *Store, auditStore *audit.Store, fga TupleStore, clusters ClusterRevoker, log *slog.Logger) *Deleter {
@@ -557,7 +568,7 @@ func (d *Deleter) stepDeleteKeycloakOrg(ctx context.Context, del *types.TenantDe
 // the org id string (audit_events has no FK) for traceability, and
 // tenant.deleted notifies any future listeners.
 func (d *Deleter) stepDeleteOrgRow(ctx context.Context, del *types.TenantDeletion) error {
-	return d.db.WithTx(ctx, func(tx pgx.Tx) error {
+	err := d.db.WithTx(ctx, func(tx pgx.Tx) error {
 		for _, table := range []string{"secret_stores", "scaffold_runs", "tenant_zones", "approval_config"} {
 			if _, err := tx.Exec(ctx, fmt.Sprintf(`DELETE FROM %s WHERE org_id = $1`, table), del.OrgID); err != nil {
 				return err
@@ -577,6 +588,11 @@ func (d *Deleter) stepDeleteOrgRow(ctx context.Context, del *types.TenantDeletio
 		}
 		return d.store.DeleteOrganization(ctx, tx, del.OrgID)
 	})
+	if err == nil && d.orgCache != nil {
+		// The org row is gone: never serve it from cache again.
+		d.orgCache.Invalidate(ctx, slugFromSnapshot(del.Snapshot))
+	}
+	return err
 }
 
 func slugFromSnapshot(raw json.RawMessage) string {
@@ -629,6 +645,11 @@ func (s *Service) restoreOrg(ctx context.Context, orgID, approvalID, action stri
 		if err := json.Unmarshal(snapshot, &p); err != nil {
 			return fmt.Errorf("tenancy: restore org: snapshot: %w", err)
 		}
-		return audit.AppendOutbox(ctx, tx, orgID, types.EventTenantRestored, &p)
+		if err := audit.AppendOutbox(ctx, tx, orgID, types.EventTenantRestored, &p); err != nil {
+			return err
+		}
+		// Status flipped back to active: evict the frozen row from cache.
+		s.invalidateOrgCache(ctx, p.Slug)
+		return nil
 	})
 }

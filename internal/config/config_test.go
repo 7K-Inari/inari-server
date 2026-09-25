@@ -136,6 +136,62 @@ func TestIdentityScopesInvalidFallsBack(t *testing.T) {
 	}
 }
 
+func TestCacheEnvDefaults(t *testing.T) {
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.CacheBackend != "memory" {
+		t.Errorf("CacheBackend = %q, want memory", c.CacheBackend)
+	}
+	if c.RedisURL != "redis://localhost:6379/0" {
+		t.Errorf("RedisURL = %q, want redis://localhost:6379/0", c.RedisURL)
+	}
+	if c.CachePEPTTL.Seconds() != 2 {
+		t.Errorf("CachePEPTTL = %v, want 2s", c.CachePEPTTL)
+	}
+	if c.CacheTenantTTL.Seconds() != 10 {
+		t.Errorf("CacheTenantTTL = %v, want 10s", c.CacheTenantTTL)
+	}
+	if c.CacheMemoryMaxEntries != 10000 {
+		t.Errorf("CacheMemoryMaxEntries = %d, want 10000", c.CacheMemoryMaxEntries)
+	}
+}
+
+func TestCacheEnvOverride(t *testing.T) {
+	t.Setenv("INARI_CACHE_BACKEND", "redis")
+	t.Setenv("INARI_REDIS_URL", "redis://cache:6379/1")
+	t.Setenv("INARI_CACHE_PEP_TTL", "5s")
+	t.Setenv("INARI_CACHE_TENANT_TTL", "30s")
+	t.Setenv("INARI_CACHE_MEMORY_MAX_ENTRIES", "500")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.CacheBackend != "redis" {
+		t.Errorf("CacheBackend = %q, want redis", c.CacheBackend)
+	}
+	if c.RedisURL != "redis://cache:6379/1" {
+		t.Errorf("RedisURL = %q", c.RedisURL)
+	}
+	if c.CachePEPTTL.Seconds() != 5 {
+		t.Errorf("CachePEPTTL = %v, want 5s", c.CachePEPTTL)
+	}
+	if c.CacheTenantTTL.Seconds() != 30 {
+		t.Errorf("CacheTenantTTL = %v, want 30s", c.CacheTenantTTL)
+	}
+	if c.CacheMemoryMaxEntries != 500 {
+		t.Errorf("CacheMemoryMaxEntries = %d, want 500", c.CacheMemoryMaxEntries)
+	}
+}
+
+func TestCacheBackendInvalid(t *testing.T) {
+	t.Setenv("INARI_CACHE_BACKEND", "memcached")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load: want error for unknown cache backend")
+	}
+}
+
 func TestRoleValid(t *testing.T) {
 	t.Setenv("INARI_DATABASE_URL", "postgres://x")
 	if _, err := Load(); err != nil {

@@ -32,7 +32,9 @@ type streamConn interface {
 }
 
 // Connect implements inari.agent.v1.EventStreamService: one bidi stream per
-// connected agent (plan §5.3 step 2).
+// connected agent (plan §5.3 step 2). Duplicate streams for an
+// already-connected cluster identity are fenced: the new stream wins and
+// the stale session is evicted (closed) deterministically.
 func (g *Gateway) Connect(ctx context.Context, stream *connect.BidiStream[agentv1.ConnectRequest, agentv1.ConnectResponse]) error {
 	id := AgentIdentityFromContext(ctx)
 	if id == nil {
@@ -42,7 +44,13 @@ func (g *Gateway) Connect(ctx context.Context, stream *connect.BidiStream[agentv
 	if err != nil {
 		return err
 	}
-	return g.newSession(cluster).run(ctx, stream)
+	sctx, cancel := context.WithCancel(ctx)
+	h := g.registerSession(cluster.ID, cancel)
+	defer func() {
+		g.unregisterSession(cluster.ID, h)
+		cancel()
+	}()
+	return g.newSession(cluster).run(sctx, stream)
 }
 
 // AuthorizeCluster gates stream admission on the claimed cluster identity: a

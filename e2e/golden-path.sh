@@ -169,11 +169,12 @@ kubectl -n "$NAMESPACE" create secret generic inari-vault \
   --from-literal=token="$VAULT_DEV_TOKEN" --dry-run=client -o yaml | kubectl apply -f -
 
 log "installing inari-server chart (e2e image, cache backend: $CACHE_BACKEND)"
+# The optional redis subchart must be vendored even when disabled: helm
+# verifies all Chart.yaml dependencies are present in charts/ on install.
+helm repo add bitnami https://charts.bitnami.com/bitnami >/dev/null
+helm dependency build "$SERVER_CHART_DIR" >/dev/null
 CACHE_HELM_ARGS=()
 if [ "$CACHE_BACKEND" = "redis" ]; then
-  # The optional redis subchart must be vendored first (Chart.lock pins it).
-  helm repo add bitnami https://charts.bitnami.com/bitnami >/dev/null
-  helm dependency build "$SERVER_CHART_DIR" >/dev/null
   CACHE_HELM_ARGS+=(--set redis.enabled=true --set cache.backend=redis)
 fi
 helm upgrade --install inari-server "$SERVER_CHART_DIR" \

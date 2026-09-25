@@ -67,47 +67,61 @@ func (s *Service) UpsertItem(ctx context.Context, item *types.CatalogItem, versi
 
 // ListVisible returns the items visible to a tenant, optionally intersected
 // with a cluster's discovered capabilities ("what can I run here?", §8/G9).
-func (s *Service) ListVisible(ctx context.Context, orgID, clusterID string) ([]ItemView, error) {
-	items, err := s.store.ListItems(ctx, s.db.Pool)
+// It applies the browse facets (ADR-0009): persisted items are filtered and
+// sorted in SQL; discovered projections are filtered in Go before the two
+// sets are merged, sorted, and sliced — ordering stays correct across both
+// kinds. Returns the page plus the total count before pagination.
+func (s *Service) ListVisible(ctx context.Context, orgID string, opts types.CatalogListOptions) ([]ItemView, int, error) {
+	items, err := s.store.ListItemsFiltered(ctx, s.db.Pool, opts)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	visMap, err := s.store.VisibilityMap(ctx, s.db.Pool)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	var out []ItemView
 	visible := make([]types.CatalogItem, 0, len(items))
 	for _, it := range items {
-		if visibleTo(visMap[it.ID], orgID, clusterID) {
+		if visibleTo(visMap[it.ID], orgID, opts.ClusterID) {
 			visible = append(visible, it)
 		}
 	}
+	if opts.ClusterID != "" && s.caps != nil {
+		caps, err := s.caps.List(ctx, s.db.Pool, opts.ClusterID)
+		if err != nil {
+			return nil, 0, err
+		}
+		for _, it := range projectDiscovered(opts.ClusterID, caps) {
+			if matchesFacet(it, opts) {
+				visible = append(visible, it)
+			}
+		}
+	}
+	sortCatalogItems(visible, opts.Sort)
+	total := len(visible)
+	visible = pageSlice(visible, opts.Limit, opts.Offset)
 	ids := make([]string, 0, len(visible))
 	for _, it := range visible {
 		ids = append(ids, it.ID)
 	}
 	versionsByItem, err := s.store.ListVersionsForItems(ctx, s.db.Pool, ids)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	pins, err := s.store.PinsForOrg(ctx, s.db.Pool, orgID)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	out := make([]ItemView, 0, len(visible))
 	for _, it := range visible {
+		// Discovered projections have no stored versions/pins.
+		if it.Source == types.CatalogSourceDiscovered {
+			out = append(out, ItemView{CatalogItem: it})
+			continue
+		}
 		out = append(out, ItemView{CatalogItem: it, Versions: versionsByItem[it.ID], PinnedVersion: pins[it.ID]})
 	}
-	if clusterID != "" && s.caps != nil {
-		caps, err := s.caps.List(ctx, s.db.Pool, clusterID)
-		if err != nil {
-			return nil, err
-		}
-		for _, it := range projectDiscovered(clusterID, caps) {
-			out = append(out, ItemView{CatalogItem: it})
-		}
-	}
-	return out, nil
+	return out, total, nil
 }
 
 // GetItem returns one item with its versions, enforcing visibility.

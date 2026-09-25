@@ -33,6 +33,9 @@ func TestFixturePuller(t *testing.T) {
 	if pg.Channel != "stable" {
 		t.Errorf("channel = %q, want stable", pg.Channel)
 	}
+	if pg.Category != "database" {
+		t.Errorf("category = %q, want database", pg.Category)
+	}
 	if len(pg.RGD) == 0 {
 		t.Error("RGD empty")
 	}
@@ -45,5 +48,21 @@ func TestFixturePuller(t *testing.T) {
 	}
 	if ws.Channel != "incubating" {
 		t.Errorf("channel = %q, want incubating", ws.Channel)
+	}
+	if ws.Category != "compute" {
+		t.Errorf("category = %q, want compute", ws.Category)
+	}
+}
+
+func TestSyncPlanPersistsCategory(t *testing.T) {
+	items, _, err := syncPlan([]Package{{Name: "postgres-aws", Version: "1.1.0", Category: "database"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items = %d, want 1", len(items))
+	}
+	if items[0].Category != "database" {
+		t.Errorf("item category = %q, want database", items[0].Category)
 	}
 }

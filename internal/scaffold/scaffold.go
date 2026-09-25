@@ -92,7 +92,7 @@ type AppRegistrar interface {
 // TemplateCatalog reads template catalog items at a tenant's effective
 // version (catalog.Service).
 type TemplateCatalog interface {
-	ListVisible(ctx context.Context, orgID, clusterID string) ([]catalog.ItemView, error)
+	ListVisible(ctx context.Context, orgID string, opts types.CatalogListOptions) ([]catalog.ItemView, int, error)
 	EffectiveVersion(ctx context.Context, orgID, itemID, channel string) (string, error)
 	GetVersion(ctx context.Context, itemID, version string) (*types.CatalogItemVersion, error)
 	GetItemByID(ctx context.Context, itemID string) (*types.CatalogItem, error)
@@ -147,7 +147,7 @@ type TemplateDetail struct {
 // ListTemplates returns the template catalog items visible to the tenant
 // at their effective versions (plan §3).
 func (s *Service) ListTemplates(ctx context.Context, orgID string) ([]TemplateSummary, error) {
-	items, err := s.catalog.ListVisible(ctx, orgID, "")
+	items, _, err := s.catalog.ListVisible(ctx, orgID, types.CatalogListOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +206,7 @@ func (s *Service) summary(ctx context.Context, orgID string, it *catalog.ItemVie
 // resolveTemplate finds the visible template item addressed by name (item
 // name or ID), enforcing catalog visibility rules.
 func (s *Service) resolveTemplate(ctx context.Context, orgID, name string) (*catalog.ItemView, error) {
-	items, err := s.catalog.ListVisible(ctx, orgID, "")
+	items, _, err := s.catalog.ListVisible(ctx, orgID, types.CatalogListOptions{})
 	if err != nil {
 		return nil, err
 	}

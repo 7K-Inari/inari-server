@@ -150,13 +150,20 @@ func (h *Handler) authorizePlatform(ctx context.Context) (*authn.Identity, error
 }
 
 type listCatalogInput struct {
-	Org     string `path:"org"`
-	Cluster string `query:"cluster" doc:"Cluster ID; intersects discovered capabilities"`
+	Org      string `path:"org"`
+	Cluster  string `query:"cluster" doc:"Cluster ID; intersects discovered capabilities"`
+	Query    string `query:"q" doc:"Free-text search over name, display name, and description"`
+	Source   string `query:"source" enum:"curated,discovered,platform,template" doc:"Filter by item source"`
+	Category string `query:"category" doc:"Filter by package category (discovered projections have no category)"`
+	Sort     string `query:"sort" enum:"name,name-desc,newest,oldest" default:"name" doc:"Sort order (whitelisted server-side)"`
+	Limit    int    `query:"limit" minimum:"0" maximum:"200" doc:"Page size; 0 returns all matches"`
+	Offset   int    `query:"offset" minimum:"0" doc:"Page offset into the filtered, sorted result"`
 }
 
 type listCatalogOutput struct {
 	Body struct {
 		Items []ItemView `json:"items"`
+		Total int        `json:"total"`
 	}
 }
 
@@ -165,12 +172,21 @@ func (h *Handler) listCatalog(ctx context.Context, in *listCatalogInput) (*listC
 	if err != nil {
 		return nil, err
 	}
-	items, err := h.svc.ListVisible(ctx, org.ID, in.Cluster)
+	items, total, err := h.svc.ListVisible(ctx, org.ID, types.CatalogListOptions{
+		Query:     in.Query,
+		Source:    in.Source,
+		Category:  in.Category,
+		ClusterID: in.Cluster,
+		Sort:      in.Sort,
+		Limit:     in.Limit,
+		Offset:    in.Offset,
+	})
 	if err != nil {
 		return nil, err
 	}
 	out := &listCatalogOutput{}
 	out.Body.Items = items
+	out.Body.Total = total
 	return out, nil
 }
 

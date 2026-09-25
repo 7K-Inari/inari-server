@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"testing"
+	"time"
 
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -140,5 +141,112 @@ func TestEffectiveVisibilityNoOverlayRowDefaultsShown(t *testing.T) {
 	got := effectiveVisibility(items, nil, nil, "org-1")
 	if !got[0].Visible || got[0].OrgHidden {
 		t.Errorf("no rules and no overlay = %+v, want visible", got[0])
+	}
+}
+
+func TestMatchesFacet(t *testing.T) {
+	item := types.CatalogItem{
+		Source:      types.CatalogSourceCurated,
+		Name:        "postgres-aws",
+		DisplayName: "PostgreSQL on AWS",
+		Description: "RDS-backed PostgreSQL",
+		Category:    "database",
+	}
+	cases := []struct {
+		name string
+		opts types.CatalogListOptions
+		want bool
+	}{
+		{"no filters", types.CatalogListOptions{}, true},
+		{"source match", types.CatalogListOptions{Source: "curated"}, true},
+		{"source mismatch", types.CatalogListOptions{Source: "discovered"}, false},
+		{"category match", types.CatalogListOptions{Category: "database"}, true},
+		{"category mismatch", types.CatalogListOptions{Category: "compute"}, false},
+		{"query name", types.CatalogListOptions{Query: "postgres"}, true},
+		{"query display name case-insensitive", types.CatalogListOptions{Query: "AWS"}, true},
+		{"query description", types.CatalogListOptions{Query: "rds"}, true},
+		{"query miss", types.CatalogListOptions{Query: "kafka"}, false},
+		{"combined", types.CatalogListOptions{Source: "curated", Category: "database", Query: "postgres"}, true},
+		{"combined one miss", types.CatalogListOptions{Source: "curated", Category: "compute", Query: "postgres"}, false},
+	}
+	for _, c := range cases {
+		if got := matchesFacet(item, c.opts); got != c.want {
+			t.Errorf("%s: matchesFacet = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestMatchesFacetDiscoveredExcludedByCategory(t *testing.T) {
+	discovered := types.CatalogItem{Source: types.CatalogSourceDiscovered, Name: "rds.amazonaws.com"}
+	if matchesFacet(discovered, types.CatalogListOptions{Category: "database"}) {
+		t.Error("discovered projections have no category and must be excluded by a category filter")
+	}
+	if !matchesFacet(discovered, types.CatalogListOptions{Source: "discovered"}) {
+		t.Error("source=discovered should keep the projection")
+	}
+}
+
+func TestSortCatalogItems(t *testing.T) {
+	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	recent := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	mk := func() []types.CatalogItem {
+		return []types.CatalogItem{
+			{Name: "zeta", CreatedAt: recent},
+			{Name: "alpha", CreatedAt: old},
+			{Name: "discovered-x"}, // zero createdAt
+		}
+	}
+	names := func(items []types.CatalogItem) []string {
+		out := make([]string, len(items))
+		for i, it := range items {
+			out[i] = it.Name
+		}
+		return out
+	}
+	cases := []struct {
+		sort string
+		want []string
+	}{
+		{"name", []string{"alpha", "discovered-x", "zeta"}},
+		{"name-desc", []string{"zeta", "discovered-x", "alpha"}},
+		{"newest", []string{"zeta", "alpha", "discovered-x"}}, // zero time last
+		{"oldest", []string{"discovered-x", "alpha", "zeta"}}, // zero time first
+		{"bogus", []string{"alpha", "discovered-x", "zeta"}},  // falls back to name
+	}
+	for _, c := range cases {
+		items := mk()
+		sortCatalogItems(items, c.sort)
+		got := names(items)
+		for i := range c.want {
+			if got[i] != c.want[i] {
+				t.Errorf("sort %q = %v, want %v", c.sort, got, c.want)
+				break
+			}
+		}
+	}
+}
+
+func TestPageSlice(t *testing.T) {
+	items := []int{1, 2, 3, 4, 5}
+	if got := pageSlice(items, 0, 0); len(got) != 5 {
+		t.Errorf("no limit = %v, want all", got)
+	}
+	if got := pageSlice(items, 2, 1); len(got) != 2 || got[0] != 2 {
+		t.Errorf("limit 2 offset 1 = %v, want [2 3]", got)
+	}
+	if got := pageSlice(items, 10, 3); len(got) != 2 || got[0] != 4 {
+		t.Errorf("limit beyond end = %v, want [4 5]", got)
+	}
+	if got := pageSlice(items, 2, 5); got != nil {
+		t.Errorf("offset past end = %v, want nil", got)
+	}
+}
+
+func TestOrderByClauseWhitelist(t *testing.T) {
+	if got := orderByClause("name; DROP TABLE catalog_items"); got != ` ORDER BY name ASC` {
+		t.Errorf("unknown sort = %q, want name asc fallback", got)
+	}
+	if got := orderByClause("newest"); got != ` ORDER BY created_at DESC, name ASC` {
+		t.Errorf("newest = %q", got)
 	}
 }

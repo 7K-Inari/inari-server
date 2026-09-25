@@ -1,1 +1,1 @@
-{"name": "web-service", "displayName": "Web Service", "description": "Web service with DNS + TLS", "channel": "incubating"}
+{"name": "web-service", "displayName": "Web Service", "description": "Web service with DNS + TLS", "channel": "incubating", "category": "compute"}

@@ -25,8 +25,17 @@ type stubCatalog struct {
 	byID      map[string]*types.CatalogItem
 }
 
-func (c *stubCatalog) ListVisible(context.Context, string, string) ([]catalog.ItemView, error) {
-	return c.items, nil
+func (c *stubCatalog) ListVisible(_ context.Context, _ string, opts types.CatalogListOptions) ([]catalog.ItemView, int, error) {
+	if opts.Source == "" {
+		return c.items, len(c.items), nil
+	}
+	var out []catalog.ItemView
+	for _, it := range c.items {
+		if string(it.Source) == opts.Source {
+			out = append(out, it)
+		}
+	}
+	return out, len(out), nil
 }
 
 func (c *stubCatalog) EffectiveVersion(_ context.Context, orgID, itemID, _ string) (string, error) {

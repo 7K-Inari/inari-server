@@ -19,6 +19,7 @@ import (
 
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/authn"
+	"github.com/7K-Inari/inari-server/internal/capabilities"
 	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
@@ -67,6 +68,11 @@ func (t itTenants) GetTenant(_ context.Context, slug string) (*types.Organizatio
 
 func itServer(t *testing.T) (*httptest.Server, *db.DB) {
 	t.Helper()
+	return itServerWithCaps(t, nil)
+}
+
+func itServerWithCaps(t *testing.T, caps catalog.CapabilityLister) (*httptest.Server, *db.DB) {
+	t.Helper()
 	ctx := context.Background()
 	pg, err := postgres.Run(ctx, "postgres:16-alpine",
 		postgres.WithDatabase("inari"),
@@ -96,7 +102,7 @@ func itServer(t *testing.T) (*httptest.Server, *db.DB) {
 	}
 
 	auditStore := audit.NewStore()
-	catalogSvc := catalog.NewService(database, catalog.NewStore(), nil, auditStore,
+	catalogSvc := catalog.NewService(database, catalog.NewStore(), caps, auditStore,
 		&catalog.FixturePuller{Root: "testdata/oci"})
 	if _, err := catalogSvc.Sync(ctx); err != nil {
 		t.Fatalf("catalog sync: %v", err)
@@ -151,6 +157,142 @@ func visEntry(t *testing.T, srv *httptest.Server, token, itemID string) catalog.
 	}
 	t.Fatalf("item %s missing from visibility list: %s", itemID, body)
 	return catalog.OrgVisibilityEntry{}
+}
+
+type catalogList struct {
+	Items []struct {
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		Source   string `json:"source"`
+		Category string `json:"category"`
+	} `json:"items"`
+	Total int `json:"total"`
+}
+
+func itListCatalog(t *testing.T, srv *httptest.Server, query string) catalogList {
+	t.Helper()
+	code, body := itReq(t, srv, "GET", "/api/v1/tenants/acme/catalog"+query, "viewer", "")
+	if code != http.StatusOK {
+		t.Fatalf("GET catalog%s: %d %s", query, code, body)
+	}
+	var out catalogList
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestListCatalogFiltering(t *testing.T) {
+	srv, _ := itServer(t)
+	defer srv.Close()
+
+	all := itListCatalog(t, srv, "")
+	if all.Total != len(all.Items) || all.Total < 2 {
+		t.Fatalf("unfiltered: total=%d items=%d", all.Total, len(all.Items))
+	}
+
+	// Free-text search matches name/display name/description.
+	got := itListCatalog(t, srv, "?q=postgres")
+	if got.Total != 1 || got.Items[0].Name != "postgres-aws" {
+		t.Errorf("q=postgres = %+v", got)
+	}
+	if got := itListCatalog(t, srv, "?q=nomatch"); got.Total != 0 || len(got.Items) != 0 {
+		t.Errorf("q=nomatch = %+v", got)
+	}
+	// ILIKE wildcards in q are escaped, not treated as patterns.
+	if got := itListCatalog(t, srv, "?q=%25"); got.Total != 0 {
+		t.Errorf("q=%% total = %d, want 0 (literal %% matches nothing)", got.Total)
+	}
+
+	// Source and category facets.
+	if got := itListCatalog(t, srv, "?source=curated"); got.Total != 2 {
+		t.Errorf("source=curated total = %d, want 2 (both fixture packages)", got.Total)
+	}
+	got = itListCatalog(t, srv, "?category=database")
+	if got.Total != 1 || got.Items[0].Category != "database" {
+		t.Errorf("category=database = %+v", got)
+	}
+	if got := itListCatalog(t, srv, "?category=bogus"); got.Total != 0 {
+		t.Errorf("category=bogus total = %d, want 0", got.Total)
+	}
+
+	// Sort: name descending reverses the default order.
+	asc := itListCatalog(t, srv, "?sort=name")
+	desc := itListCatalog(t, srv, "?sort=name-desc")
+	if asc.Items[0].Name != desc.Items[len(desc.Items)-1].Name {
+		t.Errorf("name-desc is not the reverse of name: %v vs %v", asc.Items, desc.Items)
+	}
+
+	// Pagination slices the sorted result; total stays un-paginated.
+	page := itListCatalog(t, srv, "?limit=1&offset=1")
+	if page.Total != all.Total || len(page.Items) != 1 || page.Items[0].Name != all.Items[1].Name {
+		t.Errorf("limit=1&offset=1 = %+v, want second of %v", page, all.Items)
+	}
+	if got := itListCatalog(t, srv, "?offset=999"); got.Total != all.Total || len(got.Items) != 0 {
+		t.Errorf("offset past end = %+v", got)
+	}
+
+	// Invalid enum values are rejected by huma validation.
+	if code, _ := itReq(t, srv, "GET", "/api/v1/tenants/acme/catalog?sort=name;DROP", "viewer", ""); code != http.StatusUnprocessableEntity {
+		t.Errorf("sort injection: got %d, want 422", code)
+	}
+	if code, _ := itReq(t, srv, "GET", "/api/v1/tenants/acme/catalog?source=bogus", "viewer", ""); code != http.StatusUnprocessableEntity {
+		t.Errorf("bogus source: got %d, want 422", code)
+	}
+}
+
+// Discovered projections merge with persisted items before filtering,
+// sorting, and pagination — the "what can I run here?" path (ADR-0009).
+func TestListCatalogDiscoveredMerge(t *testing.T) {
+	srv, database := itServerWithCaps(t, capabilities.NewStore())
+	defer srv.Close()
+	ctx := context.Background()
+
+	if _, err := database.Pool.Exec(ctx,
+		`INSERT INTO clusters (id, org_id, name, state) VALUES ('cl-1','org:1','eks-prod','active')`); err != nil {
+		t.Fatal(err)
+	}
+	caps := capabilities.NewStore()
+	for _, item := range []types.CapabilityItem{
+		{Kind: types.CapabilityKindCRD, Name: "aardvark", Group: "example.io", Version: "v1"},
+		{Kind: types.CapabilityKindCRD, Name: "zebra", Group: "example.io", Version: "v1"},
+	} {
+		if err := caps.Upsert(ctx, database.Pool, "cl-1", item); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Merged: persisted fixture items plus the two discovered projections.
+	plain := itListCatalog(t, srv, "")
+	merged := itListCatalog(t, srv, "?cluster=cl-1")
+	if merged.Total != plain.Total+2 {
+		t.Fatalf("merged total = %d, want %d (persisted %d + 2 discovered)", merged.Total, plain.Total+2, plain.Total)
+	}
+
+	// Facets apply to projections: source filter isolates them.
+	got := itListCatalog(t, srv, "?cluster=cl-1&source=discovered")
+	if got.Total != 2 {
+		t.Errorf("source=discovered total = %d, want 2 (%+v)", got.Total, got.Items)
+	}
+	// Projections have no category: excluded when a category filter is active.
+	if got := itListCatalog(t, srv, "?cluster=cl-1&category=database"); got.Total != 1 {
+		t.Errorf("category=database with cluster total = %d, want 1", got.Total)
+	}
+	// Free-text search reaches projection names.
+	if got := itListCatalog(t, srv, "?cluster=cl-1&q=aardvark"); got.Total != 1 {
+		t.Errorf("q=aardvark total = %d, want 1", got.Total)
+	}
+
+	// Pagination slices the merged, sorted result; total stays un-paginated.
+	page := itListCatalog(t, srv, "?cluster=cl-1&limit=1&offset=0")
+	if page.Total != merged.Total || len(page.Items) != 1 || page.Items[0].Name != "aardvark.example.io" {
+		t.Errorf("first merged page = %+v, want aardvark.example.io of %d", page, merged.Total)
+	}
+
+	// Without the cluster param nothing leaks into other clusters' views.
+	if got := itListCatalog(t, srv, "?cluster=cl-unknown"); got.Total != plain.Total {
+		t.Errorf("unknown cluster total = %d, want %d", got.Total, plain.Total)
+	}
 }
 
 func TestOrgVisibilityOverlay(t *testing.T) {

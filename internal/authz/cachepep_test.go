@@ -136,10 +136,9 @@ func TestCachedAuthorizerKeysByUserRelationObject(t *testing.T) {
 
 func TestCachedAuthorizerInvalidatedByTupleWrite(t *testing.T) {
 	store := newCountingStore()
-	inv := NewInvalidatingStore(store, cache.NewMemory(100), "memory")
 	// Authorizer and writer share the same cache instance, as in main.go.
 	c := cache.NewMemory(100)
-	inv = NewInvalidatingStore(store, c, "memory")
+	inv := NewInvalidatingStore(store, c, "memory")
 	a := NewCachedAuthorizer(NewAuthorizer(store), c, "memory", time.Minute)
 	ctx := context.Background()
 

@@ -40,7 +40,7 @@ func BenchmarkPEPCheck(b *testing.B) {
 			name = "cached"
 		}
 		b.Run(name, func(b *testing.B) {
-			var a Authorizer = NewAuthorizer(&latencyStore{latency: fgaLatency})
+			a := NewAuthorizer(&latencyStore{latency: fgaLatency})
 			if cached {
 				a = NewCachedAuthorizer(a, cache.NewMemory(10000), "memory", 2*time.Second)
 			}
@@ -74,7 +74,7 @@ func BenchmarkMePermissions(b *testing.B) {
 			name = "cached"
 		}
 		b.Run(name, func(b *testing.B) {
-			var a Authorizer = NewAuthorizer(&latencyStore{latency: fgaLatency})
+			a := NewAuthorizer(&latencyStore{latency: fgaLatency})
 			var orgLookup = func(context.Context, string) error {
 				time.Sleep(dbLatency)
 				return nil

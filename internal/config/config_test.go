@@ -192,6 +192,22 @@ func TestCacheBackendInvalid(t *testing.T) {
 	}
 }
 
+func TestCacheTTLNonPositive(t *testing.T) {
+	for _, tc := range []struct{ key, val string }{
+		{"INARI_CACHE_PEP_TTL", "0"},
+		{"INARI_CACHE_PEP_TTL", "-5s"},
+		{"INARI_CACHE_TENANT_TTL", "0"},
+		{"INARI_CACHE_TENANT_TTL", "-1s"},
+	} {
+		t.Run(tc.key+"="+tc.val, func(t *testing.T) {
+			t.Setenv(tc.key, tc.val)
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load: want error for %s=%s (ttl <= 0 never expires in both backends)", tc.key, tc.val)
+			}
+		})
+	}
+}
+
 func TestRoleValid(t *testing.T) {
 	t.Setenv("INARI_DATABASE_URL", "postgres://x")
 	if _, err := Load(); err != nil {

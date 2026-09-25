@@ -288,6 +288,14 @@ func Load() (*Config, error) {
 	if c.CacheBackend != "memory" && c.CacheBackend != "redis" {
 		return nil, fmt.Errorf("config: INARI_CACHE_BACKEND must be \"memory\" or \"redis\", got %q", c.CacheBackend)
 	}
+	// TTLs must be positive: both backends treat ttl <= 0 as "never expire",
+	// which would silently disable the documented staleness bound.
+	if c.CachePEPTTL <= 0 {
+		return nil, fmt.Errorf("config: INARI_CACHE_PEP_TTL must be positive (1-5s recommended), got %s", c.CachePEPTTL)
+	}
+	if c.CacheTenantTTL <= 0 {
+		return nil, fmt.Errorf("config: INARI_CACHE_TENANT_TTL must be positive, got %s", c.CacheTenantTTL)
+	}
 	return c, nil
 }
 

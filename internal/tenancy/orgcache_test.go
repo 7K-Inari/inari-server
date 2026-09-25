@@ -129,6 +129,37 @@ func TestOrgCacheFailOpenOnOutage(t *testing.T) {
 	oc.Invalidate(ctx, "acme") // must not panic or block
 }
 
+func TestOrgCacheCorruptEntryFallsThrough(t *testing.T) {
+	c := cache.NewMemory(100)
+	oc := NewOrgCache(c, "memory", time.Minute)
+	ctx := context.Background()
+
+	// A corrupt entry (e.g. written by an older schema) must not be served:
+	// Lookup falls through to fetch and overwrites it.
+	if err := c.Set(ctx, "inari:tenancy:org:acme", "{not json", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	var fetches atomic.Int64
+	fetch := func(context.Context) (*types.Organization, error) {
+		fetches.Add(1)
+		return org("acme"), nil
+	}
+	o, err := oc.Lookup(ctx, "acme", fetch)
+	if err != nil || o.Slug != "acme" {
+		t.Fatalf("Lookup with corrupt entry = %v,%v, want fetched org", o, err)
+	}
+	if n := fetches.Load(); n != 1 {
+		t.Fatalf("fetches = %d, want 1", n)
+	}
+	// The corrupt entry was overwritten: next lookup is a clean hit.
+	if _, err := oc.Lookup(ctx, "acme", fetch); err != nil {
+		t.Fatalf("Lookup after repair: %v", err)
+	}
+	if n := fetches.Load(); n != 1 {
+		t.Fatalf("fetches = %d, want 1 (entry repaired, served from cache)", n)
+	}
+}
+
 func TestOrgCacheConcurrent(t *testing.T) {
 	oc := NewOrgCache(cache.NewMemory(1000), "memory", time.Minute)
 	fetch := func(context.Context) (*types.Organization, error) {

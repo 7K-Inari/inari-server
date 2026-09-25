@@ -28,6 +28,10 @@ func NewRedis(url string) (*Redis, error) {
 	opts.DialTimeout = 2 * time.Second
 	opts.ReadTimeout = time.Second
 	opts.WriteTimeout = time.Second
+	// Fail fast: every caller degrades to the upstream call on error, so
+	// go-redis retries (with backoff) would only add outage latency on the
+	// request path.
+	opts.MaxRetries = -1
 	r := &Redis{client: redis.NewClient(opts)}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

@@ -183,6 +183,13 @@ type Config struct {
 	// empty disables manifest commits.
 	PlatformGitOpsRepo string
 
+	// GitStateRepoOrg is the git owner (org/user) owning the per-tenant
+	// <slug>-inari-state repos. Providers that require owner-qualified
+	// repos (github) fail on the bare convention; when set, the RBAC
+	// materializer's fallback target becomes <org>/<slug>-inari-state.
+	// Empty keeps the bare name (fake/local providers).
+	GitStateRepoOrg string
+
 	// M4: Extension Host + Fleet Manager (plan §5.8, §5.11).
 	// CurrentAgentVersion is the supported agent version (N); agents at N
 	// and N−1 are admitted (§11/5).
@@ -277,6 +284,7 @@ func Load() (*Config, error) {
 		UiExtensionCosignIssuer:   env("INARI_UI_EXTENSION_COSIGN_ISSUER", ""),
 
 		PlatformGitOpsRepo: env("INARI_PLATFORM_GITOPS_REPO", ""),
+		GitStateRepoOrg:    env("INARI_GIT_STATE_REPO_ORG", ""),
 
 		CurrentAgentVersion:  env("INARI_AGENT_VERSION", ""),
 		FleetAdvanceInterval: durEnv("INARI_FLEET_ADVANCE_INTERVAL", 10*time.Second),

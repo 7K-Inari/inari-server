@@ -624,7 +624,8 @@ func run() error {
 		// state repo on rbac.mappings.updated / tenant & team lifecycle
 		// events; the tenant-local ArgoCD syncs them into the cluster.
 		rbacmaterialize.NewHandler(svc,
-			rbacmaterialize.NewInventoryGitConfigs(database, inventory.NewStore()), gitprovider.PerRepo{R: git}, log),
+			rbacmaterialize.NewInventoryGitConfigs(database, inventory.NewStore()), gitprovider.PerRepo{R: git}, log).
+			WithStateRepoOrg(cfg.GitStateRepoOrg),
 	)
 	go dispatcher.Run(ctx)
 

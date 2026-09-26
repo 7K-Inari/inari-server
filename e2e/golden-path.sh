@@ -876,9 +876,12 @@ EOF
   start_traffic 150
   (
     for _ in $(seq 1 150); do
-      AV=$(kubectl -n "$NAMESPACE" get deployment inari-server -o jsonpath='{.status.availableReplicas}' 2>/dev/null || echo 0)
+      AV=$(kubectl -n "$NAMESPACE" get deployment inari-server -o jsonpath='{.status.availableReplicas}' 2>/dev/null || true)
+      # A transient kubectl/apiserver error yields an empty AV — skip the
+      # sample rather than recording a bogus 0 as the minimum.
+      case "$AV" in ''|*[!0-9]*) sleep 1; continue;; esac
       MIN=$(cat "$AVAIL_LOG")
-      if [ "${AV:-0}" -lt "$MIN" ]; then echo "$AV" > "$AVAIL_LOG"; fi
+      if [ "$AV" -lt "$MIN" ]; then echo "$AV" > "$AVAIL_LOG"; fi
       sleep 1
     done
   ) &

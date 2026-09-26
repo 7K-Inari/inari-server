@@ -8,6 +8,7 @@ package extensionhost
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -32,7 +33,31 @@ var strippedRequestHeaders = []string{
 	// for org-scoped extensions).
 	"X-Inari-User",
 	"X-Inari-Org",
+	// Inbound downstream-credential headers are stripped and re-set only by
+	// the auth model (strip-then-inject): a caller must never inject them.
+	HeaderDownstreamAuthorization,
+	HeaderAuthMethod,
 }
+
+// Downstream-credential headers injected by the auth model. Distinct from
+// the identity headers so plugins can tell "who the user is" (identity-only
+// AuthContext) from "what credential to use downstream" (plan §5.8).
+const (
+	HeaderDownstreamAuthorization = "X-Inari-Downstream-Authorization"
+	HeaderAuthMethod              = "X-Inari-Auth-Method"
+	// HeaderReauth signals which third-party provider the user must
+	// re-authenticate with (oidc-sso-session bootstrap/expiry).
+	HeaderReauth = "X-Inari-Reauth"
+)
+
+// Error code strings distinguishing denial kinds for API clients
+// (orchestrator/http.go-style typed mapping, on the chi-mounted proxy).
+const (
+	codeInariFGADenied             = "inari_fga_denied"
+	codeDownstreamPermissionDenied = "downstream_permission_denied"
+	codeReauthRequired             = "reauth_required"
+	codeAuthUnavailable            = "auth_unavailable"
+)
 
 // Registry resolves extension names to registry records (Service seam).
 type Registry interface {
@@ -41,13 +66,22 @@ type Registry interface {
 
 // Proxy serves /api/extensions/{name}/*.
 type Proxy struct {
-	reg  Registry
-	auth authn.Validator
-	az   authz.Authorizer
+	reg       Registry
+	auth      authn.Validator
+	az        authz.Authorizer
+	authModel *AuthModel
 }
 
 func NewProxy(reg Registry, v authn.Validator, az authz.Authorizer) *Proxy {
 	return &Proxy{reg: reg, auth: v, az: az}
+}
+
+// WithAuthModel wires per-request downstream credential resolution (token
+// exchange / session injection). Nil keeps the identity-only pass-through
+// (dev mode without Keycloak exchange configured).
+func (p *Proxy) WithAuthModel(m *AuthModel) *Proxy {
+	p.authModel = m
+	return p
 }
 
 // Mount registers the wildcard proxy route on the chi router.
@@ -83,8 +117,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !allowed {
-		http.Error(w, `{"detail":"forbidden"}`, http.StatusForbidden)
+		http.Error(w, `{"detail":"forbidden","code":"`+codeInariFGADenied+`"}`, http.StatusForbidden)
 		return
+	}
+	// Resolve the effective downstream auth method and credential (fail
+	// closed: no credential, no proxying). The caller's bearer token is used
+	// only as the exchange subject token and never reaches the upstream.
+	var resolved *ResolvedAuth
+	if p.authModel != nil {
+		resolved, err = p.authModel.Resolve(r.Context(), ext, id, raw[len(prefix):])
+		if err != nil {
+			writeProxyAuthError(w, err)
+			return
+		}
 	}
 	target, err := url.Parse(ext.Endpoint)
 	if err != nil || target.Host == "" {
@@ -107,6 +152,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if ext.OrgID != "" {
 				pr.Out.Header.Set("X-Inari-Org", ext.OrgID)
 			}
+			// Strip-then-inject: credential headers were deleted above; only
+			// the resolved credential is re-added, on separate headers.
+			if resolved != nil && resolved.DownstreamToken != "" {
+				pr.Out.Header.Set(HeaderDownstreamAuthorization, "Bearer "+resolved.DownstreamToken)
+				pr.Out.Header.Set(HeaderAuthMethod, string(resolved.Method))
+			}
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
 			// Crash isolation: a dead sidecar is a 502, never a panic or a
@@ -115,4 +166,22 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	rp.ServeHTTP(w, r)
+}
+
+// writeProxyAuthError maps auth-model errors to responses (mirrors the
+// orchestrator/http.go typed-error pattern). Response bodies never carry
+// token material; the re-auth signal is a header + code, not a body echo.
+func writeProxyAuthError(w http.ResponseWriter, err error) {
+	var reauth *ErrReauthRequired
+	switch {
+	case errors.As(err, &reauth):
+		w.Header().Set(HeaderReauth, reauth.Provider)
+		http.Error(w, `{"detail":"re-authentication required","code":"`+codeReauthRequired+`"}`, http.StatusUnauthorized)
+	case errors.Is(err, ErrExchangeDenied):
+		http.Error(w, `{"detail":"downstream permission denied","code":"`+codeDownstreamPermissionDenied+`"}`, http.StatusForbidden)
+	case errors.Is(err, ErrExchangeUnavailable), errors.Is(err, ErrAuthMethodUnavailable):
+		http.Error(w, `{"detail":"extension auth unavailable","code":"`+codeAuthUnavailable+`"}`, http.StatusBadGateway)
+	default:
+		http.Error(w, `{"detail":"extension auth failed","code":"`+codeAuthUnavailable+`"}`, http.StatusBadGateway)
+	}
 }

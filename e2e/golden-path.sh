@@ -416,6 +416,16 @@ xcurl -o /dev/null -X PUT \
   || die "failed to add dev-admin to platform-admins"
 
 log "waiting for the platform group sync to grant dev-admin org_creator"
+if $INARI_HA; then
+  # HA(c) companion assertion: the replicas' FGA store bootstrap must have
+  # converged on exactly ONE store named "inari". A duplicate means the
+  # bootstrap lease (authz-fga-bootstrap) failed and each replica pinned
+  # its own store — split-brain authz (tuple writes invisible to the other
+  # pod's Checks). stores[0] below would silently hide that.
+  FGA_STORE_COUNT=$(xcurl "http://openfga:8080/stores" | jq '[.stores[] | select(.name=="inari")] | length')
+  [ "$FGA_STORE_COUNT" = "1" ] \
+    || die "HA(c): $FGA_STORE_COUNT OpenFGA stores named 'inari' (store bootstrap race — replicas would split-brain)"
+fi
 FGA_STORE=$(xcurl "http://openfga:8080/stores" | jq -r '.stores[0].id')
 ORG_CREATOR=false
 for i in $(seq 1 18); do
@@ -464,7 +474,23 @@ done
 log "verifying /metrics exposes the cache layer series (backend: $CACHE_BACKEND)"
 # Tenant creation above already drove org lookups + FGA checks through the
 # caches, so the series exist; the scrape just must surface them.
-METRICS_BODY=$(xcurl "http://$SERVER_SVC:8080/metrics")
+# HA: /metrics via the Service hits a RANDOM replica, and OTel counters
+# only export a series after that pod's first observation — a replica that
+# has served no cache traffic since its last restart legitimately shows
+# nothing. Scrape every server pod directly and require the series on at
+# least one (the assertion's purpose: the cache layer emits metrics).
+metrics_bodies() {
+  if $INARI_HA; then
+    local ip
+    for ip in $(kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=inari-server \
+        -o jsonpath='{.items[*].status.podIP}'); do
+      xcurl "http://$ip:8080/metrics" 2>/dev/null || true
+    done
+  else
+    xcurl "http://$SERVER_SVC:8080/metrics"
+  fi
+}
+METRICS_BODY=$(metrics_bodies)
 grep -q "inari_cache_operations_total" <<<"$METRICS_BODY" \
   || die "/metrics missing inari_cache_operations_total"
 grep -q "inari_fga_check_duration_seconds" <<<"$METRICS_BODY" \

@@ -507,12 +507,19 @@ TOK_RESP=$(xcurl -X POST -H "Authorization: Bearer $(user_token)" \
 
 log "installing agent via the inari-agent Helm chart"
 REG_TOKEN=$(jq -r '.token' <<<"$TOK_RESP")
-# No --namespace: the chart renders and owns the inari-system Namespace
-# itself (same invocation the Register Cluster wizard shows users).
+# --namespace default: the chart renders and owns the inari-system
+# Namespace itself, so the release namespace is irrelevant — but it must
+# be pinned explicitly. Without it helm resolves the kubeconfig context's
+# namespace, and when this script runs INSIDE a pod (KUBERNETES_SERVICE_HOST
+# set, e.g. sandboxed runners) client-go falls back to the in-cluster
+# serviceaccount namespace, producing "namespaces \"<pod-ns>\" not found".
+# "default" is exactly what an empty context namespace yields on a normal
+# runner, so CI semantics are unchanged.
 # oidcSecret.remotePath: the control plane writes the OIDC client secret at
 # the trimmed Vault path (secrets.ClusterOIDCPath strips the "cluster:"
 # type prefix from the cluster ID).
 helm upgrade --install inari-agent "$AGENT_CHART_DIR" \
+  --namespace default \
   --set image.repository="${AGENT_IMAGE%:*}" \
   --set image.tag="${AGENT_IMAGE##*:}" \
   --set image.pullPolicy=IfNotPresent \

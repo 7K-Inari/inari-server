@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -100,6 +101,10 @@ type Gateway struct {
 	// platform records per-cluster keycloak-client desired state (M7.W2);
 	// nil means platform-resource tracking is disabled.
 	platform PlatformResourceEnsurer
+	// sessions fences duplicate agent streams: at most one live session per
+	// cluster identity (last-writer-wins eviction, see session_registry.go).
+	sessionsMu sync.Mutex
+	sessions   map[string]*sessionHandle
 }
 
 // SecretStoreLookup resolves platform-scoped SecretStore names from the

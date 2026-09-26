@@ -54,6 +54,10 @@ type Config struct {
 	OrgGroupSyncInterval time.Duration
 	OutboxPollInterval   time.Duration
 	ShutdownTimeout      time.Duration
+	// LeaderLeaseTTL is the leader-lease validity period (ADR-0011): it
+	// bounds failover of the gated singleton loops when a replica dies
+	// without releasing. Renewal runs at TTL/3.
+	LeaderLeaseTTL time.Duration
 
 	// Cache layer (internal/cache; ADR-0010): CacheBackend selects "memory"
 	// (default, in-process) or "redis" (shared, requires RedisURL). Backs the
@@ -210,6 +214,7 @@ func Load() (*Config, error) {
 		OrgGroupSyncInterval:      durEnv("INARI_ORG_GROUP_SYNC_INTERVAL", 30*time.Second),
 		OutboxPollInterval:        durEnv("INARI_OUTBOX_POLL_INTERVAL", time.Second),
 		ShutdownTimeout:           durEnv("INARI_SHUTDOWN_TIMEOUT", 10*time.Second),
+		LeaderLeaseTTL:            durEnv("INARI_LEADER_LEASE_TTL", 10*time.Second),
 
 		CacheBackend:          env("INARI_CACHE_BACKEND", "memory"),
 		RedisURL:              env("INARI_REDIS_URL", "redis://localhost:6379/0"),

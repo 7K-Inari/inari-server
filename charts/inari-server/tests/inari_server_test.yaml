@@ -4,6 +4,7 @@ templates:
   - service.yaml
   - serviceaccount.yaml
   - httproute.yaml
+  - pdb.yaml
 tests:
   - it: renders Deployment, Service and ServiceAccount by default
     asserts:
@@ -255,3 +256,201 @@ tests:
     asserts:
       - notExists:
           path: spec.template.spec.volumes
+  - it: wires readiness, liveness and startup probes to the health endpoints by default
+    template: deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /readyz
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.port
+          value: http
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.path
+          value: /healthz
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.port
+          value: http
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.httpGet.path
+          value: /healthz
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.httpGet.port
+          value: http
+  - it: honors probe parameter overrides
+    template: deployment.yaml
+    set:
+      probes.readiness.periodSeconds: 3
+      probes.readiness.timeoutSeconds: 5
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.periodSeconds
+          value: 3
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.timeoutSeconds
+          value: 5
+  - it: omits a probe when its enabled flag is false
+    template: deployment.yaml
+    set:
+      probes.startup.enabled: false
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].startupProbe
+      - exists:
+          path: spec.template.spec.containers[0].readinessProbe
+      - exists:
+          path: spec.template.spec.containers[0].livenessProbe
+  - it: renders a surge-only rolling update strategy and grace period by default
+    template: deployment.yaml
+    asserts:
+      - equal:
+          path: spec.strategy.rollingUpdate.maxUnavailable
+          value: 0
+      - equal:
+          path: spec.strategy.rollingUpdate.maxSurge
+          value: 1
+      - equal:
+          path: spec.template.spec.terminationGracePeriodSeconds
+          value: 30
+  - it: renders default resource requests and limits
+    template: deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 100m
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.memory
+          value: 128Mi
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 512Mi
+  - it: honors resource overrides
+    template: deployment.yaml
+    set:
+      resources.requests.cpu: 250m
+      resources.limits.memory: 1Gi
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 250m
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 1Gi
+  - it: renders no PDB by default (single replica)
+    template: pdb.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+  - it: renders a PDB when replicaCount >= 2
+    template: pdb.yaml
+    set:
+      replicaCount: 2
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: PodDisruptionBudget
+      - equal:
+          path: spec.minAvailable
+          value: 1
+      - equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/component"]
+          value: inari-server
+  - it: renders no PDB when pdb.enabled is false despite replicaCount >= 2
+    template: pdb.yaml
+    set:
+      replicaCount: 2
+      pdb.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+  - it: renders no anti-affinity by default (single replica)
+    template: deployment.yaml
+    asserts:
+      - notExists:
+          path: spec.template.spec.affinity
+  - it: renders preferred hostname anti-affinity when replicaCount >= 2
+    template: deployment.yaml
+    set:
+      replicaCount: 2
+    asserts:
+      - equal:
+          path: spec.template.spec.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution[0].weight
+          value: 100
+      - equal:
+          path: spec.template.spec.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution[0].podAffinityTerm.topologyKey
+          value: kubernetes.io/hostname
+  - it: renders no anti-affinity when podAntiAffinity.enabled is false despite replicaCount >= 2
+    template: deployment.yaml
+    set:
+      replicaCount: 2
+      podAntiAffinity.enabled: false
+    asserts:
+      - notExists:
+          path: spec.template.spec.affinity
+  - it: renders no topologySpreadConstraints by default
+    template: deployment.yaml
+    asserts:
+      - notExists:
+          path: spec.template.spec.topologySpreadConstraints
+  - it: renders topologySpreadConstraints when opted in
+    template: deployment.yaml
+    set:
+      replicaCount: 2
+      topologySpreadConstraints.enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.topologySpreadConstraints[0].maxSkew
+          value: 1
+      - equal:
+          path: spec.template.spec.topologySpreadConstraints[0].topologyKey
+          value: topology.kubernetes.io/zone
+      - equal:
+          path: spec.template.spec.topologySpreadConstraints[0].whenUnsatisfiable
+          value: ScheduleAnyway
+  - it: defaults the cache backend to memory without a Redis URL
+    template: deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_CACHE_BACKEND
+            value: memory
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_REDIS_URL
+  - it: renders the subchart Redis URL when cache.backend=redis and redis.enabled
+    template: deployment.yaml
+    set:
+      cache.backend: redis
+      redis.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_CACHE_BACKEND
+            value: redis
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_REDIS_URL
+            value: redis://RELEASE-NAME-inari-server-redis-master:6379/0
+  - it: honors an external Redis URL when cache.backend=redis
+    template: deployment.yaml
+    set:
+      cache.backend: redis
+      redis.url: redis://cache.example.com:6379/2
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_REDIS_URL
+            value: redis://cache.example.com:6379/2
+  - it: fails when cache.backend=redis has neither subchart nor external URL
+    template: deployment.yaml
+    set:
+      cache.backend: redis
+    asserts:
+      - failedTemplate:
+          errorMessage: cache.backend=redis requires redis.enabled=true (subchart) or redis.url (external Redis)

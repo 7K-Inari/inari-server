@@ -21,6 +21,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/authz"
+	"github.com/7K-Inari/inari-server/internal/cache"
 	"github.com/7K-Inari/inari-server/internal/capabilities"
 	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/7K-Inari/inari-server/internal/cloudaccounts"
@@ -33,6 +34,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/leaderlease"
 	"github.com/7K-Inari/inari-server/internal/logging"
+	"github.com/7K-Inari/inari-server/internal/metrics"
 	"github.com/7K-Inari/inari-server/internal/notifications"
 	"github.com/7K-Inari/inari-server/internal/orchestrator"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
@@ -227,11 +229,35 @@ func run() error {
 		return err
 	}
 
+	// Cache layer (ADR-0010): memory backend by default; redis when
+	// INARI_CACHE_BACKEND=redis. A redis startup failure is fatal (operator
+	// opted in); runtime failures are fail-open at every call site.
+	cacheBackend, err := cache.New(cache.Config{
+		Backend:          cfg.CacheBackend,
+		RedisURL:         cfg.RedisURL,
+		MemoryMaxEntries: cfg.CacheMemoryMaxEntries,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = cacheBackend.Close(context.Background()) }()
+
+	metricsHandler, metricsShutdown, err := metrics.New()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = metricsShutdown(context.Background()) }()
+
 	fgaStore, err := authz.NewOpenFGAStore(ctx, cfg.OpenFGAAPIURL, cfg.OpenFGAStoreName)
 	if err != nil {
 		return err
 	}
-	authorizer := authz.NewAuthorizer(fgaStore)
+	// PEP cache: Check results cached (INARI_CACHE_PEP_TTL); every tuple
+	// write/delete through fgaInvalidating bumps the generation so stale
+	// grants/revocations are never served (fail-open to FGA on cache error).
+	authorizer := authz.NewCachedAuthorizer(authz.NewAuthorizer(fgaStore), cacheBackend, cfg.CacheBackend, cfg.CachePEPTTL)
+	fgaInvalidating := authz.NewInvalidatingStore(fgaStore, cacheBackend, cfg.CacheBackend)
+	orgCache := tenancy.NewOrgCache(cacheBackend, cfg.CacheBackend, cfg.CacheTenantTTL)
 
 	auditStore := audit.NewStore()
 
@@ -247,7 +273,8 @@ func run() error {
 	svc := tenancy.NewService(database, idp, tenancy.NewStore(), auditStore).
 		WithClientManager(idp).
 		WithIdentityProviderManager(idp).
-		WithPlatformResources(platformResourcesSvc)
+		WithPlatformResources(platformResourcesSvc).
+		WithOrgCache(orgCache)
 	// Platform pseudo-org (ADR-0005, D1): seed the reserved "platform" org so
 	// the 7kgroup platform cluster registers through the standard org-scoped
 	// cluster registry flow. Idempotent; mirrors SeedPlatformApps below.
@@ -276,7 +303,7 @@ func run() error {
 
 	// Platform group sync (M1.W2, ADR-0003): Keycloak realm group →
 	// platform:inari org_creator tuples. Single writer for those tuples.
-	platformSync := authz.NewPlatformGroupSync(fgaStore, idp, cfg.PlatformAdminGroup)
+	platformSync := authz.NewPlatformGroupSync(fgaInvalidating, idp, cfg.PlatformAdminGroup)
 	go leaderlease.Run(ctx, leaser, "authz-platform-group-sync", func(lctx context.Context) {
 		platformSync.Run(lctx, cfg.PlatformGroupSyncInterval)
 	}, log)
@@ -285,7 +312,7 @@ func run() error {
 	// (tenant-<slug>/<team>) → team:<id>#member tuples, both directions.
 	// This is the convergence mechanism for IdP-brokered managed members,
 	// who never pass through the inline invite path.
-	teamSync := authz.NewOrgTeamSync(fgaStore, idp, authz.TeamGroupListerFunc(
+	teamSync := authz.NewOrgTeamSync(fgaInvalidating, idp, authz.TeamGroupListerFunc(
 		func(ctx context.Context) ([]authz.TeamGroupRef, error) {
 			// Active orgs only (ADR-0006): teams of a deleting tenant are
 			// excluded so the reconciler cannot resurrect tuples the
@@ -412,8 +439,8 @@ func run() error {
 	// Tenant deletion (ADR-0006): approval-gated, resumable teardown state
 	// machine. FGA tuple cleanup is a synchronous Deleter step; the
 	// clusterregistry provides the force-revoke seam.
-	tenantDeleter := tenancy.NewDeleter(database, idp, tenancy.NewStore(), auditStore, fgaStore, registry, log)
-	svc.WithDeletionApprovalGate(deletionApprovalGate{approvalsSvc}).WithDeleter(tenantDeleter)
+	tenantDeleter := tenancy.NewDeleter(database, idp, tenancy.NewStore(), auditStore, fgaInvalidating, registry, log)
+	svc.WithDeletionApprovalGate(deletionApprovalGate{approvalsSvc}).WithDeleter(tenantDeleter.WithOrgCache(orgCache))
 	// Lease-gated: the resume scan runs once per lease acquisition (so a
 	// failover re-scans and picks up crashed teardowns), then the leader
 	// holds the lease idle to keep non-leaders out.
@@ -568,7 +595,7 @@ func run() error {
 	// deploy resume (plan §5.2, §5.4). Constructed after every handler
 	// exists so the dispatch table is never mutated while Run polls.
 	dispatcher := audit.NewDispatcher(database, cfg.OutboxPollInterval,
-		authz.NewTupleWriter(fgaStore),
+		authz.NewTupleWriter(fgaInvalidating),
 		notificationsSvc,
 		orchestrator.NewResumeHandler(orchestratorSvc, approvalsSvc, log),
 		policyservice.NewDistributeHandler(policySvc, log),
@@ -586,6 +613,9 @@ func run() error {
 	go dispatcher.Run(ctx)
 
 	router, api := httpserver.NewRouter(log, validator, database)
+	// /metrics is a plain chi route (like /healthz): outside huma, so the
+	// published OpenAPI surface is unchanged (export parity preserved).
+	router.Handle("/metrics", metricsHandler)
 	// REST route registration is shared with cmd/export-openapi via
 	// restsurface.Register so the published OpenAPI spec can never drift
 	// from the served surface. Handlers are constructed inside Register.

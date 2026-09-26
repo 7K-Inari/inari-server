@@ -2,6 +2,10 @@
 target-branch: main
 chart-dirs:
   - charts
+# Subchart repositories ct resolves during dependency build (inari-server's
+# optional redis dependency).
+chart-repos:
+  - bitnami=https://charts.bitnami.com/bitnami
 # Version bumps are owned by release-please; ct's increment check would
 # duplicate the Release PR.
 check-version-increment: false

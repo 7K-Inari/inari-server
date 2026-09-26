@@ -13,5 +13,5 @@ Use **goose** with plain SQL migrations embedded via `embed.FS` (`internal/db/mi
 - **golang-migrate**: comparable; goose's Go-first embedding and explicit Up/Down SQL fit the single-binary modular monolith better.
 
 ## Consequences
-- Migrations run inside the server process (safe for the M0 single instance); if replicas ever race, move to a job/initContainer.
+- Migrations run inside the server process. Initially safe only for the M0 single instance; the multi-replica DDL race was later closed in-process with a Postgres session advisory lock (ADR 0010), not a job/initContainer.
 - Append-only `audit_events` is enforced by a trigger created in migration 0001.

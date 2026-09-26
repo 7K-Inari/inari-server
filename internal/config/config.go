@@ -59,6 +59,18 @@ type Config struct {
 	// without releasing. Renewal runs at TTL/3.
 	LeaderLeaseTTL time.Duration
 
+	// Cache layer (internal/cache; ADR-0010): CacheBackend selects "memory"
+	// (default, in-process) or "redis" (shared, requires RedisURL). Backs the
+	// OpenFGA PEP cache (CachePEPTTL, spike-mandated 1-5s) and the tenant
+	// slug→org cache (CacheTenantTTL). All cache failures are fail-open.
+	CacheBackend string
+	RedisURL     string
+	CachePEPTTL  time.Duration
+	// CacheTenantTTL bounds staleness of the slug→org cache when the memory
+	// backend runs multi-replica (invalidation is process-local there).
+	CacheTenantTTL        time.Duration
+	CacheMemoryMaxEntries int
+
 	RegistrationTokenTTL       time.Duration
 	EnrollmentApprovalRequired bool
 	AgentImageRepo             string
@@ -204,6 +216,12 @@ func Load() (*Config, error) {
 		ShutdownTimeout:           durEnv("INARI_SHUTDOWN_TIMEOUT", 10*time.Second),
 		LeaderLeaseTTL:            durEnv("INARI_LEADER_LEASE_TTL", 10*time.Second),
 
+		CacheBackend:          env("INARI_CACHE_BACKEND", "memory"),
+		RedisURL:              env("INARI_REDIS_URL", "redis://localhost:6379/0"),
+		CachePEPTTL:           durEnv("INARI_CACHE_PEP_TTL", 2*time.Second),
+		CacheTenantTTL:        durEnv("INARI_CACHE_TENANT_TTL", 10*time.Second),
+		CacheMemoryMaxEntries: int(intEnv("INARI_CACHE_MEMORY_MAX_ENTRIES", 10000)),
+
 		RegistrationTokenTTL:       durEnv("INARI_REGISTRATION_TOKEN_TTL", time.Hour),
 		EnrollmentApprovalRequired: boolEnv("INARI_ENROLLMENT_APPROVAL_REQUIRED", false),
 		AgentImageRepo:             env("INARI_AGENT_IMAGE_REPO", "ghcr.io/7k-inari/inari-agent"),
@@ -271,6 +289,17 @@ func Load() (*Config, error) {
 	}
 	if c.OIDCIssuerURL == "" {
 		return nil, fmt.Errorf("config: INARI_OIDC_ISSUER_URL must not be empty")
+	}
+	if c.CacheBackend != "memory" && c.CacheBackend != "redis" {
+		return nil, fmt.Errorf("config: INARI_CACHE_BACKEND must be \"memory\" or \"redis\", got %q", c.CacheBackend)
+	}
+	// TTLs must be positive: both backends treat ttl <= 0 as "never expire",
+	// which would silently disable the documented staleness bound.
+	if c.CachePEPTTL <= 0 {
+		return nil, fmt.Errorf("config: INARI_CACHE_PEP_TTL must be positive (1-5s recommended), got %s", c.CachePEPTTL)
+	}
+	if c.CacheTenantTTL <= 0 {
+		return nil, fmt.Errorf("config: INARI_CACHE_TENANT_TTL must be positive, got %s", c.CacheTenantTTL)
 	}
 	return c, nil
 }

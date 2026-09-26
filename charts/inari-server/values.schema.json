@@ -3,6 +3,50 @@
   "type": "object",
   "properties": {
     "replicaCount": { "type": "integer", "minimum": 1 },
+    "probes": {
+      "type": "object",
+      "properties": {
+        "startup": { "$ref": "#/$defs/probe" },
+        "readiness": { "$ref": "#/$defs/probe" },
+        "liveness": { "$ref": "#/$defs/probe" }
+      }
+    },
+    "strategy": {
+      "type": "object",
+      "properties": {
+        "rollingUpdate": {
+          "type": "object",
+          "properties": {
+            "maxUnavailable": { "type": ["integer", "string"] },
+            "maxSurge": { "type": ["integer", "string"] }
+          }
+        }
+      }
+    },
+    "terminationGracePeriodSeconds": { "type": "integer", "minimum": 0 },
+    "pdb": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minAvailable": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "podAntiAffinity": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "topologyKey": { "type": "string", "minLength": 1 }
+      }
+    },
+    "topologySpreadConstraints": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "maxSkew": { "type": "integer", "minimum": 1 },
+        "topologyKey": { "type": "string", "minLength": 1 },
+        "whenUnsatisfiable": { "type": "string", "enum": ["DoNotSchedule", "ScheduleAnyway"] }
+      }
+    },
     "image": {
       "type": "object",
       "properties": {
@@ -66,6 +110,21 @@
       },
       "required": ["realm", "adminRole", "adminSecret"]
     },
+    "cache": {
+      "type": "object",
+      "properties": {
+        "backend": { "type": "string", "enum": ["memory", "redis"] }
+      },
+      "required": ["backend"]
+    },
+    "redis": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "architecture": { "type": "string", "enum": ["standalone", "replication"] },
+        "url": { "type": "string" }
+      }
+    },
     "extraEnv": { "type": "array" },
     "vault": {
       "type": "object",
@@ -110,5 +169,16 @@
     },
     "nameOverride": { "type": "string" },
     "fullnameOverride": { "type": "string" }
+  },
+  "$defs": {
+    "probe": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "periodSeconds": { "type": "integer", "minimum": 1 },
+        "timeoutSeconds": { "type": "integer", "minimum": 1 },
+        "failureThreshold": { "type": "integer", "minimum": 1 }
+      }
+    }
   }
 }

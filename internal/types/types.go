@@ -788,8 +788,12 @@ type TenantDeletedPayload struct {
 
 // Tenant deletion state machine states (tenant_deletions.state).
 const (
-	TenantDeletionStateDeleting = "deleting"
-	TenantDeletionStateFailed   = "delete_failed"
+	// TenantDeletionStateAwaitingApproval is the request-time state: the
+	// teardown must not run until the lifecycle approval is granted (the
+	// resume scan never touches rows in this state).
+	TenantDeletionStateAwaitingApproval = "awaiting_approval"
+	TenantDeletionStateDeleting         = "deleting"
+	TenantDeletionStateFailed           = "delete_failed"
 )
 
 // TenantDeletion is one tenant teardown in flight (ADR-0006). Step is the

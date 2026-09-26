@@ -61,6 +61,9 @@ func (h *DeletionResumeHandler) Handle(ctx context.Context, ev *types.OutboxEven
 	}
 	switch p.State {
 	case types.ApprovalStateApproved:
+		if err := h.svc.MarkDeletionApproved(ctx, lc.OrgID); err != nil {
+			return err
+		}
 		return h.deleter.Run(ctx, lc.OrgID)
 	case types.ApprovalStateCancelled:
 		return h.svc.abortDeletion(ctx, lc.OrgID, p.ApprovalID)

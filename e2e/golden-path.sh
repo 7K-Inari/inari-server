@@ -849,8 +849,10 @@ EOF
     [ "$i" = 36 ] && die "HA(a): outbox dispatcher did not process rbac.mappings.updated after the pod loss"
   done
   log "HA(a): outbox dispatcher continued on the surviving pod; driving a scaffold run"
+  # The go-service skeleton templates .Values.goVersion/.Values.port too;
+  # the renderer does not inject schema defaults, so pass all four.
   RUN_RESP=$(xcurl -X POST -H "Authorization: Bearer $(user_token)" -H "Content-Type: application/json" \
-    -d '{"values":{"serviceName":"ha-probe","module":"github.com/e2e/ha-probe"}}' \
+    -d '{"values":{"serviceName":"ha-probe","module":"github.com/e2e/ha-probe","goVersion":"1.23","port":8080}}' \
     "$API/tenants/$TENANT/templates/go-service/runs")
   RUN_ID=$(jq -r '.run.id // empty' <<<"$RUN_RESP")
   [ -n "$RUN_ID" ] || die "HA(a): scaffold run creation failed: $RUN_RESP"

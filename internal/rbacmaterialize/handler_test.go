@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
@@ -114,8 +116,34 @@ func TestHandlerRespectsExistingRootApp(t *testing.T) {
 	}
 }
 
+// strictRepoFake enforces the owner/name repo contract the real github
+// provider requires (splitRepo): bare repo names are rejected, exactly as
+// gitprovider/github does. A plain gitprovider.Fake accepts bare names,
+// which is why the bare <slug>-inari-state fallback dead-lettered only on
+// live (run 423ffd13).
+type strictRepoFake struct{ *gitprovider.Fake }
+
+func (s *strictRepoFake) EnsureRepo(ctx context.Context, repo string) (string, error) {
+	if !strings.Contains(repo, "/") {
+		return "", fmt.Errorf("gitprovider github: invalid repo %q (want owner/name)", repo)
+	}
+	return s.Fake.EnsureRepo(ctx, repo)
+}
+
+func TestHandlerBareFallbackFailsAgainstOwnerQualifiedProvider(t *testing.T) {
+	git := &strictRepoFake{Fake: gitprovider.NewFake()}
+	h := NewHandler(&fakeTenancy{
+		org: &types.Organization{ID: "org:1", Slug: "acme", Status: "active"},
+	}, &fakeGitConfigs{}, git, nil)
+	err := h.Handle(context.Background(), event(t, types.EventTenantCreated,
+		types.TenantCreatedPayload{OrgID: "org:1", Slug: "acme"}))
+	if err == nil || !strings.Contains(err.Error(), "want owner/name") {
+		t.Fatalf("bare fallback against an owner/name-enforcing provider: err = %v", err)
+	}
+}
+
 func TestHandlerPrefixesStateRepoOrg(t *testing.T) {
-	git := gitprovider.NewFake()
+	git := &strictRepoFake{Fake: gitprovider.NewFake()}
 	h := NewHandler(&fakeTenancy{
 		org: &types.Organization{ID: "org:1", Slug: "acme", Status: "active"},
 	}, &fakeGitConfigs{}, git, nil).WithStateRepoOrg("platform-org")

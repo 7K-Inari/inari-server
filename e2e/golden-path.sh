@@ -823,6 +823,14 @@ EOF
   ACQ=$(kubectl -n "$NAMESPACE" logs -l "$SERVER_LABEL" --tail=-1 | grep -c 'leaderlease: acquired.*approvals-expiry' || true)
   [ "${ACQ:-0}" = "1" ] \
     || die "HA(d1): approvals-expiry leadership was acquired $ACQ times since boot, want exactly 1 (single-execution)"
+  # Every lease, not just approvals-expiry: exactly one acquisition since
+  # boot per lease (no failover, no double-run). Log-based because the
+  # live RBAC profile cannot read the leader_leases table directly.
+  ACQ_ALL=$(kubectl -n "$NAMESPACE" logs -l "$SERVER_LABEL" --tail=-1 \
+    | grep -o 'leaderlease: acquired.*"lease":"[^"]*"' | grep -o '"lease":"[^"]*"' | sort | uniq -c)
+  [ -n "$ACQ_ALL" ] || die "HA(d1): no leaderlease acquisitions in server logs"
+  BAD_LEASES=$(awk '$1 != 1 {print $0}' <<<"$ACQ_ALL")
+  [ -z "$BAD_LEASES" ] || die "HA(d1): leases acquired != 1 time since boot (duplicate execution or flap): $BAD_LEASES"
 
   # ---------- HA(d2): agent stream fencing evicts stale sessions ----------
   # Fencing is per gateway instance (in-process session registry, W1), so
@@ -853,6 +861,52 @@ EOF
     sleep 5
     [ "$i" = 24 ] && die "HA(d2): cluster did not return to active after the agent scaled back to 1"
   done
+
+  # ---------- HA(d3): agent leader failover within budget ----------------
+  # ACTIVE-PASSIVE agent HA (inari-agent W1): with 2 pods and leader
+  # election, killing the leader must promote a standby and restore the
+  # stream inside a bounded window. Live run 423ffd13 measured ~19s
+  # (kill -> new lease holder); budget 60s to absorb kind CI noise.
+  log "HA(d3): agent leader failover — standby takes over within 60s"
+  # Leader election is enabled only here: HA(d2) above needs duplicate
+  # streams, which leader election would suppress.
+  helm upgrade --install inari-agent "$AGENT_CHART_DIR" \
+    --namespace default --reuse-values \
+    --set leaderElection.enabled=true \
+    --wait --timeout 180s >/dev/null
+  kubectl -n inari-system scale deployment/inari-agent --replicas=2 >/dev/null
+  kubectl -n inari-system rollout status deployment/inari-agent --timeout=180s >/dev/null
+  LEADER=""
+  for i in $(seq 1 24); do
+    LEADER=$(kubectl -n inari-system get lease inari-agent.inari.dev \
+      -o jsonpath='{.spec.holderIdentity}' 2>/dev/null | cut -d_ -f1)
+    [ -n "$LEADER" ] && break
+    sleep 5
+    [ "$i" = 24 ] && die "HA(d3): no agent lease holder (leaderElection.enabled not effective?)"
+  done
+  log "HA(d3): leader pod: $LEADER"
+  T_KILL=$(date +%s)
+  kubectl -n inari-system delete pod "$LEADER" --wait=false >/dev/null
+  NEW_LEADER=""
+  for i in $(seq 1 24); do
+    NEW_LEADER=$(kubectl -n inari-system get lease inari-agent.inari.dev \
+      -o jsonpath='{.spec.holderIdentity}' 2>/dev/null | cut -d_ -f1)
+    [ -n "$NEW_LEADER" ] && [ "$NEW_LEADER" != "$LEADER" ] && break
+    sleep 5
+  done
+  [ -n "$NEW_LEADER" ] && [ "$NEW_LEADER" != "$LEADER" ] \
+    || die "HA(d3): lease never moved off the killed leader (holder: ${NEW_LEADER:-none})"
+  FAILOVER_S=$(( $(date +%s) - T_KILL ))
+  [ "$FAILOVER_S" -le 60 ] || die "HA(d3): leader failover took ${FAILOVER_S}s, over the 60s budget"
+  for i in $(seq 1 24); do
+    STATE=$(xcurl -H "Authorization: Bearer $(user_token)" "$API/tenants/$TENANT/clusters/$CLUSTER_ID" | jq -r '.cluster.state' 2>/dev/null || true)
+    [ "$STATE" = "active" ] && break
+    sleep 5
+    [ "$i" = 24 ] && die "HA(d3): cluster not active ${FAILOVER_S}s+ after leader failover"
+  done
+  log "HA(d3): failover ${FAILOVER_S}s (kill -> new leader), new leader: $NEW_LEADER"
+  kubectl -n inari-system scale deployment/inari-agent --replicas=1 >/dev/null
+  kubectl -n inari-system rollout status deployment/inari-agent --timeout=180s >/dev/null
 
   # ---------- HA(a): delete one server pod mid-run ------------------------
   # The surviving replica must keep serving (readiness-gated: zero failed

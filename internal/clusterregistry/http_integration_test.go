@@ -76,6 +76,13 @@ func itServer(t *testing.T, az itAuthorizer) (*httptest.Server, *Service) {
 
 func itServerDB(t *testing.T, az itAuthorizer) (*httptest.Server, *Service, *db.DB) {
 	t.Helper()
+	return itServerKubectlProxy(t, az, false)
+}
+
+// itServerKubectlProxy is itServerDB with the global kubectl-proxy kill
+// switch (INARI_DISABLE_KUBECTL_PROXY) set explicitly.
+func itServerKubectlProxy(t *testing.T, az itAuthorizer, globalKubectlProxyDisabled bool) (*httptest.Server, *Service, *db.DB) {
+	t.Helper()
 	ctx := context.Background()
 	pg, err := postgres.Run(ctx, "postgres:16-alpine",
 		postgres.WithDatabase("inari"),
@@ -109,7 +116,8 @@ func itServerDB(t *testing.T, az itAuthorizer) (*httptest.Server, *Service, *db.
 		"acme":  {ID: "org:1", Slug: "acme"},
 		"acme2": {ID: "org:2", Slug: "acme2"},
 	}, az, nil).
-		WithAccessInfo("https://keycloak.example.com/realms/inari")
+		WithAccessInfo("https://keycloak.example.com/realms/inari").
+		WithKubectlProxy(globalKubectlProxyDisabled)
 	router, api := httpserver.NewRouter(slog.Default(), itValidator{}, database)
 	h.RegisterRoutes(api)
 	return httptest.NewServer(router), svc, database
@@ -492,5 +500,113 @@ func TestClusterAPITokenListAndRevoke(t *testing.T) {
 	}
 	if revocations != 1 {
 		t.Errorf("token.revoked audit rows = %d, want 1", revocations)
+	}
+}
+
+// TestClusterAPIKubectlProxy covers the per-cluster kubectl-proxy disable
+// setting and its composition with the global kill switch: effective
+// enablement = !global && !cluster.
+func TestClusterAPIKubectlProxy(t *testing.T) {
+	srv, _ := itServer(t, itAuthorizer{allow: true})
+	defer srv.Close()
+	cid := itCreate(t, srv, "acme", "kp-1")
+
+	type clusterView struct {
+		Cluster             types.Cluster `json:"cluster"`
+		KubectlProxyEnabled bool          `json:"kubectlProxyEnabled"`
+	}
+	get := func(org, id, token string) (int, clusterView) {
+		code, body := itReq(t, srv, "GET", "/api/v1/tenants/"+org+"/clusters/"+id, token, "")
+		var out clusterView
+		if code == http.StatusOK {
+			if err := json.Unmarshal([]byte(body), &out); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return code, out
+	}
+	patch := func(org, id, token, body string) (int, clusterView) {
+		code, respBody := itReq(t, srv, "PATCH", "/api/v1/tenants/"+org+"/clusters/"+id, token, body)
+		var out clusterView
+		if code == http.StatusOK {
+			if err := json.Unmarshal([]byte(respBody), &out); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return code, out
+	}
+
+	// Defaults: setting off, effective enabled (global off).
+	code, out := get("acme", cid, "good")
+	if code != http.StatusOK {
+		t.Fatalf("get cluster: %d", code)
+	}
+	if out.Cluster.KubectlProxyDisabled {
+		t.Error("kubectlProxyDisabled default = true, want false")
+	}
+	if !out.KubectlProxyEnabled {
+		t.Error("kubectlProxyEnabled = false, want true by default")
+	}
+
+	// Disable per-cluster.
+	code, out = patch("acme", cid, "good", `{"kubectlProxyDisabled":true}`)
+	if code != http.StatusOK {
+		t.Fatalf("patch disable: %d", code)
+	}
+	if !out.Cluster.KubectlProxyDisabled || out.KubectlProxyEnabled {
+		t.Errorf("after disable: disabled=%v enabled=%v, want true/false",
+			out.Cluster.KubectlProxyDisabled, out.KubectlProxyEnabled)
+	}
+
+	// Persisted across reads.
+	_, out = get("acme", cid, "good")
+	if !out.Cluster.KubectlProxyDisabled || out.KubectlProxyEnabled {
+		t.Errorf("get after disable: disabled=%v enabled=%v, want true/false",
+			out.Cluster.KubectlProxyDisabled, out.KubectlProxyEnabled)
+	}
+
+	// Re-enable.
+	code, out = patch("acme", cid, "good", `{"kubectlProxyDisabled":false}`)
+	if code != http.StatusOK || out.Cluster.KubectlProxyDisabled || !out.KubectlProxyEnabled {
+		t.Errorf("re-enable: %d disabled=%v enabled=%v, want 200 false/true",
+			code, out.Cluster.KubectlProxyDisabled, out.KubectlProxyEnabled)
+	}
+
+	// Auth surface: no token 401, non-member 403, cross-tenant 404.
+	if code, _ := patch("acme", cid, "", `{"kubectlProxyDisabled":true}`); code != http.StatusUnauthorized {
+		t.Errorf("no token: got %d, want 401", code)
+	}
+	if code, _ := patch("acme", cid, "outsider", `{"kubectlProxyDisabled":true}`); code != http.StatusForbidden {
+		t.Errorf("non-member: got %d, want 403", code)
+	}
+	if code, _ := patch("acme2", cid, "good", `{"kubectlProxyDisabled":true}`); code != http.StatusNotFound {
+		t.Errorf("cross-tenant: got %d, want 404", code)
+	}
+}
+
+// TestClusterAPIKubectlProxyGlobalKillSwitch: with INARI_DISABLE_KUBECTL_PROXY
+// set, every cluster reports kubectlProxyEnabled=false regardless of the
+// per-cluster setting, while the setting itself stays readable/writable.
+func TestClusterAPIKubectlProxyGlobalKillSwitch(t *testing.T) {
+	srv, _, _ := itServerKubectlProxy(t, itAuthorizer{allow: true}, true)
+	defer srv.Close()
+	cid := itCreate(t, srv, "acme", "kp-global")
+
+	var out struct {
+		Cluster             types.Cluster `json:"cluster"`
+		KubectlProxyEnabled bool          `json:"kubectlProxyEnabled"`
+	}
+	code, body := itReq(t, srv, "GET", "/api/v1/tenants/acme/clusters/"+cid, "good", "")
+	if code != http.StatusOK {
+		t.Fatalf("get cluster: %d %s", code, body)
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Cluster.KubectlProxyDisabled {
+		t.Error("kubectlProxyDisabled = true, want false (setting untouched)")
+	}
+	if out.KubectlProxyEnabled {
+		t.Error("kubectlProxyEnabled = true, want false under global kill switch")
 	}
 }

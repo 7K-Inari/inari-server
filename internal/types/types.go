@@ -184,7 +184,11 @@ type Cluster struct {
 	Labels             map[string]string `json:"labels,omitempty"`
 	KeycloakClientID   string            `json:"keycloakClientId,omitempty"`
 	State              ClusterState      `json:"state"`
-	CapabilityChecksum string            `json:"capabilityChecksum,omitempty"`
+	// KubectlProxyDisabled is the per-cluster opt-out of kubectl-proxy e2e
+	// access. Effective enablement = !INARI_DISABLE_KUBECTL_PROXY &&
+	// !KubectlProxyDisabled, computed server-side on cluster payloads.
+	KubectlProxyDisabled bool              `json:"kubectlProxyDisabled"`
+	CapabilityChecksum   string            `json:"capabilityChecksum,omitempty"`
 	ConnectedAt        *time.Time        `json:"connectedAt,omitempty"`
 	LastSeenAt         *time.Time        `json:"lastSeenAt,omitempty"`
 	CreatedAt          time.Time         `json:"createdAt"`

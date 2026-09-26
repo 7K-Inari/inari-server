@@ -27,6 +27,10 @@ type Handler struct {
 	authz     authz.Authorizer
 	caps      CapabilitiesLister
 	issuerURL string
+	// kubectlProxyGlobalDisabled mirrors config.Config.DisableKubectlProxy
+	// (INARI_DISABLE_KUBECTL_PROXY): effective per-cluster enablement is
+	// !global && !cluster.kubectlProxyDisabled.
+	kubectlProxyGlobalDisabled bool
 }
 
 // CapabilitiesLister reads the live capabilities of a cluster (implemented
@@ -54,6 +58,20 @@ func (h *Handler) WithAccessInfo(issuerURL string) *Handler {
 	return h
 }
 
+// WithKubectlProxy wires the global kubectl-proxy kill switch
+// (INARI_DISABLE_KUBECTL_PROXY) used to compute kubectlProxyEnabled on
+// cluster payloads.
+func (h *Handler) WithKubectlProxy(globalDisabled bool) *Handler {
+	h.kubectlProxyGlobalDisabled = globalDisabled
+	return h
+}
+
+// kubectlProxyEnabled reports the effective per-cluster enablement:
+// !global kill switch && !per-cluster opt-out.
+func (h *Handler) kubectlProxyEnabled(c *types.Cluster) bool {
+	return !h.kubectlProxyGlobalDisabled && !c.KubectlProxyDisabled
+}
+
 // RegisterRoutes mounts the cluster API on the huma API instance.
 func (h *Handler) RegisterRoutes(api huma.API) {
 	huma.Register(api, huma.Operation{
@@ -79,6 +97,14 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Summary:     "Get a cluster",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.getCluster)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "updateClusterSettings",
+		Method:      http.MethodPatch,
+		Path:        "/api/v1/tenants/{org}/clusters/{id}",
+		Summary:     "Update per-cluster settings (kubectl-proxy e2e access opt-out)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.updateClusterSettings)
 
 	huma.Register(api, huma.Operation{
 		OperationID: "getClusterAccessInfo",
@@ -180,6 +206,11 @@ type createClusterInput struct {
 type clusterOutput struct {
 	Body struct {
 		Cluster types.Cluster `json:"cluster"`
+		// KubectlProxyEnabled is the effective kubectl-proxy e2e-access
+		// enablement: !INARI_DISABLE_KUBECTL_PROXY &&
+		// !cluster.kubectlProxyDisabled (server-computed; clients must not
+		// re-derive precedence).
+		KubectlProxyEnabled bool `json:"kubectlProxyEnabled"`
 	}
 }
 
@@ -197,6 +228,7 @@ func (h *Handler) createCluster(ctx context.Context, in *createClusterInput) (*c
 	}
 	out := &clusterOutput{}
 	out.Body.Cluster = *c
+	out.Body.KubectlProxyEnabled = h.kubectlProxyEnabled(c)
 	return out, nil
 }
 
@@ -246,6 +278,39 @@ func (h *Handler) getCluster(ctx context.Context, in *clusterPathInput) (*cluste
 	}
 	out := &clusterOutput{}
 	out.Body.Cluster = *c
+	out.Body.KubectlProxyEnabled = h.kubectlProxyEnabled(c)
+	return out, nil
+}
+
+type updateClusterSettingsInput struct {
+	Org  string `path:"org"`
+	ID   string `path:"id"`
+	Body struct {
+		KubectlProxyDisabled bool `json:"kubectlProxyDisabled" doc:"Per-cluster opt-out of kubectl-proxy e2e access"`
+	}
+}
+
+// updateClusterSettings flips per-cluster settings. The kubectl-proxy
+// opt-out composes with the global INARI_DISABLE_KUBECTL_PROXY switch:
+// the response always carries the server-computed effective enablement.
+func (h *Handler) updateClusterSettings(ctx context.Context, in *updateClusterSettingsInput) (*clusterOutput, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.requireOrgCluster(ctx, org.ID, in.ID); err != nil {
+		return nil, err
+	}
+	c, err := h.svc.SetKubectlProxyDisabled(ctx, id.Subject, in.ID, in.Body.KubectlProxyDisabled)
+	if errors.Is(err, ErrClusterNotFound) {
+		return nil, huma.Error404NotFound("cluster not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := &clusterOutput{}
+	out.Body.Cluster = *c
+	out.Body.KubectlProxyEnabled = h.kubectlProxyEnabled(c)
 	return out, nil
 }
 

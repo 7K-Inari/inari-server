@@ -175,3 +175,49 @@ func TestCreateTenantForbiddenWithoutOrgCreator(t *testing.T) {
 		t.Errorf("detail = %q, want org_creator mention", body.Detail)
 	}
 }
+
+func TestFeaturesKubectlProxy(t *testing.T) {
+	newServer := func(globalDisabled bool) *httptest.Server {
+		router, api := httpserver.NewRouter(slog.New(slog.NewTextHandler(nil, nil)),
+			stubValidator{id: &authn.Identity{Subject: "u1"}}, stubReady{})
+		NewMeHandler(flagAuthorizer{allow: true}, nil).
+			WithKubectlProxy(globalDisabled).RegisterRoutes(api)
+		srv := httptest.NewServer(router)
+		t.Cleanup(srv.Close)
+		return srv
+	}
+
+	var get = func(srv *httptest.Server) (int, bool) {
+		resp := testTokenReq(t, http.MethodGet, srv.URL+"/api/v1/features", "")
+		defer func() { _ = resp.Body.Close() }()
+		var body struct {
+			KubectlProxy struct {
+				Enabled bool `json:"enabled"`
+			} `json:"kubectlProxy"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		return resp.StatusCode, body.KubectlProxy.Enabled
+	}
+
+	code, enabled := get(newServer(false))
+	if code != http.StatusOK || !enabled {
+		t.Errorf("global flag off: got %d enabled=%v, want 200 enabled=true", code, enabled)
+	}
+	code, enabled = get(newServer(true))
+	if code != http.StatusOK || enabled {
+		t.Errorf("global flag on: got %d enabled=%v, want 200 enabled=false", code, enabled)
+	}
+
+	// Unauthenticated callers get 401 like every other route.
+	srv := newServer(false)
+	resp, err := http.Get(srv.URL + "/api/v1/features")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("no token: got %d, want 401", resp.StatusCode)
+	}
+}

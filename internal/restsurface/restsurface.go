@@ -66,6 +66,9 @@ type Deps struct {
 	OIDCIssuerURL   string
 	AllowedAPIBases []string
 	RemoteEntries   *extensionhost.RemoteEntryFetcher
+	// DisableKubectlProxy is the global kubectl-proxy kill switch
+	// (config.Config.DisableKubectlProxy / INARI_DISABLE_KUBECTL_PROXY).
+	DisableKubectlProxy bool
 }
 
 // Register mounts every module's REST routes on the huma API. The call order
@@ -73,9 +76,11 @@ type Deps struct {
 // order-independent (routes key on method+path).
 func Register(api huma.API, d Deps) {
 	tenancy.NewHandler(d.Tenancy, d.Authz).WithScopesCatalog(d.IdentityScopes).RegisterRoutes(api)
-	tenancy.NewMeHandler(d.Authz, d.Tenancy).RegisterRoutes(api)
+	tenancy.NewMeHandler(d.Authz, d.Tenancy).
+		WithKubectlProxy(d.DisableKubectlProxy).RegisterRoutes(api)
 	clusterregistry.NewHandler(d.Clusters, d.Tenancy, d.Authz, d.CapabilitiesLister).
-		WithAccessInfo(d.OIDCIssuerURL).RegisterRoutes(api)
+		WithAccessInfo(d.OIDCIssuerURL).
+		WithKubectlProxy(d.DisableKubectlProxy).RegisterRoutes(api)
 	catalog.NewHandler(d.Catalog, d.Tenancy, d.Authz).RegisterRoutes(api)
 	approvals.NewHandler(d.Approvals, d.Tenancy, d.Authz, d.Tenancy).RegisterRoutes(api)
 	inventory.NewHandler(d.Inventory, d.Tenancy, d.Authz).RegisterRoutes(api)

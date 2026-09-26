@@ -17,6 +17,9 @@ import (
 type MeHandler struct {
 	authz   authz.Authorizer
 	tenants MeTenantResolver
+	// kubectlProxyDisabled mirrors config.Config.DisableKubectlProxy (the
+	// INARI_DISABLE_KUBECTL_PROXY global kill switch).
+	kubectlProxyDisabled bool
 }
 
 // MeTenantResolver resolves a tenant slug to its record (tenancy.Service).
@@ -28,6 +31,13 @@ func NewMeHandler(az authz.Authorizer, tenants MeTenantResolver) *MeHandler {
 	return &MeHandler{authz: az, tenants: tenants}
 }
 
+// WithKubectlProxy wires the global kubectl-proxy kill switch
+// (INARI_DISABLE_KUBECTL_PROXY) surfaced by GET /api/v1/features.
+func (h *MeHandler) WithKubectlProxy(globalDisabled bool) *MeHandler {
+	h.kubectlProxyDisabled = globalDisabled
+	return h
+}
+
 func (h *MeHandler) RegisterRoutes(api huma.API) {
 	huma.Register(api, huma.Operation{
 		OperationID: "getMyPermissions",
@@ -36,6 +46,31 @@ func (h *MeHandler) RegisterRoutes(api huma.API) {
 		Summary:     "Platform-level permissions of the authenticated caller",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.getMyPermissions)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "getFeatures",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/features",
+		Summary:     "Global feature flags for the console (kubectl-proxy e2e access)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.getFeatures)
+}
+
+type featuresOutput struct {
+	Body struct {
+		KubectlProxy struct {
+			Enabled bool `json:"enabled" doc:"False when INARI_DISABLE_KUBECTL_PROXY is set on the control plane"`
+		} `json:"kubectlProxy"`
+	}
+}
+
+// getFeatures exposes server-driven feature flags so the console can hide
+// disabled surfaces. Per-cluster enablement additionally ANDs the
+// cluster's kubectlProxyDisabled setting (computed on cluster payloads).
+func (h *MeHandler) getFeatures(_ context.Context, _ *struct{}) (*featuresOutput, error) {
+	out := &featuresOutput{}
+	out.Body.KubectlProxy.Enabled = !h.kubectlProxyDisabled
+	return out, nil
 }
 
 type myPermissionsOutput struct {

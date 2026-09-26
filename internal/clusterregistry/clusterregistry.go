@@ -93,13 +93,13 @@ type Store struct{}
 func NewStore() *Store { return &Store{} }
 
 const clusterCols = `id, org_id, name, kubernetes_version, distribution, oidc_issuer_url, labels, keycloak_client_id, state,
-	capability_checksum, connected_at, last_seen_at, created_at`
+	kubectl_proxy_disabled, capability_checksum, connected_at, last_seen_at, created_at`
 
 func scanCluster(row interface{ Scan(...any) error }) (*types.Cluster, error) {
 	var c types.Cluster
 	var labels []byte
 	err := row.Scan(&c.ID, &c.OrgID, &c.Name, &c.KubernetesVersion, &c.Distribution, &c.OIDCIssuerURL, &labels, &c.KeycloakClientID,
-		&c.State, &c.CapabilityChecksum, &c.ConnectedAt, &c.LastSeenAt, &c.CreatedAt)
+		&c.State, &c.KubectlProxyDisabled, &c.CapabilityChecksum, &c.ConnectedAt, &c.LastSeenAt, &c.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -233,6 +233,20 @@ func (s *Store) MarkRegistered(ctx context.Context, q db.Querier, id, clientID, 
 func (s *Store) SetMetadata(ctx context.Context, q db.Querier, id, distribution, oidcIssuerURL string) error {
 	const sql = `UPDATE clusters SET distribution = $2, oidc_issuer_url = $3 WHERE id = $1`
 	tag, err := q.Exec(ctx, sql, id, distribution, oidcIssuerURL)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrClusterNotFound
+	}
+	return nil
+}
+
+// SetKubectlProxyDisabled flips the per-cluster kubectl-proxy opt-out
+// (composes with the global INARI_DISABLE_KUBECTL_PROXY kill switch).
+func (s *Store) SetKubectlProxyDisabled(ctx context.Context, q db.Querier, id string, disabled bool) error {
+	const sql = `UPDATE clusters SET kubectl_proxy_disabled = $2 WHERE id = $1`
+	tag, err := q.Exec(ctx, sql, id, disabled)
 	if err != nil {
 		return err
 	}
@@ -415,6 +429,30 @@ func (s *Service) ListClusters(ctx context.Context, orgID string) ([]types.Clust
 
 func (s *Service) GetCluster(ctx context.Context, id string) (*types.Cluster, error) {
 	return s.store.GetCluster(ctx, s.db.Pool, id)
+}
+
+// SetKubectlProxyDisabled updates the per-cluster kubectl-proxy opt-out and
+// audits the change. Cross-tenant writes are rejected by the caller
+// (requireOrgCluster) before this runs.
+func (s *Service) SetKubectlProxyDisabled(ctx context.Context, actor, clusterID string, disabled bool) (*types.Cluster, error) {
+	c, err := s.store.GetCluster(ctx, s.db.Pool, clusterID)
+	if err != nil {
+		return nil, err
+	}
+	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		if err := s.store.SetKubectlProxyDisabled(ctx, tx, clusterID, disabled); err != nil {
+			return err
+		}
+		return s.audit.Record(ctx, tx, &types.AuditEvent{
+			OrgID: c.OrgID, Actor: actor, Action: "cluster.kubectl-proxy-settings", ObjectType: "cluster", ObjectID: clusterID,
+			Payload: json.RawMessage(fmt.Sprintf(`{"kubectlProxyDisabled":%t}`, disabled)),
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	c.KubectlProxyDisabled = disabled
+	return c, nil
 }
 
 // IssueToken mints a one-time TTL'd registration token; the plaintext is

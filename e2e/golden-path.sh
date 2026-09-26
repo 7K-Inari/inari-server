@@ -145,10 +145,12 @@ helm upgrade --install nats nats/nats --version 1.3.2 \
 # Belt-and-braces on top of helm --wait (the StatefulSet readiness probe
 # /healthz?js-server-only=true already gates on meta-group currency): assert
 # the JetStream meta group actually formed with 3 members and a leader.
+# The monitor port 8222 lives only on the nats-headless service (the nats
+# ClusterIP service exposes just 4222), so jsz must be scraped there.
 log "verifying the JetStream meta group (3 members + leader)"
 for i in $(seq 1 24); do
   JSZ=$(kubectl -n "$NAMESPACE" exec deploy/nats-box -- \
-    sh -c 'curl -sf http://nats:8222/jsz' 2>/dev/null || true)
+    sh -c 'curl -sf http://nats-headless:8222/jsz' 2>/dev/null || true)
   if jq -e '.meta_cluster.cluster_size == 3 and (.meta_cluster.leader | type == "string" and length > 0)' \
       <<<"$JSZ" >/dev/null 2>&1; then
     break

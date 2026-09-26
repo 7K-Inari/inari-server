@@ -582,6 +582,23 @@ func TestClusterAPIKubectlProxy(t *testing.T) {
 	if code, _ := patch("acme2", cid, "good", `{"kubectlProxyDisabled":true}`); code != http.StatusNotFound {
 		t.Errorf("cross-tenant: got %d, want 404", code)
 	}
+
+	// Validation: missing field, wrong type, and unknown properties are 422;
+	// none of them may mutate the setting.
+	for name, body := range map[string]string{
+		"missing field": `{}`,
+		"wrong type":    `{"kubectlProxyDisabled":"yes"}`,
+		"extra field":   `{"kubectlProxyDisabled":true,"bogus":1}`,
+	} {
+		if code, _ := patch("acme", cid, "good", body); code != http.StatusUnprocessableEntity {
+			t.Errorf("validation %s: got %d, want 422", name, code)
+		}
+	}
+	_, out = get("acme", cid, "good")
+	if out.Cluster.KubectlProxyDisabled || !out.KubectlProxyEnabled {
+		t.Errorf("after rejected PATCHes: disabled=%v enabled=%v, want false/true (unchanged)",
+			out.Cluster.KubectlProxyDisabled, out.KubectlProxyEnabled)
+	}
 }
 
 // TestClusterAPIKubectlProxyGlobalKillSwitch: with INARI_DISABLE_KUBECTL_PROXY

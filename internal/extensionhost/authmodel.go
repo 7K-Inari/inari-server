@@ -192,6 +192,20 @@ func (m *AuthModel) Resolve(ctx context.Context, ext *types.Extension, id *authn
 	if !ok {
 		return nil, fmt.Errorf("%w: no provider registered for %s", ErrAuthMethodUnavailable, declared.Method)
 	}
+	// Audience separation: an oidc-user audience must be on the extension's
+	// declared allowlist (defends the exchanger against a drifted pick).
+	if declared.Method == AuthMethodOIDCUser && declared.Audience != "" {
+		allowed := false
+		for _, a := range exchangeAudiences(ext) {
+			if a == declared.Audience {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return nil, fmt.Errorf("%w: %s", ErrExchangeAudienceNotAllowed, declared.Audience)
+		}
+	}
 	res, err := p.Resolve(ctx, ConnectionRequest{
 		Extension: ext, Identity: id, Declared: declared, SubjectToken: subjectToken,
 	})

@@ -114,6 +114,23 @@ func TestHandlerRespectsExistingRootApp(t *testing.T) {
 	}
 }
 
+func TestHandlerPrefixesStateRepoOrg(t *testing.T) {
+	git := gitprovider.NewFake()
+	h := NewHandler(&fakeTenancy{
+		org: &types.Organization{ID: "org:1", Slug: "acme", Status: "active"},
+	}, &fakeGitConfigs{}, git, nil).WithStateRepoOrg("platform-org")
+	if err := h.Handle(context.Background(), event(t, types.EventTenantCreated,
+		types.TenantCreatedPayload{OrgID: "org:1", Slug: "acme"})); err != nil {
+		t.Fatal(err)
+	}
+	if files := git.Files("platform-org/acme-inari-state", "main"); len(files) == 0 {
+		t.Errorf("nothing committed to owner-qualified fallback repo")
+	}
+	if files := git.Files("acme-inari-state", "main"); len(files) != 0 {
+		t.Errorf("unexpected commit to bare repo: %v", keys(files))
+	}
+}
+
 func TestHandlerUsesTenantGitConfig(t *testing.T) {
 	git := gitprovider.NewFake()
 	h := NewHandler(&fakeTenancy{

@@ -70,6 +70,17 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 }
 
+func TestGitStateRepoOrgEnvOverride(t *testing.T) {
+	t.Setenv("INARI_GIT_STATE_REPO_ORG", "7k-group")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.GitStateRepoOrg != "7k-group" {
+		t.Errorf("GitStateRepoOrg = %q, want 7k-group", c.GitStateRepoOrg)
+	}
+}
+
 func TestScaffoldEnvOverride(t *testing.T) {
 	t.Setenv("INARI_SCAFFOLD_RECONCILE_INTERVAL", "10s")
 	t.Setenv("INARI_SCAFFOLD_STEP_MAX_ATTEMPTS", "3")

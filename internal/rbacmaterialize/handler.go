@@ -38,6 +38,11 @@ type Handler struct {
 	configs GitConfigs
 	git     gitprovider.Provider
 	log     *slog.Logger
+	// stateRepoOrg prefixes the fallback <slug>-inari-state repo with the
+	// platform git owner (e.g. "7k-group") for providers that require
+	// owner-qualified repo names (github). Empty keeps the bare
+	// convention (fake/local providers).
+	stateRepoOrg string
 }
 
 // NewHandler wires the outbox consumer; a nil logger uses slog.Default.
@@ -46,6 +51,13 @@ func NewHandler(ten Tenancy, configs GitConfigs, git gitprovider.Provider, log *
 		log = slog.Default()
 	}
 	return &Handler{tenancy: ten, configs: configs, git: git, log: log}
+}
+
+// WithStateRepoOrg sets the git owner for the fallback tenant state repo
+// (INARI_GIT_STATE_REPO_ORG).
+func (h *Handler) WithStateRepoOrg(org string) *Handler {
+	h.stateRepoOrg = org
+	return h
 }
 
 // EventTypes implements audit.Handler.
@@ -111,9 +123,13 @@ func (h *Handler) Handle(ctx context.Context, ev *types.OutboxEvent) error {
 }
 
 // target resolves repo/branch/policy from the tenant git-config, falling
-// back to the platform convention (<slug>-inari-state, main, direct).
+// back to the platform convention (<slug>-inari-state, main, direct;
+// owner-qualified with stateRepoOrg when configured).
 func (h *Handler) target(ctx context.Context, org *types.Organization) (repo, branch string, policy types.CommitPolicy) {
 	repo, branch, policy = org.Slug+"-inari-state", "main", types.CommitPolicyDirect
+	if h.stateRepoOrg != "" {
+		repo = h.stateRepoOrg + "/" + repo
+	}
 	cfg, err := h.configs.GitConfig(ctx, org.ID)
 	if err != nil {
 		// A broken config lookup must not block materialization for every

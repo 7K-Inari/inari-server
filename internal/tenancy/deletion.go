@@ -111,10 +111,12 @@ func (s *Store) DeleteTenantDeletionRow(ctx context.Context, q db.Querier, orgID
 }
 
 // ListPendingTenantDeletions returns in-flight and failed deletions for the
-// startup resume scan.
+// startup resume scan. Rows still awaiting their approval decision are
+// excluded: an undecided decommission must never run (the scan fires on
+// every boot/lease failover, long before any human decides).
 func (s *Store) ListPendingTenantDeletions(ctx context.Context, q db.Querier) ([]types.TenantDeletion, error) {
-	const sql = `SELECT ` + tenantDeletionCols + ` FROM tenant_deletions ORDER BY created_at`
-	rows, err := q.Query(ctx, sql)
+	const sql = `SELECT ` + tenantDeletionCols + ` FROM tenant_deletions WHERE state IN ($1, $2) ORDER BY created_at`
+	rows, err := q.Query(ctx, sql, types.TenantDeletionStateDeleting, types.TenantDeletionStateFailed)
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +269,7 @@ func (s *Service) DeleteTenant(ctx context.Context, actor, slug string, force bo
 		return "", err
 	}
 	del := &types.TenantDeletion{
-		OrgID: org.ID, State: types.TenantDeletionStateDeleting,
+		OrgID: org.ID, State: types.TenantDeletionStateAwaitingApproval,
 		Force: force, Reason: reason, RequestedBy: actor, Snapshot: raw,
 	}
 	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
@@ -407,6 +409,9 @@ func NewDeleter(d *db.DB, idp IdentityProvider, store *Store, auditStore *audit.
 // Run executes the remaining teardown steps for an org. Re-entrant: it
 // resumes after tenant_deletions.step. A step failure flips the row to
 // delete_failed with last_error; retry (or the startup scan) resumes.
+// Defense in depth: Run refuses rows still awaiting their approval
+// decision — only the approval-decided handler may transition a row out of
+// awaiting_approval before running the teardown.
 func (d *Deleter) Run(ctx context.Context, orgID string) error {
 	del, err := d.store.GetTenantDeletion(ctx, d.db.Pool, orgID)
 	if errors.Is(err, ErrDeletionNotFound) {
@@ -414,6 +419,9 @@ func (d *Deleter) Run(ctx context.Context, orgID string) error {
 	}
 	if err != nil {
 		return err
+	}
+	if del.State == types.TenantDeletionStateAwaitingApproval {
+		return fmt.Errorf("tenancy: deletion for %s is still awaiting approval; refusing to run", orgID)
 	}
 	start := 0
 	for i, s := range deletionSteps {
@@ -601,6 +609,12 @@ func slugFromSnapshot(raw json.RawMessage) string {
 		return ""
 	}
 	return p.Slug
+}
+
+// MarkDeletionApproved transitions a deletion out of awaiting_approval so
+// the teardown may run. Only the approval-decided handler may call it.
+func (s *Service) MarkDeletionApproved(ctx context.Context, orgID string) error {
+	return s.store.UpdateTenantDeletion(ctx, s.db.Pool, orgID, types.TenantDeletionStateDeleting, "", "")
 }
 
 // denyDeletion restores an org whose decommission approval was rejected.

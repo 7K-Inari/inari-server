@@ -289,20 +289,37 @@ kubectl -n "$NAMESPACE" rollout status deployment/inari-server --timeout=180s
 # ==================== HA-only (c): fresh 0→2 scale-up ====================
 # The install above IS the fresh 0→2 scale-up on a clean namespace: both
 # replicas boot simultaneously against an empty database and the W1
-# migration advisory lock (ADR-0010) must serialize their goose runs.
-# Asserted immediately — later disruption blocks replace pods and wipe
-# the boot logs this relies on.
+# migration advisory lock (ADR-0010) serializes their goose runs. The
+# asserted outcome is the one the lock exists to guarantee: with
+# concurrent first boots, every migration is applied exactly once and
+# both replicas become Ready. Boot-LOG evidence is deliberately NOT
+# asserted: goose only engages (and logs) the locker while migrations
+# are pending, and pods that restart during stack bring-up (Keycloak
+# warmup 500s rotate logs away) leave no trace — the lock mechanics
+# themselves are covered deterministically by W1's internal/db
+# integration tests. The acquisition-line count is printed as soft CI
+# evidence only.
 if $INARI_HA; then
   log "HA(c): fresh 0->2 scale-up — migrations serialized by the advisory lock, both replicas ready"
   kubectl -n "$NAMESPACE" wait --for=condition=ready pod \
     -l app.kubernetes.io/name=inari-server --timeout=300s
-  BOOT_LOGS=$(kubectl -n "$NAMESPACE" logs -l app.kubernetes.io/name=inari-server --prefix --tail=-1)
-  LOCK_WAITING=$(grep -c 'db: acquiring migration lock' <<<"$BOOT_LOGS" || true)
-  LOCK_ACQUIRED=$(grep -c 'db: migration lock acquired' <<<"$BOOT_LOGS" || true)
-  [ "${LOCK_WAITING:-0}" -ge 2 ] && [ "${LOCK_ACQUIRED:-0}" -ge 2 ] \
-    || die "HA(c): expected BOTH replicas to serialize through the migration advisory lock (acquiring=$LOCK_WAITING acquired=$LOCK_ACQUIRED)"
+  # psql_inari runs SQL against the platform database via the CNPG
+  # primary pod (the toolbox image has curl only; the connection URI
+  # never leaves the cluster). Also used by the HA(d1) block below.
+  psql_inari() {
+    local uri primary
+    uri=$(kubectl -n "$NAMESPACE" get secret inari-db -o jsonpath='{.data.inari-uri}' | base64 -d)
+    primary=$(kubectl -n "$NAMESPACE" get cluster.postgresql.cnpg.io/postgresql -o jsonpath='{.status.currentPrimary}')
+    kubectl -n "$NAMESPACE" exec "$primary" -c postgres -- psql "$uri" -tAc "$1"
+  }
+  EXPECTED_MIGRATIONS=$(find "$(dirname "$0")/../internal/db/migrations" -name '[0-9]*.sql' | wc -l)
+  APPLIED_MIGRATIONS=$(psql_inari "SELECT max(version_id) FROM goose_db_version")
+  [ "$APPLIED_MIGRATIONS" = "$EXPECTED_MIGRATIONS" ] \
+    || die "HA(c): goose_db_version is at $APPLIED_MIGRATIONS, want $EXPECTED_MIGRATIONS (concurrent first-boot migrations did not converge)"
+  LOCK_LINES=$(kubectl -n "$NAMESPACE" logs -l app.kubernetes.io/name=inari-server --tail=-1 2>/dev/null | grep -c 'db: migration lock acquired' || true)
+  log "HA(c): migrations converged at version $APPLIED_MIGRATIONS; advisory-lock acquisitions visible in current logs: ${LOCK_LINES:-0} (informational)"
   # The W1 chart knobs at replicaCount >= 2: PDB (minAvailable: 1) and
-  # preferred hostname anti-affinity.
+  # rollingUpdate maxUnavailable: 0.
   kubectl -n "$NAMESPACE" get pdb inari-server >/dev/null \
     || die "HA(c): PodDisruptionBudget inari-server missing at replicaCount=2"
   [ "$(kubectl -n "$NAMESPACE" get pdb inari-server -o jsonpath='{.spec.minAvailable}')" = "1" ] \
@@ -721,37 +738,38 @@ xcurl -X PUT -H "Authorization: Bearer $(user_token)" -H "Content-Type: applicat
 if $INARI_HA; then
   SERVER_LABEL=app.kubernetes.io/name=inari-server
 
-  # psql_inari runs SQL against the platform database via the CNPG primary
-  # pod (the toolbox image has curl only; the connection URI never leaves
-  # the cluster).
-  psql_inari() {
-    local uri primary
-    uri=$(kubectl -n "$NAMESPACE" get secret inari-db -o jsonpath='{.data.inari-uri}' | base64 -d)
-    primary=$(kubectl -n "$NAMESPACE" get cluster.postgresql.cnpg.io/postgresql -o jsonpath='{.status.currentPrimary}')
-    kubectl -n "$NAMESPACE" exec "$primary" -c postgres -- psql "$uri" -tAc "$1"
-  }
-
   # start_traffic/stop_traffic: background availability sampler. It probes
   # /readyz through the ClusterIP Service from the toolbox pod — i.e. the
   # exact readiness-gated routing clients depend on — and records
   # ok=/fail= counts. Unauthenticated on purpose: Keycloak access tokens
   # can expire mid-disruption and would measure token lifetime, not API
-  # availability.
-  TRAFFIC_LOG=$(mktemp /tmp/inari-e2e-traffic.XXXXXX)
-  start_traffic() { # $1 = sample window in seconds (≈5 iterations/s; busybox sh has no SECONDS)
-    kubectl -n "$NAMESPACE" exec -i "$TOOLS" -- sh -s -- "$(( $1 * 5 ))" "http://$SERVER_SVC:8080/readyz" \
-      > "$TRAFFIC_LOG" 2>&1 <<'EOF' &
+  # availability. The sampler runs DETACHED inside the toolbox pod
+  # (kubectl exec drops the stream once stdin EOFs, losing the tail of a
+  # long-lived foreground sampler), writing its result to /tmp/traffic.out
+  # which stop_traffic polls for. ≈5 iterations/s (busybox sh has no
+  # SECONDS, so the window is an iteration count).
+  kubectl -n "$NAMESPACE" exec -i "$TOOLS" -- sh -c 'cat > /tmp/sampler.sh && chmod +x /tmp/sampler.sh' <<'EOF'
+#!/bin/sh
 ok=0; fail=0; i=0
 while [ "$i" -lt "$1" ]; do
   if curl -sf -m 5 -o /dev/null "$2"; then ok=$((ok+1)); else fail=$((fail+1)); fi
-  i=$((i+1))
-  sleep 0.2
+  i=$((i+1)); sleep 0.2
 done
 echo "ok=$ok fail=$fail"
 EOF
-    TRAFFIC_PID=$!
+  start_traffic() { # $1 = sample window in seconds
+    kubectl -n "$NAMESPACE" exec "$TOOLS" -- sh -c \
+      "rm -f /tmp/traffic.out; nohup /tmp/sampler.sh $(( $1 * 5 )) 'http://$SERVER_SVC:8080/readyz' > /tmp/traffic.out 2>&1 &"
   }
-  stop_traffic() { wait "$TRAFFIC_PID" 2>/dev/null || true; cat "$TRAFFIC_LOG"; }
+  stop_traffic() { # waits out the sampler, then prints "ok=N fail=M"
+    local out=""
+    for _ in $(seq 1 60); do
+      out=$(kubectl -n "$NAMESPACE" exec "$TOOLS" -- cat /tmp/traffic.out 2>/dev/null || true)
+      grep -q 'fail=' <<<"$out" && break
+      sleep 3
+    done
+    echo "$out"
+  }
 
   # ---------- HA(d1): leader-leased singleton loops run exactly once ------
   # ADR-0011: each lease-gated loop (approvals-expiry, the group syncs,

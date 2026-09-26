@@ -20,6 +20,10 @@
 #   AGENT_CHART_DIR (default ../inari-agent/charts/inari-agent — the
 #     inari-agent repo checkout the e2e workflow nests in the repo root)
 #   KEEP_CLUSTER=true to skip teardown
+#   INARI_E2E_KUBECTL_PROXY=true (default false) — additionally assert the
+#     kubectl-proxy e2e-access contract after cluster registration
+#     (features endpoint, per-cluster PATCH round-trip, effective
+#     kubectlProxyEnabled on cluster payloads)
 #   INARI_E2E_CACHE_BACKEND=memory|redis (default memory; default redis when
 #     INARI_HA=true) — redis installs the chart's bitnami/redis subchart and
 #     points the cache layer at it
@@ -502,6 +506,32 @@ CLUSTER_RESP=$(xcurl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type:
   -d '{"name":"e2e-self","labels":{"e2e":"true"}}' "$API/tenants/$TENANT/clusters")
 CLUSTER_ID=$(jq -r '.cluster.id' <<<"$CLUSTER_RESP")
 ORG_ID=$(jq -r '.cluster.orgId' <<<"$CLUSTER_RESP")
+
+# kubectl-proxy e2e-access contract (opt-in; INARI_E2E_KUBECTL_PROXY=true):
+# default enablement, per-cluster disable round-trip via PATCH, and the
+# features endpoint reflecting the (unset) global kill switch. The server
+# computes effective enablement = !global && !cluster — clients never
+# re-derive precedence.
+if ${INARI_E2E_KUBECTL_PROXY:-false}; then
+  log "asserting kubectl-proxy feature contract"
+  FEATURES=$(xcurl -H "Authorization: Bearer $TOKEN" "$API/features")
+  [ "$(jq -r '.kubectlProxy.enabled' <<<"$FEATURES")" = "true" ] \
+    || die "features.kubectlProxy.enabled != true by default: $FEATURES"
+  [ "$(jq -r '.cluster.kubectlProxyDisabled' <<<"$CLUSTER_RESP")" = "false" ] \
+    || die "cluster.kubectlProxyDisabled != false by default: $CLUSTER_RESP"
+  [ "$(jq -r '.kubectlProxyEnabled' <<<"$CLUSTER_RESP")" = "true" ] \
+    || die "kubectlProxyEnabled != true by default: $CLUSTER_RESP"
+  PATCHED=$(xcurl -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    -d '{"kubectlProxyDisabled":true}' "$API/tenants/$TENANT/clusters/$CLUSTER_ID")
+  [ "$(jq -r '.cluster.kubectlProxyDisabled' <<<"$PATCHED")" = "true" ] \
+    || die "PATCH did not set kubectlProxyDisabled: $PATCHED"
+  [ "$(jq -r '.kubectlProxyEnabled' <<<"$PATCHED")" = "false" ] \
+    || die "kubectlProxyEnabled != false after per-cluster disable: $PATCHED"
+  RE_ENABLED=$(xcurl -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    -d '{"kubectlProxyDisabled":false}' "$API/tenants/$TENANT/clusters/$CLUSTER_ID")
+  [ "$(jq -r '.kubectlProxyEnabled' <<<"$RE_ENABLED")" = "true" ] \
+    || die "kubectlProxyEnabled != true after re-enable: $RE_ENABLED"
+fi
 TOK_RESP=$(xcurl -X POST -H "Authorization: Bearer $(user_token)" \
   "$API/tenants/$TENANT/clusters/$CLUSTER_ID/tokens")
 

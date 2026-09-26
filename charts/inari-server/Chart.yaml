@@ -4,14 +4,11 @@ description: >-
   Inari control-plane API server (inari-server) — tenant/org management,
   catalog, resources inventory.
 type: application
-version: 0.1.9
-appVersion: 3.0.0
+version: 0.1.10
+appVersion: 3.1.0
 maintainers:
   - name: 7K-Inari
     url: https://github.com/7K-Inari
-# Optional in-cluster Redis for the cache layer (ADR-0010). Disabled by
-# default; enable with --set redis.enabled=true (or set cache.backend=redis
-# with redis.url for an external instance).
 dependencies:
   - name: redis
     version: 28.2.4

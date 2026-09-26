@@ -530,7 +530,6 @@ helm upgrade --install inari-agent "$AGENT_CHART_DIR" \
   --set oidcSecret.create=true \
   --set oidcSecret.secretStore=inari-platform \
   --set oidcSecret.remotePath="inari/clusters/${CLUSTER_ID#cluster:}/oidc-client-secret" \
-  $($INARI_HA && echo "--set leaderElection.enabled=true") \
   --wait --timeout 180s
 # ESO wiring: the chart's opt-in ExternalSecret pulls from the
 # ClusterSecretStore the registration response references
@@ -869,6 +868,12 @@ EOF
   # stream inside a bounded window. Live run 423ffd13 measured ~19s
   # (kill -> new lease holder); budget 60s to absorb kind CI noise.
   log "HA(d3): agent leader failover — standby takes over within 60s"
+  # Leader election is enabled only here: HA(d2) above needs duplicate
+  # streams, which leader election would suppress.
+  helm upgrade --install inari-agent "$AGENT_CHART_DIR" \
+    --namespace default --reuse-values \
+    --set leaderElection.enabled=true \
+    --wait --timeout 180s >/dev/null
   kubectl -n inari-system scale deployment/inari-agent --replicas=2 >/dev/null
   kubectl -n inari-system rollout status deployment/inari-agent --timeout=180s >/dev/null
   LEADER=""

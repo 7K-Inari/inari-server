@@ -14,8 +14,19 @@ concurrency:
 
 jobs:
   golden-path:
+    # Two legs: the default single-replica fast gate, and the HA gate
+    # (INARI_HA=true — 2x server/OpenFGA replicas + disruption assertions:
+    # pod kill, rollout restart under traffic, migration-lock race,
+    # leader-lease single-execution, agent stream fencing). The HA leg
+    # adds ~10 minutes (extra replica, redis subchart, bounded traffic
+    # windows), so it gets a larger but still bounded timeout.
+    strategy:
+      fail-fast: false
+      matrix:
+        ha: [false, true]
+    name: golden-path (INARI_HA=${{ matrix.ha }})
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: ${{ matrix.ha && 60 || 45 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -73,15 +84,23 @@ jobs:
       - name: Run golden path
         # KEEP_CLUSTER=true: the workflow owns teardown (final step) so the
         # diagnostics step still has a cluster to inspect on failure.
-        run: HELM_CHARTS_DIR=inari-helm-charts KEEP_CLUSTER=true bash e2e/golden-path.sh
+        run: HELM_CHARTS_DIR=inari-helm-charts KEEP_CLUSTER=true INARI_HA=${{ matrix.ha }} bash e2e/golden-path.sh
 
       - name: Dump diagnostics on failure
         if: failure()
         run: |
           kubectl config use-context kind-inari-e2e || true
           kubectl -n inari get pods || true
-          kubectl -n inari logs deployment/inari-server --tail=100 || true
+          kubectl -n inari logs -l app.kubernetes.io/name=inari-server --prefix --tail=100 || true
           kubectl -n inari-system logs deployment/inari-agent --tail=100 || true
+          if [ "${{ matrix.ha }}" = "true" ]; then
+            kubectl -n inari get pdb,deployment inari-server -o wide || true
+            PRIMARY=$(kubectl -n inari get cluster.postgresql.cnpg.io/postgresql -o jsonpath='{.status.currentPrimary}' 2>/dev/null || true)
+            if [ -n "$PRIMARY" ]; then
+              URI=$(kubectl -n inari get secret inari-db -o jsonpath='{.data.inari-uri}' | base64 -d)
+              kubectl -n inari exec "$PRIMARY" -c postgres -- psql "$URI" -c 'SELECT name, holder, expires_at FROM leader_leases' || true
+            fi
+          fi
 
       - name: Delete kind cluster
         if: always()

@@ -248,7 +248,30 @@ func run() error {
 	}
 	defer func() { _ = metricsShutdown(context.Background()) }()
 
+	// Multi-replica safety (ADR-0011): DB-backed leader leases gate the
+	// singleton background loops below so exactly one replica drives each at
+	// a time; failover is bounded by the lease TTL. Claim-based SKIP LOCKED
+	// loops (outbox dispatcher, scaffold reconcile) are already safe and are
+	// intentionally NOT gated.
+	leaser := leaderlease.New(database, leaderlease.Config{TTL: cfg.LeaderLeaseTTL})
+
+	// The FGA store/model bootstrap is itself multi-replica unsafe:
+	// ensureStore's list-then-create races on a fresh 0->N install (OpenFGA
+	// does not enforce store-name uniqueness), and each replica would pin a
+	// different store id — split-brain authz where one pod's tuple writes
+	// are invisible to the other's Checks. Serialize it with a one-shot
+	// lease: waiting replicas re-list after acquiring and adopt the store
+	// the winner created. A holder crashing mid-bootstrap frees the lease
+	// after the TTL; the next acquirer simply re-runs the idempotent
+	// bootstrap.
+	bootstrapLease, err := leaser.Acquire(ctx, "authz-fga-bootstrap")
+	if err != nil {
+		return fmt.Errorf("acquire fga bootstrap lease: %w", err)
+	}
 	fgaStore, err := authz.NewOpenFGAStore(ctx, cfg.OpenFGAAPIURL, cfg.OpenFGAStoreName)
+	if relErr := bootstrapLease.Release(ctx); relErr != nil {
+		slog.Warn("fga bootstrap lease release failed (expires via TTL)", "error", relErr)
+	}
 	if err != nil {
 		return err
 	}
@@ -260,13 +283,6 @@ func run() error {
 	orgCache := tenancy.NewOrgCache(cacheBackend, cfg.CacheBackend, cfg.CacheTenantTTL)
 
 	auditStore := audit.NewStore()
-
-	// Multi-replica safety (ADR-0011): DB-backed leader leases gate the
-	// singleton background loops below so exactly one replica drives each at
-	// a time; failover is bounded by the lease TTL. Claim-based SKIP LOCKED
-	// loops (outbox dispatcher, scaffold reconcile) are already safe and are
-	// intentionally NOT gated.
-	leaser := leaderlease.New(database, leaderlease.Config{TTL: cfg.LeaderLeaseTTL})
 
 	idp := tenancy.NewKeycloakAdmin(cfg.KeycloakBaseURL, cfg.KeycloakRealm, cfg.KeycloakClientID, cfg.KeycloakClientSecret)
 	platformResourcesSvc := platformresources.NewService(database, platformresources.NewStore(), auditStore)

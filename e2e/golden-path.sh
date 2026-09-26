@@ -20,8 +20,28 @@
 #   AGENT_CHART_DIR (default ../inari-agent/charts/inari-agent — the
 #     inari-agent repo checkout the e2e workflow nests in the repo root)
 #   KEEP_CLUSTER=true to skip teardown
-#   INARI_E2E_CACHE_BACKEND=memory|redis (default memory) — redis installs
-#     the chart's bitnami/redis subchart and points the cache layer at it
+#   INARI_E2E_CACHE_BACKEND=memory|redis (default memory; default redis when
+#     INARI_HA=true) — redis installs the chart's bitnami/redis subchart and
+#     points the cache layer at it
+#   INARI_HA=true (default false) — HA mode (Wave 2, 99.9% initiative):
+#     inari-server replicaCount=2 via the W1 chart knobs (probes, PDB,
+#     anti-affinity, rollingUpdate maxUnavailable: 0), OpenFGA
+#     replicaCount=2, plus clearly delimited HA-only disruption assertions
+#     after the golden path passes (pod kill, rollout restart under
+#     traffic, migration-lock race, leader-lease single-execution, agent
+#     stream fencing). The non-HA path is byte-identical in behavior and
+#     timing and stays the fast default gate. NATS is 3-node JetStream in
+#     BOTH modes (W1 provisioned it HA from day one). The inari console +
+#     operator charts are not part of this stack (server + agent only);
+#     their W1 HA guardrails live in their own repos.
+#     Backend constraints in HA mode:
+#     - INARI_GIT_PROVIDER=local stays: the bare-repo root is a hostPath
+#       shared by every replica through the kind node mount.
+#     - TZF fake AWS backends keep state per-pod (in-memory): the golden
+#       path makes no TZF-zone assertions, and any future one must be
+#       skipped or pinned to a single pod under INARI_HA.
+#     - No assertion needs the github provider; if one is added, gate it
+#       on INARI_GITHUB_APP_ID + INARI_GITHUB_APP_PRIVATE_KEY_FILE.
 set -euo pipefail
 
 CLUSTER_NAME="${CLUSTER_NAME:-inari-e2e}"
@@ -38,7 +58,25 @@ TOOLS=golden-path-tools
 KC_FQDN="keycloak-service.${NAMESPACE}.svc:8080"
 SERVER_SVC="inari-server"
 VAULT_DEV_TOKEN="${VAULT_DEV_TOKEN:-e2e-root-token}"
-CACHE_BACKEND="${INARI_E2E_CACHE_BACKEND:-memory}"
+# HA mode (default off). Only replica counts and HA-only assertion blocks
+# branch on this — every other step is identical between modes.
+INARI_HA="${INARI_HA:-false}"
+[ "$INARI_HA" = "true" ] || [ "$INARI_HA" = "false" ] || \
+  die "INARI_HA must be true or false (got: $INARI_HA)"
+SERVER_REPLICAS=1
+OPENFGA_REPLICAS=1
+if $INARI_HA; then
+  SERVER_REPLICAS=2
+  OPENFGA_REPLICAS=2
+fi
+# Cache backend: memory is per-pod (the PEP generation bump is
+# process-local, so cross-replica invalidation degrades to the 2s PEP
+# TTL); HA defaults to the shared redis backend per the chart's
+# multi-replica guidance. Non-HA default stays memory (unchanged).
+CACHE_BACKEND="${INARI_E2E_CACHE_BACKEND:-}"
+if [ -z "$CACHE_BACKEND" ]; then
+  if $INARI_HA; then CACHE_BACKEND=redis; else CACHE_BACKEND=memory; fi
+fi
 [ "$CACHE_BACKEND" = "memory" ] || [ "$CACHE_BACKEND" = "redis" ] || \
   die "INARI_E2E_CACHE_BACKEND must be memory or redis (got: $CACHE_BACKEND)"
 
@@ -160,6 +198,10 @@ for i in $(seq 1 24); do
 done
 
 log "installing OpenFGA (postgres datastore via the inari-db secret)"
+# Always installed single-replica first: OpenFGA runs its datastore
+# migrations in a per-pod initContainer with no cross-pod locking, so a
+# fresh 2-replica install would race goose migrations on an empty
+# database. HA mode scales out AFTER the first pod has applied them.
 helm upgrade --install openfga openfga/openfga --version 0.2.27 \
   --namespace "$NAMESPACE" \
   --set fullnameOverride=openfga \
@@ -170,6 +212,11 @@ helm upgrade --install openfga openfga/openfga --version 0.2.27 \
   --set datastore.migrationType=initContainer \
   --set playground.enabled=false \
   --wait --timeout 5m
+if [ "$OPENFGA_REPLICAS" -gt 1 ]; then
+  log "HA: scaling OpenFGA to $OPENFGA_REPLICAS replicas (migrations already applied)"
+  kubectl -n "$NAMESPACE" scale deployment/openfga --replicas="$OPENFGA_REPLICAS"
+  kubectl -n "$NAMESPACE" rollout status deployment/openfga --timeout=240s
+fi
 
 log "installing Vault (dev mode) + ESO for the OIDC client-secret delivery path"
 helm repo add hashicorp https://helm.releases.hashicorp.com >/dev/null
@@ -202,20 +249,34 @@ CACHE_HELM_ARGS=()
 if [ "$CACHE_BACKEND" = "redis" ]; then
   CACHE_HELM_ARGS+=(--set redis.enabled=true --set cache.backend=redis)
 fi
+EXTRA_ENV="[
+    {\"name\":\"INARI_AGENT_GATEWAY_ADDRESS\",\"value\":\"http://$SERVER_SVC.${NAMESPACE}.svc:8080\"},
+    {\"name\":\"INARI_AGENT_IMAGE_REPO\",\"value\":\"inari/agent\"},
+    {\"name\":\"INARI_GIT_PROVIDER\",\"value\":\"local\"},
+    {\"name\":\"INARI_GIT_LOCAL_ROOT\",\"value\":\"/var/lib/inari/git\"}"
+if $INARI_HA; then
+  # HA-only scaffold knobs: disruption block HA(a) drives a real scaffold
+  # run to prove the claim-based reconcile loop keeps progressing work
+  # after a pod loss. The templates are baked into the image at
+  # /templates; the local git provider receives repos under
+  # $INARI_GIT_LOCAL_ROOT/e2e-platform/. Never set in non-HA mode.
+  EXTRA_ENV="$EXTRA_ENV,
+    {\"name\":\"INARI_SCAFFOLD_TEMPLATE_DIR\",\"value\":\"/templates\"},
+    {\"name\":\"INARI_SCAFFOLD_GIT_ORG\",\"value\":\"e2e-platform\"},
+    {\"name\":\"INARI_SCAFFOLD_RECONCILE_INTERVAL\",\"value\":\"5s\"}"
+fi
+EXTRA_ENV="$EXTRA_ENV
+  ]"
 helm upgrade --install inari-server "$SERVER_CHART_DIR" \
   --namespace "$NAMESPACE" \
+  --set replicaCount="$SERVER_REPLICAS" \
   --set image.repository="${SERVER_IMAGE%:*}" \
   --set image.tag="${SERVER_IMAGE##*:}" \
   --set image.pullPolicy=IfNotPresent \
   --set keycloak.baseUrl="http://$KC_FQDN" \
   --set vault.addr="http://vault.${NAMESPACE}.svc:8200" \
   ${CACHE_HELM_ARGS[@]+"${CACHE_HELM_ARGS[@]}"} \
-  --set-json "extraEnv=[
-    {\"name\":\"INARI_AGENT_GATEWAY_ADDRESS\",\"value\":\"http://$SERVER_SVC.${NAMESPACE}.svc:8080\"},
-    {\"name\":\"INARI_AGENT_IMAGE_REPO\",\"value\":\"inari/agent\"},
-    {\"name\":\"INARI_GIT_PROVIDER\",\"value\":\"local\"},
-    {\"name\":\"INARI_GIT_LOCAL_ROOT\",\"value\":\"/var/lib/inari/git\"}
-  ]" \
+  --set-json "extraEnv=$EXTRA_ENV" \
   --set-json "extraVolumes=[
     {\"name\":\"git-repos\",\"hostPath\":{\"path\":\"/git\",\"type\":\"Directory\"}}
   ]" \
@@ -224,6 +285,48 @@ helm upgrade --install inari-server "$SERVER_CHART_DIR" \
   ]" \
   --wait --timeout 10m
 kubectl -n "$NAMESPACE" rollout status deployment/inari-server --timeout=180s
+
+# ==================== HA-only (c): fresh 0→2 scale-up ====================
+# The install above IS the fresh 0→2 scale-up on a clean namespace: both
+# replicas boot simultaneously against an empty database and the W1
+# migration advisory lock (ADR-0010) serializes their goose runs. The
+# asserted outcome is the one the lock exists to guarantee: with
+# concurrent first boots, every migration is applied exactly once and
+# both replicas become Ready. Boot-LOG evidence is deliberately NOT
+# asserted: goose only engages (and logs) the locker while migrations
+# are pending, and pods that restart during stack bring-up (Keycloak
+# warmup 500s rotate logs away) leave no trace — the lock mechanics
+# themselves are covered deterministically by W1's internal/db
+# integration tests. The acquisition-line count is printed as soft CI
+# evidence only.
+if $INARI_HA; then
+  log "HA(c): fresh 0->2 scale-up — migrations serialized by the advisory lock, both replicas ready"
+  kubectl -n "$NAMESPACE" wait --for=condition=ready pod \
+    -l app.kubernetes.io/name=inari-server --timeout=300s
+  # psql_inari runs SQL against the platform database via the CNPG
+  # primary pod (the toolbox image has curl only; the connection URI
+  # never leaves the cluster). Also used by the HA(d1) block below.
+  psql_inari() {
+    local uri primary
+    uri=$(kubectl -n "$NAMESPACE" get secret inari-db -o jsonpath='{.data.inari-uri}' | base64 -d)
+    primary=$(kubectl -n "$NAMESPACE" get cluster.postgresql.cnpg.io/postgresql -o jsonpath='{.status.currentPrimary}')
+    kubectl -n "$NAMESPACE" exec "$primary" -c postgres -- psql "$uri" -tAc "$1"
+  }
+  EXPECTED_MIGRATIONS=$(find "$(dirname "$0")/../internal/db/migrations" -name '[0-9]*.sql' | wc -l)
+  APPLIED_MIGRATIONS=$(psql_inari "SELECT max(version_id) FROM goose_db_version")
+  [ "$APPLIED_MIGRATIONS" = "$EXPECTED_MIGRATIONS" ] \
+    || die "HA(c): goose_db_version is at $APPLIED_MIGRATIONS, want $EXPECTED_MIGRATIONS (concurrent first-boot migrations did not converge)"
+  LOCK_LINES=$(kubectl -n "$NAMESPACE" logs -l app.kubernetes.io/name=inari-server --tail=-1 2>/dev/null | grep -c 'db: migration lock acquired' || true)
+  log "HA(c): migrations converged at version $APPLIED_MIGRATIONS; advisory-lock acquisitions visible in current logs: ${LOCK_LINES:-0} (informational)"
+  # The W1 chart knobs at replicaCount >= 2: PDB (minAvailable: 1) and
+  # rollingUpdate maxUnavailable: 0.
+  kubectl -n "$NAMESPACE" get pdb inari-server >/dev/null \
+    || die "HA(c): PodDisruptionBudget inari-server missing at replicaCount=2"
+  [ "$(kubectl -n "$NAMESPACE" get pdb inari-server -o jsonpath='{.spec.minAvailable}')" = "1" ] \
+    || die "HA(c): pdb minAvailable != 1"
+  kubectl -n "$NAMESPACE" get deployment inari-server -o jsonpath='{.spec.strategy.rollingUpdate.maxUnavailable}' \
+    | grep -q '^0' || die "HA(c): rollingUpdate.maxUnavailable is not 0"
+fi
 
 log "starting toolbox pod"
 kubectl -n "$NAMESPACE" delete pod "$TOOLS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
@@ -313,6 +416,16 @@ xcurl -o /dev/null -X PUT \
   || die "failed to add dev-admin to platform-admins"
 
 log "waiting for the platform group sync to grant dev-admin org_creator"
+if $INARI_HA; then
+  # HA(c) companion assertion: the replicas' FGA store bootstrap must have
+  # converged on exactly ONE store named "inari". A duplicate means the
+  # bootstrap lease (authz-fga-bootstrap) failed and each replica pinned
+  # its own store — split-brain authz (tuple writes invisible to the other
+  # pod's Checks). stores[0] below would silently hide that.
+  FGA_STORE_COUNT=$(xcurl "http://openfga:8080/stores" | jq '[.stores[] | select(.name=="inari")] | length')
+  [ "$FGA_STORE_COUNT" = "1" ] \
+    || die "HA(c): $FGA_STORE_COUNT OpenFGA stores named 'inari' (store bootstrap race — replicas would split-brain)"
+fi
 FGA_STORE=$(xcurl "http://openfga:8080/stores" | jq -r '.stores[0].id')
 ORG_CREATOR=false
 for i in $(seq 1 18); do
@@ -361,7 +474,23 @@ done
 log "verifying /metrics exposes the cache layer series (backend: $CACHE_BACKEND)"
 # Tenant creation above already drove org lookups + FGA checks through the
 # caches, so the series exist; the scrape just must surface them.
-METRICS_BODY=$(xcurl "http://$SERVER_SVC:8080/metrics")
+# HA: /metrics via the Service hits a RANDOM replica, and OTel counters
+# only export a series after that pod's first observation — a replica that
+# has served no cache traffic since its last restart legitimately shows
+# nothing. Scrape every server pod directly and require the series on at
+# least one (the assertion's purpose: the cache layer emits metrics).
+metrics_bodies() {
+  if $INARI_HA; then
+    local ip
+    for ip in $(kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=inari-server \
+        -o jsonpath='{.items[*].status.podIP}'); do
+      xcurl "http://$ip:8080/metrics" 2>/dev/null || true
+    done
+  else
+    xcurl "http://$SERVER_SVC:8080/metrics"
+  fi
+}
+METRICS_BODY=$(metrics_bodies)
 grep -q "inari_cache_operations_total" <<<"$METRICS_BODY" \
   || die "/metrics missing inari_cache_operations_total"
 grep -q "inari_fga_check_duration_seconds" <<<"$METRICS_BODY" \
@@ -378,12 +507,19 @@ TOK_RESP=$(xcurl -X POST -H "Authorization: Bearer $(user_token)" \
 
 log "installing agent via the inari-agent Helm chart"
 REG_TOKEN=$(jq -r '.token' <<<"$TOK_RESP")
-# No --namespace: the chart renders and owns the inari-system Namespace
-# itself (same invocation the Register Cluster wizard shows users).
+# --namespace default: the chart renders and owns the inari-system
+# Namespace itself, so the release namespace is irrelevant — but it must
+# be pinned explicitly. Without it helm resolves the kubeconfig context's
+# namespace, and when this script runs INSIDE a pod (KUBERNETES_SERVICE_HOST
+# set, e.g. sandboxed runners) client-go falls back to the in-cluster
+# serviceaccount namespace, producing "namespaces \"<pod-ns>\" not found".
+# "default" is exactly what an empty context namespace yields on a normal
+# runner, so CI semantics are unchanged.
 # oidcSecret.remotePath: the control plane writes the OIDC client secret at
 # the trimmed Vault path (secrets.ClusterOIDCPath strips the "cluster:"
 # type prefix from the cluster ID).
 helm upgrade --install inari-agent "$AGENT_CHART_DIR" \
+  --namespace default \
   --set image.repository="${AGENT_IMAGE%:*}" \
   --set image.tag="${AGENT_IMAGE##*:}" \
   --set image.pullPolicy=IfNotPresent \
@@ -628,4 +764,176 @@ xcurl -X PUT -H "Authorization: Bearer $(user_token)" -H "Content-Type: applicat
   -d "$(jq -n --arg src "$DENY_LATEST_REGO" '{source:$src,enabled:true}')" \
   -o /dev/null "$API/tenants/$TENANT/policies/$POLICY_ID" || die "re-enabling the policy failed"
 
-log "PASS: golden path verified (tenant → register → stream → $CAPS capabilities → heartbeats → RBAC materialization → policy evaluate matrix)"
+# ============================================================================
+# HA-only disruption assertions (INARI_HA=true). Everything in this block
+# runs ONLY in HA mode, after the golden path above has passed unchanged.
+# ============================================================================
+if $INARI_HA; then
+  SERVER_LABEL=app.kubernetes.io/name=inari-server
+
+  # start_traffic/stop_traffic: background availability sampler. It probes
+  # /readyz through the ClusterIP Service from the toolbox pod — i.e. the
+  # exact readiness-gated routing clients depend on — and records
+  # ok=/fail= counts. Unauthenticated on purpose: Keycloak access tokens
+  # can expire mid-disruption and would measure token lifetime, not API
+  # availability. The sampler runs DETACHED inside the toolbox pod
+  # (kubectl exec drops the stream once stdin EOFs, losing the tail of a
+  # long-lived foreground sampler), writing its result to /tmp/traffic.out
+  # which stop_traffic polls for. ≈5 iterations/s (busybox sh has no
+  # SECONDS, so the window is an iteration count).
+  kubectl -n "$NAMESPACE" exec -i "$TOOLS" -- sh -c 'cat > /tmp/sampler.sh && chmod +x /tmp/sampler.sh' <<'EOF'
+#!/bin/sh
+ok=0; fail=0; i=0
+while [ "$i" -lt "$1" ]; do
+  if curl -sf -m 5 -o /dev/null "$2"; then ok=$((ok+1)); else fail=$((fail+1)); fi
+  i=$((i+1)); sleep 0.2
+done
+echo "ok=$ok fail=$fail"
+EOF
+  start_traffic() { # $1 = sample window in seconds
+    kubectl -n "$NAMESPACE" exec "$TOOLS" -- sh -c \
+      "rm -f /tmp/traffic.out; nohup /tmp/sampler.sh $(( $1 * 5 )) 'http://$SERVER_SVC:8080/readyz' > /tmp/traffic.out 2>&1 &"
+  }
+  stop_traffic() { # waits out the sampler, then prints "ok=N fail=M"
+    local out=""
+    for _ in $(seq 1 60); do
+      out=$(kubectl -n "$NAMESPACE" exec "$TOOLS" -- cat /tmp/traffic.out 2>/dev/null || true)
+      grep -q 'fail=' <<<"$out" && break
+      sleep 3
+    done
+    echo "$out"
+  }
+
+  # ---------- HA(d1): leader-leased singleton loops run exactly once ------
+  # ADR-0011: each lease-gated loop (approvals-expiry, the group syncs,
+  # fleet loops, tzf-reconcile, ...) must have exactly one holder cluster-
+  # wide, renewed (expires_at in the future), stable across samples (no
+  # flapping), and — within this quiet window — acquired exactly once
+  # since boot (no failover = the loop's effects ran on one pod only).
+  log "HA(d1): leader-leased singleton loops — exactly one holder each, renewed and stable"
+  LEASES=$(psql_inari "SELECT name || '|' || holder FROM leader_leases")
+  [ -n "$LEASES" ] || die "HA(d1): leader_leases is empty (no lease-gated loop ever acquired?)"
+  DUPES=$(cut -d'|' -f1 <<<"$LEASES" | sort | uniq -d)
+  [ -z "$DUPES" ] || die "HA(d1): leases with duplicate holders: $DUPES"
+  for sample in 1 2; do
+    [ "$(psql_inari "SELECT count(*) FROM leader_leases WHERE name='approvals-expiry' AND expires_at > now()")" = "1" ] \
+      || die "HA(d1): approvals-expiry lease missing or not renewed (sample $sample)"
+    [ "$sample" = 1 ] && sleep 8
+  done
+  ACQ=$(kubectl -n "$NAMESPACE" logs -l "$SERVER_LABEL" --tail=-1 | grep -c 'leaderlease: acquired.*approvals-expiry' || true)
+  [ "${ACQ:-0}" = "1" ] \
+    || die "HA(d1): approvals-expiry leadership was acquired $ACQ times since boot, want exactly 1 (single-execution)"
+
+  # ---------- HA(d2): agent stream fencing evicts stale sessions ----------
+  # Fencing is per gateway instance (in-process session registry, W1), so
+  # the duplicate stream must land on the SAME server pod as the live one.
+  # Streams are per-connection load-balanced across the 2 server pods by
+  # the ClusterIP, so 3 agent pods guarantee a collision by pigeonhole (3
+  # streams, 2 pods) — deterministic, no luck involved. The new stream
+  # wins; the stale session must be evicted (logged). Then scale back and
+  # confirm the cluster returns to active.
+  log "HA(d2): agent stream fencing — duplicate stream evicts the stale session"
+  EVICTIONS_BEFORE=$(kubectl -n "$NAMESPACE" logs -l "$SERVER_LABEL" --tail=-1 | grep -c 'evicting stale session' || true)
+  kubectl -n inari-system scale deployment/inari-agent --replicas=3 >/dev/null
+  FENCED=false
+  for i in $(seq 1 24); do
+    EVICTIONS_NOW=$(kubectl -n "$NAMESPACE" logs -l "$SERVER_LABEL" --tail=-1 2>/dev/null | grep -c 'evicting stale session' || true)
+    if [ "${EVICTIONS_NOW:-0}" -gt "${EVICTIONS_BEFORE:-0}" ]; then
+      FENCED=true
+      break
+    fi
+    sleep 5
+  done
+  kubectl -n inari-system scale deployment/inari-agent --replicas=1 >/dev/null
+  kubectl -n inari-system rollout status deployment/inari-agent --timeout=180s >/dev/null
+  [ "$FENCED" = "true" ] || die "HA(d2): no stale-session eviction was logged with 3 agent pods (fencing not exercised)"
+  for i in $(seq 1 24); do
+    STATE=$(xcurl -H "Authorization: Bearer $(user_token)" "$API/tenants/$TENANT/clusters/$CLUSTER_ID" | jq -r '.cluster.state' 2>/dev/null || true)
+    [ "$STATE" = "active" ] && break
+    sleep 5
+    [ "$i" = 24 ] && die "HA(d2): cluster did not return to active after the agent scaled back to 1"
+  done
+
+  # ---------- HA(a): delete one server pod mid-run ------------------------
+  # The surviving replica must keep serving (readiness-gated: zero failed
+  # probes), and the claim-based loops (outbox dispatcher, scaffold
+  # reconcile — deliberately NOT lease-gated, ADR-0011) must keep
+  # processing work. Proven end-to-end: an RBAC mapping flip must still
+  # materialize into the tenant state repo, and a fresh scaffold run must
+  # still reach completed.
+  log "HA(a): deleting one server pod mid-run — API stays available, outbox + scaffold reconcile continue"
+  VICTIM=$(kubectl -n "$NAMESPACE" get pods -l "$SERVER_LABEL" -o jsonpath='{.items[0].metadata.name}')
+  log "HA(a): victim pod: $VICTIM"
+  start_traffic 90
+  kubectl -n "$NAMESPACE" delete pod "$VICTIM" --wait=false
+  kubectl -n "$NAMESPACE" rollout status deployment/inari-server --timeout=240s
+  TRAFFIC=$(stop_traffic)
+  FAILS=$(sed -n 's/.*fail=\([0-9]*\).*/\1/p' <<<"$TRAFFIC")
+  [ "${FAILS:-99}" = "0" ] || die "HA(a): $FAILS failed requests while a pod was being replaced ($TRAFFIC)"
+  xcurl -X PUT -H "Authorization: Bearer $(user_token)" -H "Content-Type: application/json" \
+    -d "{\"mappings\":[{\"team\":\"viewers\",\"role\":\"org-admin\"}]}" \
+    "$API/tenants/$TENANT/rbac/mappings" >/dev/null || die "HA(a): PUT rbac/mappings failed after the pod loss"
+  for i in $(seq 1 36); do
+    if git -C "$STATE_REPO" show main:baseline/rbac/clusterrolebindings.yaml 2>/dev/null \
+        | grep -qE "^  name: tenant-$TENANT-viewers-admin\$"; then
+      break
+    fi
+    sleep 5
+    [ "$i" = 36 ] && die "HA(a): outbox dispatcher did not process rbac.mappings.updated after the pod loss"
+  done
+  log "HA(a): outbox dispatcher continued on the surviving pod; driving a scaffold run"
+  # The go-service skeleton templates .Values.goVersion/.Values.port too;
+  # the renderer does not inject schema defaults, so pass all four.
+  RUN_RESP=$(xcurl -X POST -H "Authorization: Bearer $(user_token)" -H "Content-Type: application/json" \
+    -d '{"values":{"serviceName":"ha-probe","module":"github.com/e2e/ha-probe","goVersion":"1.23","port":8080}}' \
+    "$API/tenants/$TENANT/templates/go-service/runs")
+  RUN_ID=$(jq -r '.run.id // empty' <<<"$RUN_RESP")
+  [ -n "$RUN_ID" ] || die "HA(a): scaffold run creation failed: $RUN_RESP"
+  for i in $(seq 1 48); do
+    RUN_VIEW=$(xcurl -H "Authorization: Bearer $(user_token)" "$API/tenants/$TENANT/scaffold-runs/$RUN_ID" 2>/dev/null || true)
+    PHASE=$(jq -r '.run.phase // empty' <<<"$RUN_VIEW")
+    [ "$PHASE" = "completed" ] && break
+    [ "$PHASE" = "failed" ] && die "HA(a): scaffold run failed post-disruption: $RUN_VIEW"
+    sleep 5
+    [ "$i" = 48 ] && die "HA(a): scaffold run stuck in phase '${PHASE:-unknown}' (reconcile loop not progressing on the survivor)"
+  done
+
+  # ---------- HA(b): rollout restart under traffic ------------------------
+  # A full rolling restart must honor rollingUpdate.maxUnavailable: 0
+  # (available replicas never drop below 2) and keep failed requests
+  # within a small error budget (in-flight connections may reset during
+  # pod termination).
+  log "HA(b): rollout restart under traffic — maxUnavailable: 0, bounded error budget"
+  AVAIL_LOG=$(mktemp /tmp/inari-e2e-avail.XXXXXX)
+  echo 99 > "$AVAIL_LOG"
+  start_traffic 150
+  (
+    for _ in $(seq 1 150); do
+      AV=$(kubectl -n "$NAMESPACE" get deployment inari-server -o jsonpath='{.status.availableReplicas}' 2>/dev/null || true)
+      # A transient kubectl/apiserver error yields an empty AV — skip the
+      # sample rather than recording a bogus 0 as the minimum.
+      case "$AV" in ''|*[!0-9]*) sleep 1; continue;; esac
+      MIN=$(cat "$AVAIL_LOG")
+      if [ "$AV" -lt "$MIN" ]; then echo "$AV" > "$AVAIL_LOG"; fi
+      sleep 1
+    done
+  ) &
+  WATCH_PID=$!
+  kubectl -n "$NAMESPACE" rollout restart deployment/inari-server
+  kubectl -n "$NAMESPACE" rollout status deployment/inari-server --timeout=300s
+  wait "$WATCH_PID" 2>/dev/null || true
+  TRAFFIC=$(stop_traffic)
+  MIN_AVAIL=$(cat "$AVAIL_LOG")
+  FAILS=$(sed -n 's/.*fail=\([0-9]*\).*/\1/p' <<<"$TRAFFIC")
+  [ "$MIN_AVAIL" -ge 2 ] \
+    || die "HA(b): availableReplicas dropped to $MIN_AVAIL during the rollout (maxUnavailable: 0 violated)"
+  ERROR_BUDGET=2
+  [ "${FAILS:-99}" -le "$ERROR_BUDGET" ] \
+    || die "HA(b): $FAILS failed requests during the rollout restart, over the error budget of $ERROR_BUDGET ($TRAFFIC)"
+
+  log "HA: all disruption assertions passed (c: migration-lock race, d1: lease single-execution, d2: stream fencing, a: pod kill, b: rollout restart)"
+fi
+
+HA_NOTE=""
+$INARI_HA && HA_NOTE=" + HA disruption assertions (pod kill, rollout restart, migration-lock race, lease single-execution, stream fencing)"
+log "PASS: golden path verified (tenant → register → stream → $CAPS capabilities → heartbeats → RBAC materialization → policy evaluate matrix)$HA_NOTE"

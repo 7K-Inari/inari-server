@@ -1,0 +1,29 @@
+# NATS JetStream for the e2e platform stack — provisioned HA from day one
+# (99.9% availability initiative): M1's outbox→NATS dispatcher lands on an
+# already-clustered substrate. Chart: nats/nats 1.3.2 (version pinned in
+# golden-path.sh). Single-node kind must still schedule all three pods, so
+# spreading below is soft (ScheduleAnyway), never required.
+fullnameOverride: nats
+config:
+  cluster:
+    enabled: true
+    replicas: 3 # JetStream meta group + R=3 streams need 3 nodes
+  jetstream:
+    enabled: true
+    fileStore:
+      enabled: true
+      pvc:
+        size: 1Gi # per-pod volumeClaimTemplate; CI footprint stays small
+container:
+  merge:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+podTemplate:
+  topologySpreadConstraints:
+    # Soft spread only: multi-node clusters spread the 3 pods across hosts;
+    # single-node kind still schedules all three.
+    kubernetes.io/hostname:
+      maxSkew: 1
+      whenUnsatisfiable: ScheduleAnyway

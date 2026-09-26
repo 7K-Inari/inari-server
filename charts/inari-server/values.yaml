@@ -93,6 +93,12 @@ redis:
   # cache.backend=redis, used instead of the subchart service URL.
   url: ""
 
+# NATS event bus (reserved M1 seam — no client is wired yet; the outbox
+# dispatcher is in-process). When the server grows a NATS client, its URL
+# setting will accept a comma-separated endpoint list, e.g.
+# "nats://nats-0.nats-headless:4222,nats://nats-1.nats-headless:4222,nats://nats-2.nats-headless:4222",
+# so a clustered JetStream is a drop-in behind the same service name.
+
 # OIDC issuer for token validation. Defaults to
 # <keycloak.baseUrl>/realms/<keycloak.realm> when empty.
 oidc:

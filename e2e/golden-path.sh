@@ -122,17 +122,42 @@ kubectl -n "$NAMESPACE" patch keycloak keycloak --type merge \
   -p "{\"spec\":{\"hostname\":{\"hostname\":\"http://$KC_FQDN\",\"strict\":true}}}"
 kubectl -n "$NAMESPACE" rollout status statefulset/keycloak --timeout=420s
 
-log "installing NATS (JetStream)"
+log "installing NATS (JetStream, 3-node cluster)"
+# NATS is the reserved M1 event-bus seam (the outbox dispatcher is still
+# in-process; no server client exists yet) and is provisioned HA from day
+# one — part of the 99.9% availability initiative, so M1 lands on an
+# already-clustered substrate. e2e/nats-values.yaml mirrors the production
+# posture:
+#   - 3-node cluster (JetStream meta group quorum), one fileStore PVC per pod
+#   - R=3 streams (replicas=3) so any single node loss keeps the stream live
+#   - advised limits: size fileStore per retention budget and set explicit
+#     max_memory_store/max_file_store; keep per-stream consumer counts
+#     bounded (prefer few durable consumers over many ephemeral ones)
+# The full operations docs page is a separate task.
 helm repo add openfga https://openfga.github.io/helm-charts >/dev/null
 helm repo add nats https://nats-io.github.io/k8s/helm/charts/ >/dev/null
 helm repo update >/dev/null
 helm upgrade --install nats nats/nats --version 1.3.2 \
   --namespace "$NAMESPACE" \
-  --set fullnameOverride=nats \
-  --set config.jetstream.enabled=true \
-  --set config.jetstream.fileStore.enabled=true \
-  --set config.jetstream.fileStore.pvc.size=1Gi \
-  --wait --timeout 5m
+  -f "$(dirname "$0")/nats-values.yaml" \
+  --wait --timeout 8m
+
+# Belt-and-braces on top of helm --wait (the StatefulSet readiness probe
+# /healthz?js-server-only=true already gates on meta-group currency): assert
+# the JetStream meta group actually formed with 3 members and a leader.
+# The monitor port 8222 lives only on the nats-headless service (the nats
+# ClusterIP service exposes just 4222), so jsz must be scraped there.
+log "verifying the JetStream meta group (3 members + leader)"
+for i in $(seq 1 24); do
+  JSZ=$(kubectl -n "$NAMESPACE" exec deploy/nats-box -- \
+    sh -c 'curl -sf http://nats-headless:8222/jsz' 2>/dev/null || true)
+  if jq -e '.meta_cluster.cluster_size == 3 and (.meta_cluster.leader | type == "string" and length > 0)' \
+      <<<"$JSZ" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 5
+  [ "$i" = 24 ] && die "JetStream meta group never formed (jsz: ${JSZ:-empty}; logs: kubectl -n $NAMESPACE logs statefulset/nats)"
+done
 
 log "installing OpenFGA (postgres datastore via the inari-db secret)"
 helm upgrade --install openfga openfga/openfga --version 0.2.27 \

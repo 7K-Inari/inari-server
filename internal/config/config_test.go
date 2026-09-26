@@ -271,3 +271,22 @@ func TestGitHubResolverEnvDefaults(t *testing.T) {
 		t.Errorf("TenantGitKeyMountRoot default = %q", c.TenantGitKeyMountRoot)
 	}
 }
+
+func TestDisableKubectlProxy(t *testing.T) {
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.DisableKubectlProxy {
+		t.Errorf("DisableKubectlProxy default = true, want false")
+	}
+
+	t.Setenv("INARI_DISABLE_KUBECTL_PROXY", "true")
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c.DisableKubectlProxy {
+		t.Errorf("DisableKubectlProxy = false, want true when INARI_DISABLE_KUBECTL_PROXY=true")
+	}
+}

@@ -73,8 +73,13 @@ type Config struct {
 
 	RegistrationTokenTTL       time.Duration
 	EnrollmentApprovalRequired bool
-	AgentImageRepo             string
-	AgentGatewayAddress        string
+	// DisableKubectlProxy is the global kill switch for the kubectl-proxy
+	// e2e-access feature: when true the server reports the feature disabled
+	// (GET /api/v1/features) and per-cluster effective enablement is forced
+	// off regardless of the per-cluster setting.
+	DisableKubectlProxy bool
+	AgentImageRepo      string
+	AgentGatewayAddress string
 	// ExtensionGatewayAudience is the audience scope pinned on per-extension
 	// Keycloak service-account clients and enforced by the extension-gateway
 	// tunnel validator (ADR-0008): only client_credentials JWTs minted for an
@@ -231,6 +236,7 @@ func Load() (*Config, error) {
 
 		RegistrationTokenTTL:       durEnv("INARI_REGISTRATION_TOKEN_TTL", time.Hour),
 		EnrollmentApprovalRequired: boolEnv("INARI_ENROLLMENT_APPROVAL_REQUIRED", false),
+		DisableKubectlProxy:        boolEnv("INARI_DISABLE_KUBECTL_PROXY", false),
 		AgentImageRepo:             env("INARI_AGENT_IMAGE_REPO", "ghcr.io/7k-inari/inari-agent"),
 		AgentGatewayAddress:        env("INARI_AGENT_GATEWAY_ADDRESS", "https://inari-server.example.com"),
 		ExtensionGatewayAudience:   env("INARI_EXTENSION_GATEWAY_AUDIENCE", "inari-extension-gateway"),

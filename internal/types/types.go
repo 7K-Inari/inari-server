@@ -175,23 +175,23 @@ const (
 // Cluster is a registered tenant cluster. It never holds a kubeconfig —
 // identity is the per-cluster Keycloak OIDC client only (plan §5.2, §5.10).
 type Cluster struct {
-	ID                 string            `json:"id"`
-	OrgID              string            `json:"orgId"`
-	Name               string            `json:"name"`
-	KubernetesVersion  string            `json:"kubernetesVersion,omitempty"`
-	Distribution       string            `json:"distribution,omitempty"` // e.g. "eks", "kind" (agent-reported)
-	OIDCIssuerURL      string            `json:"oidcIssuerUrl,omitempty"`
-	Labels             map[string]string `json:"labels,omitempty"`
-	KeycloakClientID   string            `json:"keycloakClientId,omitempty"`
-	State              ClusterState      `json:"state"`
+	ID                string            `json:"id"`
+	OrgID             string            `json:"orgId"`
+	Name              string            `json:"name"`
+	KubernetesVersion string            `json:"kubernetesVersion,omitempty"`
+	Distribution      string            `json:"distribution,omitempty"` // e.g. "eks", "kind" (agent-reported)
+	OIDCIssuerURL     string            `json:"oidcIssuerUrl,omitempty"`
+	Labels            map[string]string `json:"labels,omitempty"`
+	KeycloakClientID  string            `json:"keycloakClientId,omitempty"`
+	State             ClusterState      `json:"state"`
 	// KubectlProxyDisabled is the per-cluster opt-out of kubectl-proxy e2e
 	// access. Effective enablement = !INARI_DISABLE_KUBECTL_PROXY &&
 	// !KubectlProxyDisabled, computed server-side on cluster payloads.
-	KubectlProxyDisabled bool              `json:"kubectlProxyDisabled"`
-	CapabilityChecksum   string            `json:"capabilityChecksum,omitempty"`
-	ConnectedAt        *time.Time        `json:"connectedAt,omitempty"`
-	LastSeenAt         *time.Time        `json:"lastSeenAt,omitempty"`
-	CreatedAt          time.Time         `json:"createdAt"`
+	KubectlProxyDisabled bool       `json:"kubectlProxyDisabled"`
+	CapabilityChecksum   string     `json:"capabilityChecksum,omitempty"`
+	ConnectedAt          *time.Time `json:"connectedAt,omitempty"`
+	LastSeenAt           *time.Time `json:"lastSeenAt,omitempty"`
+	CreatedAt            time.Time  `json:"createdAt"`
 }
 
 // ClusterAccessInfo is everything a developer needs to build a kubelogin

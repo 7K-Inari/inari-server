@@ -561,6 +561,13 @@ func run() error {
 		}
 	}
 	extProxy := extensionhost.NewProxy(extSvc, validator, authorizer)
+	// W2 extension auth model (plan §5.8): per-request RFC 8693 exchange of
+	// the caller's token into the extension's declared downstream audience,
+	// authenticating as the ext-<name> client (secret read via the admin API
+	// at exchange time, never persisted). The oidc-sso-session store ships
+	// with W3; declaring extensions fail closed with re-auth until then.
+	extExchanger := extensionhost.NewKeycloakExchanger(cfg.OIDCIssuerURL, idp)
+	extProxy.WithAuthModel(extensionhost.NewAuthModel(extExchanger, nil))
 	extUiAssets := extensionhost.NewUiAssetServer(extSvc, svc, remoteEntries)
 
 	// Tenant Zone Factory (plan §5.12): fake AWS/Crossplane backends by

@@ -117,6 +117,8 @@ keycloak:
     clientSecretKey: client-secret
 
 # Extra INARI_* env vars, e.g. - name: INARI_AGENT_IMAGE_TAG / value: dev
+# Notable flags: INARI_DISABLE_KUBECTL_PROXY=true globally disables the
+# kubectl-proxy e2e-access feature (console Connect tab + /api/v1/features).
 extraEnv: []
 
 # Extra pod volumes/mounts, e.g. a hostPath for INARI_GIT_PROVIDER=local

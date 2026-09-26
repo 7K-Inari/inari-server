@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.10](https://github.com/7K-Inari/inari-server/compare/inari-server-chart-v0.1.9...inari-server-chart-v0.1.10) (2026-09-26)
+
+
+### Features
+
+* cache layer with optional Redis backend (PEP + tenant resolution) ([#87](https://github.com/7K-Inari/inari-server/issues/87)) ([ee3dd61](https://github.com/7K-Inari/inari-server/commit/ee3dd613fce072498ed6d5553f57b4c8afd1359a))
+* **chart:** add opt-in HA knobs (probes, PDB, anti-affinity, strategy, resources) ([#88](https://github.com/7K-Inari/inari-server/issues/88)) ([addc1d2](https://github.com/7K-Inari/inari-server/commit/addc1d289c1287f973b46165e44b586baee405c0))
+* **e2e:** run NATS JetStream as a 3-node cluster in the golden path ([#91](https://github.com/7K-Inari/inari-server/issues/91)) ([bce083d](https://github.com/7K-Inari/inari-server/commit/bce083d6ada1428a1dfd1d4904fc87703d910638))
+
 ## [0.1.9](https://github.com/7K-Inari/inari-server/compare/inari-server-chart-v0.1.8...inari-server-chart-v0.1.9) (2026-09-24)
 
 

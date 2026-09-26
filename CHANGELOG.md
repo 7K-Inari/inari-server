@@ -1,5 +1,24 @@
 # Changelog
 
+## [3.1.0](https://github.com/7K-Inari/inari-server/compare/v3.0.0...v3.1.0) (2026-09-26)
+
+
+### Features
+
+* cache layer with optional Redis backend (PEP + tenant resolution) ([#87](https://github.com/7K-Inari/inari-server/issues/87)) ([ee3dd61](https://github.com/7K-Inari/inari-server/commit/ee3dd613fce072498ed6d5553f57b4c8afd1359a))
+* **catalog:** server-side filtering, sorting, and pagination for browse API ([#85](https://github.com/7K-Inari/inari-server/issues/85)) ([3d59fcc](https://github.com/7K-Inari/inari-server/commit/3d59fcc49a2bbc35d9e429be7e0058829961c882))
+* **chart:** add opt-in HA knobs (probes, PDB, anti-affinity, strategy, resources) ([#88](https://github.com/7K-Inari/inari-server/issues/88)) ([addc1d2](https://github.com/7K-Inari/inari-server/commit/addc1d289c1287f973b46165e44b586baee405c0))
+* **e2e:** run NATS JetStream as a 3-node cluster in the golden path ([#91](https://github.com/7K-Inari/inari-server/issues/91)) ([bce083d](https://github.com/7K-Inari/inari-server/commit/bce083d6ada1428a1dfd1d4904fc87703d910638))
+* multi-replica safety — DB leader leases for singleton loops, agent-gateway session fencing ([#90](https://github.com/7K-Inari/inari-server/issues/90)) ([da5f78e](https://github.com/7K-Inari/inari-server/commit/da5f78e9960bebf42a321bade52a53ce1f095fb7))
+
+
+### Bug Fixes
+
+* **db:** serialize goose migrations across replicas with Postgres advisory lock ([#89](https://github.com/7K-Inari/inari-server/issues/89)) ([9c5974e](https://github.com/7K-Inari/inari-server/commit/9c5974ee61f0a61aab5cf860fc50e637c7098b8a))
+* **rbacmaterialize:** owner-qualify fallback tenant state repo ([#93](https://github.com/7K-Inari/inari-server/issues/93)) ([bdbb1c3](https://github.com/7K-Inari/inari-server/commit/bdbb1c3a9766f037fc2621beb0fc993e141918ca))
+* **tenancy:** gate tenant deletion resume on the approval decision ([ecd73d0](https://github.com/7K-Inari/inari-server/commit/ecd73d0dd258e042763b56e036488b22364ff14a))
+* **tenancy:** gate tenant deletion resume on the approval decision ([e2f38f9](https://github.com/7K-Inari/inari-server/commit/e2f38f97662eb1a7982f4e0646a68d3938bd3bc2))
+
 ## [3.0.0](https://github.com/7K-Inari/inari-server/compare/v2.0.0...v3.0.0) (2026-09-24)
 
 

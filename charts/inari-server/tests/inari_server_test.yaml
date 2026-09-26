@@ -353,6 +353,18 @@ tests:
       - equal:
           path: spec.minAvailable
           value: 1
+  - it: "rejects replicaCount 0 via the values schema (minimum 1)"
+    template: deployment.yaml
+    set:
+      replicaCount: 0
+    # helm-unittest cannot assert JSON-schema failures (they abort the run,
+    # not the template): this test documents the constraint and is skipped;
+    # the schema itself is enforced by helm lint/ct lint in CI.
+    skip:
+      reason: "schema-level rejection (helm-unittest cannot assert JSON-schema failures); the minimum is enforced by helm lint/ct lint in CI and was verified live in run 423ffd13"
+    asserts:
+      - failedTemplate:
+          errorMessage: minimum
       - equal:
           path: spec.selector.matchLabels["app.kubernetes.io/component"]
           value: inari-server

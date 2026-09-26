@@ -73,6 +73,74 @@ func (f fakeApprovalLoader) Get(context.Context, string, string) (*types.Approva
 	return f.req, nil
 }
 
+// TestTenantDeletionResumeSkipsUndecided pins the live data-loss bug from
+// run 423ffd13: a requested-but-undecided decommission must survive any
+// number of boot/lease-failover resume scans and must refuse a direct Run.
+// Before the fix, the row was created in state "deleting", the startup
+// scan returned every row, and the next server restart executed the full
+// teardown without any approval decision.
+func TestTenantDeletionResumeSkipsUndecided(t *testing.T) {
+	database := setupDB(t)
+	ctx := context.Background()
+	idp := newFakeIdP()
+	store := tenancy.NewStore()
+	auditStore := audit.NewStore()
+	gate := &fakeGate{}
+	rec := &recordingStore{}
+	svc := tenancy.NewService(database, idp, store, auditStore).WithDeletionApprovalGate(gate)
+	deleter := tenancy.NewDeleter(database, idp, store, auditStore, rec, nil, slog.Default())
+	svc.WithDeleter(deleter)
+
+	org, _, err := svc.CreateTenant(ctx, "user-1", "acme", "Acme Corp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.DeleteTenant(ctx, "user-1", "acme", false, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// The request-time row is awaiting its approval decision.
+	del, err := store.GetTenantDeletion(ctx, database.Pool, org.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if del.State != types.TenantDeletionStateAwaitingApproval {
+		t.Fatalf("state at request = %q, want awaiting_approval", del.State)
+	}
+
+	// Boot/lease-failover resume scans must not touch it.
+	for range 3 {
+		deleter.ResumePendingDeletions(ctx)
+	}
+	if _, err := store.GetOrganizationBySlug(ctx, database.Pool, "acme"); err != nil {
+		t.Fatalf("org gone after resume scans without approval: %v", err)
+	}
+	idp.mu.Lock()
+	_, orgExists := idp.orgs[org.KeycloakOrgID]
+	idp.mu.Unlock()
+	if !orgExists {
+		t.Error("keycloak org deleted without approval")
+	}
+	del, err = store.GetTenantDeletion(ctx, database.Pool, org.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if del.State != types.TenantDeletionStateAwaitingApproval {
+		t.Fatalf("state after resume scans = %q, want awaiting_approval", del.State)
+	}
+	if len(rec.deleted) != 0 {
+		t.Errorf("FGA tuples retracted without approval: %v", rec.deleted)
+	}
+
+	// A direct Run on an undecided row is refused outright.
+	if err := deleter.Run(ctx, org.ID); err == nil {
+		t.Fatal("Run on an awaiting_approval row: want error, got nil")
+	}
+	if _, err := store.GetOrganizationBySlug(ctx, database.Pool, "acme"); err != nil {
+		t.Fatalf("org gone after refused Run: %v", err)
+	}
+}
+
 func TestTenantDeletionHappyPath(t *testing.T) {
 	database := setupDB(t)
 	ctx := context.Background()
@@ -119,7 +187,11 @@ func TestTenantDeletionHappyPath(t *testing.T) {
 		t.Errorf("idempotent re-request: id=%q err=%v", again, err)
 	}
 
-	// Approval granted: run the teardown.
+	// Approval granted: the decided handler transitions the row out of
+	// awaiting_approval, then the teardown runs.
+	if err := svc.MarkDeletionApproved(ctx, org.ID); err != nil {
+		t.Fatal(err)
+	}
 	if err := deleter.Run(ctx, org.ID); err != nil {
 		t.Fatalf("deleter.Run: %v", err)
 	}
@@ -250,6 +322,9 @@ func TestTenantDeletionBlockersAndForce(t *testing.T) {
 	// Force revokes the cluster as part of teardown.
 	if _, err := svc.DeleteTenant(ctx, "user-1", "acme", true, "force"); err != nil {
 		t.Fatalf("forced DeleteTenant: %v", err)
+	}
+	if err := svc.MarkDeletionApproved(ctx, org.ID); err != nil {
+		t.Fatal(err)
 	}
 	if err := deleter.Run(ctx, org.ID); err != nil {
 		t.Fatalf("deleter.Run: %v", err)
@@ -423,6 +498,9 @@ func TestTenantDeletionResumeAfterFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if err := svc.MarkDeletionApproved(ctx, org.ID); err != nil {
+		t.Fatal(err)
+	}
 	// FGA cleanup fails: deletion flips to delete_failed and stops.
 	if err := deleter.Run(ctx, org.ID); err == nil {
 		t.Fatal("Run with failing FGA store: want error")

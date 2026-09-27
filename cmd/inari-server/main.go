@@ -27,6 +27,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/cloudaccounts"
 	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/config"
+	"github.com/7K-Inari/inari-server/internal/cryptoenvelope"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/extensionhost"
 	"github.com/7K-Inari/inari-server/internal/fleetmanager"
@@ -387,6 +388,26 @@ func run() error {
 		CurrentAgentVersion: cfg.CurrentAgentVersion,
 	}).WithSecretWriter(secretWriter).WithPlatformResources(platformResourcesSvc)
 
+	// W3 credential vault (plan §5.8): envelope-encrypted per-user tokens
+	// for InvokeAction, redeemed once by agents via AgentCredentials. The
+	// KEK comes from a mounted file/env (cryptoenvelope.LoadKEK); when
+	// unset the vault is off and raw user tokens on the extension hop fail
+	// closed.
+	var credVault *agentgateway.CredentialVault
+	if kek, err := cryptoenvelope.LoadKEK(); err != nil {
+		log.Warn("credential KEK unset: user-credential vault disabled", "reason", err)
+	} else {
+		v, err := agentgateway.NewCredentialVault(database, kek)
+		if err != nil {
+			return err
+		}
+		credVault = v
+		gateway.WithCredentialVault(v)
+		go leaderlease.Run(ctx, leaser, "agent-credential-sweep", func(lctx context.Context) {
+			v.RunSweepLoop(lctx, time.Minute)
+		}, log)
+	}
+
 	// M7.W4: the ops reconcile endpoint enqueues platform-cluster resyncs
 	// through the durable agent command queue.
 	platformResourcesSvc.WithCommandQueue(gateway.Queue()).WithClusterLister(registry).WithTenantResolver(svc)
@@ -679,6 +700,12 @@ func run() error {
 		connect.WithInterceptors(agentgateway.AuthInterceptor(validator)))
 	router.Handle(regPath+"*", regHandler)
 	router.Handle(streamPath+"*", streamHandler)
+	if credVault != nil {
+		credPath, credHandler := agentv1connect.NewAgentCredentialsServiceHandler(
+			agentgateway.NewCredentialsHandler(credVault),
+			connect.WithInterceptors(agentgateway.AuthInterceptor(validator)))
+		router.Handle(credPath+"*", credHandler)
+	}
 
 	// Extension-gateway tunnel (plan §5.8): extensions invoke imperative
 	// actions on tenant clusters, authenticated by per-extension identity

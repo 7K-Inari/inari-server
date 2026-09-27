@@ -35,6 +35,10 @@ func NewHandler(svc *Service, tenants TenantResolver, az authz.Authorizer) *Hand
 	return &Handler{svc: svc, tenants: tenants, authz: az}
 }
 
+// errDisabled is returned by every handler when the module is off (the
+// service is nil: feature flag unset or KEK/app credentials unavailable).
+var errDisabled = huma.Error501NotImplemented("user git connections disabled")
+
 // RegisterRoutes mounts the user git connections API on the huma API.
 func (h *Handler) RegisterRoutes(api huma.API) {
 	huma.Register(api, huma.Operation{
@@ -107,6 +111,9 @@ type listConnectionsOutput struct {
 }
 
 func (h *Handler) list(ctx context.Context, in *orgPathInput) (*listConnectionsOutput, error) {
+	if h.svc == nil {
+		return nil, errDisabled
+	}
 	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
 	if err != nil {
 		return nil, err
@@ -134,6 +141,9 @@ type redirectOutput struct {
 }
 
 func (h *Handler) authorize(ctx context.Context, in *authorizeInput) (*redirectOutput, error) {
+	if h.svc == nil {
+		return nil, errDisabled
+	}
 	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
 	if err != nil {
 		return nil, err
@@ -165,11 +175,13 @@ type callbackInput struct {
 // ?connected=<provider>, failure a safe ?error=<code> — internal details
 // are never reflected to the browser.
 func (h *Handler) callback(ctx context.Context, in *callbackInput) (*redirectOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	if h.svc == nil {
+		return nil, errDisabled
+	}
+	_, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
 	if err != nil {
 		return nil, err
 	}
-	_ = org
 	if _, err := h.svc.CompleteAuthorize(ctx, id.Subject, in.State, in.Code); err != nil {
 		return &redirectOutput{Status: http.StatusFound, Location: h.uiErrorURL(in.Provider, callbackErrorCode(err))}, nil
 	}
@@ -215,6 +227,9 @@ type disconnectOutput struct {
 }
 
 func (h *Handler) disconnect(ctx context.Context, in *disconnectInput) (*disconnectOutput, error) {
+	if h.svc == nil {
+		return nil, errDisabled
+	}
 	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
 	if err != nil {
 		return nil, err

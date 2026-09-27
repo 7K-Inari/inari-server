@@ -127,6 +127,24 @@ func TestUserProviderEnsureRepoOrgForbidden(t *testing.T) {
 	}
 }
 
+func TestUserProviderEnsureRepoCreateRace(t *testing.T) {
+	p := testUserProvider(t, userMux(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_ = json.NewEncoder(w).Encode(map[string]any{"message": "name already exists on this account"})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	url, err := p.EnsureRepo(context.Background(), "octocat/state")
+	if err != nil {
+		t.Fatalf("422 race must be treated as existing: %v", err)
+	}
+	if !strings.HasSuffix(url, "/octocat/state.git") {
+		t.Fatalf("url = %q", url)
+	}
+}
+
 func TestUserProviderNeverMintsInstallationToken(t *testing.T) {
 	var tokenCalls atomic.Int32
 	p := testUserProvider(t, userMux(t, &tokenCalls, func(w http.ResponseWriter, r *http.Request) {

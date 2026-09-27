@@ -22,11 +22,11 @@ import (
 )
 
 const (
-	tokenExchangeGrantType   = "urn:ietf:params:oauth:grant-type:token-exchange"
-	tokenTypeAccessToken     = "urn:ietf:params:oauth:token-type:access_token"
-	exchangeCacheMaxTTL      = 60 * time.Second
-	exchangeHTTPTimeout      = 10 * time.Second
-	defaultExchangeTokenTTL  = 60 * time.Second
+	tokenExchangeGrantType  = "urn:ietf:params:oauth:grant-type:token-exchange"
+	tokenTypeAccessToken    = "urn:ietf:params:oauth:token-type:access_token"
+	exchangeCacheMaxTTL     = 60 * time.Second
+	exchangeHTTPTimeout     = 10 * time.Second
+	defaultExchangeTokenTTL = 60 * time.Second
 )
 
 // ErrExchangeDenied: Keycloak refused the exchange (4xx — e.g. the user has

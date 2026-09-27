@@ -212,6 +212,11 @@ func (m *AuthModel) Resolve(ctx context.Context, ext *types.Extension, id *authn
 	if err != nil {
 		return nil, err
 	}
+	// Fail closed: a provider that resolves no credential must not silently
+	// proxy the request unauthenticated.
+	if res == nil || res.DownstreamToken == "" {
+		return nil, fmt.Errorf("%w: provider %s resolved no credential", ErrAuthMethodUnavailable, declared.Method)
+	}
 	res.Method = declared.Method
 	return res, nil
 }

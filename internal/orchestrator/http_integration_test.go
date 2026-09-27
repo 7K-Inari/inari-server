@@ -327,6 +327,10 @@ func (r errGitResolver) ForTenant(context.Context, *types.TenantGitConfig) (gitp
 	return nil, nil, r.err
 }
 
+func (r errGitResolver) ForUser(context.Context, string, string) (gitprovider.Provider, *gitprovider.AuthInfo, error) {
+	return nil, nil, r.err
+}
+
 // TestDeployGitAuthFailureMapping verifies typed git credential failures
 // surface as 412 (app not installed, with install link) and 502 (credentials
 // revoked) instead of a generic 500.

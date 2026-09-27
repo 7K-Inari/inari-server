@@ -151,7 +151,6 @@ func TestAuthModelResolve(t *testing.T) {
 
 type fakeExchanger struct {
 	token            string
-	expirySet        bool
 	err              error
 	calls            int
 	lastSubjectToken string

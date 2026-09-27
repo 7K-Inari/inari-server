@@ -117,4 +117,40 @@ func TestGitConfigUserTemplateFallback(t *testing.T) {
 	if cfg.UserTemplateFallback != "platform_app" {
 		t.Fatalf("fallback wiped by plain upsert: %q", cfg.UserTemplateFallback)
 	}
+
+	// Boundary: an explicit empty string must behave like omit (preserve
+	// the stored policy), not fail validation or reset to block.
+	code, body = itReq(t, srv, "PUT", "/api/v1/tenants/acme/git-config", "good",
+		`{"repo":"acme/acme-inari-state","commitPolicy":"direct","userTemplateFallback":""}`)
+	if code != http.StatusOK && code != http.StatusNoContent {
+		t.Fatalf("explicit-empty upsert: %d %s", code, body)
+	}
+	cfg, err = inv.GitConfig(ctx, database.Pool, "org:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UserTemplateFallback != "platform_app" {
+		t.Fatalf("fallback changed by explicit-empty upsert: %q", cfg.UserTemplateFallback)
+	}
+
+	// Boundary: policy values are case-sensitive ("BLOCK" is invalid).
+	code, body = itReq(t, srv, "PUT", "/api/v1/tenants/acme/git-config", "good",
+		`{"repo":"acme/acme-inari-state","userTemplateFallback":"BLOCK"}`)
+	if code != http.StatusUnprocessableEntity {
+		t.Fatalf("uppercase fallback: %d %s, want 422", code, body)
+	}
+
+	// An explicit "block" resets the stored policy.
+	code, body = itReq(t, srv, "PUT", "/api/v1/tenants/acme/git-config", "good",
+		`{"repo":"acme/acme-inari-state","commitPolicy":"direct","userTemplateFallback":"block"}`)
+	if code != http.StatusOK && code != http.StatusNoContent {
+		t.Fatalf("explicit block: %d %s", code, body)
+	}
+	cfg, err = inv.GitConfig(ctx, database.Pool, "org:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UserTemplateFallback != "block" {
+		t.Fatalf("fallback = %q, want block", cfg.UserTemplateFallback)
+	}
 }

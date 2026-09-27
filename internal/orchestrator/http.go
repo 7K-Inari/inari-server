@@ -277,8 +277,11 @@ type gitConfigInput struct {
 		// (M8.W6): "block" (default) rejects the run with a
 		// connect-account deep link; "platform_app" routes the run's git
 		// writes through the platform app (audited). Platform-engineer-only
-		// setting; omitting it preserves the stored policy.
-		UserTemplateFallback string `json:"userTemplateFallback,omitempty" enum:"block,platform_app"`
+		// setting; omitting it (or sending an explicit empty string)
+		// preserves the stored policy. No huma enum tag: the enum validator
+		// rejects the explicit-empty preserve signal with a 422 — the
+		// handler validates non-empty values itself.
+		UserTemplateFallback string `json:"userTemplateFallback,omitempty"`
 	}
 }
 

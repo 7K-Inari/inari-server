@@ -137,6 +137,51 @@ func TestScopeUserNoResolverBlocks(t *testing.T) {
 	}
 }
 
+func TestScopeUserFallbackAuditFailureLeavesNoMarker(t *testing.T) {
+	// Regression: when the fallback audit hook fails, the run must NOT
+	// carry the gitFallback marker — outputs persist with the failed-step
+	// transition, and a persisted marker would make the retry skip the
+	// audit entirely (silent platform replacement).
+	rc, repo, env, git, _ := scopeFixture(t, userScopeBlock)
+	env.UserGit = &fakeUserGit{err: &gitgithub.ErrNoConnection{OrgID: "org:acme", UserSub: "dev-1", Provider: "github"}}
+	env.GitConfigs = fakeGitConfigs{
+		"org:acme": {OrgID: "org:acme", Repo: "acme/inari-state", UserTemplateFallback: "platform_app"},
+	}
+	hookErr := errors.New("audit tx boom")
+	var calls int
+	env.OnGitFallback = func(_ context.Context, _ *RunContext, _ GitFallback) error {
+		calls++
+		if calls == 1 {
+			return hookErr
+		}
+		return nil
+	}
+
+	done, err := stepCreatingRepo(context.Background(), env, rc, repo)
+	if done || !errors.Is(err, hookErr) {
+		t.Fatalf("done=%v err=%v, want hook failure", done, err)
+	}
+	if got := outputValue(rc.Run.Outputs, "gitFallback"); got != "" {
+		t.Fatalf("gitFallback marker = %q after failed audit, want unset", got)
+	}
+	if git.ensures != 0 || git.commits != 0 {
+		t.Fatal("failed audit must not write through the platform provider")
+	}
+
+	// Retry: the hook fires again (marker was never persisted) and the
+	// fallback completes with the marker set.
+	done, err = stepCreatingRepo(context.Background(), env, rc, repo)
+	if err != nil || !done {
+		t.Fatalf("retry done=%v err=%v", done, err)
+	}
+	if calls != 2 {
+		t.Fatalf("hook calls = %d, want 2 (audit must not be skipped on retry)", calls)
+	}
+	if got := outputValue(rc.Run.Outputs, "gitFallback"); got != "platform_app" {
+		t.Fatalf("gitFallback marker = %q after retry", got)
+	}
+}
+
 func TestScopeUserFallbackPlatformApp(t *testing.T) {
 	rc, repo, env, git, _ := scopeFixture(t, userScopeBlock)
 	env.UserGit = &fakeUserGit{err: &gitgithub.ErrNoConnection{OrgID: "org:acme", UserSub: "dev-1", Provider: "github"}}

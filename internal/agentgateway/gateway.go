@@ -105,7 +105,19 @@ type Gateway struct {
 	// cluster identity (last-writer-wins eviction, see session_registry.go).
 	sessionsMu sync.Mutex
 	sessions   map[string]*sessionHandle
+	// vault mints/redeems per-user credential refs for InvokeAction (W3);
+	// nil means raw user tokens on the extension hop fail closed.
+	vault *CredentialVault
 }
+
+// WithCredentialVault wires the W3 credential vault (nil-safe).
+func (g *Gateway) WithCredentialVault(v *CredentialVault) *Gateway {
+	g.vault = v
+	return g
+}
+
+// CredentialVault exposes the wired vault (nil when unconfigured).
+func (g *Gateway) CredentialVault() *CredentialVault { return g.vault }
 
 // SecretStoreLookup resolves platform-scoped SecretStore names from the
 // registry (secretstores.Service seam). ErrNotFound from the registry means

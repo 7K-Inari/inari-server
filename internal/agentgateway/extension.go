@@ -45,7 +45,12 @@ const (
 	// persisted, so only this reference ever crosses the hop — raw user
 	// tokens are rejected, never stored in agent_commands.payload.
 	MetadataUserCredentialRef = "x-inari-user-credential-ref"
-	defaultInvokeWait         = 60 * time.Second
+	// MetadataUserCredential carries a raw per-user token from the extension
+	// hop (in memory only). The gateway mints a vault ref for it and the
+	// command payload carries only that ref — the token is never persisted,
+	// logged, or audited.
+	MetadataUserCredential = "x-inari-user-credential"
+	defaultInvokeWait      = 60 * time.Second
 )
 
 // userCredentialRefMaxLen bounds the opaque reference (it is a lookup key,
@@ -128,19 +133,37 @@ func (g *Gateway) invokeExtension(ctx context.Context, req *connect.Request[agen
 	// Per-user credential reference (W2 auth model): the control plane owns
 	// InvokeAction.user_credential_ref — the extension hop supplies it via
 	// metadata; any value self-asserted in the payload is discarded. Raw
-	// user tokens are rejected outright.
+	// user tokens are rejected outright in the ref header.
 	credRef := req.Header().Get(MetadataUserCredentialRef)
 	req.Msg.UserCredentialRef = ""
 	if credRef != "" {
 		if err := validateUserCredentialRef(credRef); err != nil {
 			return nil, connect.NewError(connect.CodeInvalidArgument, err)
 		}
-		req.Msg.UserCredentialRef = credRef
 	}
 	// The control plane owns the command journal id: stamp it into the
 	// payload — the agent's dispatcher dedupes/acks on
 	// InvokeAction.CommandId, and its ack must match our journal row.
 	req.Msg.CommandId = uuid.NewString()
+	// Raw user token over the hop (W3): the vault mints a credential bound
+	// to this command and cluster with a TTL equal to the invoke wait; the
+	// persisted payload carries only the minted ref. The credential and the
+	// command row commit atomically (command_id FK).
+	rawToken := req.Header().Get(MetadataUserCredential)
+	if rawToken != "" {
+		if credRef != "" {
+			return nil, connect.NewError(connect.CodeInvalidArgument,
+				fmt.Errorf("%s and %s are mutually exclusive", MetadataUserCredential, MetadataUserCredentialRef))
+		}
+		if g.vault == nil {
+			return nil, connect.NewError(connect.CodeFailedPrecondition,
+				fmt.Errorf("user credential vault not configured"))
+		}
+		credRef = g.vault.NewRef()
+	}
+	if credRef != "" {
+		req.Msg.UserCredentialRef = credRef
+	}
 	anyPayload, err := anypb.New(req.Msg)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
@@ -165,7 +188,25 @@ func (g *Gateway) invokeExtension(ctx context.Context, req *connect.Request[agen
 		Type:      agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_INVOKE_ACTION),
 		Payload:   raw,
 	}
-	if err := g.queue.Enqueue(ctx, cmd); err != nil {
+	if rawToken != "" {
+		// Atomic: command row first (command_id FK), then the credential.
+		tx, err := g.db.Pool.Begin(ctx)
+		if err != nil {
+			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("enqueue: %w", err))
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		if _, err := tx.Exec(ctx, `INSERT INTO agent_commands (id, cluster_id, type, payload)
+			VALUES ($1,$2,$3,$4) ON CONFLICT (id) DO NOTHING`,
+			cmd.ID, cmd.ClusterID, cmd.Type, cmd.Payload); err != nil {
+			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("enqueue: %w", err))
+		}
+		if err := g.vault.MintWithRefTx(ctx, tx, credRef, clusterID, cmd.ID, []byte(rawToken), wait); err != nil {
+			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("mint user credential"))
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("enqueue: %w", err))
+		}
+	} else if err := g.queue.Enqueue(ctx, cmd); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("enqueue: %w", err))
 	}
 	ack, err := g.awaitAck(ctx, cmd.ID, wait)

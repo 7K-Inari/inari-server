@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,13 +26,37 @@ import (
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
 )
 
-// Provider writes desired state to GitHub as an App installation.
+// UserIdentity attributes commits to a connected user's git host login
+// (model C). Email defaults to the provider noreply address.
+type UserIdentity struct {
+	Login string
+	Email string
+}
+
+// noreplyEmail is the privacy-preserving address GitHub routes to the
+// user's account (used when the profile email is unavailable).
+func noreplyEmail(login string) string {
+	return login + "@users.noreply.github.com"
+}
+
+// AccessTokenFunc returns a valid user OAuth access token (model C). The
+// backing service owns refresh/caching; the provider never persists tokens.
+type AccessTokenFunc func(ctx context.Context) (string, error)
+
+// Provider writes desired state to GitHub as an App installation
+// (models A/B) or as a connected user via OAuth user tokens (model C).
 type Provider struct {
 	apiBase        string
 	appID          int64
 	installationID int64
 	key            *rsa.PrivateKey
 	http           *http.Client
+
+	// Model C (user OAuth). userToken != nil selects user mode: no App JWT,
+	// no installation token minting, commits carry author/committer, and
+	// EnsureRepo may create repositories.
+	userToken AccessTokenFunc
+	identity  *UserIdentity
 
 	mu       sync.Mutex
 	token    string
@@ -110,6 +135,26 @@ func NewWithKey(appID, installationID int64, key *rsa.PrivateKey, apiBase string
 	}
 }
 
+// NewUserProvider builds a model-C Provider authenticated with per-user
+// OAuth access tokens (never a PAT). Commits are authored/committed as
+// identity; EnsureRepo may create repositories the user can administer.
+// apiBase is the connection's API base (allowlist-validated by the caller).
+func NewUserProvider(token AccessTokenFunc, apiBase string, identity UserIdentity) *Provider {
+	base := apiBase
+	if base == "" {
+		base = "https://api.github.com"
+	}
+	if identity.Email == "" {
+		identity.Email = noreplyEmail(identity.Login)
+	}
+	return &Provider{
+		apiBase:   strings.TrimSuffix(base, "/"),
+		http:      &http.Client{Timeout: 30 * time.Second},
+		userToken: token,
+		identity:  &identity,
+	}
+}
+
 // signAppJWT signs a short-lived App JWT (RS256, §12.1).
 func signAppJWT(appID int64, key *rsa.PrivateKey) (string, error) {
 	now := time.Now()
@@ -124,6 +169,15 @@ func signAppJWT(appID int64, key *rsa.PrivateKey) (string, error) {
 // appJWT signs a short-lived App JWT (RS256, §12.1).
 func (p *Provider) appJWT() (string, error) {
 	return signAppJWT(p.appID, p.key)
+}
+
+// bearerToken returns the credential for API calls: the user's OAuth token
+// (model C) or an App installation token (models A/B).
+func (p *Provider) bearerToken(ctx context.Context) (string, error) {
+	if p.userToken != nil {
+		return p.userToken(ctx)
+	}
+	return p.installationToken(ctx)
 }
 
 // installationToken mints (and caches) an installation access token.
@@ -169,7 +223,7 @@ func (p *Provider) installationToken(ctx context.Context) (string, error) {
 
 // do performs an authenticated API call. body may be nil.
 func (p *Provider) do(ctx context.Context, method, path string, body, out any) (int, error) {
-	tok, err := p.installationToken(ctx)
+	tok, err := p.bearerToken(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -230,11 +284,53 @@ func (p *Provider) EnsureRepo(ctx context.Context, repo string) (string, error) 
 	}
 	status, err := p.do(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/%s", owner, name), nil, nil)
 	if status == http.StatusNotFound {
+		if p.userToken != nil {
+			return p.createUserRepo(ctx, owner, name)
+		}
 		return "", fmt.Errorf("gitprovider github: repo %s not found; create %s-inari-state via the tenant zone flow", repo, owner)
 	}
 	if err != nil {
 		return "", err
 	}
+	return p.webBase() + "/" + owner + "/" + name + ".git", nil
+}
+
+// ErrRepoCreateForbidden: the connected user cannot create the repository
+// (not their account and no org-admin permission). Never falls through to
+// the platform "tenant zone flow" message — model C fails explicitly.
+type ErrRepoCreateForbidden struct {
+	Repo string
+}
+
+func (e *ErrRepoCreateForbidden) Error() string {
+	return fmt.Sprintf("gitprovider github: connected user cannot create repo %s (needs own account or org admin)", e.Repo)
+}
+
+// createUserRepo creates a missing repository as the connected user: under
+// their own account (POST /user/repos) or an org they administer
+// (POST /orgs/{org}/repos). 403/404 from the org path means the user lacks
+// permission — surfaced as ErrRepoCreateForbidden.
+func (p *Provider) createUserRepo(ctx context.Context, owner, name string) (string, error) {
+	body := map[string]any{"name": name, "private": true}
+	var path string
+	if strings.EqualFold(owner, p.identity.Login) {
+		path = "/user/repos"
+	} else {
+		path = fmt.Sprintf("/orgs/%s/repos", owner)
+	}
+	status, err := p.do(ctx, http.MethodPost, path, body, nil)
+	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && (apiErr.Status == http.StatusForbidden || apiErr.Status == http.StatusNotFound) {
+			return "", &ErrRepoCreateForbidden{Repo: owner + "/" + name}
+		}
+		if apiErr != nil && apiErr.Status == http.StatusUnprocessableEntity {
+			// Raced with another creator: treat as existing.
+			return p.webBase() + "/" + owner + "/" + name + ".git", nil
+		}
+		return "", err
+	}
+	_ = status
 	return p.webBase() + "/" + owner + "/" + name + ".git", nil
 }
 
@@ -322,9 +418,11 @@ func (p *Provider) DeleteFiles(ctx context.Context, repo, branch string, paths [
 	var commit struct {
 		SHA string `json:"sha"`
 	}
-	if _, err := p.do(ctx, http.MethodPost, base+"/git/commits", map[string]any{
-		"message": message, "tree": tree.SHA, "parents": []string{ref.Object.SHA},
-	}, &commit); err != nil {
+	commitReq := map[string]any{"message": message, "tree": tree.SHA, "parents": []string{ref.Object.SHA}}
+	for k, v := range p.attribution() {
+		commitReq[k] = v
+	}
+	if _, err := p.do(ctx, http.MethodPost, base+"/git/commits", commitReq, &commit); err != nil {
 		return nil, err
 	}
 	if _, err := p.do(ctx, http.MethodPatch, base+"/git/refs/heads/"+branch, map[string]any{
@@ -357,6 +455,16 @@ func (p *Provider) ReadFile(ctx context.Context, repo, branch, path string) (str
 		return "", err
 	}
 	return string(raw), nil
+}
+
+// attribution returns the author/committer payload for model C commits,
+// or nil for App installations (models A/B keep bot attribution payloads).
+func (p *Provider) attribution() map[string]any {
+	if p.identity == nil {
+		return nil
+	}
+	id := map[string]string{"name": p.identity.Login, "email": p.identity.Email}
+	return map[string]any{"author": id, "committer": id}
 }
 
 // commitTree creates blobs → tree → commit → ref update on branch.
@@ -425,6 +533,9 @@ func (p *Provider) commitTree(ctx context.Context, owner, name, branch string, f
 	}
 
 	commitReq := map[string]any{"message": message, "tree": tree.SHA}
+	for k, v := range p.attribution() {
+		commitReq[k] = v
+	}
 	if baseSHA != "" {
 		commitReq["parents"] = []string{baseSHA}
 	}

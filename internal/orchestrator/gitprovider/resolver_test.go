@@ -22,6 +22,17 @@ func TestStaticResolverReturnsSameProvider(t *testing.T) {
 	}
 }
 
+func TestStaticResolverForUserFailsClosed(t *testing.T) {
+	r := StaticResolver{P: NewFake()}
+	p, info, err := r.ForUser(context.Background(), "org:1", "user:1")
+	if p != nil || info != nil {
+		t.Fatalf("static resolver must never impersonate a user: %v %v", p, info)
+	}
+	if err != ErrUserModelUnsupported {
+		t.Fatalf("err = %v, want ErrUserModelUnsupported", err)
+	}
+}
+
 func TestStaticResolverIgnoresConfig(t *testing.T) {
 	fake := NewFake()
 	r := StaticResolver{P: fake}

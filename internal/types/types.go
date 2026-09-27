@@ -731,11 +731,14 @@ type PlatformResource struct {
 // resolves/refreshes/fails a tenant's git credentials (never on cache hit).
 type TenantGitAuthResolvedPayload struct {
 	OrgID          string `json:"orgId"`
-	AuthModel      string `json:"authModel"` // platform|byo
+	AuthModel      string `json:"authModel"` // platform|byo|user
 	AppID          int64  `json:"appId,omitempty"`
 	InstallationID int64  `json:"installationId,omitempty"`
 	APIBase        string `json:"apiBase,omitempty"`
-	Result         string `json:"result"` // resolved|scope_warning|not_installed|invalid_credentials|error
+	Result         string `json:"result"` // resolved|scope_warning|not_installed|not_connected|invalid_credentials|error
+	// Model C (per-user OAuth) identifiers; never token material.
+	UserSub      string `json:"userSub,omitempty"`
+	ConnectionID string `json:"connectionId,omitempty"`
 }
 
 // PlatformResourcePayload is the outbox payload for platform resource events.

@@ -31,7 +31,10 @@ type ResolvedEvent struct {
 	AppID          int64
 	InstallationID int64
 	APIBase        string
-	Result         string // resolved|scope_warning|not_installed|error
+	Result         string // resolved|scope_warning|not_installed|not_connected|error
+	// Model C fields (empty for platform/BYO).
+	UserSub      string
+	ConnectionID string
 }
 
 // ResolverConfig configures the hybrid per-tenant git provider resolver.
@@ -104,6 +107,9 @@ type statusEntry struct {
 // (model B) when configured, else the platform app with a per-org
 // installation discovered at runtime (model A).
 type Resolver struct {
+	// User is the optional model-C (per-user OAuth) resolver; nil disables
+	// user resolution (ForUser fails closed).
+	User        *UserResolver
 	cfg         ResolverConfig
 	platformKey *rsa.PrivateKey
 	apiBase     string
@@ -176,6 +182,15 @@ func (r *Resolver) ForTenant(ctx context.Context, cfg *types.TenantGitConfig) (g
 		return r.forTenantBYO(ctx, cfg)
 	}
 	return r.forTenantPlatform(ctx, cfg)
+}
+
+// ForUser implements gitprovider.Resolver for model C, delegating to the
+// wired UserResolver. Fails closed when user resolution is not wired.
+func (r *Resolver) ForUser(ctx context.Context, orgID, userSub string) (gitprovider.Provider, *gitprovider.AuthInfo, error) {
+	if r.User == nil {
+		return nil, nil, gitprovider.ErrUserModelUnsupported
+	}
+	return r.User.ForUser(ctx, orgID, userSub)
 }
 
 // forTenantPlatform implements model A: platform app + per-org installation.

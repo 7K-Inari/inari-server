@@ -192,20 +192,47 @@ func buildGitResolver(cfg *config.Config, database *db.DB) (gitprovider.Resolver
 		LegacyInstallationID:   cfg.GitHubInstallationID,
 		CacheTTL:               cfg.GitHubInstallCacheTTL,
 		KeyLoader:              loader.Load,
-		OnResolved: func(_ context.Context, ev gitgithub.ResolvedEvent) {
-			// Audit trail for credential resolutions (outbox → NATS).
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if err := database.WithTx(ctx, func(tx pgx.Tx) error {
-				return audit.AppendOutbox(ctx, tx, ev.OrgID, types.EventTenantGitAuthResolved, types.TenantGitAuthResolvedPayload{
-					OrgID: ev.OrgID, AuthModel: string(ev.AuthModel), AppID: ev.AppID,
-					InstallationID: ev.InstallationID, APIBase: ev.APIBase, Result: ev.Result,
-				})
-			}); err != nil {
-				slog.Warn("git auth audit event failed", "org", ev.OrgID, "result", ev.Result, "error", err)
-			}
-		},
+		OnResolved:             gitAuthAuditHook(database),
 	})
+}
+
+// gitAuthAuditHook writes credential-resolution events to the outbox
+// (→ NATS). Shared by the App resolver (models A/B) and the user resolver
+// (model C).
+func gitAuthAuditHook(database *db.DB) func(context.Context, gitgithub.ResolvedEvent) {
+	return func(_ context.Context, ev gitgithub.ResolvedEvent) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := database.WithTx(ctx, func(tx pgx.Tx) error {
+			return audit.AppendOutbox(ctx, tx, ev.OrgID, types.EventTenantGitAuthResolved, types.TenantGitAuthResolvedPayload{
+				OrgID: ev.OrgID, AuthModel: string(ev.AuthModel), AppID: ev.AppID,
+				InstallationID: ev.InstallationID, APIBase: ev.APIBase, Result: ev.Result,
+				UserSub: ev.UserSub, ConnectionID: ev.ConnectionID,
+			})
+		}); err != nil {
+			slog.Warn("git auth audit event failed", "org", ev.OrgID, "result", ev.Result, "error", err)
+		}
+	}
+}
+
+// userGitLookup adapts usergit.Service to the model-C resolver's metadata
+// seam (metadata only — token material stays inside usergit).
+func userGitLookup(svc *usergit.Service) gitgithub.LookupConnectionFunc {
+	return func(ctx context.Context, orgID, userSub, provider string) (*gitgithub.Connection, error) {
+		conns, err := svc.List(ctx, orgID, userSub)
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range conns {
+			if c.Provider == provider {
+				return &gitgithub.Connection{
+					ID: c.ID, Provider: c.Provider,
+					ProviderLogin: c.ProviderLogin, APIBase: c.APIBase,
+				}, nil
+			}
+		}
+		return nil, gitgithub.ErrConnectionNotFound
+	}
 }
 
 // buildUserGitService assembles the W4 user-git module. Returns (nil, nil)
@@ -586,6 +613,21 @@ func run() error {
 	git, err := buildGitResolver(cfg, database)
 	if err != nil {
 		return err
+	}
+	// W5 model C: per-user OAuth resolution (user-attributed git writes).
+	// Wired onto the github App resolver when both the github backend and
+	// the W4 user-git module are enabled; otherwise ForUser fails closed.
+	if ghResolver, ok := git.(*gitgithub.Resolver); ok && userGitSvc != nil {
+		userResolver, err := gitgithub.NewUserResolver(gitgithub.UserResolverConfig{
+			Tokens:          userGitSvc,
+			Lookup:          userGitLookup(userGitSvc),
+			AllowedAPIBases: cfg.UserGitAPIBaseAllowlist,
+			OnResolved:      gitAuthAuditHook(database),
+		})
+		if err != nil {
+			return err
+		}
+		ghResolver.User = userResolver
 	}
 	// Modules that address repos directly (scaffold, TZF) resolve
 	// credentials per repo via the platform app.

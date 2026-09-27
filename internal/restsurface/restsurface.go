@@ -35,6 +35,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/secretstores"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/tenantzonefactory"
+	"github.com/7K-Inari/inari-server/internal/usergit"
 )
 
 // Deps carries every dependency the REST handlers need. The live binary
@@ -59,6 +60,7 @@ type Deps struct {
 	Fleet              *fleetmanager.Service
 	SecretStores       *secretstores.Service
 	Extensions         *extensionhost.Service
+	UserGit            *usergit.Service
 	DB                 *db.DB
 	AuditStore         *audit.Store
 
@@ -91,5 +93,6 @@ func Register(api huma.API, d Deps) {
 	secretstores.NewHandler(d.SecretStores, d.Tenancy, d.Authz).RegisterRoutes(api)
 	extensionhost.NewHandler(d.Extensions, d.Tenancy, d.Authz).
 		WithRemoteEntryFetcher(d.RemoteEntries).RegisterRoutes(api)
+	usergit.NewHandler(d.UserGit, d.Tenancy, d.Authz).RegisterRoutes(api)
 	auditapi.NewHandler(d.DB, d.AuditStore, d.Tenancy, d.Authz).RegisterRoutes(api)
 }

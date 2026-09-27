@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -51,6 +53,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/tenancy/gitkeys"
 	"github.com/7K-Inari/inari-server/internal/tenantzonefactory"
 	"github.com/7K-Inari/inari-server/internal/types"
+	"github.com/7K-Inari/inari-server/internal/usergit"
 
 	"connectrpc.com/connect"
 	agentv1connect "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1/agentv1connect"
@@ -203,6 +206,83 @@ func buildGitResolver(cfg *config.Config, database *db.DB) (gitprovider.Resolver
 			}
 		},
 	})
+}
+
+// buildUserGitService assembles the W4 user-git module. Returns (nil, nil)
+// when disabled or when the KEK/app credentials are unavailable (fail-open,
+// mirroring the credential vault); configuration errors surface as errors.
+func buildUserGitService(cfg *config.Config, database *db.DB, auditStore *audit.Store, log *slog.Logger) (*usergit.Service, error) {
+	if !cfg.UserGitEnabled {
+		return nil, nil
+	}
+	var kek usergit.KEK
+	switch cfg.UserGitKEKBackend {
+	case "transit":
+		raw, err := os.ReadFile(cfg.UserGitTransitTokenFile)
+		if err != nil {
+			return nil, fmt.Errorf("usergit: read transit token: %w", err)
+		}
+		kek, err = usergit.NewTransitKEK(cfg.UserGitTransitAddr, cfg.UserGitTransitMount,
+			cfg.UserGitTransitKeyName, strings.TrimSpace(string(raw)), nil)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		key, err := usergit.LoadStaticKEK()
+		if err != nil {
+			log.Warn("usergit KEK unset: user git connections disabled", "reason", err)
+			return nil, nil
+		}
+		kek, err = usergit.NewStaticKEK(key)
+		if err != nil {
+			return nil, err
+		}
+	}
+	cipher, err := usergit.NewCipher(kek)
+	if err != nil {
+		return nil, err
+	}
+	secretRaw, err := os.ReadFile(cfg.UserGitGitHubClientSecretFile)
+	if err != nil {
+		return nil, fmt.Errorf("usergit: read github client secret: %w", err)
+	}
+	secret := strings.TrimSpace(string(secretRaw))
+	gh, err := usergit.NewGitHubProvider(usergit.GitHubConfig{
+		ClientID:        cfg.UserGitGitHubClientID,
+		ClientSecret:    secret,
+		CallbackURL:     cfg.UserGitCallbackURL,
+		Scopes:          cfg.UserGitGitHubScopes,
+		AllowedAPIBases: cfg.UserGitAPIBaseAllowlist,
+	})
+	if err != nil {
+		return nil, err
+	}
+	// OAuth state HMAC key: dedicated mounted file, else derived from the
+	// client secret (stable across restarts, never persisted).
+	stateKey := []byte(secret)
+	if cfg.UserGitStateKeyFile != "" {
+		raw, err := os.ReadFile(cfg.UserGitStateKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("usergit: read state key: %w", err)
+		}
+		stateKey = []byte(strings.TrimSpace(string(raw)))
+	}
+	sum := sha256.Sum256(stateKey)
+	svc, err := usergit.NewService(database, usergit.NewStore(), auditStore, cipher,
+		map[string]usergit.Provider{
+			"github":  gh,
+			"gitlab":  usergit.PlannedProvider{ProviderName: "gitlab"},
+			"forgejo": usergit.PlannedProvider{ProviderName: "forgejo"},
+		},
+		sum[:], usergit.Config{
+			UIReturnURL:     cfg.UserGitUIReturnURL,
+			StateTTL:        cfg.UserGitStateTTL,
+			AccessCacheSkew: cfg.UserGitAccessCacheSkew,
+		})
+	if err != nil {
+		return nil, err
+	}
+	return svc, nil
 }
 
 func run() error {
@@ -406,6 +486,16 @@ func run() error {
 		go leaderlease.Run(ctx, leaser, "agent-credential-sweep", func(lctx context.Context) {
 			v.RunSweepLoop(lctx, time.Minute)
 		}, log)
+	}
+
+	// W4 user git connections (per-user git social login): envelope-encrypted
+	// refresh tokens behind a KEK backend (static key file or OpenBao/Vault
+	// transit), dedicated GitHub user-OAuth app, single-flight refresh with
+	// compromise wipe. Fail-open: when the KEK or app credentials are
+	// missing the module is disabled and its routes 501/404.
+	userGitSvc, err := buildUserGitService(cfg, database, auditStore, log)
+	if err != nil {
+		return err
 	}
 
 	// M7.W4: the ops reconcile endpoint enqueues platform-cluster resyncs
@@ -684,6 +774,7 @@ func run() error {
 		Fleet:             fleetSvc,
 		SecretStores:      secretStoresSvc,
 		Extensions:        extSvc,
+		UserGit:           userGitSvc,
 		DB:                database,
 		AuditStore:        auditStore,
 		IdentityScopes:    cfg.IdentityScopes,

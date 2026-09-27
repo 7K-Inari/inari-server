@@ -138,6 +138,34 @@ type Config struct {
 	// TenantGitKeyMountRoot is where ESO renders tenant BYO app keys.
 	TenantGitKeyMountRoot string
 
+	// User git connections (W4: per-user git social login). UserGitEnabled
+	// gates the whole module; the dedicated GitHub user-OAuth app (client
+	// id + mounted secret file — never an inline secret) is distinct from
+	// the platform/BYO installation apps above.
+	UserGitEnabled                bool
+	UserGitGitHubClientID         string
+	UserGitGitHubClientSecretFile string
+	UserGitGitHubScopes           string
+	// UserGitCallbackURL is the public callback URL registered on the app.
+	UserGitCallbackURL string
+	// UserGitUIReturnURL is where the callback redirects the browser.
+	UserGitUIReturnURL string
+	// UserGitAPIBaseAllowlist allowlists GHE/self-hosted API base URLs
+	// (empty: github.com only).
+	UserGitAPIBaseAllowlist []string
+	// UserGitKEKBackend selects the DEK-wrapping KEK: "static" (AES-256-GCM
+	// key file, dev default) or "transit" (OpenBao/Vault transit engine).
+	UserGitKEKBackend       string
+	UserGitTransitAddr      string
+	UserGitTransitMount     string
+	UserGitTransitKeyName   string
+	UserGitTransitTokenFile string
+	// UserGitStateKeyFile holds the HMAC key signing OAuth states; empty
+	// derives it from the GitHub client secret.
+	UserGitStateKeyFile    string
+	UserGitStateTTL        time.Duration
+	UserGitAccessCacheSkew time.Duration
+
 	// Tenant Zone Factory (plan §5.12). TZFAWSMode selects the AWS backend:
 	// "fake" (default; deterministic in-memory — the M3 acceptance layer)
 	// or "aws" (SDK against a real dev organization when credentials exist).
@@ -259,6 +287,22 @@ func Load() (*Config, error) {
 		GitHubAllowedAPIBases:   listEnv("INARI_GITHUB_ALLOWED_API_BASES", nil),
 		TenantGitKeyMountRoot:   env("INARI_TENANT_GIT_KEY_MOUNT_ROOT", "/var/run/inari/tenant-git-keys"),
 
+		UserGitEnabled:                boolEnv("INARI_USERGIT_ENABLED", false),
+		UserGitGitHubClientID:         env("INARI_USERGIT_GITHUB_CLIENT_ID", ""),
+		UserGitGitHubClientSecretFile: env("INARI_USERGIT_GITHUB_CLIENT_SECRET_FILE", ""),
+		UserGitGitHubScopes:           env("INARI_USERGIT_GITHUB_SCOPES", "repo read:user"),
+		UserGitCallbackURL:            env("INARI_USERGIT_CALLBACK_URL", ""),
+		UserGitUIReturnURL:            env("INARI_USERGIT_UI_RETURN_URL", "/settings/git"),
+		UserGitAPIBaseAllowlist:       listEnv("INARI_USERGIT_API_BASE_ALLOWLIST", nil),
+		UserGitKEKBackend:             env("INARI_USERGIT_KEK_BACKEND", "static"),
+		UserGitTransitAddr:            env("INARI_USERGIT_TRANSIT_ADDR", ""),
+		UserGitTransitMount:           env("INARI_USERGIT_TRANSIT_MOUNT", "transit"),
+		UserGitTransitKeyName:         env("INARI_USERGIT_TRANSIT_KEY_NAME", "inari-usergit"),
+		UserGitTransitTokenFile:       env("INARI_USERGIT_TRANSIT_TOKEN_FILE", ""),
+		UserGitStateKeyFile:           env("INARI_USERGIT_STATE_KEY_FILE", ""),
+		UserGitStateTTL:               durEnv("INARI_USERGIT_STATE_TTL", 10*time.Minute),
+		UserGitAccessCacheSkew:        durEnv("INARI_USERGIT_ACCESS_CACHE_SKEW", time.Minute),
+
 		TZFAWSMode:           env("INARI_TZF_AWS_MODE", "fake"),
 		TZFApprovalRequired:  boolEnv("INARI_TZF_APPROVAL_REQUIRED", true),
 		TZFAccountQuota:      intEnv("INARI_TZF_ACCOUNT_QUOTA", 10),
@@ -308,6 +352,22 @@ func Load() (*Config, error) {
 	}
 	if c.CacheTenantTTL <= 0 {
 		return nil, fmt.Errorf("config: INARI_CACHE_TENANT_TTL must be positive, got %s", c.CacheTenantTTL)
+	}
+	if c.UserGitKEKBackend != "static" && c.UserGitKEKBackend != "transit" {
+		return nil, fmt.Errorf("config: INARI_USERGIT_KEK_BACKEND must be \"static\" or \"transit\", got %q", c.UserGitKEKBackend)
+	}
+	if c.UserGitKEKBackend == "transit" {
+		if c.UserGitTransitAddr == "" || c.UserGitTransitTokenFile == "" || c.UserGitTransitKeyName == "" {
+			return nil, fmt.Errorf("config: transit KEK requires INARI_USERGIT_TRANSIT_ADDR, INARI_USERGIT_TRANSIT_TOKEN_FILE and INARI_USERGIT_TRANSIT_KEY_NAME")
+		}
+	}
+	if c.UserGitEnabled {
+		if c.UserGitGitHubClientID == "" || c.UserGitGitHubClientSecretFile == "" {
+			return nil, fmt.Errorf("config: INARI_USERGIT_ENABLED requires INARI_USERGIT_GITHUB_CLIENT_ID and INARI_USERGIT_GITHUB_CLIENT_SECRET_FILE")
+		}
+		if c.UserGitCallbackURL == "" {
+			return nil, fmt.Errorf("config: INARI_USERGIT_ENABLED requires INARI_USERGIT_CALLBACK_URL")
+		}
 	}
 	return c, nil
 }

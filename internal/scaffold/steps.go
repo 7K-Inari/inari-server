@@ -118,17 +118,20 @@ func gitProviderFor(ctx context.Context, env *ExecEnv, rc *RunContext, m *Templa
 			OrgSlug: slug, Provider: providerName, ConnectURL: connectURL(slug, providerName),
 		}
 	}
-	// platform_app: route through the platform app — never silently: mark
-	// the run and audit the fallback (marker set first so a retry after a
-	// failed step doesn't duplicate the audit record).
+	// platform_app: route through the platform app — never silently: audit
+	// the fallback, then mark the run. Audit first: run.Outputs persist
+	// with the failed-step transition, so a marker set before a failed
+	// audit TX would make a retry skip the audit record entirely (a silent
+	// platform replacement). A retry after a later failure may record the
+	// audit twice — far less harmful than losing it.
 	if outputValue(rc.Run.Outputs, "gitFallback") != "platform_app" {
-		if err := mergeOutputs(rc, "gitFallback", "platform_app"); err != nil {
-			return nil, "", "", "", err
-		}
 		if env.OnGitFallback != nil {
 			if err := env.OnGitFallback(ctx, rc, GitFallback{UserSub: rc.Run.CreatedBy, Reason: reason}); err != nil {
 				return nil, "", "", "", err
 			}
+		}
+		if err := mergeOutputs(rc, "gitFallback", "platform_app"); err != nil {
+			return nil, "", "", "", err
 		}
 	}
 	return env.Git, "platform_fallback", "", "", nil

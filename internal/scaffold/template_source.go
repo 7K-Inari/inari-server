@@ -25,9 +25,37 @@ import (
 // — kept permissive (phase name → param map) and only validated for shape.
 type ScaffoldConfig struct {
 	RequiresApproval bool `yaml:"requiresApproval" json:"requiresApproval,omitempty"`
+	// Scope classifies the template's git writes (M8.W6): ScopePlatform
+	// (default, fail-safe) commits through the platform app (PerRepo);
+	// ScopeUser commits as the initiating user's connected git identity
+	// (model C, gitprovider.Resolver.ForUser).
+	Scope string `yaml:"scope" json:"scope,omitempty"`
 	// Phases maps phase name → phase params (yaml inline: the phase keys
 	// sit alongside requiresApproval in the scaffold: mapping).
 	Phases map[string]map[string]any `yaml:",inline" json:"-"`
+}
+
+// Template git-write scopes (scaffold.scope).
+const (
+	// ScopePlatform commits through the platform GitHub App — the default
+	// when the manifest omits scope (fail-safe).
+	ScopePlatform = "platform"
+	// ScopeUser commits as the initiating user's connected git identity.
+	ScopeUser = "user"
+)
+
+// scope reports the effective git-write scope (empty → platform).
+func (c *ScaffoldConfig) scope() string {
+	if c == nil || c.Scope == "" {
+		return ScopePlatform
+	}
+	return c.Scope
+}
+
+// validScope reports whether raw is an acceptable scaffold.scope value
+// (empty defaults to platform).
+func validScope(raw string) bool {
+	return raw == "" || raw == ScopePlatform || raw == ScopeUser
 }
 
 // MarshalJSON flattens Phases back alongside requiresApproval so the
@@ -41,6 +69,9 @@ func (c ScaffoldConfig) MarshalJSON() ([]byte, error) {
 	}
 	if c.RequiresApproval {
 		m["requiresApproval"] = true
+	}
+	if s := c.scope(); s != ScopePlatform {
+		m["scope"] = s
 	}
 	return json.Marshal(m)
 }
@@ -169,6 +200,9 @@ func readTemplateDir(dir, dirName string) (*TemplatePackage, error) {
 	}
 	if m.Channel == "" {
 		m.Channel = "stable"
+	}
+	if m.Scaffold != nil && !validScope(m.Scaffold.Scope) {
+		return nil, fmt.Errorf("scaffold: %s: template.yaml: invalid scaffold.scope %q (want %q or %q)", dirName, m.Scaffold.Scope, ScopePlatform, ScopeUser)
 	}
 	schema, err := readJSONFile(dir, "schema.json", true)
 	if err != nil {

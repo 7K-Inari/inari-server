@@ -619,6 +619,13 @@ type TenantGitConfig struct {
 	// GitHubApp is the optional BYO GitHub App override (model B); when
 	// nil the platform app + per-org installation is used (model A).
 	GitHubApp *GitHubAppConfig `json:"githubApp,omitempty"`
+	// UserTemplateFallback is the policy for user-scoped scaffold templates
+	// when the initiating user has no connected git identity (M8.W6):
+	// "block" (default/empty) rejects the run with a connect-account deep
+	// link; "platform_app" routes the run's git writes through the platform
+	// app (audited via scaffold.git.fallback). Platform-engineer-only
+	// configuration; an omitted value preserves the stored policy.
+	UserTemplateFallback string `json:"userTemplateFallback,omitempty"`
 	// ClearGitHubApp is a transient write-time signal (never persisted or
 	// serialized): remove the tenant's BYO override, reverting to model A.
 	// Plain nil GitHubApp keeps the stored reference (TZF-safe).
@@ -1588,6 +1595,23 @@ type TenantZonePayload struct {
 	StepStatus string `json:"stepStatus,omitempty"`
 }
 
+// ScaffoldGitFallbackPayload is the outbox payload for
+// EventScaffoldGitFallback: a user-scoped template run whose initiating
+// user had no git connection fell back to the platform app per the
+// tenant's userTemplateFallback=platform_app policy (M8.W6). Identifiers
+// only — never credential material.
+type ScaffoldGitFallbackPayload struct {
+	OrgID        string `json:"orgId"`
+	RunID        string `json:"runId"`
+	TemplateName string `json:"templateName,omitempty"`
+	UserSub      string `json:"userSub"`
+	// Reason classifies the failed user resolution: no_connection |
+	// user_model_unsupported.
+	Reason string `json:"reason"`
+	// Fallback is the applied route (always "platform_app" today).
+	Fallback string `json:"fallback"`
+}
+
 // ScaffoldPhase is the coarse lifecycle state of a scaffold run (M8
 // scaffolding, plan §4/§10).
 type ScaffoldPhase string
@@ -1659,6 +1683,7 @@ const (
 	EventScaffoldRunFailed      = "scaffold.failed"
 	EventScaffoldRunCancelled   = "scaffold.cancelled"
 	EventScaffoldRunRetried     = "scaffold.run_retried"
+	EventScaffoldGitFallback    = "scaffold.git.fallback"
 )
 
 // ScaffoldRunPayload is the outbox payload for scaffold run lifecycle

@@ -360,7 +360,32 @@ func (s *Service) execEnv() *ExecEnv {
 	if env.GitOrg == "" {
 		env.GitOrg = s.cfg.GitOrg
 	}
+	if env.OnGitFallback == nil {
+		env.OnGitFallback = s.recordGitFallback
+	}
 	return env
+}
+
+// recordGitFallback is the OnGitFallback audit hook (M8.W6): a user-scoped
+// template run fell back to the platform app because the initiating user
+// has no connected git identity and the tenant policy allows it. Audit +
+// outbox in one TX, identifiers only.
+func (s *Service) recordGitFallback(ctx context.Context, rc *RunContext, fb GitFallback) error {
+	run := rc.Run
+	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
+			OrgID: run.OrgID, Actor: "system:scaffold", Action: "scaffold.git.fallback",
+			ObjectType: "scaffold_run", ObjectID: run.ID,
+			Payload: json.RawMessage(fmt.Sprintf(`{"user":%q,"reason":%q,"fallback":"platform_app"}`, fb.UserSub, fb.Reason)),
+		}); err != nil {
+			return err
+		}
+		return audit.AppendOutbox(ctx, tx, run.OrgID, types.EventScaffoldGitFallback, types.ScaffoldGitFallbackPayload{
+			OrgID: run.OrgID, RunID: run.ID,
+			TemplateName: strings.TrimPrefix(run.TemplateItemID, "template:"),
+			UserSub:      fb.UserSub, Reason: fb.Reason, Fallback: "platform_app",
+		})
+	})
 }
 
 // failedStep returns the first failed step in execution order, if any.

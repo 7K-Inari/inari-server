@@ -272,6 +272,16 @@ type gitConfigInput struct {
 		// the tenant to the platform app (model A). Mutually exclusive
 		// with githubApp; omitting both leaves any stored override intact.
 		ClearGitHubApp bool `json:"clearGithubApp,omitempty"`
+		// UserTemplateFallback is the policy for user-scoped scaffold
+		// templates when the initiating user has no connected git identity
+		// (M8.W6): "block" (default) rejects the run with a
+		// connect-account deep link; "platform_app" routes the run's git
+		// writes through the platform app (audited). Platform-engineer-only
+		// setting; omitting it (or sending an explicit empty string)
+		// preserves the stored policy. No huma enum tag: the enum validator
+		// rejects the explicit-empty preserve signal with a 422 — the
+		// handler validates non-empty values itself.
+		UserTemplateFallback string `json:"userTemplateFallback,omitempty"`
 	}
 }
 
@@ -334,6 +344,9 @@ func (h *Handler) setGitConfig(ctx context.Context, in *gitConfigInput) (*struct
 	if err := h.validateGitHubApp(in.Body.GitHubApp); err != nil {
 		return nil, huma.Error422UnprocessableEntity(err.Error())
 	}
+	if fb := in.Body.UserTemplateFallback; fb != "" && fb != "block" && fb != "platform_app" {
+		return nil, huma.Error422UnprocessableEntity(`userTemplateFallback must be "block" or "platform_app"`)
+	}
 	policy := types.CommitPolicy(in.Body.CommitPolicy)
 	if policy == "" {
 		policy = types.CommitPolicyDirect
@@ -345,7 +358,7 @@ func (h *Handler) setGitConfig(ctx context.Context, in *gitConfigInput) (*struct
 	return nil, h.svc.SetGitConfig(ctx, "user:"+id.Subject, &types.TenantGitConfig{
 		OrgID: org.ID, Repo: in.Body.Repo, CommitPolicy: policy, BaseBranch: branch,
 		ScaffoldGitOrg: in.Body.ScaffoldGitOrg, GitHubApp: in.Body.GitHubApp,
-		ClearGitHubApp: in.Body.ClearGitHubApp,
+		ClearGitHubApp: in.Body.ClearGitHubApp, UserTemplateFallback: in.Body.UserTemplateFallback,
 	})
 }
 

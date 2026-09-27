@@ -88,9 +88,9 @@ func itServer(t *testing.T) (*httptest.Server, *db.DB, *gitprovider.Fake, *itQue
 	return srv, database, fake, queue
 }
 
-// itServerWithGit is itServer with a caller-supplied git resolver (e.g. one
-// returning typed credential errors for the deploy failure mapping).
-func itServerWithGit(t *testing.T, git gitprovider.Resolver) (*httptest.Server, *db.DB, *itQueue) {
+// itDatabase spins up a migrated, seeded test database (skips when
+// testcontainers is unavailable).
+func itDatabase(t *testing.T) *db.DB {
 	t.Helper()
 	ctx := context.Background()
 	pg, err := postgres.Run(ctx, "postgres:16-alpine",
@@ -113,7 +113,7 @@ func itServerWithGit(t *testing.T, git gitprovider.Resolver) (*httptest.Server, 
 	}
 	t.Cleanup(database.Close)
 	if err := database.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
+		t.Fatal(err)
 	}
 	seed := `
 		INSERT INTO organizations (id, slug, display_name, keycloak_org_id) VALUES ('org:1','acme','Acme','kc-1');
@@ -126,6 +126,15 @@ func itServerWithGit(t *testing.T, git gitprovider.Resolver) (*httptest.Server, 
 	if _, err := database.Pool.Exec(ctx, seed); err != nil {
 		t.Fatal(err)
 	}
+	return database
+}
+
+// itServerWithGit is itServer with a caller-supplied git resolver (e.g. one
+// returning typed credential errors for the deploy failure mapping).
+func itServerWithGit(t *testing.T, git gitprovider.Resolver) (*httptest.Server, *db.DB, *itQueue) {
+	t.Helper()
+	database := itDatabase(t)
+	ctx := context.Background()
 
 	auditStore := audit.NewStore()
 	tenancySvc := tenancy.NewService(database, nil, tenancy.NewStore(), auditStore)

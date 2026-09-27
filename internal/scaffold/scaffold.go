@@ -363,6 +363,12 @@ func (s *Service) CreateRun(ctx context.Context, actor, orgID, name, version, di
 	if err := validateValues(ver.Schema, values); err != nil {
 		return nil, nil, false, err
 	}
+	scope := payloadScope(ver.Payload)
+	if scope == ScopeUser {
+		if err := s.preflightUserGit(ctx, actor, orgID); err != nil {
+			return nil, nil, false, err
+		}
+	}
 	if displayName == "" {
 		displayName = defaultDisplayName(it, values)
 	}
@@ -385,7 +391,7 @@ func (s *Service) CreateRun(ctx context.Context, actor, orgID, name, version, di
 		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
 			OrgID: orgID, Actor: actor, Action: "scaffold.run_created",
 			ObjectType: "scaffold_run", ObjectID: run.ID,
-			Payload: json.RawMessage(fmt.Sprintf(`{"template":%q,"version":%q,"displayName":%q}`, it.Name, version, displayName)),
+			Payload: json.RawMessage(fmt.Sprintf(`{"template":%q,"version":%q,"displayName":%q,"scope":%q}`, it.Name, version, displayName, scope)),
 		}); err != nil {
 			return err
 		}
@@ -408,6 +414,62 @@ func (s *Service) CreateRun(ctx context.Context, actor, orgID, name, version, di
 		return nil, nil, false, err
 	}
 	return run, steps, false, nil
+}
+
+// payloadScope extracts the manifest's scaffold.scope from a catalog
+// version payload written by the template sync (M8.W6); absent or
+// malformed payloads yield the fail-safe platform default.
+func payloadScope(payload json.RawMessage) string {
+	var p struct {
+		Manifest TemplateManifest `json:"manifest"`
+	}
+	if len(payload) == 0 || json.Unmarshal(payload, &p) != nil {
+		return ScopePlatform
+	}
+	return p.Manifest.Scaffold.scope()
+}
+
+// preflightUserGit enforces the user-scope connection policy at run
+// creation (M8.W6): the initiating user must have a connected git
+// identity unless the tenant's userTemplateFallback=platform_app policy
+// applies (the run then falls back at execution time, audited via
+// scaffold.git.fallback). Returns *ErrGitConnectionRequired for the typed
+// 409; other resolution errors are hard failures (never silent fallback).
+func (s *Service) preflightUserGit(ctx context.Context, actor, orgID string) error {
+	env := s.execEnv()
+	var rerr error
+	if env.UserGit == nil {
+		rerr = gitprovider.ErrUserModelUnsupported
+	} else {
+		_, _, rerr = env.UserGit.ForUser(ctx, orgID, actor)
+	}
+	if rerr == nil {
+		return nil
+	}
+	_, providerName, ok := classifyUserGitErr(rerr)
+	if !ok {
+		return fmt.Errorf("scaffold: resolve user git identity: %w", rerr)
+	}
+	fallback := ""
+	if env.GitConfigs != nil {
+		cfg, err := env.GitConfigs.GitConfigForOrg(ctx, orgID)
+		if err != nil {
+			return fmt.Errorf("scaffold: resolve tenant git config: %w", err)
+		}
+		if cfg != nil {
+			fallback = cfg.UserTemplateFallback
+		}
+	}
+	if fallback == "platform_app" {
+		return nil
+	}
+	slug := ""
+	if env.Tenants != nil {
+		if t, err := env.Tenants.ResolveTenant(ctx, orgID); err == nil && t != nil {
+			slug = t.Slug
+		}
+	}
+	return &ErrGitConnectionRequired{OrgSlug: slug, Provider: providerName, ConnectURL: connectURL(slug, providerName)}
 }
 
 // defaultDisplayName derives a run display name from the wizard "name"

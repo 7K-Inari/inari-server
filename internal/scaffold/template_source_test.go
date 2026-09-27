@@ -137,6 +137,10 @@ func TestFilePullerValidation(t *testing.T) {
 		"invalid uiSchema.json": func(dir string) {
 			_ = os.WriteFile(filepath.Join(dir, "uiSchema.json"), []byte("{nope"), 0o644)
 		},
+		"invalid scaffold.scope": func(dir string) {
+			_ = os.WriteFile(filepath.Join(dir, "template.yaml"), []byte(
+				"name: svc\nversion: 0.1.0\nscaffold:\n  scope: org\n"), 0o644)
+		},
 		"missing skeleton": func(dir string) {
 			_ = os.RemoveAll(filepath.Join(dir, "skeleton"))
 		},
@@ -157,6 +161,43 @@ func TestFilePullerValidation(t *testing.T) {
 				t.Errorf("error should name the template dir: %v", err)
 			}
 		})
+	}
+}
+
+func TestScaffoldScopeParsing(t *testing.T) {
+	root := t.TempDir()
+	// scope: user parses and is not swallowed into the inline Phases map.
+	writeTemplate(t, root, "svc", func(dir string) {
+		_ = os.WriteFile(filepath.Join(dir, "template.yaml"), []byte(
+			"name: svc\nversion: 0.1.0\nscaffold:\n  scope: user\n  createRepo:\n    visibility: private\n"), 0o644)
+	})
+	pkgs, err := (&FilePuller{Root: root}).Pull(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := pkgs[0].Manifest.Scaffold
+	if sc.scope() != ScopeUser {
+		t.Fatalf("scope = %q, want user", sc.scope())
+	}
+	if _, ok := sc.Phases["createRepo"]; !ok {
+		t.Fatalf("phases = %v, createRepo must stay inline", sc.Phases)
+	}
+	// MarshalJSON exposes a non-default scope.
+	raw, err := sc.MarshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["scope"] != "user" {
+		t.Fatalf("marshalled scope = %v", m["scope"])
+	}
+	// The fail-safe default is platform.
+	var nilCfg *ScaffoldConfig
+	if nilCfg.scope() != ScopePlatform || (&ScaffoldConfig{}).scope() != ScopePlatform {
+		t.Fatal("empty scope must default to platform")
 	}
 }
 

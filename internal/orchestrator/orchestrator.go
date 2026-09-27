@@ -528,7 +528,7 @@ func (s *Service) SetGitConfig(ctx context.Context, actor string, cfg *types.Ten
 		return s.audit.Record(ctx, tx, &types.AuditEvent{
 			OrgID: cfg.OrgID, Actor: actor, Action: "git.config_set",
 			ObjectType: "tenant", ObjectID: cfg.OrgID,
-			Payload: json.RawMessage(fmt.Sprintf(`{"repo":%q,"commitPolicy":%q,"byoGitApp":%t}`, cfg.Repo, cfg.CommitPolicy, cfg.GitHubApp != nil)),
+			Payload: json.RawMessage(fmt.Sprintf(`{"repo":%q,"commitPolicy":%q,"byoGitApp":%t,"userTemplateFallback":%q}`, cfg.Repo, cfg.CommitPolicy, cfg.GitHubApp != nil, cfg.UserTemplateFallback)),
 		})
 	})
 	if err != nil {

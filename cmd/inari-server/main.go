@@ -666,6 +666,10 @@ func run() error {
 			Tenants:    scaffoldTenantResolver{tenants: svc, clusters: registry},
 			Gate:       approvalsSvc,
 			GitConfigs: scaffoldGitConfigResolver{d: database, store: inventory.NewStore()},
+			// W6: user-scoped templates resolve the initiating user's
+			// connected git identity through the same resolver (model C,
+			// ForUser wired above; fails closed otherwise).
+			UserGit: git,
 		})
 		go scaffoldSvc.RunReconcileLoop(ctx, cfg.ScaffoldReconcileInterval)
 	}

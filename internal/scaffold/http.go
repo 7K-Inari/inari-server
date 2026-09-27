@@ -226,7 +226,10 @@ func (h *Handler) createRun(ctx context.Context, in *createRunInput) (*createRun
 	}
 	run, steps, existed, err := h.svc.CreateRun(ctx, id.Subject, org.ID, in.Name, in.Body.Version, in.Body.DisplayName, values)
 	var valErr *ValidationError
+	var connReq *ErrGitConnectionRequired
 	switch {
+	case errors.As(err, &connReq):
+		return nil, huma.Error409Conflict(connReq.Error(), fmt.Errorf("connectUrl: %s", connReq.ConnectURL))
 	case errors.As(err, &valErr):
 		errs := make([]error, 0, len(valErr.Fields))
 		for _, f := range valErr.Fields {
@@ -398,7 +401,10 @@ func (h *Handler) createScaffold(ctx context.Context, in *createScaffoldInput) (
 	}
 	run, _, existed, err := h.svc.CreateRun(ctx, id.Subject, org.ID, in.Body.TemplateID, "", in.Body.Name, values)
 	var valErr *ValidationError
+	var connReq *ErrGitConnectionRequired
 	switch {
+	case errors.As(err, &connReq):
+		return nil, huma.Error409Conflict(connReq.Error(), fmt.Errorf("connectUrl: %s", connReq.ConnectURL))
 	case errors.As(err, &valErr):
 		errs := make([]error, 0, len(valErr.Fields))
 		for _, f := range valErr.Fields {

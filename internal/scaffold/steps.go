@@ -23,8 +23,116 @@ import (
 
 	"github.com/7K-Inari/inari-server/internal/orchestrator"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
+	gitgithub "github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider/github"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
+
+// ErrGitConnectionRequired fails a user-scoped template run when the
+// initiating user has no connected git identity and the tenant's
+// userTemplateFallback policy is block (the default): the HTTP layer maps
+// it to a typed 409 carrying the connect-account deep link (M8.W6).
+type ErrGitConnectionRequired struct {
+	OrgSlug    string
+	Provider   string
+	ConnectURL string
+}
+
+func (e *ErrGitConnectionRequired) Error() string {
+	return fmt.Sprintf("scaffold: template requires a connected %s git identity; connect one at %s", e.Provider, e.ConnectURL)
+}
+
+// connectURL is the usergit authorize deep link for one org/provider (the
+// 302 flow entry point in internal/usergit/http.go).
+func connectURL(orgSlug, provider string) string {
+	return fmt.Sprintf("/api/v1/tenants/%s/git-connections/%s/authorize", orgSlug, provider)
+}
+
+// classifyUserGitErr reports whether err is a "user has no usable git
+// connection" condition (no connection row, or a resolver that cannot
+// impersonate users) — the only cases the tenant fallback policy may
+// route. Anything else (e.g. a revoked token mid-flight) is a hard error:
+// the user must reconnect; there is no silent platform replacement.
+func classifyUserGitErr(err error) (reason, provider string, ok bool) {
+	var noConn *gitgithub.ErrNoConnection
+	if errors.As(err, &noConn) {
+		provider = noConn.Provider
+		if provider == "" {
+			provider = "github"
+		}
+		return "no_connection", provider, true
+	}
+	if errors.Is(err, gitprovider.ErrUserModelUnsupported) {
+		return "user_model_unsupported", "github", true
+	}
+	return "", "", false
+}
+
+// gitProviderFor selects the git backend for the run by template scope
+// (M8.W6): platform scope (the default) always uses the platform app
+// (env.Git — PerRepo); user scope resolves the initiating user's connected
+// git identity via env.UserGit. When the user has no connection the
+// tenant's userTemplateFallback policy decides: block (default) fails with
+// ErrGitConnectionRequired; platform_app routes through the platform app
+// and fires the OnGitFallback audit hook exactly once per run.
+func gitProviderFor(ctx context.Context, env *ExecEnv, rc *RunContext, m *TemplateManifest) (git GitProvider, authModel, connID, connLogin string, err error) {
+	if m.Scaffold.scope() != ScopeUser {
+		return env.Git, string(gitprovider.AuthModelPlatform), "", "", nil
+	}
+	var provider gitprovider.Provider
+	var info *gitprovider.AuthInfo
+	var rerr error
+	if env.UserGit == nil {
+		rerr = gitprovider.ErrUserModelUnsupported
+	} else {
+		provider, info, rerr = env.UserGit.ForUser(ctx, rc.Run.OrgID, rc.Run.CreatedBy)
+	}
+	if rerr == nil {
+		return provider, string(info.Model), info.ConnectionID, info.ProviderLogin, nil
+	}
+	reason, providerName, ok := classifyUserGitErr(rerr)
+	if !ok {
+		return nil, "", "", "", fmt.Errorf("scaffold: resolve user git identity: %w", rerr)
+	}
+	fallback := ""
+	if env.GitConfigs != nil {
+		cfg, cerr := env.GitConfigs.GitConfigForOrg(ctx, rc.Run.OrgID)
+		if cerr != nil {
+			return nil, "", "", "", fmt.Errorf("scaffold: resolve tenant git config: %w", cerr)
+		}
+		if cfg != nil {
+			fallback = cfg.UserTemplateFallback
+		}
+	}
+	if fallback != "platform_app" {
+		slug := ""
+		if rc.Tenant != nil {
+			slug = rc.Tenant.Slug
+		}
+		if err := mergeOutputs(rc, "errorCode", "git_connection_required"); err != nil {
+			return nil, "", "", "", err
+		}
+		if err := mergeOutputs(rc, "connectUrl", connectURL(slug, providerName)); err != nil {
+			return nil, "", "", "", err
+		}
+		return nil, "", "", "", &ErrGitConnectionRequired{
+			OrgSlug: slug, Provider: providerName, ConnectURL: connectURL(slug, providerName),
+		}
+	}
+	// platform_app: route through the platform app — never silently: mark
+	// the run and audit the fallback (marker set first so a retry after a
+	// failed step doesn't duplicate the audit record).
+	if outputValue(rc.Run.Outputs, "gitFallback") != "platform_app" {
+		if err := mergeOutputs(rc, "gitFallback", "platform_app"); err != nil {
+			return nil, "", "", "", err
+		}
+		if env.OnGitFallback != nil {
+			if err := env.OnGitFallback(ctx, rc, GitFallback{UserSub: rc.Run.CreatedBy, Reason: reason}); err != nil {
+				return nil, "", "", "", err
+			}
+		}
+	}
+	return env.Git, "platform_fallback", "", "", nil
+}
 
 // createRepoResult is the shape persisted in scaffold_run_steps.result for
 // the creating-repo step; creating-pipeline consumes it for the
@@ -308,7 +416,11 @@ func stepCreatingRepo(ctx context.Context, env *ExecEnv, rc *RunContext, step *t
 		return false, fmt.Errorf("scaffold: invalid createRepo.name %q", segment)
 	}
 	repo := gitOrg + "/" + segment
-	cloneURL, err := env.Git.EnsureRepo(ctx, repo)
+	git, authModel, connID, connLogin, err := gitProviderFor(ctx, env, rc, &pkg.Manifest)
+	if err != nil {
+		return false, err
+	}
+	cloneURL, err := git.EnsureRepo(ctx, repo)
 	if err != nil {
 		return false, fmt.Errorf("scaffold: ensure repo %s: %w", repo, err)
 	}
@@ -316,9 +428,22 @@ func stepCreatingRepo(ctx context.Context, env *ExecEnv, rc *RunContext, step *t
 	for _, f := range rendered.Files {
 		files = append(files, gitprovider.File{Path: f.Path, Content: []byte(f.Content)})
 	}
-	res, err := env.Git.CommitFiles(ctx, repo, branch, files, fmt.Sprintf("scaffold: initial %s skeleton", component))
+	res, err := git.CommitFiles(ctx, repo, branch, files, fmt.Sprintf("scaffold: initial %s skeleton", component))
 	if err != nil {
 		return false, fmt.Errorf("scaffold: commit skeleton to %s: %w", repo, err)
+	}
+	if err := mergeOutputs(rc, "authModel", authModel); err != nil {
+		return false, err
+	}
+	if connID != "" {
+		if err := mergeOutputs(rc, "gitConnectionId", connID); err != nil {
+			return false, err
+		}
+	}
+	if connLogin != "" {
+		if err := mergeOutputs(rc, "gitProviderLogin", connLogin); err != nil {
+			return false, err
+		}
 	}
 	raw, err := json.Marshal(createRepoResult{RepoName: repo, RepoURL: cloneURL, Branch: branch, CommitSHA: res.CommitSHA})
 	if err != nil {

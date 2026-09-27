@@ -173,13 +173,14 @@ func (s *Store) MarkFailed(ctx context.Context, q db.Querier, id, message string
 // GitConfig reads the tenant's git target.
 func (s *Store) GitConfig(ctx context.Context, q db.Querier, orgID string) (*types.TenantGitConfig, error) {
 	var c types.TenantGitConfig
-	var scaffoldOrg, keySecret, keyKey, apiBase *string
+	var scaffoldOrg, keySecret, keyKey, apiBase, userFallback *string
 	var appID, installationID *int64
 	err := q.QueryRow(ctx, `SELECT org_id, repo, commit_policy, base_branch, scaffold_git_org,
-		github_app_id, github_app_installation_id, github_app_key_secret, github_app_key_key, github_app_api_base
+		github_app_id, github_app_installation_id, github_app_key_secret, github_app_key_key, github_app_api_base,
+		user_template_fallback
 		FROM tenant_git_configs WHERE org_id = $1`, orgID).
 		Scan(&c.OrgID, &c.Repo, &c.CommitPolicy, &c.BaseBranch, &scaffoldOrg,
-			&appID, &installationID, &keySecret, &keyKey, &apiBase)
+			&appID, &installationID, &keySecret, &keyKey, &apiBase, &userFallback)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -188,6 +189,9 @@ func (s *Store) GitConfig(ctx context.Context, q db.Querier, orgID string) (*typ
 	}
 	if scaffoldOrg != nil {
 		c.ScaffoldGitOrg = *scaffoldOrg
+	}
+	if userFallback != nil {
+		c.UserTemplateFallback = *userFallback
 	}
 	if appID != nil {
 		c.GitHubApp = gitAppFromColumns(*appID, installationID, keySecret, keyKey, apiBase)
@@ -225,6 +229,10 @@ func (s *Store) UpsertGitConfig(ctx context.Context, q db.Querier, c *types.Tena
 	if c.ScaffoldGitOrg != "" {
 		scaffoldOrg = &c.ScaffoldGitOrg
 	}
+	var userFallback *string
+	if c.UserTemplateFallback != "" {
+		userFallback = &c.UserTemplateFallback
+	}
 	var appID, installationID *int64
 	var keySecret, keyKey, apiBase *string
 	if c.GitHubApp != nil {
@@ -251,15 +259,20 @@ func (s *Store) UpsertGitConfig(ctx context.Context, q db.Querier, c *types.Tena
 	}
 	const sqlFmt = `INSERT INTO tenant_git_configs
 		(org_id, repo, commit_policy, base_branch, scaffold_git_org,
-		 github_app_id, github_app_installation_id, github_app_key_secret, github_app_key_key, github_app_api_base)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		 github_app_id, github_app_installation_id, github_app_key_secret, github_app_key_key, github_app_api_base,
+		 user_template_fallback)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,COALESCE($11,'block'))
 		ON CONFLICT (org_id) DO UPDATE SET repo = EXCLUDED.repo, commit_policy = EXCLUDED.commit_policy,
 		  base_branch = EXCLUDED.base_branch,
 		  -- A writer that doesn't know the override (e.g. the
 		  -- tenant zone factory) must not wipe it.
 		  scaffold_git_org = COALESCE(EXCLUDED.scaffold_git_org, tenant_git_configs.scaffold_git_org),
+		  -- Same preserve-on-omit rule for the user-template fallback
+		  -- policy (platform-engineer-only setting): keyed off the raw
+		  -- parameter because the INSERT coalesces omit to 'block'.
+		  user_template_fallback = CASE WHEN $11 IS NULL THEN tenant_git_configs.user_template_fallback ELSE $11 END,
 		  %s`
 	_, err := q.Exec(ctx, fmt.Sprintf(sqlFmt, byoClause), c.OrgID, c.Repo, c.CommitPolicy, c.BaseBranch, scaffoldOrg,
-		appID, installationID, keySecret, keyKey, apiBase)
+		appID, installationID, keySecret, keyKey, apiBase, userFallback)
 	return err
 }

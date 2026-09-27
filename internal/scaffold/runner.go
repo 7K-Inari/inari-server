@@ -11,6 +11,7 @@ import (
 	"errors"
 
 	"github.com/7K-Inari/inari-server/internal/approvals"
+	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -50,6 +51,27 @@ type GitConfigResolver interface {
 	GitConfigForOrg(ctx context.Context, orgID string) (*types.TenantGitConfig, error)
 }
 
+// UserGitResolver resolves a git provider bound to one user's connected
+// git identity (M8.W6 user-scoped templates; gitprovider.Resolver.ForUser,
+// model C). Implementations fail closed: a missing connection is a typed
+// error, never a silent platform fallback.
+type UserGitResolver interface {
+	ForUser(ctx context.Context, orgID, userSub string) (gitprovider.Provider, *gitprovider.AuthInfo, error)
+}
+
+// GitFallback describes one applied user-scope → platform-app fallback
+// (the tenant's userTemplateFallback=platform_app policy).
+type GitFallback struct {
+	UserSub string // initiating user (run.CreatedBy)
+	// Reason classifies the failed user resolution: no_connection |
+	// user_model_unsupported.
+	Reason string
+}
+
+// GitFallbackHook is invoked once when a user-scoped template run falls
+// back to the platform app; the Service supplies audit + outbox.
+type GitFallbackHook func(ctx context.Context, rc *RunContext, fb GitFallback) error
+
 // ExecEnv bundles the backend seams the steps run against. Git, Upsert,
 // RBAC and Registrar are consumed by the W4 phase steps; Templates and
 // Tenants by the rendering step; Gate by the W6 approval hold; GitConfigs
@@ -65,6 +87,13 @@ type ExecEnv struct {
 	Tenants    TenantContextResolver
 	Gate       ApprovalGate
 	GitConfigs GitConfigResolver
+	// UserGit resolves per-user git providers for user-scoped templates
+	// (nil → user scope behaves as "no connection": the tenant fallback
+	// policy decides).
+	UserGit UserGitResolver
+	// OnGitFallback is invoked when a user-scoped run falls back to the
+	// platform app (audit seam; nil → no audit record).
+	OnGitFallback GitFallbackHook
 }
 
 // StepFunc runs one step idempotently. done=false means the step is

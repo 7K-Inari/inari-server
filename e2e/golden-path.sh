@@ -356,7 +356,16 @@ user_token() {
     | jq -r .access_token
 }
 
+# DEBUG(ci): probe the admin token path before relying on it.
+KC_ADMIN_SECRET=$(kubectl -n "$NAMESPACE" get secret inari-keycloak-admin -o jsonpath='{.data.client-secret}' | base64 -d)
+log "DEBUG: admin secret len=${#KC_ADMIN_SECRET}"
+kubectl -n "$NAMESPACE" exec "$TOOLS" -- curl -s -m 20 -w '\nDEBUG token-probe HTTP:%{http_code}\n' \
+  "http://keycloak-service:8080/realms/inari/protocol/openid-connect/token" \
+  -d grant_type=client_credentials -d client_id=inari-platform-admin -d client_secret="$KC_ADMIN_SECRET" | tail -c 400 || true
 AT="$(admin_token)"
+log "DEBUG: admin token len=${#AT}"
+kubectl -n "$NAMESPACE" exec "$TOOLS" -- curl -s -m 20 -o /dev/null -w 'DEBUG users-probe HTTP:%{http_code}\n' \
+  -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/users?username=dev-admin" || true
 
 log "GAP(kc-realm): ensuring dev user + public client with correct scopes"
 KC_UID=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/users?username=dev-admin" | jq -r '.[0].id // empty')

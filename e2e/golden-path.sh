@@ -356,25 +356,9 @@ user_token() {
     | jq -r .access_token
 }
 
-# DEBUG(ci): probe the admin token path before relying on it.
-KC_ADMIN_SECRET=$(kubectl -n "$NAMESPACE" get secret inari-keycloak-admin -o jsonpath='{.data.client-secret}' | base64 -d)
-log "DEBUG: admin secret len=${#KC_ADMIN_SECRET}"
-kubectl -n "$NAMESPACE" exec "$TOOLS" -- curl -s -m 20 -w '\nDEBUG token-probe HTTP:%{http_code}\n' \
-  "http://keycloak-service:8080/realms/inari/protocol/openid-connect/token" \
-  -d grant_type=client_credentials -d client_id=inari-platform-admin -d client_secret="$KC_ADMIN_SECRET" | tail -c 400 || true
 AT="$(admin_token)"
-log "DEBUG: admin token len=${#AT}"
-kubectl -n "$NAMESPACE" exec "$TOOLS" -- curl -s -m 20 -w '\nDEBUG user-token-probe HTTP:%{http_code}\n' \
-  "http://keycloak-service:8080/realms/inari/protocol/openid-connect/token" \
-  -d grant_type=password -d client_id=inari-server -d username=dev-admin -d password=dev-admin \
-  -d scope="openid organization:*" | tail -c 600 || true
-kubectl -n "$NAMESPACE" exec "$TOOLS" -- curl -s -m 20 -H "Authorization: Bearer $AT" \
-  "http://keycloak-service:8080/admin/realms/inari/client-scopes" | jq -r '.[].name' | tr '\n' ' ' | sed 's/^/DEBUG scopes: /' || true
-kubectl -n "$NAMESPACE" exec "$TOOLS" -- curl -s -m 20 -o /dev/null -w 'DEBUG users-probe HTTP:%{http_code}\n' \
-  -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/users?username=dev-admin" || true
 
 log "GAP(kc-realm): ensuring dev user + public client with correct scopes"
-set -x # DEBUG(ci)
 KC_UID=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/users?username=dev-admin" | jq -r '.[0].id // empty')
 if [ -z "$KC_UID" ]; then
   xcurl -X POST -H "Authorization: Bearer $AT" -H "Content-Type: application/json" \
@@ -402,10 +386,26 @@ for i in 1 2 3; do
     -o /dev/null "http://keycloak-service:8080/admin/realms/inari/clients/$KC_CLIENT/protocol-mappers/models" || true
   sleep 2
 done
-# GAP(basic-scope): without the basic scope, tokens carry no sub claim.
-BASIC_ID=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/client-scopes" | jq -r '.[] | select(.name=="basic") | .id')
-kubectl -n "$NAMESPACE" exec "$TOOLS" -- curl -s -o /dev/null -X PUT -H "Authorization: Bearer $AT" \
-  "http://keycloak-service:8080/admin/realms/inari/clients/$KC_CLIENT/default-client-scopes/$BASIC_ID"
+# GAP(default-scopes): when the realm import JSON carries an explicit
+# clientScopes array, Keycloak skips creating its built-in default scopes
+# (basic, organization, ...) and every token request dies with invalid_scope.
+# Recreate the two scopes these flows depend on — with the built-in mapper
+# shapes — and attach them to the client (idempotent).
+ensure_scope() { # $1=name $2=creation-json (used only when missing)
+  local name="$1" body="$2" sid
+  sid=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/client-scopes" | jq -r --arg n "$name" '.[] | select(.name==$n) | .id // empty')
+  if [ -z "$sid" ]; then
+    xcurl -X POST -H "Authorization: Bearer $AT" -H "Content-Type: application/json" \
+      -d "$body" -o /dev/null "http://keycloak-service:8080/admin/realms/inari/client-scopes"
+    sid=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/client-scopes" | jq -r --arg n "$name" '.[] | select(.name==$n) | .id')
+  fi
+  kubectl -n "$NAMESPACE" exec "$TOOLS" -- curl -s -o /dev/null -X PUT -H "Authorization: Bearer $AT" \
+    "http://keycloak-service:8080/admin/realms/inari/clients/$KC_CLIENT/default-client-scopes/$sid"
+}
+# Without the basic scope, tokens carry no sub claim (KC 26 user-profile model).
+ensure_scope basic '{"name":"basic","protocol":"openid-connect","attributes":{"include.in.token.scope":"false","display.on.consent.screen":"false"},"protocolMappers":[{"name":"sub","protocol":"openid-connect","protocolMapper":"oidc-sub-mapper","config":{"access.token.claim":"true","id.token.claim":"true"}}]}'
+# Without the organization scope, scope="openid organization:*" is rejected.
+ensure_scope organization '{"name":"organization","protocol":"openid-connect","attributes":{"include.in.token.scope":"true","display.on.consent.screen":"false"},"protocolMappers":[{"name":"organization","protocol":"openid-connect","protocolMapper":"oidc-organization-membership-mapper","config":{"id.token.claim":"true","access.token.claim":"true","claim.name":"organization","jsonType.label":"String","multivalued":"true"}}]}'
 # Sanity: a token must carry sub and aud=inari-server before we proceed.
 PROBE="$(user_token)"
 PAYLOAD=$(cut -d. -f2 <<<"$PROBE"); PAYLOAD="${PAYLOAD}$(printf '=%.0s' $(seq 1 $(( (4 - ${#PAYLOAD} % 4) % 4 ))))"
@@ -413,7 +413,6 @@ CLAIMS=$(base64 -d <<<"$PAYLOAD" 2>/dev/null || base64 -D <<<"$PAYLOAD")
 jq -e '.sub != null' <<<"$CLAIMS" >/dev/null || die "token has no sub claim (basic scope missing)"
 jq -e '.aud == "inari-server" or (.aud | type == "array" and index("inari-server"))' <<<"$CLAIMS" >/dev/null \
   || die "token has wrong aud (audience mapper missing): $(jq -c .aud <<<"$CLAIMS")"
-set +x # DEBUG(ci)
 
 API="http://$SERVER_SVC:8080/api/v1"
 log "GAP(kc-platform-group): ensuring dev-admin is in platform-admins (drives org_creator tuple sync)"

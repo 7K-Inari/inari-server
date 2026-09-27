@@ -145,15 +145,18 @@ func (v *CredentialVault) Redeem(ctx context.Context, ref, clusterID string) (to
 	if !v.clock().Before(expiresAt) {
 		return nil, time.Time{}, ErrCredentialExpired
 	}
+	// Decrypt before the hard delete: a decrypt failure (corrupt row, KEK
+	// rotation) must not destroy a credential the agent could otherwise
+	// redeem after the underlying key issue is fixed.
+	token, err = v.enc.Decrypt(tokenEnc, dekEnc, credentialAAD(ref))
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("agentgateway: redeem decrypt: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM agent_command_credentials WHERE credential_ref = $1`, ref); err != nil {
 		return nil, time.Time{}, fmt.Errorf("agentgateway: redeem delete: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, time.Time{}, fmt.Errorf("agentgateway: redeem commit: %w", err)
-	}
-	token, err = v.enc.Decrypt(tokenEnc, dekEnc, credentialAAD(ref))
-	if err != nil {
-		return nil, time.Time{}, fmt.Errorf("agentgateway: redeem decrypt: %w", err)
 	}
 	return token, expiresAt, nil
 }

@@ -132,6 +132,88 @@ func TestCredentialVaultClusterBinding(t *testing.T) {
 	}
 }
 
+// Mint guard rails: empty tokens and non-positive TTLs fail before any row
+// is written.
+func TestCredentialVaultMintGuards(t *testing.T) {
+	r := newRig(t, false)
+	ctx := context.Background()
+	cluster, _ := r.registry.CreateCluster(ctx, "user-1", "org:1", "kind-dev", nil)
+	v := testVault(t, r)
+	enqueueInvokeCommand(t, r, cluster.ID, "cmd-guard")
+
+	if _, err := v.Mint(ctx, cluster.ID, "cmd-guard", nil, time.Minute); err == nil {
+		t.Fatal("empty token minted")
+	}
+	if _, err := v.Mint(ctx, cluster.ID, "cmd-guard", []byte("tok"), 0); err == nil {
+		t.Fatal("zero TTL minted")
+	}
+	if _, err := v.Mint(ctx, cluster.ID, "cmd-guard", []byte("tok"), -time.Second); err == nil {
+		t.Fatal("negative TTL minted")
+	}
+	var n int
+	if err := r.db.Pool.QueryRow(ctx, `SELECT count(*) FROM agent_command_credentials`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("guard-rejected mints persisted %d rows", n)
+	}
+}
+
+// Concurrent redemption of the same ref: exactly one agent wins; everyone
+// else fails closed with ErrCredentialNotFound. Guards the FOR UPDATE +
+// hard-delete single-use guarantee under races (e.g. agent retries after a
+// gateway timeout while a duplicate command delivery redeems first).
+func TestCredentialVaultConcurrentRedeemSingleUse(t *testing.T) {
+	r := newRig(t, false)
+	ctx := context.Background()
+	cluster, _ := r.registry.CreateCluster(ctx, "user-1", "org:1", "kind-dev", nil)
+	v := testVault(t, r)
+
+	enqueueInvokeCommand(t, r, cluster.ID, "cmd-race")
+	ref, err := v.Mint(ctx, cluster.ID, "cmd-race", []byte("race-token"), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const racers = 16
+	start := make(chan struct{})
+	results := make(chan error, racers)
+	tokens := make(chan string, racers)
+	for i := 0; i < racers; i++ {
+		go func() {
+			<-start
+			tok, _, err := v.Redeem(ctx, ref, cluster.ID)
+			if err == nil {
+				tokens <- string(tok)
+			}
+			results <- err
+		}()
+	}
+	close(start)
+
+	var wins, notFound int
+	for i := 0; i < racers; i++ {
+		err := <-results
+		switch {
+		case err == nil:
+			wins++
+		case errors.Is(err, ErrCredentialNotFound):
+			notFound++
+		default:
+			t.Fatalf("unexpected redeem error: %v", err)
+		}
+	}
+	if wins != 1 || notFound != racers-1 {
+		t.Fatalf("wins = %d, notFound = %d; want exactly 1 win and %d ErrCredentialNotFound", wins, notFound, racers-1)
+	}
+	if got := <-tokens; got != "race-token" {
+		t.Fatalf("winning redeem token = %q", got)
+	}
+	if n := countCredentialRows(t, r, ref); n != 0 {
+		t.Fatalf("row survives concurrent redeem: count = %d", n)
+	}
+}
+
 func TestCredentialVaultExpiredAndMissing(t *testing.T) {
 	r := newRig(t, false)
 	ctx := context.Background()

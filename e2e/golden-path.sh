@@ -368,6 +368,7 @@ kubectl -n "$NAMESPACE" exec "$TOOLS" -- curl -s -m 20 -o /dev/null -w 'DEBUG us
   -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/users?username=dev-admin" || true
 
 log "GAP(kc-realm): ensuring dev user + public client with correct scopes"
+set -x # DEBUG(ci)
 KC_UID=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/users?username=dev-admin" | jq -r '.[0].id // empty')
 if [ -z "$KC_UID" ]; then
   xcurl -X POST -H "Authorization: Bearer $AT" -H "Content-Type: application/json" \
@@ -406,6 +407,7 @@ CLAIMS=$(base64 -d <<<"$PAYLOAD" 2>/dev/null || base64 -D <<<"$PAYLOAD")
 jq -e '.sub != null' <<<"$CLAIMS" >/dev/null || die "token has no sub claim (basic scope missing)"
 jq -e '.aud == "inari-server" or (.aud | type == "array" and index("inari-server"))' <<<"$CLAIMS" >/dev/null \
   || die "token has wrong aud (audience mapper missing): $(jq -c .aud <<<"$CLAIMS")"
+set +x # DEBUG(ci)
 
 API="http://$SERVER_SVC:8080/api/v1"
 log "GAP(kc-platform-group): ensuring dev-admin is in platform-admins (drives org_creator tuple sync)"

@@ -5,6 +5,7 @@ package agentgateway
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -153,5 +154,93 @@ func TestExtensionInvokeDisabledWithoutAuth(t *testing.T) {
 	r := newRig(t, false)
 	if _, h := r.gw.ExtensionInvokeHandler(nil, 0); h != nil {
 		t.Fatal("expected nil handler with no authenticator")
+	}
+}
+
+// Per-user credential reference (W2 auth model): the hop metadata is the
+// only source for InvokeAction.user_credential_ref; the persisted command
+// payload carries the opaque reference and never raw token material.
+func TestExtensionInvokeUserCredentialRef(t *testing.T) {
+	r := newRig(t, false)
+	ctx := context.Background()
+	cluster, _ := r.registry.CreateCluster(ctx, "user-1", "org:1", "kind-dev", nil)
+	token, _, _ := r.registry.IssueToken(ctx, "user-1", cluster.ID)
+	if _, err := r.gw.RegisterCluster(ctx, registerReq(token)); err != nil {
+		t.Fatal(err)
+	}
+	ext := &types.Extension{
+		ID: "extension:1", OrgID: "org:1", Name: "argocd",
+		ClientID: "ext-argocd", State: types.ExtensionStateReady,
+	}
+	auth := &fakeExtAuth{byToken: map[string]*types.Extension{"ext-jwt": ext}}
+
+	mkReq := func(ref string) *connect.Request[agentv1.InvokeAction] {
+		req := connect.NewRequest(&agentv1.InvokeAction{Action: "sync"})
+		req.Header().Set(MetadataCluster, cluster.ID)
+		req.Header().Set(MetadataTenant, "org:1")
+		req.Header().Set("Authorization", "Bearer ext-jwt")
+		if ref != "" {
+			req.Header().Set(MetadataUserCredentialRef, ref)
+		}
+		return req
+	}
+
+	// JWT-shaped metadata is rejected as a raw-token smuggling attempt.
+	if _, err := r.gw.invokeExtension(ctx, mkReq("eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyLTEifQ.c2ln"), auth, time.Second); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("raw token: err = %v, want invalid argument", err)
+	}
+	// Self-asserted payload refs are discarded when metadata is absent.
+	req := mkReq("")
+	req.Msg.UserCredentialRef = "self-asserted"
+	if _, err := r.gw.invokeExtension(ctx, req, auth, 500*time.Millisecond); connect.CodeOf(err) != connect.CodeDeadlineExceeded {
+		t.Fatalf("self-asserted: err = %v, want deadline exceeded (queued without ref)", err)
+	}
+	// Drain the pending self-asserted command so it cannot shadow the next
+	// invoke in Due(), and assert the ref was really stripped.
+	due, err := r.gw.Queue().Due(ctx, cluster.ID, 10)
+	if err != nil || len(due) == 0 {
+		t.Fatalf("drain: %v (%d due)", err, len(due))
+	}
+	if strings.Contains(string(due[0].Payload), "self-asserted") {
+		t.Fatalf("self-asserted ref leaked into payload: %s", due[0].Payload)
+	}
+	if err := r.gw.Queue().Complete(ctx, due[0].ID, "nacked", "drain"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Happy path: metadata ref lands in the persisted payload, token-free.
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.gw.invokeExtension(ctx, mkReq("ucr_01JABCXYZ"), auth, 10*time.Second)
+		done <- err
+	}()
+	var payload string
+	for i := 0; i < 40; i++ {
+		due, err := r.gw.Queue().Due(ctx, cluster.ID, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(due) == 1 && strings.Contains(string(due[0].Payload), "ucr_01JABCXYZ") {
+			payload = string(due[0].Payload)
+			if err := r.gw.Queue().Complete(ctx, due[0].ID, "acked", "ok"); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if payload == "" {
+		t.Fatal("no queued command carried the credential ref")
+	}
+	if strings.Contains(payload, "eyJ") || strings.Contains(payload, "user-token") {
+		t.Fatalf("payload carries token material: %s", payload)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("invoke: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("invoke did not return after ack")
 	}
 }

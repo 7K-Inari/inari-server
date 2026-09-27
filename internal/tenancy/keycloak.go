@@ -372,6 +372,15 @@ type ClientSpec struct {
 	// with full group paths (/tenant-<slug>/<team>, leading slash) — the
 	// kubectl-access contract pinned in plan §5.4.
 	GroupsClaim bool
+	// TokenExchange enables the standard token-exchange capability on a
+	// confidential client (RFC 8693; plan §5.8 extension OIDC pass-through).
+	// Only set on ext-<name> clients that declare downstream audiences —
+	// least privilege: exchange permission is never granted by default.
+	TokenExchange bool
+	// StandardFlow enables the authorization-code flow on a confidential
+	// client (Dex federation: cluster-<id>-dex is a confidential client Dex
+	// redirects users to).
+	StandardFlow bool
 }
 
 // KubectlClientSpec returns the canonical per-tenant kubelogin client spec
@@ -400,6 +409,49 @@ func KubectlClientID(slug string) string {
 	return "org-" + slug + "-kubectl"
 }
 
+// ClusterDexClientID renders the per-cluster Dex-federation clientId
+// (cluster-<id>-dex).
+func ClusterDexClientID(clusterID string) string {
+	return "cluster-" + clusterID + "-dex"
+}
+
+// ClusterDexClientSpec returns the canonical per-cluster confidential client
+// Dex federates against (plan §5.8): standard flow with the Dex callback as
+// the only redirect, the groups claim so Dex can forward team membership for
+// RBAC, and audience mappers for exactly the declared audiences.
+func ClusterDexClientSpec(clusterID, dexIssuer string, audiences []string) ClientSpec {
+	return ClientSpec{
+		ClientID:     ClusterDexClientID(clusterID),
+		Name:         "cluster-" + clusterID + "-dex",
+		ClientType:   ClientTypeService,
+		Audiences:    audiences,
+		RedirectURIs: []string{strings.TrimRight(dexIssuer, "/") + "/callback"},
+		Enabled:      true,
+		StandardFlow: true,
+		GroupsClaim:  true,
+	}
+}
+
+// CreateClusterDexClient provisions the Dex-federation client and returns
+// its secret exactly once (handed to the cluster's Dex config out-of-band,
+// never persisted here). Idempotent: an existing client is updated in place
+// and its current secret is read back.
+func (k *KeycloakAdmin) CreateClusterDexClient(ctx context.Context, clusterID, dexIssuer string, audiences []string) (clientID, secret string, err error) {
+	spec := ClusterDexClientSpec(clusterID, dexIssuer, audiences)
+	secret, err = k.CreateClient(ctx, spec)
+	if err != nil {
+		return "", "", err
+	}
+	return spec.ClientID, secret, nil
+}
+
+// ClientSecret reads the current secret of any confidential client (extension
+// token-exchange resolves ext-<name> credentials at exchange time; the secret
+// is never persisted server-side).
+func (k *KeycloakAdmin) ClientSecret(ctx context.Context, clientID string) (string, error) {
+	return k.readClientSecret(ctx, clientID)
+}
+
 // CreateClient provisions a tenant OIDC client in the inari realm and, for
 // confidential (service) clients, returns the generated secret exactly once.
 // Public clients have no secret. Scopes are attached as optional client
@@ -415,16 +467,21 @@ func (k *KeycloakAdmin) CreateClient(ctx context.Context, spec ClientSpec) (stri
 		"name":                      spec.Name,
 		"enabled":                   true,
 		"publicClient":              public,
-		"standardFlowEnabled":       public,
+		"standardFlowEnabled":       public || spec.StandardFlow,
 		"serviceAccountsEnabled":    !public,
 		"directAccessGrantsEnabled": false,
 		"redirectUris":              spec.RedirectURIs,
 		"protocolMappers":           mappers,
 	}
+	attrs := map[string]any{}
 	if spec.DeviceFlow {
-		rep["attributes"] = map[string]any{
-			"oauth2.device.authorization.grant.enabled": "true",
-		}
+		attrs["oauth2.device.authorization.grant.enabled"] = "true"
+	}
+	if spec.TokenExchange {
+		attrs["standard.token.exchange.enabled"] = "true"
+	}
+	if len(attrs) > 0 {
+		rep["attributes"] = attrs
 	}
 	resp, err := k.do(ctx, http.MethodPost, "/clients", rep)
 	if err != nil {

@@ -73,6 +73,34 @@ func ExtensionClientSpec(name, audience string) tenancy.ClientSpec {
 	}
 }
 
+// ExtensionExchangeClientSpec extends ExtensionClientSpec with RFC 8693
+// token-exchange capability and one audience mapper per declared downstream
+// audience (least privilege: only the extension's declared allowlist is
+// mintable). Used when the manifest declares oidc-user methods with
+// audiences.
+func ExtensionExchangeClientSpec(name, gatewayAudience string, downstreamAudiences []string) tenancy.ClientSpec {
+	spec := ExtensionClientSpec(name, gatewayAudience)
+	spec.Audiences = append(append([]string{}, spec.Audiences...), downstreamAudiences...)
+	spec.TokenExchange = true
+	return spec
+}
+
+// exchangeAudiences collects the downstream audience allowlist from declared
+// oidc-user methods (invalid manifests yield none — provisioning stays on the
+// plain spec and resolution fails closed at request time).
+func exchangeAudiences(e *types.Extension) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range declaredAuthMethods(e) {
+		if m.Method != AuthMethodOIDCUser || m.Audience == "" || seen[m.Audience] {
+			continue
+		}
+		seen[m.Audience] = true
+		out = append(out, m.Audience)
+	}
+	return out
+}
+
 // ensureIdentity provisions the extension's Keycloak client when missing
 // and persists the client_id projection with audit in one TX. The secret is
 // returned exactly once on creation; callers that only need the client to
@@ -85,7 +113,11 @@ func (s *Service) ensureIdentity(ctx context.Context, actor string, e *types.Ext
 	if e.ClientID != "" {
 		return "", nil // already provisioned
 	}
-	secret, err := s.clients.CreateClient(ctx, ExtensionClientSpec(e.Name, s.gatewayAudience))
+	spec := ExtensionClientSpec(e.Name, s.gatewayAudience)
+	if auds := exchangeAudiences(e); len(auds) > 0 {
+		spec = ExtensionExchangeClientSpec(e.Name, s.gatewayAudience, auds)
+	}
+	secret, err := s.clients.CreateClient(ctx, spec)
 	if err != nil {
 		return "", fmt.Errorf("extensionhost: create extension keycloak client: %w", err)
 	}

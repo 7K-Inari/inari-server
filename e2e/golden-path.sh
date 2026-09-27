@@ -386,10 +386,26 @@ for i in 1 2 3; do
     -o /dev/null "http://keycloak-service:8080/admin/realms/inari/clients/$KC_CLIENT/protocol-mappers/models" || true
   sleep 2
 done
-# GAP(basic-scope): without the basic scope, tokens carry no sub claim.
-BASIC_ID=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/client-scopes" | jq -r '.[] | select(.name=="basic") | .id')
-kubectl -n "$NAMESPACE" exec "$TOOLS" -- curl -s -o /dev/null -X PUT -H "Authorization: Bearer $AT" \
-  "http://keycloak-service:8080/admin/realms/inari/clients/$KC_CLIENT/default-client-scopes/$BASIC_ID"
+# GAP(default-scopes): when the realm import JSON carries an explicit
+# clientScopes array, Keycloak skips creating its built-in default scopes
+# (basic, organization, ...) and every token request dies with invalid_scope.
+# Recreate the two scopes these flows depend on — with the built-in mapper
+# shapes — and attach them to the client (idempotent).
+ensure_scope() { # $1=name $2=creation-json (used only when missing)
+  local name="$1" body="$2" sid
+  sid=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/client-scopes" | jq -r --arg n "$name" '.[] | select(.name==$n) | .id // empty')
+  if [ -z "$sid" ]; then
+    xcurl -X POST -H "Authorization: Bearer $AT" -H "Content-Type: application/json" \
+      -d "$body" -o /dev/null "http://keycloak-service:8080/admin/realms/inari/client-scopes"
+    sid=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/admin/realms/inari/client-scopes" | jq -r --arg n "$name" '.[] | select(.name==$n) | .id')
+  fi
+  kubectl -n "$NAMESPACE" exec "$TOOLS" -- curl -s -o /dev/null -X PUT -H "Authorization: Bearer $AT" \
+    "http://keycloak-service:8080/admin/realms/inari/clients/$KC_CLIENT/default-client-scopes/$sid"
+}
+# Without the basic scope, tokens carry no sub claim (KC 26 user-profile model).
+ensure_scope basic '{"name":"basic","protocol":"openid-connect","attributes":{"include.in.token.scope":"false","display.on.consent.screen":"false"},"protocolMappers":[{"name":"sub","protocol":"openid-connect","protocolMapper":"oidc-sub-mapper","config":{"access.token.claim":"true","id.token.claim":"true"}}]}'
+# Without the organization scope, scope="openid organization:*" is rejected.
+ensure_scope organization '{"name":"organization","protocol":"openid-connect","attributes":{"include.in.token.scope":"true","display.on.consent.screen":"false"},"protocolMappers":[{"name":"organization","protocol":"openid-connect","protocolMapper":"oidc-organization-membership-mapper","config":{"id.token.claim":"true","access.token.claim":"true","claim.name":"organization","jsonType.label":"String","multivalued":"true"}}]}'
 # Sanity: a token must carry sub and aud=inari-server before we proceed.
 PROBE="$(user_token)"
 PAYLOAD=$(cut -d. -f2 <<<"$PROBE"); PAYLOAD="${PAYLOAD}$(printf '=%.0s' $(seq 1 $(( (4 - ${#PAYLOAD} % 4) % 4 ))))"

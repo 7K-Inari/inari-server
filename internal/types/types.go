@@ -136,6 +136,10 @@ const (
 	EventExtensionUnregistered = "extension.unregistered"
 	EventExtensionStateChanged = "extension.state_changed"
 
+	EventUserGitConnected    = "user_git.connected"
+	EventUserGitDisconnected = "user_git.disconnected"
+	EventUserGitCompromised  = "user_git.compromised"
+
 	EventRolloutCreated       = "rollout.created"
 	EventRolloutStarted       = "rollout.started"
 	EventRolloutPaused        = "rollout.paused"
@@ -954,6 +958,15 @@ type CloudAccountPayload struct {
 	AccountID string `json:"accountId"` // cloud_accounts.id
 	AWSAcct   string `json:"awsAccountId,omitempty"`
 	State     string `json:"state,omitempty"`
+}
+
+// UserGitPayload is the outbox payload for user git connection events
+// (W4). Never carries token material.
+type UserGitPayload struct {
+	OrgID        string `json:"orgId"`
+	UserSub      string `json:"userSub"`
+	Provider     string `json:"provider"`
+	ConnectionID string `json:"connectionId"`
 }
 
 // Policy targets / engines (plan §5.11).

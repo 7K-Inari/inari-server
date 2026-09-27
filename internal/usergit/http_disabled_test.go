@@ -70,7 +70,7 @@ func TestDisabledModuleReturns501(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusNotImplemented {
 			t.Errorf("%s %s: got %d, want 501", p.method, p.path, resp.StatusCode)
 		}

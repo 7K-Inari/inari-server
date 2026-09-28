@@ -125,6 +125,14 @@
         "url": { "type": "string" }
       }
     },
+    "nats": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "url": { "type": "string" },
+        "streamReplicas": { "type": "integer", "minimum": 1 }
+      }
+    },
     "extraEnv": { "type": "array" },
     "vault": {
       "type": "object",

@@ -1,12 +1,28 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
+
+// INARI_NATS_URL is required (ADR-0014); tests that exercise its absence
+// override it explicitly with t.Setenv.
+func TestMain(m *testing.M) {
+	_ = os.Setenv("INARI_NATS_URL", "nats://localhost:4222")
+	os.Exit(m.Run())
+}
 
 func TestLoadDefaults(t *testing.T) {
 	t.Setenv("INARI_HTTP_ADDR", "")
 	c, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
+	}
+	if c.NATSURL != "nats://localhost:4222" {
+		t.Errorf("NATSURL = %q, want nats://localhost:4222", c.NATSURL)
+	}
+	if c.NATSStreamReplicas != 1 {
+		t.Errorf("NATSStreamReplicas = %d, want 1", c.NATSStreamReplicas)
 	}
 	if c.HTTPAddr != ":8080" {
 		t.Errorf("HTTPAddr = %q, want :8080", c.HTTPAddr)
@@ -219,6 +235,31 @@ func TestCacheTTLNonPositive(t *testing.T) {
 				t.Fatalf("Load: want error for %s=%s (ttl <= 0 never expires in both backends)", tc.key, tc.val)
 			}
 		})
+	}
+}
+
+func TestNATSURLRequired(t *testing.T) {
+	t.Setenv("INARI_NATS_URL", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load with empty INARI_NATS_URL = nil error, want required-validation error")
+	}
+}
+
+func TestNATSStreamReplicasEnv(t *testing.T) {
+	t.Setenv("INARI_NATS_STREAM_REPLICAS", "3")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.NATSStreamReplicas != 3 {
+		t.Errorf("NATSStreamReplicas = %d, want 3", c.NATSStreamReplicas)
+	}
+}
+
+func TestNATSStreamReplicasInvalid(t *testing.T) {
+	t.Setenv("INARI_NATS_STREAM_REPLICAS", "0")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load with INARI_NATS_STREAM_REPLICAS=0 = nil error, want validation error")
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/authz"
+	"github.com/7K-Inari/inari-server/internal/eventbus/eventbustest"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -661,8 +662,8 @@ func TestTenantDeletionTupleWriterSweep(t *testing.T) {
 	}
 	// Dispatch pending outbox events: the tenant.deleting sweep must retract
 	// tuples through the TupleWriter too (defensive second path).
-	disp := audit.NewDispatcher(database, 50*time.Millisecond, authz.NewTupleWriter(rec))
-	if err := disp.DispatchOnce(ctx); err != nil {
+	disp := eventbustest.Dispatcher(t, database, 50*time.Millisecond, audit.Named("authz-tuple-writer", authz.NewTupleWriter(rec)))
+	if err := eventbustest.DispatchOnce(ctx, disp); err != nil {
 		t.Fatal(err)
 	}
 	foundRole := false

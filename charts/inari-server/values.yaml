@@ -93,11 +93,33 @@ redis:
   # cache.backend=redis, used instead of the subchart service URL.
   url: ""
 
-# NATS event bus (reserved M1 seam — no client is wired yet; the outbox
-# dispatcher is in-process). When the server grows a NATS client, its URL
-# setting will accept a comma-separated endpoint list, e.g.
-# "nats://nats-0.nats-headless:4222,nats://nats-1.nats-headless:4222,nats://nats-2.nats-headless:4222",
-# so a clustered JetStream is a drop-in behind the same service name.
+# NATS event bus (ADR-0014): REQUIRED — the server refuses to boot without
+# JetStream (outbox relay → stream INARI_OUTBOX; per-handler durable
+# consumer groups). Default: in-cluster single-node subchart (dev/e2e
+# posture). Production: enabled=false + url pointing at an external cluster
+# (comma-separated endpoint list works, e.g.
+# "nats://nats-0.nats-headless:4222,nats://nats-1.nats-headless:4222") +
+# streamReplicas matching the cluster size.
+nats:
+  enabled: true
+  # BYO NATS URL (used instead of the subchart service when set).
+  url: ""
+  # JetStream replica count for the INARI_OUTBOX stream.
+  streamReplicas: 1
+  # Subchart settings (single-node JetStream, small PVC — dev posture).
+  config:
+    jetstream:
+      enabled: true
+      fileStore:
+        enabled: true
+        pvc:
+          size: 1Gi
+  container:
+    merge:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
 
 # OIDC issuer for token validation. Defaults to
 # <keycloak.baseUrl>/realms/<keycloak.realm> when empty.

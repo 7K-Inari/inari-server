@@ -69,3 +69,15 @@ subchart's standalone master service (<fullname>-redis-master).
 {{- printf "redis://%s-redis-master:6379/0" (include "inari-server.fullname" .) }}
 {{- end }}
 {{- end }}
+
+{{/*
+NATS URL for the event bus (ADR-0014): explicit nats.url (BYO/external),
+else the nats subchart's client service (<fullname>-nats).
+*/}}
+{{- define "inari-server.natsUrl" -}}
+{{- if .Values.nats.url }}
+{{- .Values.nats.url }}
+{{- else }}
+{{- printf "nats://%s-nats:4222" (include "inari-server.fullname" .) }}
+{{- end }}
+{{- end }}

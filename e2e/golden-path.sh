@@ -161,11 +161,11 @@ kubectl -n "$NAMESPACE" patch keycloak keycloak --type merge \
 kubectl -n "$NAMESPACE" rollout status statefulset/keycloak --timeout=420s
 
 log "installing NATS (JetStream, 3-node cluster)"
-# NATS is the reserved M1 event-bus seam (the outbox dispatcher is still
-# in-process; no server client exists yet) and is provisioned HA from day
-# one — part of the 99.9% availability initiative, so M1 lands on an
-# already-clustered substrate. e2e/nats-values.yaml mirrors the production
-# posture:
+# NATS is the platform event bus (ADR-0014): the server refuses to boot
+# without it — the outbox relay publishes to the INARI_OUTBOX stream and
+# every handler is delivered via its own durable consumer group. It is
+# provisioned HA (3-node, R=3 streams) — part of the 99.9% availability
+# initiative. e2e/nats-values.yaml mirrors the production posture:
 #   - 3-node cluster (JetStream meta group quorum), one fileStore PVC per pod
 #   - R=3 streams (replicas=3) so any single node loss keeps the stream live
 #   - advised limits: size fileStore per retention budget and set explicit
@@ -275,6 +275,9 @@ helm upgrade --install inari-server "$SERVER_CHART_DIR" \
   --set image.pullPolicy=IfNotPresent \
   --set keycloak.baseUrl="http://$KC_FQDN" \
   --set vault.addr="http://vault.${NAMESPACE}.svc:8200" \
+  --set nats.enabled=false \
+  --set nats.url="nats://nats:4222" \
+  --set nats.streamReplicas=3 \
   ${CACHE_HELM_ARGS[@]+"${CACHE_HELM_ARGS[@]}"} \
   --set-json "extraEnv=$EXTRA_ENV" \
   --set-json "extraVolumes=[
@@ -285,6 +288,30 @@ helm upgrade --install inari-server "$SERVER_CHART_DIR" \
   ]" \
   --wait --timeout 10m
 kubectl -n "$NAMESPACE" rollout status deployment/inari-server --timeout=180s
+
+# psql_inari runs SQL against the platform database via the CNPG primary
+# pod (the toolbox image has curl only; the connection URI never leaves the
+# cluster). Used by the outbox drain check and the HA(c)/(d1) blocks below.
+psql_inari() {
+  local uri primary
+  uri=$(kubectl -n "$NAMESPACE" get secret inari-db -o jsonpath='{.data.inari-uri}' | base64 -d)
+  primary=$(kubectl -n "$NAMESPACE" get cluster.postgresql.cnpg.io/postgresql -o jsonpath='{.status.currentPrimary}')
+  kubectl -n "$NAMESPACE" exec "$primary" -c postgres -- psql "$uri" -tAc "$1"
+}
+
+log "verifying the INARI_OUTBOX stream formed (R=3) on the external cluster"
+# The server ensures the stream at boot (ADR-0014); the monitor CLI lives in
+# the nats-box pod deployed with the NATS chart.
+for i in $(seq 1 24); do
+  STREAM=$(kubectl -n "$NAMESPACE" exec deploy/nats-box -- \
+    nats stream info INARI_OUTBOX --server nats:4222 --json 2>/dev/null || true)
+  if jq -e '.config.num_replicas == 3 and (.config.subjects | index("inari.outbox.>"))' \
+      <<<"$STREAM" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 5
+  [ "$i" = 24 ] && die "INARI_OUTBOX stream never formed at R=3 (stream info: ${STREAM:-empty})"
+done
 
 # ==================== HA-only (c): fresh 0→2 scale-up ====================
 # The install above IS the fresh 0→2 scale-up on a clean namespace: both
@@ -303,15 +330,6 @@ if $INARI_HA; then
   log "HA(c): fresh 0->2 scale-up — migrations serialized by the advisory lock, both replicas ready"
   kubectl -n "$NAMESPACE" wait --for=condition=ready pod \
     -l app.kubernetes.io/name=inari-server --timeout=300s
-  # psql_inari runs SQL against the platform database via the CNPG
-  # primary pod (the toolbox image has curl only; the connection URI
-  # never leaves the cluster). Also used by the HA(d1) block below.
-  psql_inari() {
-    local uri primary
-    uri=$(kubectl -n "$NAMESPACE" get secret inari-db -o jsonpath='{.data.inari-uri}' | base64 -d)
-    primary=$(kubectl -n "$NAMESPACE" get cluster.postgresql.cnpg.io/postgresql -o jsonpath='{.status.currentPrimary}')
-    kubectl -n "$NAMESPACE" exec "$primary" -c postgres -- psql "$uri" -tAc "$1"
-  }
   EXPECTED_MIGRATIONS=$(find "$(dirname "$0")/../internal/db/migrations" -name '[0-9]*.sql' | wc -l)
   APPLIED_MIGRATIONS=$(psql_inari "SELECT max(version_id) FROM goose_db_version")
   [ "$APPLIED_MIGRATIONS" = "$EXPECTED_MIGRATIONS" ] \
@@ -486,6 +504,16 @@ for i in $(seq 1 18); do
   sleep 5
 done
 [ "$ALLOWED" = "true" ] || die "OpenFGA check failed (creator auto-membership did not propagate via outbox)"
+
+log "verifying the outbox drained through the NATS relay"
+# Tenant creation emitted several events; the relay marks rows published
+# only after the JetStream PubAck, so a drained backlog proves relay ->
+# stream -> consumer delivery end-to-end (ADR-0014).
+for i in $(seq 1 24); do
+  [ "$(psql_inari "SELECT count(*) FROM outbox WHERE published_at IS NULL")" = "0" ] && break
+  sleep 5
+  [ "$i" = 24 ] && die "outbox did not drain through the NATS relay"
+done
 
 log "verifying /metrics exposes the cache layer series (backend: $CACHE_BACKEND)"
 # Tenant creation above already drove org lookups + FGA checks through the
@@ -926,11 +954,11 @@ EOF
 
   # ---------- HA(a): delete one server pod mid-run ------------------------
   # The surviving replica must keep serving (readiness-gated: zero failed
-  # probes), and the claim-based loops (outbox dispatcher, scaffold
-  # reconcile — deliberately NOT lease-gated, ADR-0011) must keep
-  # processing work. Proven end-to-end: an RBAC mapping flip must still
-  # materialize into the tenant state repo, and a fresh scaffold run must
-  # still reach completed.
+  # probes), and the claim-based loops (outbox relay + scaffold reconcile —
+  # deliberately NOT lease-gated, ADR-0011) plus the durable JetStream
+  # consumer groups (ADR-0014) must keep processing work. Proven end-to-end:
+  # an RBAC mapping flip must still materialize into the tenant state repo,
+  # and a fresh scaffold run must still reach completed.
   log "HA(a): deleting one server pod mid-run — API stays available, outbox + scaffold reconcile continue"
   VICTIM=$(kubectl -n "$NAMESPACE" get pods -l "$SERVER_LABEL" -o jsonpath='{.items[0].metadata.name}')
   log "HA(a): victim pod: $VICTIM"
@@ -949,9 +977,16 @@ EOF
       break
     fi
     sleep 5
-    [ "$i" = 36 ] && die "HA(a): outbox dispatcher did not process rbac.mappings.updated after the pod loss"
+    [ "$i" = 36 ] && die "HA(a): outbox relay/consumers did not process rbac.mappings.updated after the pod loss"
   done
-  log "HA(a): outbox dispatcher continued on the surviving pod; driving a scaffold run"
+  # Durable-consumer failover evidence: the shared outbox-rbac-materialize
+  # group kept acking after the pod loss (ack floor advanced past the
+  # pre-kill deliveries).
+  CONSUMER=$(kubectl -n "$NAMESPACE" exec deploy/nats-box -- \
+    nats consumer info INARI_OUTBOX outbox-rbac-materialize --server nats:4222 --json 2>/dev/null || true)
+  jq -e '.ack_floor.stream_seq > 0 and .num_pending == 0' <<<"$CONSUMER" >/dev/null 2>&1 \
+    || die "HA(a): outbox-rbac-materialize consumer did not drain after failover (consumer info: ${CONSUMER:-empty})"
+  log "HA(a): outbox relay + durable consumers continued on the surviving pod; driving a scaffold run"
   # The go-service skeleton templates .Values.goVersion/.Values.port too;
   # the renderer does not inject schema defaults, so pass all four.
   RUN_RESP=$(xcurl -X POST -H "Authorization: Bearer $(user_token)" -H "Content-Type: application/json" \

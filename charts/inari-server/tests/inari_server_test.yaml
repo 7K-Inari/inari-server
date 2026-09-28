@@ -466,3 +466,40 @@ tests:
     asserts:
       - failedTemplate:
           errorMessage: cache.backend=redis requires redis.enabled=true (subchart) or redis.url (external Redis)
+  - it: renders the subchart NATS URL and single-replica stream by default
+    template: deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_NATS_URL
+            value: nats://RELEASE-NAME-inari-server-nats:4222
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_NATS_STREAM_REPLICAS
+            value: "1"
+  - it: honors an external NATS URL with matching stream replicas
+    template: deployment.yaml
+    set:
+      nats.enabled: false
+      nats.url: nats://nats:4222
+      nats.streamReplicas: 3
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_NATS_URL
+            value: nats://nats:4222
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INARI_NATS_STREAM_REPLICAS
+            value: "3"
+  - it: fails when nats.enabled=false without an external URL
+    template: deployment.yaml
+    set:
+      nats.enabled: false
+    asserts:
+      - failedTemplate:
+          errorMessage: nats.enabled=false requires nats.url (external NATS); the server refuses to boot without JetStream (ADR-0014)

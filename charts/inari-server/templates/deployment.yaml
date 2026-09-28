@@ -91,6 +91,13 @@ spec:
             - name: INARI_REDIS_URL
               value: {{ include "inari-server.redisUrl" . | quote }}
             {{- end }}
+            {{- if and (not .Values.nats.enabled) (not .Values.nats.url) }}
+            {{- fail "nats.enabled=false requires nats.url (external NATS); the server refuses to boot without JetStream (ADR-0014)" }}
+            {{- end }}
+            - name: INARI_NATS_URL
+              value: {{ include "inari-server.natsUrl" . | quote }}
+            - name: INARI_NATS_STREAM_REPLICAS
+              value: {{ .Values.nats.streamReplicas | quote }}
             - name: INARI_OIDC_ISSUER_URL
               value: {{ include "inari-server.oidcIssuerUrl" . | quote }}
             - name: INARI_KEYCLOAK_BASE_URL

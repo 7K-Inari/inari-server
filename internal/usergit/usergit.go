@@ -132,6 +132,9 @@ func (s *Service) BeginAuthorize(ctx context.Context, orgID, userSub, provider, 
 	if err != nil {
 		return "", err
 	}
+	if !p.Configured() {
+		return "", ErrProviderNotEnabled
+	}
 	verifier, err := NewCodeVerifier()
 	if err != nil {
 		return "", err

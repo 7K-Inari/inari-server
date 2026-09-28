@@ -205,10 +205,20 @@ func TestGitHubErrorsNeverLeakSecrets(t *testing.T) {
 	}
 }
 
+func TestGitHubProviderConfigured(t *testing.T) {
+	f := newFakeGitHub(t)
+	if !f.provider(t).Configured() {
+		t.Error("github provider with credentials must report configured")
+	}
+}
+
 func TestPlannedProviderStubs(t *testing.T) {
 	p := PlannedProvider{ProviderName: "gitlab"}
 	if p.Name() != "gitlab" {
 		t.Fatal(p.Name())
+	}
+	if p.Configured() {
+		t.Error("planned provider must report not configured")
 	}
 	if _, err := p.AuthorizeURL("s", "c", ""); !errors.Is(err, ErrProviderNotEnabled) {
 		t.Errorf("authorize: %v", err)

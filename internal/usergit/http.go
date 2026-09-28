@@ -9,6 +9,8 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"sort"
+	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -53,9 +55,17 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		OperationID: "authorizeGitConnection",
 		Method:      http.MethodPost,
 		Path:        "/api/v1/tenants/{org}/git-connections/{provider}/authorize",
-		Summary:     "Start the git OAuth flow (302 to the provider consent URL)",
+		Summary:     "Start the git OAuth flow (302 to the provider consent URL; 200 {authorizeUrl} for JSON clients)",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.authorize)
+	// The console navigates via GET (apiFetch); same contract, no body.
+	huma.Register(api, huma.Operation{
+		OperationID: "authorizeGitConnectionGet",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/tenants/{org}/git-connections/{provider}/authorize",
+		Summary:     "Start the git OAuth flow (302 or JSON authorizeUrl, per Accept)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.authorizeGet)
 
 	huma.Register(api, huma.Operation{
 		OperationID: "gitConnectionCallback",
@@ -106,8 +116,16 @@ type orgPathInput struct {
 
 type listConnectionsOutput struct {
 	Body struct {
-		Connections []Connection `json:"connections"`
+		Connections []Connection   `json:"connections"`
+		Providers   []ProviderInfo `json:"providers"`
 	}
+}
+
+// ProviderInfo describes one configured git provider (metadata only).
+type ProviderInfo struct {
+	ID      string `json:"id"`
+	Enabled bool   `json:"enabled"`
+	APIBase string `json:"apiBase,omitempty"`
 }
 
 func (h *Handler) list(ctx context.Context, in *orgPathInput) (*listConnectionsOutput, error) {
@@ -124,12 +142,28 @@ func (h *Handler) list(ctx context.Context, in *orgPathInput) (*listConnectionsO
 	}
 	out := &listConnectionsOutput{}
 	out.Body.Connections = conns
+	names := make([]string, 0, len(h.svc.providers))
+	for name := range h.svc.providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		// Only configured providers are advertised: unconfigured ones
+		// (registry placeholders, partially configured implementations)
+		// authorize nothing and would render as dead connect buttons in
+		// the console.
+		if !h.svc.providers[name].Configured() {
+			continue
+		}
+		out.Body.Providers = append(out.Body.Providers, ProviderInfo{ID: name, Enabled: true})
+	}
 	return out, nil
 }
 
 type authorizeInput struct {
 	Org      string `path:"org"`
 	Provider string `path:"provider"`
+	Accept   string `header:"Accept"`
 	Body     struct {
 		APIBase string `json:"apiBase,omitempty" doc:"GHE/self-hosted API base (must be allowlisted); empty = github.com"`
 	}
@@ -137,18 +171,37 @@ type authorizeInput struct {
 
 type redirectOutput struct {
 	Status   int
-	Location string `header:"Location"`
+	Location string            `header:"Location"`
+	Body     *authorizeURLBody `json:",omitempty"`
+}
+
+type authorizeURLBody struct {
+	AuthorizeURL string `json:"authorizeUrl"`
+}
+
+type authorizeGetInput struct {
+	Org      string `path:"org"`
+	Provider string `path:"provider"`
+	Accept   string `header:"Accept"`
+}
+
+func (h *Handler) authorizeGet(ctx context.Context, in *authorizeGetInput) (*redirectOutput, error) {
+	return h.beginAuthorize(ctx, in.Org, in.Provider, "", in.Accept)
 }
 
 func (h *Handler) authorize(ctx context.Context, in *authorizeInput) (*redirectOutput, error) {
+	return h.beginAuthorize(ctx, in.Org, in.Provider, in.Body.APIBase, in.Accept)
+}
+
+func (h *Handler) beginAuthorize(ctx context.Context, orgSlug, provider, apiBase, accept string) (*redirectOutput, error) {
 	if h.svc == nil {
 		return nil, errDisabled
 	}
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, id, err := h.authorizeOrg(ctx, orgSlug, authz.RelationViewer)
 	if err != nil {
 		return nil, err
 	}
-	url, err := h.svc.BeginAuthorize(ctx, org.ID, id.Subject, in.Provider, in.Body.APIBase)
+	url, err := h.svc.BeginAuthorize(ctx, org.ID, id.Subject, provider, apiBase)
 	if errors.Is(err, ErrUnknownProvider) {
 		return nil, huma.Error404NotFound("unknown git provider")
 	}
@@ -160,6 +213,11 @@ func (h *Handler) authorize(ctx context.Context, in *authorizeInput) (*redirectO
 	}
 	if err != nil {
 		return nil, err
+	}
+	// Contract negotiation: JSON clients (the console) want the consent URL
+	// in a body to navigate to themselves; browsers/CLI keep the 302.
+	if strings.Contains(accept, "application/json") {
+		return &redirectOutput{Status: http.StatusOK, Body: &authorizeURLBody{AuthorizeURL: url}}, nil
 	}
 	return &redirectOutput{Status: http.StatusFound, Location: url}, nil
 }

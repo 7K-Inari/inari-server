@@ -37,6 +37,11 @@ type TokenGrant struct {
 // forgejo planned behind the same interface).
 type Provider interface {
 	Name() string
+	// Configured reports whether the provider holds working credentials
+	// and can run the OAuth flow. Unconfigured providers (placeholders,
+	// partially configured implementations) are hidden from the provider
+	// listing and rejected at authorize time with ErrProviderNotEnabled.
+	Configured() bool
 	// AuthorizeURL builds the provider consent URL for the flow.
 	AuthorizeURL(state, codeChallenge, apiBase string) (string, error)
 	// Exchange trades an authorization code (+ PKCE verifier) for tokens.
@@ -54,6 +59,8 @@ type Provider interface {
 type PlannedProvider struct{ ProviderName string }
 
 func (p PlannedProvider) Name() string { return p.ProviderName }
+
+func (p PlannedProvider) Configured() bool { return false }
 
 func (p PlannedProvider) AuthorizeURL(string, string, string) (string, error) {
 	return "", ErrProviderNotEnabled

@@ -5,6 +5,7 @@ package usergit_test
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -43,6 +44,8 @@ type fakeProvider struct {
 }
 
 func (p *fakeProvider) Name() string { return "fakehub" }
+
+func (p *fakeProvider) Configured() bool { return true }
 
 func (p *fakeProvider) AuthorizeURL(state, codeChallenge, apiBase string) (string, error) {
 	return "https://fakehub.example/login/oauth/authorize?state=" + url.QueryEscape(state) +
@@ -497,6 +500,45 @@ func TestUserGitHTTP(t *testing.T) {
 		t.Errorf("planned provider: %d", resp.StatusCode)
 	}
 
+	// GET authorize (the console's flow): planned provider → 501, too.
+	getReq := func(path, accept string) *http.Response {
+		t.Helper()
+		r, err := http.NewRequest("GET", srv.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Header.Set("Authorization", "Bearer good")
+		if accept != "" {
+			r.Header.Set("Accept", accept)
+		}
+		resp, err := client.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+	if resp := getReq("/api/v1/tenants/acme/git-connections/gitlab/authorize", "application/json"); resp.StatusCode != http.StatusNotImplemented {
+		t.Errorf("GET planned provider: %d", resp.StatusCode)
+	}
+	// JSON clients get 200 {authorizeUrl}; non-JSON keeps the 302.
+	jresp := getReq("/api/v1/tenants/acme/git-connections/fakehub/authorize", "application/json")
+	if jresp.StatusCode != http.StatusOK {
+		t.Fatalf("GET authorize json: %d", jresp.StatusCode)
+	}
+	var authBody struct {
+		AuthorizeURL string `json:"authorizeUrl"`
+	}
+	if err := json.NewDecoder(jresp.Body).Decode(&authBody); err != nil {
+		t.Fatalf("GET authorize decode: %v", err)
+	}
+	jresp.Body.Close()
+	if !strings.HasPrefix(authBody.AuthorizeURL, "https://fakehub.example/") {
+		t.Fatalf("GET authorize url: %q", authBody.AuthorizeURL)
+	}
+	if resp := getReq("/api/v1/tenants/acme/git-connections/fakehub/authorize", ""); resp.StatusCode != http.StatusFound {
+		t.Errorf("GET authorize redirect: %d", resp.StatusCode)
+	}
+
 	// Authorize → 302 with state + PKCE challenge.
 	resp := req("POST", "/api/v1/tenants/acme/git-connections/fakehub/authorize", "good", "{}")
 	if resp.StatusCode != http.StatusFound {
@@ -537,6 +579,21 @@ func TestUserGitHTTP(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "octo") {
 		t.Fatalf("list: %d %s", resp.StatusCode, body)
+	}
+	// The provider listing advertises only configured providers: the
+	// fakehub fixture is configured, the gitlab PlannedProvider placeholder
+	// must be invisible.
+	var listBody struct {
+		Providers []struct {
+			ID      string `json:"id"`
+			Enabled bool   `json:"enabled"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(body, &listBody); err != nil {
+		t.Fatalf("list decode: %v", err)
+	}
+	if len(listBody.Providers) != 1 || listBody.Providers[0].ID != "fakehub" || !listBody.Providers[0].Enabled {
+		t.Fatalf("providers = %+v, want exactly [fakehub enabled]", listBody.Providers)
 	}
 	for _, secret := range []string{"rt-0", "acc-exchange", "refresh_token", "access_token"} {
 		if strings.Contains(string(body), secret) {

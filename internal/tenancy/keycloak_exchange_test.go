@@ -127,6 +127,10 @@ func TestClusterDexConflictIsIdempotent(t *testing.T) {
 			w.WriteHeader(http.StatusConflict)
 		case r.URL.Path == "/admin/realms/inari/clients" && r.Method == http.MethodGet:
 			_, _ = w.Write([]byte(`[{"id":"uuid-9"}]`))
+		case r.URL.Path == "/admin/realms/inari/clients/uuid-9" && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"id":"uuid-9","clientId":"cluster-abc123-dex","enabled":false}`))
+		case r.URL.Path == "/admin/realms/inari/clients/uuid-9" && r.Method == http.MethodPut:
+			w.WriteHeader(http.StatusNoContent)
 		case r.URL.Path == "/admin/realms/inari/clients/uuid-9/client-secret":
 			_, _ = w.Write([]byte(`{"value":"existing-secret"}`))
 		default:

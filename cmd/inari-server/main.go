@@ -501,6 +501,7 @@ func run() error {
 	// unset the vault is off and raw user tokens on the extension hop fail
 	// closed.
 	var credVault *agentgateway.CredentialVault
+	var extSessions extensionhost.SessionStore
 	if kek, err := cryptoenvelope.LoadKEK(); err != nil {
 		log.Warn("credential KEK unset: user-credential vault disabled", "reason", err)
 	} else {
@@ -510,6 +511,13 @@ func run() error {
 		}
 		credVault = v
 		gateway.WithCredentialVault(v)
+		// oidc-sso-session backing store (W3): same KEK, envelope-encrypted
+		// rows in user_extension_sessions.
+		ss, err := extensionhost.NewPgSessionStore(database, kek)
+		if err != nil {
+			return err
+		}
+		extSessions = ss
 		go leaderlease.Run(ctx, leaser, "agent-credential-sweep", func(lctx context.Context) {
 			v.RunSweepLoop(lctx, time.Minute)
 		}, log)
@@ -721,10 +729,12 @@ func run() error {
 	// W2 extension auth model (plan §5.8): per-request RFC 8693 exchange of
 	// the caller's token into the extension's declared downstream audience,
 	// authenticating as the ext-<name> client (secret read via the admin API
-	// at exchange time, never persisted). The oidc-sso-session store ships
-	// with W3; declaring extensions fail closed with re-auth until then.
+	// at exchange time, never persisted). The oidc-sso-session store is the
+	// envelope-encrypted Postgres store built with the credential vault; when
+	// no KEK is configured it is nil and declaring extensions fail closed
+	// with re-auth.
 	extExchanger := extensionhost.NewKeycloakExchanger(cfg.OIDCIssuerURL, idp)
-	extProxy.WithAuthModel(extensionhost.NewAuthModel(extExchanger, nil))
+	extProxy.WithAuthModel(extensionhost.NewAuthModel(extExchanger, extSessions))
 	extUiAssets := extensionhost.NewUiAssetServer(extSvc, svc, remoteEntries)
 
 	// Tenant Zone Factory (plan §5.12): fake AWS/Crossplane backends by
@@ -820,6 +830,7 @@ func run() error {
 		Fleet:             fleetSvc,
 		SecretStores:      secretStoresSvc,
 		Extensions:        extSvc,
+		ExtensionSessions: extSessions,
 		UserGit:           userGitSvc,
 		DB:                database,
 		AuditStore:        auditStore,

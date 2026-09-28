@@ -5,9 +5,12 @@ package extensionhost
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -25,14 +28,22 @@ type TenantResolver interface {
 
 // Handler exposes the extension registry REST surface.
 type Handler struct {
-	svc     *Service
-	tenants TenantResolver
-	authz   authz.Authorizer
-	fetcher *RemoteEntryFetcher
+	svc      *Service
+	tenants  TenantResolver
+	authz    authz.Authorizer
+	fetcher  *RemoteEntryFetcher
+	sessions SessionStore
 }
 
 func NewHandler(svc *Service, tenants TenantResolver, az authz.Authorizer) *Handler {
 	return &Handler{svc: svc, tenants: tenants, authz: az}
+}
+
+// WithSessionStore wires the per-user third-party session store so the
+// session bootstrap endpoint can persist oidc-sso-session material.
+func (h *Handler) WithSessionStore(s SessionStore) *Handler {
+	h.sessions = s
+	return h
 }
 
 // WithRemoteEntryFetcher wires the remoteEntry cache so registration writes
@@ -86,6 +97,20 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Summary:     "Run the SDK handshake and mark the extension ready",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.verify)
+	huma.Register(api, huma.Operation{
+		OperationID: "putExtensionSession",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/tenants/{org}/extensions/{id}/session",
+		Summary:     "Store bootstrapped third-party session material for the calling user (oidc-sso-session)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.putSession)
+	huma.Register(api, huma.Operation{
+		OperationID: "deleteExtensionSession",
+		Method:      http.MethodDelete,
+		Path:        "/api/v1/tenants/{org}/extensions/{id}/session",
+		Summary:     "Drop the calling user's third-party session (logout/re-auth)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.deleteSession)
 	huma.Register(api, huma.Operation{
 		OperationID: "listUiExtensions",
 		Method:      http.MethodGet,
@@ -455,4 +480,130 @@ func (h *Handler) selfExtensionPermissions(ctx context.Context, in *listUiInput)
 		}
 	}
 	return out, nil
+}
+
+// --- Per-user third-party sessions (oidc-sso-session bootstrap) ---
+
+type sessionInput struct {
+	Org  string `path:"org"`
+	ID   string `path:"id"`
+	Body struct {
+		SessionMaterial  string `json:"sessionMaterial" doc:"third-party session credential; used for this call only, never echoed"`
+		Nonce            string `json:"nonce,omitempty" doc:"client-generated replay marker"`
+		ExpiresInSeconds int    `json:"expiresInSeconds,omitempty" doc:"override session TTL (capped); defaults to the token's exp claim or 8h"`
+	}
+}
+
+type sessionOutput struct {
+	Body struct {
+		Session struct {
+			ExtensionID string     `json:"extensionId"`
+			State       string     `json:"state"`
+			ExpiresAt   *time.Time `json:"expiresAt"`
+		} `json:"session"`
+	}
+}
+
+// sessionProviderFor derives the session provider key from the extension's
+// declared default auth method (audience), falling back to the extension
+// name — the same derivation the ssoSessionProvider uses at resolve time.
+func sessionProviderFor(e *types.Extension) string {
+	declared, err := pickAuthMethod(e)
+	if err != nil {
+		return e.Name
+	}
+	if declared.Audience != "" {
+		return declared.Audience
+	}
+	return e.Name
+}
+
+// sessionExpiry prefers the material's own exp claim when it is JWT-shaped;
+// otherwise it falls back to a bounded TTL. The claim is read best-effort
+// without signature validation (the credential is opaque to us).
+func sessionExpiry(material string, overrideSeconds int) time.Time {
+	const defTTL, maxTTL = 8 * time.Hour, 24 * time.Hour
+	if overrideSeconds > 0 {
+		d := time.Duration(overrideSeconds) * time.Second
+		if d > maxTTL {
+			d = maxTTL
+		}
+		return time.Now().Add(d)
+	}
+	if exp, ok := jwtExpClaim(material); ok {
+		return exp
+	}
+	return time.Now().Add(defTTL)
+}
+
+func jwtExpClaim(tok string) (time.Time, bool) {
+	parts := strings.Split(tok, ".")
+	if len(parts) != 3 {
+		return time.Time{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}, false
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp == 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(claims.Exp, 0), true
+}
+
+func (h *Handler) putSession(ctx context.Context, in *sessionInput) (*sessionOutput, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	if err != nil {
+		return nil, err
+	}
+	if h.sessions == nil {
+		return nil, huma.Error501NotImplemented("extension sessions not configured")
+	}
+	if strings.TrimSpace(in.Body.SessionMaterial) == "" {
+		return nil, huma.Error422UnprocessableEntity("sessionMaterial is required")
+	}
+	ext, err := h.svc.Get(ctx, org.ID, in.ID)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	provider := sessionProviderFor(ext)
+	expiry := sessionExpiry(in.Body.SessionMaterial, in.Body.ExpiresInSeconds)
+	material := in.Body.SessionMaterial
+	in.Body.SessionMaterial = ""
+	if err := h.sessions.Put(ctx, id.Subject, ext.Name, &UserSession{
+		Provider: provider, Credential: material, Expiry: expiry,
+	}); err != nil {
+		return nil, mapErr(err)
+	}
+	out := &sessionOutput{}
+	out.Body.Session.ExtensionID = ext.ID
+	out.Body.Session.State = "active"
+	out.Body.Session.ExpiresAt = &expiry
+	return out, nil
+}
+
+type sessionPathInput struct {
+	Org string `path:"org"`
+	ID  string `path:"id"`
+}
+
+func (h *Handler) deleteSession(ctx context.Context, in *sessionPathInput) (*struct{}, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	if err != nil {
+		return nil, err
+	}
+	if h.sessions == nil {
+		return nil, huma.Error501NotImplemented("extension sessions not configured")
+	}
+	ext, err := h.svc.Get(ctx, org.ID, in.ID)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	if err := h.sessions.Delete(ctx, id.Subject, ext.Name, sessionProviderFor(ext)); err != nil {
+		return nil, mapErr(err)
+	}
+	return &struct{}{}, nil
 }

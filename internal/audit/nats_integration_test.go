@@ -5,11 +5,13 @@ package audit_test
 import (
 	"context"
 	"errors"
+	"net"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/nats-io/nats-server/v2/server"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -242,6 +244,80 @@ func TestRelayPublishFailureFailOpen(t *testing.T) {
 	r = readRow(t, ctx, database, id)
 	if !r.published || r.lastError == "" {
 		t.Errorf("dead-lettered row = %+v, want published with last_error", r)
+	}
+}
+
+func TestRelayDrainsAfterNATSRestart(t *testing.T) {
+	ctx := context.Background()
+	database := itDB(t)
+
+	// Fixed-port embedded server so the outage can be restarted on the same
+	// address; JetStream state survives via the shared store dir.
+	storeDir := t.TempDir()
+	start := func(t *testing.T, port int) *server.Server {
+		t.Helper()
+		s, err := server.NewServer(&server.Options{
+			JetStream: true,
+			StoreDir:  storeDir,
+			Host:      "127.0.0.1",
+			Port:      port,
+		})
+		if err != nil {
+			t.Fatalf("nats-server: %v", err)
+		}
+		go s.Start()
+		if !s.ReadyForConnections(5 * time.Second) {
+			t.Fatal("nats-server did not become ready")
+		}
+		return s
+	}
+	natsServer := start(t, -1)
+	port := natsServer.Addr().(*net.TCPAddr).Port
+
+	bus, err := eventbus.Connect(ctx, natsServer.ClientURL(), eventbus.WithConnectBudget(5*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bus.Close()
+	if err := bus.EnsureOutboxStream(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	rec := &recorder{}
+	d := newDispatcher(t, database, bus, rec.handler("tenant.created"), audit.WithPublishAckBudget(300*time.Millisecond))
+
+	id := appendEvent(t, ctx, database, "org:1", "tenant.created", map[string]string{"slug": "acme"})
+
+	// Outage: the row accumulates unpublished (fail-open).
+	natsServer.Shutdown()
+	if err := d.RelayOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if r := readRow(t, ctx, database, id); r.published {
+		t.Fatal("row marked published despite NATS outage")
+	}
+
+	// Recovery: the client auto-reconnects and the next relay publishes the
+	// accumulated row; the handler then receives it exactly once.
+	natsServer = start(t, port)
+	defer natsServer.Shutdown()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if err := d.RelayOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if r := readRow(t, ctx, database, id); r.published {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("row never drained after NATS recovery")
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if _, err := d.DeliverOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.distinctIDs(); len(got) != 1 || !got[id] {
+		t.Errorf("handler received %v, want exactly row %d", got, id)
 	}
 }
 

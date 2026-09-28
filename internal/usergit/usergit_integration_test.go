@@ -500,6 +500,45 @@ func TestUserGitHTTP(t *testing.T) {
 		t.Errorf("planned provider: %d", resp.StatusCode)
 	}
 
+	// GET authorize (the console's flow): planned provider → 501, too.
+	getReq := func(path, accept string) *http.Response {
+		t.Helper()
+		r, err := http.NewRequest("GET", srv.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Header.Set("Authorization", "Bearer good")
+		if accept != "" {
+			r.Header.Set("Accept", accept)
+		}
+		resp, err := client.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+	if resp := getReq("/api/v1/tenants/acme/git-connections/gitlab/authorize", "application/json"); resp.StatusCode != http.StatusNotImplemented {
+		t.Errorf("GET planned provider: %d", resp.StatusCode)
+	}
+	// JSON clients get 200 {authorizeUrl}; non-JSON keeps the 302.
+	jresp := getReq("/api/v1/tenants/acme/git-connections/fakehub/authorize", "application/json")
+	if jresp.StatusCode != http.StatusOK {
+		t.Fatalf("GET authorize json: %d", jresp.StatusCode)
+	}
+	var authBody struct {
+		AuthorizeURL string `json:"authorizeUrl"`
+	}
+	if err := json.NewDecoder(jresp.Body).Decode(&authBody); err != nil {
+		t.Fatalf("GET authorize decode: %v", err)
+	}
+	jresp.Body.Close()
+	if !strings.HasPrefix(authBody.AuthorizeURL, "https://fakehub.example/") {
+		t.Fatalf("GET authorize url: %q", authBody.AuthorizeURL)
+	}
+	if resp := getReq("/api/v1/tenants/acme/git-connections/fakehub/authorize", ""); resp.StatusCode != http.StatusFound {
+		t.Errorf("GET authorize redirect: %d", resp.StatusCode)
+	}
+
 	// Authorize → 302 with state + PKCE challenge.
 	resp := req("POST", "/api/v1/tenants/acme/git-connections/fakehub/authorize", "good", "{}")
 	if resp.StatusCode != http.StatusFound {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/eventbus/eventbustest"
 	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
 	"github.com/7K-Inari/inari-server/internal/rbacmaterialize"
@@ -80,7 +81,7 @@ func setup(t *testing.T) (*db.DB, *tenancy.Service, *gitprovider.Fake, *audit.Di
 	git := gitprovider.NewFake()
 	h := rbacmaterialize.NewHandler(svc,
 		rbacmaterialize.NewInventoryGitConfigs(database, inventory.NewStore()), git, nil)
-	disp := audit.NewDispatcher(database, 10*time.Millisecond, h)
+	disp := eventbustest.Dispatcher(t, database, 10*time.Millisecond, audit.Named("rbac-materialize", h))
 	return database, svc, git, disp, ctx
 }
 
@@ -94,7 +95,7 @@ func TestMaterializesOnTenantAndMappingLifecycle(t *testing.T) {
 	if len(teams) == 0 {
 		t.Fatal("expected seeded default teams")
 	}
-	if err := disp.DispatchOnce(ctx); err != nil {
+	if err := eventbustest.DispatchOnce(ctx, disp); err != nil {
 		t.Fatal(err)
 	}
 
@@ -131,7 +132,7 @@ func TestMaterializesOnTenantAndMappingLifecycle(t *testing.T) {
 		[]types.TeamRoleMapping{{Team: team.Name, Role: newRole}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := disp.DispatchOnce(ctx); err != nil {
+	if err := eventbustest.DispatchOnce(ctx, disp); err != nil {
 		t.Fatal(err)
 	}
 	updated := git.Files("acme-inari-state", "main")[rbacmaterialize.ClusterRoleBindingsPath]
@@ -149,7 +150,7 @@ func TestMaterializesOnTenantAndMappingLifecycle(t *testing.T) {
 
 	// Idempotency: redispatching with no changes must not alter content.
 	before := git.Files("acme-inari-state", "main")
-	if err := disp.DispatchOnce(ctx); err != nil {
+	if err := eventbustest.DispatchOnce(ctx, disp); err != nil {
 		t.Fatal(err)
 	}
 	after := git.Files("acme-inari-state", "main")
@@ -169,7 +170,7 @@ func TestMaterializesTeamDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := disp.DispatchOnce(ctx); err != nil {
+	if err := eventbustest.DispatchOnce(ctx, disp); err != nil {
 		t.Fatal(err)
 	}
 	bindings := git.Files("acme-inari-state", "main")[rbacmaterialize.ClusterRoleBindingsPath]
@@ -180,7 +181,7 @@ func TestMaterializesTeamDelete(t *testing.T) {
 	if err := svc.DeleteTeam(ctx, "user-1", "acme", extra.Name); err != nil {
 		t.Fatal(err)
 	}
-	if err := disp.DispatchOnce(ctx); err != nil {
+	if err := eventbustest.DispatchOnce(ctx, disp); err != nil {
 		t.Fatal(err)
 	}
 	bindings = git.Files("acme-inari-state", "main")[rbacmaterialize.ClusterRoleBindingsPath]

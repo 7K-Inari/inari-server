@@ -23,6 +23,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/eventbus/eventbustest"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -232,8 +233,8 @@ func TestCreateTenantEndToEnd(t *testing.T) {
 
 	// Outbox rows pending, then dispatched into tuples.
 	rec := &recordingStore{}
-	disp := audit.NewDispatcher(database, 50*time.Millisecond, authz.NewTupleWriter(rec))
-	if err := disp.DispatchOnce(ctx); err != nil {
+	disp := eventbustest.Dispatcher(t, database, 50*time.Millisecond, audit.Named("authz-tuple-writer", authz.NewTupleWriter(rec)))
+	if err := eventbustest.DispatchOnce(ctx, disp); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	if len(rec.written) != 6 { // 4 team→org role tuples + 2 creator memberships
@@ -346,8 +347,8 @@ func TestMembershipLifecycle(t *testing.T) {
 
 	// Outbox dispatch writes the membership tuple.
 	rec := &recordingStore{}
-	disp := audit.NewDispatcher(database, 50*time.Millisecond, authz.NewTupleWriter(rec))
-	if err := disp.DispatchOnce(ctx); err != nil {
+	disp := eventbustest.Dispatcher(t, database, 50*time.Millisecond, audit.Named("authz-tuple-writer", authz.NewTupleWriter(rec)))
+	if err := eventbustest.DispatchOnce(ctx, disp); err != nil {
 		t.Fatal(err)
 	}
 	want := authz.Tuple{User: "user:user-2", Relation: "member", Object: "team:" + devTeam.ID}
@@ -371,7 +372,7 @@ func TestMembershipLifecycle(t *testing.T) {
 	if _, ok, _ := tenancy.NewStore().HighestRole(ctx, database.Pool, org.ID, "user-2"); ok {
 		t.Error("user-2 still has a role after remove")
 	}
-	if err := disp.DispatchOnce(ctx); err != nil {
+	if err := eventbustest.DispatchOnce(ctx, disp); err != nil {
 		t.Fatal(err)
 	}
 	found = false
@@ -442,8 +443,8 @@ func TestMembershipIdempotent(t *testing.T) {
 		}
 	}
 	rec := &recordingStore{}
-	disp := audit.NewDispatcher(database, 50*time.Millisecond, authz.NewTupleWriter(rec))
-	if err := disp.DispatchOnce(ctx); err != nil {
+	disp := eventbustest.Dispatcher(t, database, 50*time.Millisecond, audit.Named("authz-tuple-writer", authz.NewTupleWriter(rec)))
+	if err := eventbustest.DispatchOnce(ctx, disp); err != nil {
 		t.Fatal(err)
 	}
 	want := authz.Tuple{User: "user:user-2", Relation: "member", Object: "team:" + devTeam.ID}
@@ -478,7 +479,7 @@ func TestMembershipIdempotent(t *testing.T) {
 			t.Fatalf("concurrent RemoveMember: %v", err)
 		}
 	}
-	if err := disp.DispatchOnce(ctx); err != nil {
+	if err := eventbustest.DispatchOnce(ctx, disp); err != nil {
 		t.Fatal(err)
 	}
 	deletes := 0
@@ -640,8 +641,8 @@ func TestTeamLifecycle(t *testing.T) {
 
 	// team.created seeds the org role tuple via the outbox.
 	rec := &recordingStore{}
-	disp := audit.NewDispatcher(database, 50*time.Millisecond, authz.NewTupleWriter(rec))
-	if err := disp.DispatchOnce(ctx); err != nil {
+	disp := eventbustest.Dispatcher(t, database, 50*time.Millisecond, audit.Named("authz-tuple-writer", authz.NewTupleWriter(rec)))
+	if err := eventbustest.DispatchOnce(ctx, disp); err != nil {
 		t.Fatal(err)
 	}
 	want := authz.Tuple{User: "team:" + team.ID + "#member", Relation: "developer", Object: authz.OrgObject(org.ID)}
@@ -738,7 +739,7 @@ func TestTeamLifecycle(t *testing.T) {
 			t.Errorf("keycloak group still present: %v", idp.groups)
 		}
 	}
-	if err := disp.DispatchOnce(ctx); err != nil {
+	if err := eventbustest.DispatchOnce(ctx, disp); err != nil {
 		t.Fatal(err)
 	}
 	found = false
@@ -835,8 +836,8 @@ func TestOrgMemberRoleLifecycle(t *testing.T) {
 
 	// The org-admins team now exists and grants admin via the outbox.
 	rec := &recordingStore{}
-	disp := audit.NewDispatcher(database, 50*time.Millisecond, authz.NewTupleWriter(rec))
-	if err := disp.DispatchOnce(ctx); err != nil {
+	disp := eventbustest.Dispatcher(t, database, 50*time.Millisecond, audit.Named("authz-tuple-writer", authz.NewTupleWriter(rec)))
+	if err := eventbustest.DispatchOnce(ctx, disp); err != nil {
 		t.Fatal(err)
 	}
 	adminTuple := false
@@ -899,7 +900,7 @@ func TestOrgMemberRoleLifecycle(t *testing.T) {
 	if !removedAudit {
 		t.Error("no member.removed audit event")
 	}
-	if err := disp.DispatchOnce(ctx); err != nil {
+	if err := eventbustest.DispatchOnce(ctx, disp); err != nil {
 		t.Fatal(err)
 	}
 	memberDeleted := false

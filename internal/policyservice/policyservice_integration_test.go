@@ -16,6 +16,7 @@ import (
 
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/eventbus/eventbustest"
 	"github.com/7K-Inari/inari-server/internal/fleetmanager"
 	"github.com/7K-Inari/inari-server/internal/policyservice"
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -317,8 +318,8 @@ func TestAssignDistributesApplyBundle(t *testing.T) {
 
 	// Distribution is outbox-driven: Assign commits the assignment + event,
 	// the dispatcher fan-out enqueues ApplyBundle commands.
-	dispatcher := audit.NewDispatcher(database, time.Millisecond,
-		policyservice.NewDistributeHandler(svc, slog.Default()))
+	dispatcher := eventbustest.Dispatcher(t, database, time.Millisecond,
+		audit.Named("policy-distribute", policyservice.NewDistributeHandler(svc, slog.Default())))
 
 	manifests := json.RawMessage(`[{"apiVersion":"kyverno.io/v1","kind":"ClusterPolicy","metadata":{"name":"require-labels"}}]`)
 	pack, err := svc.CreatePolicyPack(ctx, "user-1", "org:1", "baseline", types.PolicyPackEngineKyverno, "", "1.0.0", nil, manifests)
@@ -333,7 +334,7 @@ func TestAssignDistributesApplyBundle(t *testing.T) {
 	if a.State != "active" {
 		t.Fatalf("assignment = %+v", a)
 	}
-	if err := dispatcher.DispatchOnce(ctx); err != nil {
+	if err := eventbustest.DispatchOnce(ctx, dispatcher); err != nil {
 		t.Fatal(err)
 	}
 
@@ -368,7 +369,7 @@ func TestAssignDistributesApplyBundle(t *testing.T) {
 	if _, err := svc.Assign(ctx, "user-1", "org:1", pack.ID, types.PolicyTargetClusterSet, cs.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := dispatcher.DispatchOnce(ctx); err != nil {
+	if err := eventbustest.DispatchOnce(ctx, dispatcher); err != nil {
 		t.Fatal(err)
 	}
 	if len(queue.cmds) != 2 {

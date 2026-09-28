@@ -26,9 +26,9 @@ const (
 	DefaultMaxPublishAttempts = 50
 	DefaultMaxDeliver         = 50
 
-	publishAckBudget = 10 * time.Second
-	consumerAckWait  = 30 * time.Second
-	fetchBatch       = 32
+	defaultPublishAckBudget = 10 * time.Second
+	defaultConsumerAckWait  = 30 * time.Second
+	fetchBatch              = 32
 )
 
 // handlerNameRE pins durable consumer names (outbox-<name>): stable across
@@ -106,6 +106,8 @@ type Dispatcher struct {
 	batch              int
 	maxPublishAttempts int
 	maxDeliver         int
+	publishAckBudget   time.Duration
+	consumerAckWait    time.Duration
 	handlers           []NamedHandler
 	consumers          map[string]jetstream.Consumer
 }
@@ -119,6 +121,26 @@ func WithMaxDeliver(n int) DispatcherOption {
 	return func(d *Dispatcher) {
 		if n > 0 {
 			d.maxDeliver = n
+		}
+	}
+}
+
+// WithPublishAckBudget overrides the per-batch publish ack timeout (tests
+// exercise NATS-down failure paths without waiting 10s).
+func WithPublishAckBudget(b time.Duration) DispatcherOption {
+	return func(d *Dispatcher) {
+		if b > 0 {
+			d.publishAckBudget = b
+		}
+	}
+}
+
+// WithConsumerAckWait overrides the consumer ack wait (tests exercise
+// shutdown redelivery without waiting 30s).
+func WithConsumerAckWait(w time.Duration) DispatcherOption {
+	return func(d *Dispatcher) {
+		if w > 0 {
+			d.consumerAckWait = w
 		}
 	}
 }
@@ -138,6 +160,8 @@ func NewDispatcher(ctx context.Context, d *db.DB, bus *eventbus.Bus, interval ti
 		batch:              100,
 		maxPublishAttempts: DefaultMaxPublishAttempts,
 		maxDeliver:         DefaultMaxDeliver,
+		publishAckBudget:   defaultPublishAckBudget,
+		consumerAckWait:    defaultConsumerAckWait,
 		consumers:          map[string]jetstream.Consumer{},
 	}
 	for _, o := range opts {
@@ -153,7 +177,7 @@ func NewDispatcher(ctx context.Context, d *db.DB, bus *eventbus.Bus, interval ti
 		cons, err := disp.js.CreateOrUpdateConsumer(ctx, eventbus.StreamNameOutbox, jetstream.ConsumerConfig{
 			Durable:       "outbox-" + h.name,
 			AckPolicy:     jetstream.AckExplicitPolicy,
-			AckWait:       consumerAckWait,
+			AckWait:       disp.consumerAckWait,
 			MaxDeliver:    disp.maxDeliver,
 			DeliverPolicy: jetstream.DeliverAllPolicy,
 			FilterSubject: eventbus.SubjectOutbox + ".>",
@@ -242,14 +266,14 @@ func (d *Dispatcher) RelayOnce(ctx context.Context) error {
 			pubs = append(pubs, pending{ev: ev, fut: fut})
 		}
 
-		deadline := time.Now().Add(publishAckBudget)
+		deadline := time.Now().Add(d.publishAckBudget)
 		var relayed int64
 		for i := range pubs {
 			p := &pubs[i]
 			if p.pubErr == nil {
 				remaining := time.Until(deadline)
 				if remaining <= 0 {
-					p.pubErr = fmt.Errorf("outbox: publish ack budget %s exhausted", publishAckBudget)
+					p.pubErr = fmt.Errorf("outbox: publish ack budget %s exhausted", d.publishAckBudget)
 				} else {
 					timer := time.NewTimer(remaining)
 					select {
@@ -257,7 +281,7 @@ func (d *Dispatcher) RelayOnce(ctx context.Context) error {
 					case e := <-p.fut.Err():
 						p.pubErr = fmt.Errorf("outbox: publish ack: %w", e)
 					case <-timer.C:
-						p.pubErr = fmt.Errorf("outbox: publish ack budget %s exhausted", publishAckBudget)
+						p.pubErr = fmt.Errorf("outbox: publish ack budget %s exhausted", d.publishAckBudget)
 					}
 					timer.Stop()
 				}
@@ -344,6 +368,11 @@ func (d *Dispatcher) consumeLoop(ctx context.Context, h NamedHandler) {
 		}
 		for msg := range batch.Messages() {
 			if !d.deliver(ctx, h, msg) {
+				// Shutdown: Nak anything else the in-flight pull delivers so
+				// a surviving replica isn't gated on the ack wait.
+				for rest := range batch.Messages() {
+					_ = rest.Nak()
+				}
 				return
 			}
 		}
@@ -402,7 +431,23 @@ func (d *Dispatcher) deliver(ctx context.Context, h NamedHandler, msg jetstream.
 		metrics.RecordConsumerDelivery(ctx, h.name, metrics.ResultDeadletter, time.Since(start))
 		return true
 	}
-	_ = msg.Nak()
+	_ = msg.NakWithDelay(retryDelay(d.maxDeliver, delivered))
 	metrics.RecordConsumerDelivery(ctx, h.name, metrics.ResultRetry, time.Since(start))
 	return true
+}
+
+// retryDelay picks the redelivery delay for the given delivery count from
+// the capped backoff schedule. The consumer also carries the schedule as
+// BackOff (governs AckWait-expiry redeliveries); the explicit NakWithDelay
+// keeps handler-failure retries deterministic across server versions.
+func retryDelay(maxDeliver int, delivered uint64) time.Duration {
+	schedule := backoffSchedule(maxDeliver)
+	idx := int(delivered) - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(schedule) {
+		idx = len(schedule) - 1
+	}
+	return schedule[idx]
 }

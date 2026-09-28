@@ -15,9 +15,10 @@ import (
 	"github.com/7K-Inari/inari-server/internal/eventbus"
 )
 
-// ServerURL starts an embedded nats-server with JetStream enabled and
-// returns its client URL.
-func ServerURL(t *testing.T) string {
+// Server starts an embedded nats-server with JetStream enabled and returns
+// it (Shutdown via t.Cleanup; tests may shut it down early to simulate
+// outages).
+func Server(t *testing.T) *server.Server {
 	t.Helper()
 	s, err := server.NewServer(&server.Options{
 		JetStream: true,
@@ -33,7 +34,14 @@ func ServerURL(t *testing.T) string {
 		t.Fatal("nats-server did not become ready")
 	}
 	t.Cleanup(s.Shutdown)
-	return s.ClientURL()
+	return s
+}
+
+// ServerURL starts an embedded nats-server with JetStream enabled and
+// returns its client URL.
+func ServerURL(t *testing.T) string {
+	t.Helper()
+	return Server(t).ClientURL()
 }
 
 // Bus connects a Bus to a fresh embedded server and ensures the outbox

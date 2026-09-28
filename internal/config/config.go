@@ -61,7 +61,7 @@ type Config struct {
 	// NATSStreamReplicas is the JetStream replica count for the INARI_OUTBOX
 	// stream (1 for a single-node bus, 3 for a clustered one).
 	NATSStreamReplicas int
-	ShutdownTimeout      time.Duration
+	ShutdownTimeout    time.Duration
 	// LeaderLeaseTTL is the leader-lease validity period (ADR-0011): it
 	// bounds failover of the gated singleton loops when a replica dies
 	// without releasing. Renewal runs at TTL/3.

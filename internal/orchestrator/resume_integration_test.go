@@ -20,6 +20,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/eventbus/eventbustest"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/orchestrator"
@@ -94,8 +95,8 @@ func itServerM3(t *testing.T, checker orchestrator.PolicyChecker) (*httptest.Ser
 	if checker != nil {
 		orchSvc = orchSvc.WithPolicyChecker(checker)
 	}
-	dispatcher := audit.NewDispatcher(database, time.Millisecond,
-		orchestrator.NewResumeHandler(orchSvc, approvalsSvc, slog.Default()))
+	dispatcher := eventbustest.Dispatcher(t, database, time.Millisecond,
+		audit.Named("orchestrator-resume", orchestrator.NewResumeHandler(orchSvc, approvalsSvc, slog.Default())))
 
 	router, api := httpserver.NewRouter(slog.Default(), itValidator{}, database)
 	catalog.NewHandler(catalogSvc, itTenants{"acme": {ID: "org:1", Slug: "acme"}}, itAuthorizer{allow: true}).RegisterRoutes(api)
@@ -152,7 +153,7 @@ func TestApprovalGateResume(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("approve: %d %s", code, body)
 	}
-	if err := dispatcher.DispatchOnce(ctx); err != nil {
+	if err := eventbustest.DispatchOnce(ctx, dispatcher); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 

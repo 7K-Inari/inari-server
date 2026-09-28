@@ -21,6 +21,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/config"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/eventbus/eventbustest"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -354,8 +355,8 @@ func TestSetRBACMappings(t *testing.T) {
 	}
 
 	rec := &recordingStore{}
-	disp := audit.NewDispatcher(database, 50*time.Millisecond, authz.NewTupleWriter(rec))
-	if err := disp.DispatchOnce(ctx); err != nil {
+	disp := eventbustest.Dispatcher(t, database, 50*time.Millisecond, audit.Named("authz-tuple-writer", authz.NewTupleWriter(rec)))
+	if err := eventbustest.DispatchOnce(ctx, disp); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	var delDev, addDev bool

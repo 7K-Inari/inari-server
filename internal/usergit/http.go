@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -141,12 +142,17 @@ func (h *Handler) list(ctx context.Context, in *orgPathInput) (*listConnectionsO
 	}
 	out := &listConnectionsOutput{}
 	out.Body.Connections = conns
-	for name, p := range h.svc.providers {
+	names := make([]string, 0, len(h.svc.providers))
+	for name := range h.svc.providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
 		// Only configured providers are advertised: unconfigured ones
 		// (registry placeholders, partially configured implementations)
 		// authorize nothing and would render as dead connect buttons in
 		// the console.
-		if !p.Configured() {
+		if !h.svc.providers[name].Configured() {
 			continue
 		}
 		out.Body.Providers = append(out.Body.Providers, ProviderInfo{ID: name, Enabled: true})

@@ -120,6 +120,14 @@ func (f *fakeIdP) GetUser(_ context.Context, userID string) (*types.User, error)
 	}
 	return &types.User{ID: userID, Email: userID + "@example.com"}, nil
 }
+func (f *fakeIdP) GetUserByEmail(_ context.Context, email string) (*types.User, error) {
+	for id := range f.users {
+		if id+"@example.com" == email {
+			return &types.User{ID: id, Email: email}, nil
+		}
+	}
+	return nil, tenancy.ErrUserNotFound
+}
 
 func removeStr(s []string, v string) []string {
 	out := s[:0]
@@ -1093,5 +1101,41 @@ func TestCreateTenantEnsuresBasePlatformResources(t *testing.T) {
 	}
 	if len(ensurer.orgs) != 1 || ensurer.orgs[0] != org.ID {
 		t.Errorf("EnsureBaseResources calls = %v, want [%s]", ensurer.orgs, org.ID)
+	}
+}
+
+func TestMemberEmailResolution(t *testing.T) {
+	database := setupDB(t)
+	ctx := context.Background()
+	idp := newFakeIdP()
+	idp.users["user-2"] = true
+	svc := tenancy.NewService(database, idp, tenancy.NewStore(), audit.NewStore())
+	org, _, err := svc.CreateTenant(ctx, "user-1", "acme", "Acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Unknown email rejected.
+	if err := svc.AddMember(ctx, "user-1", "acme", "developers", "ghost@example.com"); !errors.Is(err, tenancy.ErrUserNotFound) {
+		t.Fatalf("AddMember ghost email: %v, want ErrUserNotFound", err)
+	}
+	// Email subject resolves to the Keycloak user UUID end-to-end.
+	if err := svc.AddMember(ctx, "user-1", "acme", "developers", "user-2@example.com"); err != nil {
+		t.Fatalf("AddMember by email: %v", err)
+	}
+	if got := idp.grpMembers["tenant-acme/developers"]; len(got) != 1 || got[0] != "user-2" {
+		t.Errorf("developers members after email add = %v, want [user-2]", got)
+	}
+	role, ok, err := tenancy.NewStore().HighestRole(ctx, database.Pool, org.ID, "user-2")
+	if err != nil || !ok || role != types.RoleDeveloper {
+		t.Errorf("user-2 role = %q ok=%v err=%v", role, ok, err)
+	}
+	// SetMemberRole by email resolves too.
+	if err := svc.SetMemberRole(ctx, "user-1", "acme", "user-2@example.com", types.RoleViewer); err != nil {
+		t.Fatalf("SetMemberRole by email: %v", err)
+	}
+	role, _, err = tenancy.NewStore().HighestRole(ctx, database.Pool, org.ID, "user-2")
+	if err != nil || role != types.RoleViewer {
+		t.Errorf("user-2 role after email SetMemberRole = %q err=%v, want viewer", role, err)
 	}
 }

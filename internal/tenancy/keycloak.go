@@ -1051,3 +1051,34 @@ func (k *KeycloakAdmin) GetUser(ctx context.Context, userID string) (*types.User
 		DisplayName: strings.TrimSpace(rep.FirstName + " " + rep.LastName),
 	}, nil
 }
+
+// GetUserByEmail resolves a realm user by exact email match.
+func (k *KeycloakAdmin) GetUserByEmail(ctx context.Context, email string) (*types.User, error) {
+	resp, err := k.do(ctx, http.MethodGet, "/users?email="+url.QueryEscape(email)+"&exact=true", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("keycloak: get user by email: status %d", resp.StatusCode)
+	}
+	var reps []struct {
+		ID        string `json:"id"`
+		Email     string `json:"email"`
+		FirstName string `json:"firstName"`
+		LastName  string `json:"lastName"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&reps); err != nil {
+		return nil, err
+	}
+	for _, rep := range reps {
+		if strings.EqualFold(rep.Email, email) {
+			return &types.User{
+				ID:          rep.ID,
+				Email:       rep.Email,
+				DisplayName: strings.TrimSpace(rep.FirstName + " " + rep.LastName),
+			}, nil
+		}
+	}
+	return nil, ErrUserNotFound
+}

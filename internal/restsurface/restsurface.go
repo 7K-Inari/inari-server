@@ -60,6 +60,7 @@ type Deps struct {
 	Fleet              *fleetmanager.Service
 	SecretStores       *secretstores.Service
 	Extensions         *extensionhost.Service
+	ExtensionSessions  extensionhost.SessionStore
 	UserGit            *usergit.Service
 	DB                 *db.DB
 	AuditStore         *audit.Store
@@ -92,7 +93,8 @@ func Register(api huma.API, d Deps) {
 	fleetmanager.NewHandler(d.Fleet, d.Tenancy, d.Authz).RegisterRoutes(api)
 	secretstores.NewHandler(d.SecretStores, d.Tenancy, d.Authz).RegisterRoutes(api)
 	extensionhost.NewHandler(d.Extensions, d.Tenancy, d.Authz).
-		WithRemoteEntryFetcher(d.RemoteEntries).RegisterRoutes(api)
+		WithRemoteEntryFetcher(d.RemoteEntries).
+		WithSessionStore(d.ExtensionSessions).RegisterRoutes(api)
 	usergit.NewHandler(d.UserGit, d.Tenancy, d.Authz).RegisterRoutes(api)
 	auditapi.NewHandler(d.DB, d.AuditStore, d.Tenancy, d.Authz).RegisterRoutes(api)
 }

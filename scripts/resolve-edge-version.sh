@@ -13,6 +13,8 @@
 #      for <manifest-path>.
 #   2. Fallback: the working-tree manifest entry for <manifest-path> with a
 #      patch bump (no Release PR open).
+#   3. Repos without a manifest (release-please simple mode): the latest
+#      stable (non-prerelease) v* tag with a patch bump.
 #
 # Output: <version>-edge.<short-sha> (short sha from GITHUB_SHA or HEAD).
 # Set RAW=1 to print only the base version.
@@ -25,8 +27,11 @@ path="${1:?usage: resolve-edge-version.sh <manifest-path>}"
 manifest=".release-please-manifest.json"
 
 pending_version=""
-pr_head="$(gh pr list --state open --label "autorelease: pending" \
-  --json headRefName --limit 1 --jq '.[0].headRefName' 2>/dev/null || true)"
+pr_head=""
+if [ -f "$manifest" ]; then
+  pr_head="$(gh pr list --state open --label "autorelease: pending" \
+    --json headRefName --limit 1 --jq '.[0].headRefName' 2>/dev/null || true)"
+fi
 if [ -n "$pr_head" ]; then
   pending_version="$(gh api "repos/${GITHUB_REPOSITORY}/contents/${manifest}?ref=${pr_head}" \
     --jq '.content' 2>/dev/null | tr -d '\n' | base64 -d | jq -r --arg p "$path" '.[$p] // empty' || true)"
@@ -34,7 +39,7 @@ fi
 
 if [ -n "$pending_version" ]; then
   base="$pending_version"
-else
+elif [ -f "$manifest" ]; then
   current="$(jq -r --arg p "$path" '.[$p] // empty' "$manifest")"
   if [ -z "$current" ]; then
     echo "resolve-edge-version: no manifest entry for '$path'" >&2
@@ -42,6 +47,14 @@ else
   fi
   # Patch bump as the fallback next version.
   base="$(printf '%s\n' "$current" | awk -F. '{printf "%d.%d.%d", $1, $2, $3+1}')"
+else
+  # Simple mode (no manifest): latest stable tag + patch.
+  current="$(git tag --list 'v*' --sort=-v:refname | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+-' | head -1)"
+  if [ -z "$current" ]; then
+    echo "resolve-edge-version: no manifest and no stable v* tag" >&2
+    exit 1
+  fi
+  base="$(printf '%s\n' "${current#v}" | awk -F. '{printf "%d.%d.%d", $1, $2, $3+1}')"
 fi
 
 if [ "${RAW:-}" = "1" ]; then

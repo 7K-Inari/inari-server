@@ -492,6 +492,15 @@ func (k *KeycloakAdmin) CreateClient(ctx context.Context, spec ClientSpec) (stri
 		b, _ := io.ReadAll(resp.Body)
 		return "", fmt.Errorf("keycloak: create client: status %d: %s", resp.StatusCode, b)
 	}
+	if resp.StatusCode == http.StatusConflict {
+		// Re-registration of a previously-unregistered name: the client
+		// exists but may have been disabled by the unregister path — make
+		// sure it is enabled again (409-tolerant create is idempotent for
+		// everything else).
+		if err := k.setClientEnabled(ctx, spec.ClientID, true); err != nil {
+			return "", err
+		}
+	}
 	if err := k.syncOptionalScopes(ctx, spec.ClientID, spec.Scopes); err != nil {
 		return "", err
 	}
@@ -800,6 +809,32 @@ func stringSliceField(rep map[string]any, key string) []string {
 
 // DisableClient revokes a cluster's identity by disabling its client (plan
 // §5.3 revocation path); in-flight tokens expire on their short TTL.
+// setClientEnabled flips the client's enabled flag, preserving all other
+// representation fields.
+func (k *KeycloakAdmin) setClientEnabled(ctx context.Context, clientID string, enabled bool) error {
+	uuid, err := k.findClientUUID(ctx, clientID)
+	if err != nil {
+		return err
+	}
+	if uuid == "" {
+		return fmt.Errorf("keycloak: client %s not found", clientID)
+	}
+	rep, err := k.getClientRep(ctx, uuid)
+	if err != nil {
+		return err
+	}
+	rep["enabled"] = enabled
+	resp, err := k.do(ctx, http.MethodPut, "/clients/"+uuid, rep)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("keycloak: update client enabled: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 func (k *KeycloakAdmin) DisableClient(ctx context.Context, clientID string) error {
 	uuid, err := k.findClientUUID(ctx, clientID)
 	if err != nil {

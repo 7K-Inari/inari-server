@@ -5,11 +5,9 @@ name: release
 # runs the publish jobs gated on the action's outputs. No tag-push triggers,
 # no manual releases.
 #
-# Sole release-please detector on push to main. chart-release.yaml no longer
-# detects releases, so the server and chart publishes can never race each
-# other for the same release (previously both workflows ran detection on the
-# same push and the second run saw the release already created, skipping its
-# publish job — that is how v1.6.0 lost its image/OpenAPI artifacts).
+# Sole release-please detector on push to main. The Helm chart lives in
+# 7K-Inari/inari-release-bundle now — chart versioning/publishing happens
+# there; this workflow only notifies it (chart-sync job) after a release.
 
 on:
   push:
@@ -65,39 +63,22 @@ jobs:
       id-token: write
       attestations: write
 
-  chart-paths:
-    needs: release
-    if: always() && (github.event_name == 'workflow_dispatch' || needs.release.outputs.release_created == 'true')
+  # The chart lives in 7K-Inari/inari-release-bundle now: notify it so its
+  # chart-sync workflow bumps charts/inari-server appVersion (chart releases
+  # in lockstep via release-please there). Best-effort: a failed dispatch is
+  # repairable via the bundle repo's chart-sync workflow_dispatch.
+  chart-sync:
+    needs: [release, publish]
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.release.outputs.release_created == 'true') && needs.publish.result == 'success'
     runs-on: ubuntu-latest
-    outputs:
-      paths: ${{ steps.filter.outputs.paths }}
     steps:
-      - uses: actions/checkout@v4
-        if: github.event_name == 'workflow_dispatch'
-        with:
-          fetch-depth: 0
-
-      - name: Resolve chart paths to publish
-        id: filter
+      - name: Dispatch appversion-bump to inari-release-bundle
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || needs.release.outputs.version }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            # Repair path: publish every chart at its manifest version.
-            paths=$(jq -c 'keys | map(select(startswith("charts/")))' .release-please-manifest.json)
-          else
-            paths=$(echo '${{ needs.release.outputs.paths_released }}' | jq -c '[.[] | select(startswith("charts/"))]')
-          fi
-          echo "paths=$paths" >> "$GITHUB_OUTPUT"
-
-  publish-chart:
-    needs: chart-paths
-    if: needs.chart-paths.outputs.paths != '' && needs.chart-paths.outputs.paths != '[]'
-    strategy:
-      fail-fast: false
-      matrix:
-        chart-path: ${{ fromJSON(needs.chart-paths.outputs.paths) }}
-    uses: ./.github/workflows/chart-publish.yml
-    with:
-      chart-path: ${{ matrix.chart-path }}
-    permissions:
-      contents: read
-      packages: write
+          test -n "$VERSION" || { echo "::error::no version resolved"; exit 1; }
+          gh api repos/7K-Inari/inari-release-bundle/dispatches \
+            -f event_type=appversion-bump \
+            -F "client_payload[chart]=inari-server" \
+            -F "client_payload[version]=${VERSION}"

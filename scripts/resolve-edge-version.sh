@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# resolve-edge-version.sh — resolve the edge version for a release-please
+# manifest path.
+#
+# Usage: resolve-edge-version.sh <manifest-path>
+#   <manifest-path>  key in .release-please-manifest.json (e.g. "." or
+#                    "charts/inari-server")
+#
+# Resolution order:
+#   1. The open release-please Release PR (label "autorelease: pending")
+#      carries the pending versions in its bumped manifest — read
+#      .release-please-manifest.json at the PR head ref and take the entry
+#      for <manifest-path>.
+#   2. Fallback: the working-tree manifest entry for <manifest-path> with a
+#      patch bump (no Release PR open).
+#
+# Output: <version>-edge.<short-sha> (short sha from GITHUB_SHA or HEAD).
+# Set RAW=1 to print only the base version.
+#
+# Requires: gh (GH_TOKEN), jq, git. Identical copy in every inari repo —
+# keep in sync (see docs/ops/release-process.md).
+set -euo pipefail
+
+path="${1:?usage: resolve-edge-version.sh <manifest-path>}"
+manifest=".release-please-manifest.json"
+
+pending_version=""
+pr_head="$(gh pr list --state open --label "autorelease: pending" \
+  --json headRefName --limit 1 --jq '.[0].headRefName' 2>/dev/null || true)"
+if [ -n "$pr_head" ]; then
+  pending_version="$(gh api "repos/${GITHUB_REPOSITORY}/contents/${manifest}?ref=${pr_head}" \
+    --jq '.content' 2>/dev/null | tr -d '\n' | base64 -d | jq -r --arg p "$path" '.[$p] // empty' || true)"
+fi
+
+if [ -n "$pending_version" ]; then
+  base="$pending_version"
+else
+  current="$(jq -r --arg p "$path" '.[$p] // empty' "$manifest")"
+  if [ -z "$current" ]; then
+    echo "resolve-edge-version: no manifest entry for '$path'" >&2
+    exit 1
+  fi
+  # Patch bump as the fallback next version.
+  base="$(printf '%s\n' "$current" | awk -F. '{printf "%d.%d.%d", $1, $2, $3+1}')"
+fi
+
+if [ "${RAW:-}" = "1" ]; then
+  printf '%s\n' "$base"
+  exit 0
+fi
+
+sha="${GITHUB_SHA:-$(git rev-parse HEAD)}"
+printf '%s-edge.%s\n' "$base" "${sha:0:7}"

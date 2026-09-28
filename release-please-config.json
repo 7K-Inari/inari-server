@@ -11,25 +11,7 @@
   ],
   "packages": {
     ".": {
-      "release-type": "go",
-      "extra-files": [
-        {
-          "type": "yaml",
-          "path": "charts/inari-server/Chart.yaml",
-          "jsonpath": "$.appVersion"
-        }
-      ]
-    },
-    "charts/inari-server": {
-      "release-type": "simple",
-      "component": "inari-server-chart",
-      "include-component-in-tag": true,
-      "changelog-path": "CHANGELOG.md",
-      "bump-minor-pre-major": true,
-      "bump-patch-for-minor-pre-major": true,
-      "extra-files": [
-        "Chart.yaml"
-      ]
+      "release-type": "go"
     }
   }
 }

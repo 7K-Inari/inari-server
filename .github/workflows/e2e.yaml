@@ -30,22 +30,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve matching inari-helm-charts ref
+      - name: Resolve matching inari-release-bundle ref
         id: chart
         run: |
           BRANCH="${{ github.head_ref || github.ref_name }}"
-          if git ls-remote --exit-code https://github.com/7K-Inari/inari-helm-charts.git "refs/heads/$BRANCH" >/dev/null 2>&1; then
+          if git ls-remote --exit-code https://github.com/7K-Inari/inari-release-bundle.git "refs/heads/$BRANCH" >/dev/null 2>&1; then
             echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
           else
             echo "ref=main" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Checkout inari-helm-charts
+      - name: Checkout inari-release-bundle
         uses: actions/checkout@v4
         with:
-          repository: 7K-Inari/inari-helm-charts
+          repository: 7K-Inari/inari-release-bundle
           ref: ${{ steps.chart.outputs.ref }}
-          path: inari-helm-charts
+          path: inari-release-bundle
 
       - name: Resolve matching inari-agent ref
         id: agent
@@ -84,7 +84,7 @@ jobs:
       - name: Run golden path
         # KEEP_CLUSTER=true: the workflow owns teardown (final step) so the
         # diagnostics step still has a cluster to inspect on failure.
-        run: HELM_CHARTS_DIR=inari-helm-charts KEEP_CLUSTER=true INARI_HA=${{ matrix.ha }} bash e2e/golden-path.sh
+        run: HELM_CHARTS_DIR=inari-release-bundle KEEP_CLUSTER=true INARI_HA=${{ matrix.ha }} bash e2e/golden-path.sh
 
       - name: Dump diagnostics on failure
         if: failure()

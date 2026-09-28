@@ -1,9 +1,0 @@
-dependencies:
-- name: redis
-  repository: https://charts.bitnami.com/bitnami
-  version: 28.2.4
-- name: nats
-  repository: https://nats-io.github.io/k8s/helm/charts
-  version: 1.3.2
-digest: sha256:a41cc4e736fa7fde3b6dae30498c20b0e0fc098df233c4c80362e6b451d150d8
-generated: "2026-09-28T17:01:45.277959695Z"

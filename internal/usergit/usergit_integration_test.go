@@ -5,6 +5,7 @@ package usergit_test
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -43,6 +44,8 @@ type fakeProvider struct {
 }
 
 func (p *fakeProvider) Name() string { return "fakehub" }
+
+func (p *fakeProvider) Configured() bool { return true }
 
 func (p *fakeProvider) AuthorizeURL(state, codeChallenge, apiBase string) (string, error) {
 	return "https://fakehub.example/login/oauth/authorize?state=" + url.QueryEscape(state) +
@@ -537,6 +540,21 @@ func TestUserGitHTTP(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "octo") {
 		t.Fatalf("list: %d %s", resp.StatusCode, body)
+	}
+	// The provider listing advertises only configured providers: the
+	// fakehub fixture is configured, the gitlab PlannedProvider placeholder
+	// must be invisible.
+	var listBody struct {
+		Providers []struct {
+			ID      string `json:"id"`
+			Enabled bool   `json:"enabled"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(body, &listBody); err != nil {
+		t.Fatalf("list decode: %v", err)
+	}
+	if len(listBody.Providers) != 1 || listBody.Providers[0].ID != "fakehub" || !listBody.Providers[0].Enabled {
+		t.Fatalf("providers = %+v, want exactly [fakehub enabled]", listBody.Providers)
 	}
 	for _, secret := range []string{"rt-0", "acc-exchange", "refresh_token", "access_token"} {
 		if strings.Contains(string(body), secret) {

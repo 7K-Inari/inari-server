@@ -63,6 +63,13 @@ func NewGitHubProvider(cfg GitHubConfig) (*GitHubProvider, error) {
 
 func (p *GitHubProvider) Name() string { return "github" }
 
+// Configured reports whether the provider holds working app credentials.
+// The constructor requires both, so this is always true today; the field
+// check keeps the contract honest if construction ever relaxes.
+func (p *GitHubProvider) Configured() bool {
+	return p.cfg.ClientID != "" && p.cfg.ClientSecret != ""
+}
+
 // isLoopbackHTTP permits http api bases only for loopback hosts (dev/tests).
 func isLoopbackHTTP(u *url.URL) bool {
 	if u.Scheme != "http" {

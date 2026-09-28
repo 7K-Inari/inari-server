@@ -54,7 +54,15 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		OperationID: "authorizeGitConnection",
 		Method:      http.MethodPost,
 		Path:        "/api/v1/tenants/{org}/git-connections/{provider}/authorize",
-		Summary:     "Start the git OAuth flow (302 to the provider consent URL)",
+		Summary:     "Start the git OAuth flow (302 to the provider consent URL; 200 {authorizeUrl} for JSON clients)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.authorize)
+	// The console navigates via GET (apiFetch); same handler, same contract.
+	huma.Register(api, huma.Operation{
+		OperationID: "authorizeGitConnectionGet",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/tenants/{org}/git-connections/{provider}/authorize",
+		Summary:     "Start the git OAuth flow (302 or JSON authorizeUrl, per Accept)",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.authorize)
 

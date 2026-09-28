@@ -305,7 +305,7 @@ log "verifying the INARI_OUTBOX stream formed (R=3) on the external cluster"
 for i in $(seq 1 24); do
   STREAM=$(kubectl -n "$NAMESPACE" exec deploy/nats-box -- \
     nats stream info INARI_OUTBOX --server nats:4222 --json 2>/dev/null || true)
-  if jq -e '.config.replicas == 3 and (.config.subjects | index("inari.outbox.>"))' \
+  if jq -e '.config.num_replicas == 3 and (.config.subjects | index("inari.outbox.>"))' \
       <<<"$STREAM" >/dev/null 2>&1; then
     break
   fi

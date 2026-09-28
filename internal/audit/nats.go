@@ -207,7 +207,12 @@ func (d *Dispatcher) Run(ctx context.Context) {
 	tick := time.NewTicker(d.interval)
 	defer tick.Stop()
 	for {
-		_ = d.RelayOnce(ctx)
+		if err := d.RelayOnce(ctx); err != nil && ctx.Err() == nil {
+			// Fail-open: the batch stays unpublished and the next tick
+			// retries; log so a stalled relay is visible (the backlog gauge
+			// inari.outbox.unpublished only updates on successful polls).
+			slog.Warn("outbox: relay batch failed (fail-open, retrying)", "error", err)
+		}
 		select {
 		case <-ctx.Done():
 			wg.Wait()

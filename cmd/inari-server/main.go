@@ -28,6 +28,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/config"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/eventbus"
 	"github.com/7K-Inari/inari-server/internal/extensionhost"
 	"github.com/7K-Inari/inari-server/internal/fleetmanager"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
@@ -248,10 +249,25 @@ func run() error {
 	}
 	defer func() { _ = metricsShutdown(context.Background()) }()
 
+	// Event bus (ADR-0014): NATS is obligatory — the outbox relay publishes
+	// to JetStream and handlers are delivered via per-handler durable
+	// consumer groups. Connect retries for a bounded budget (first-install
+	// race with the chart's default-on subchart), then fails fatally.
+	// Runtime outages are fail-open: outbox rows accumulate unpublished and
+	// drain on recovery; /readyz stays decoupled.
+	bus, err := eventbus.Connect(ctx, cfg.NATSURL)
+	if err != nil {
+		return err
+	}
+	defer bus.Close()
+	if err := bus.EnsureOutboxStream(ctx, cfg.NATSStreamReplicas); err != nil {
+		return err
+	}
+
 	// Multi-replica safety (ADR-0011): DB-backed leader leases gate the
 	// singleton background loops below so exactly one replica drives each at
 	// a time; failover is bounded by the lease TTL. Claim-based SKIP LOCKED
-	// loops (outbox dispatcher, scaffold reconcile) are already safe and are
+	// loops (outbox relay, scaffold reconcile) are already safe and are
 	// intentionally NOT gated.
 	leaser := leaderlease.New(database, leaderlease.Config{TTL: cfg.LeaderLeaseTTL})
 
@@ -607,26 +623,34 @@ func run() error {
 		tzfSvc.RunReconcileLoop(lctx, cfg.TZFReconcileInterval)
 	}, log)
 
-	// Outbox consumers: FGA tuple writer, notifications, approval-gated
-	// deploy resume (plan §5.2, §5.4). Constructed after every handler
-	// exists so the dispatch table is never mutated while Run polls.
-	dispatcher := audit.NewDispatcher(database, cfg.OutboxPollInterval,
-		authz.NewTupleWriter(fgaInvalidating),
-		notificationsSvc,
-		orchestrator.NewResumeHandler(orchestratorSvc, approvalsSvc, log),
-		policyservice.NewDistributeHandler(policySvc, log),
-		tenantzonefactory.NewResumeHandler(tzfSvc, approvalsSvc, log),
-		tenancy.NewDeletionResumeHandler(svc, tenantDeleter, approvalsSvc, log),
-		fleetmanager.NewResumeHandler(fleetSvc, approvalsSvc, log),
-		scaffold.NewResumeHandler(scaffoldSvc, approvalsSvc, log),
-		// RBAC mapping materialization (plan §7.1): renders the tenant's
-		// anchor ClusterRoles + Keycloak-group bindings into the tenant
-		// state repo on rbac.mappings.updated / tenant & team lifecycle
-		// events; the tenant-local ArgoCD syncs them into the cluster.
-		rbacmaterialize.NewHandler(svc,
-			rbacmaterialize.NewInventoryGitConfigs(database, inventory.NewStore()), gitprovider.PerRepo{R: git}, log).
-			WithStateRepoOrg(cfg.GitStateRepoOrg),
-	)
+	// Outbox consumers (ADR-0014): FGA tuple writer, notifications,
+	// approval-gated deploy resume (plan §5.2, §5.4). Each handler gets a
+	// durable JetStream consumer group; the dispatcher relays unpublished
+	// outbox rows to the stream and every replica's consumers join the same
+	// durables, so delivery load-balances cluster-wide. Constructed after
+	// every handler exists so the consumer set is never mutated while Run
+	// loops.
+	dispatcher, err := audit.NewDispatcher(ctx, database, bus, cfg.OutboxPollInterval,
+		[]audit.NamedHandler{
+			audit.Named("authz-tuple-writer", authz.NewTupleWriter(fgaInvalidating)),
+			audit.Named("notifications", notificationsSvc),
+			audit.Named("orchestrator-resume", orchestrator.NewResumeHandler(orchestratorSvc, approvalsSvc, log)),
+			audit.Named("policy-distribute", policyservice.NewDistributeHandler(policySvc, log)),
+			audit.Named("tzf-resume", tenantzonefactory.NewResumeHandler(tzfSvc, approvalsSvc, log)),
+			audit.Named("tenant-deletion-resume", tenancy.NewDeletionResumeHandler(svc, tenantDeleter, approvalsSvc, log)),
+			audit.Named("fleet-resume", fleetmanager.NewResumeHandler(fleetSvc, approvalsSvc, log)),
+			audit.Named("scaffold-resume", scaffold.NewResumeHandler(scaffoldSvc, approvalsSvc, log)),
+			// RBAC mapping materialization (plan §7.1): renders the tenant's
+			// anchor ClusterRoles + Keycloak-group bindings into the tenant
+			// state repo on rbac.mappings.updated / tenant & team lifecycle
+			// events; the tenant-local ArgoCD syncs them into the cluster.
+			audit.Named("rbac-materialize", rbacmaterialize.NewHandler(svc,
+				rbacmaterialize.NewInventoryGitConfigs(database, inventory.NewStore()), gitprovider.PerRepo{R: git}, log).
+				WithStateRepoOrg(cfg.GitStateRepoOrg)),
+		})
+	if err != nil {
+		return err
+	}
 	go dispatcher.Run(ctx)
 
 	router, api := httpserver.NewRouter(log, validator, database)

@@ -53,6 +53,14 @@ type Config struct {
 	// managed members.
 	OrgGroupSyncInterval time.Duration
 	OutboxPollInterval   time.Duration
+	// NATSURL is the (possibly comma-separated) NATS endpoint list backing
+	// the event bus (ADR-0014). REQUIRED — the server refuses to boot
+	// without it: the outbox relay publishes to JetStream and handlers are
+	// delivered via per-handler durable consumer groups.
+	NATSURL string
+	// NATSStreamReplicas is the JetStream replica count for the INARI_OUTBOX
+	// stream (1 for a single-node bus, 3 for a clustered one).
+	NATSStreamReplicas int
 	ShutdownTimeout      time.Duration
 	// LeaderLeaseTTL is the leader-lease validity period (ADR-0011): it
 	// bounds failover of the gated singleton loops when a replica dies
@@ -220,6 +228,8 @@ func Load() (*Config, error) {
 		PlatformGroupSyncInterval: durEnv("INARI_PLATFORM_GROUP_SYNC_INTERVAL", 30*time.Second),
 		OrgGroupSyncInterval:      durEnv("INARI_ORG_GROUP_SYNC_INTERVAL", 30*time.Second),
 		OutboxPollInterval:        durEnv("INARI_OUTBOX_POLL_INTERVAL", time.Second),
+		NATSURL:                   env("INARI_NATS_URL", ""),
+		NATSStreamReplicas:        int(intEnv("INARI_NATS_STREAM_REPLICAS", 1)),
 		ShutdownTimeout:           durEnv("INARI_SHUTDOWN_TIMEOUT", 10*time.Second),
 		LeaderLeaseTTL:            durEnv("INARI_LEADER_LEASE_TTL", 10*time.Second),
 
@@ -297,6 +307,12 @@ func Load() (*Config, error) {
 	}
 	if c.OIDCIssuerURL == "" {
 		return nil, fmt.Errorf("config: INARI_OIDC_ISSUER_URL must not be empty")
+	}
+	if c.NATSURL == "" {
+		return nil, fmt.Errorf("config: INARI_NATS_URL must not be empty (ADR-0014: the event bus is obligatory)")
+	}
+	if c.NATSStreamReplicas < 1 {
+		return nil, fmt.Errorf("config: INARI_NATS_STREAM_REPLICAS must be >= 1, got %d", c.NATSStreamReplicas)
 	}
 	if c.CacheBackend != "memory" && c.CacheBackend != "redis" {
 		return nil, fmt.Errorf("config: INARI_CACHE_BACKEND must be \"memory\" or \"redis\", got %q", c.CacheBackend)

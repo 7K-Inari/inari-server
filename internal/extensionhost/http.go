@@ -585,7 +585,12 @@ func (h *Handler) putSession(ctx context.Context, in *sessionInput) (*sessionOut
 	return out, nil
 }
 
-func (h *Handler) deleteSession(ctx context.Context, in *sessionInput) (*struct{}, error) {
+type sessionPathInput struct {
+	Org string `path:"org"`
+	ID  string `path:"id"`
+}
+
+func (h *Handler) deleteSession(ctx context.Context, in *sessionPathInput) (*struct{}, error) {
 	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
 	if err != nil {
 		return nil, err

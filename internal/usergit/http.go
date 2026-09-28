@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -106,8 +107,16 @@ type orgPathInput struct {
 
 type listConnectionsOutput struct {
 	Body struct {
-		Connections []Connection `json:"connections"`
+		Connections []Connection   `json:"connections"`
+		Providers   []ProviderInfo `json:"providers"`
 	}
+}
+
+// ProviderInfo describes one configured git provider (metadata only).
+type ProviderInfo struct {
+	ID      string `json:"id"`
+	Enabled bool   `json:"enabled"`
+	APIBase string `json:"apiBase,omitempty"`
 }
 
 func (h *Handler) list(ctx context.Context, in *orgPathInput) (*listConnectionsOutput, error) {
@@ -124,12 +133,16 @@ func (h *Handler) list(ctx context.Context, in *orgPathInput) (*listConnectionsO
 	}
 	out := &listConnectionsOutput{}
 	out.Body.Connections = conns
+	for name := range h.svc.providers {
+		out.Body.Providers = append(out.Body.Providers, ProviderInfo{ID: name, Enabled: true})
+	}
 	return out, nil
 }
 
 type authorizeInput struct {
 	Org      string `path:"org"`
 	Provider string `path:"provider"`
+	Accept   string `header:"Accept"`
 	Body     struct {
 		APIBase string `json:"apiBase,omitempty" doc:"GHE/self-hosted API base (must be allowlisted); empty = github.com"`
 	}
@@ -137,7 +150,12 @@ type authorizeInput struct {
 
 type redirectOutput struct {
 	Status   int
-	Location string `header:"Location"`
+	Location string            `header:"Location"`
+	Body     *authorizeURLBody `json:",omitempty"`
+}
+
+type authorizeURLBody struct {
+	AuthorizeURL string `json:"authorizeUrl"`
 }
 
 func (h *Handler) authorize(ctx context.Context, in *authorizeInput) (*redirectOutput, error) {
@@ -160,6 +178,11 @@ func (h *Handler) authorize(ctx context.Context, in *authorizeInput) (*redirectO
 	}
 	if err != nil {
 		return nil, err
+	}
+	// Contract negotiation: JSON clients (the console) want the consent URL
+	// in a body to navigate to themselves; browsers/CLI keep the 302.
+	if strings.Contains(in.Accept, "application/json") {
+		return &redirectOutput{Status: http.StatusOK, Body: &authorizeURLBody{AuthorizeURL: url}}, nil
 	}
 	return &redirectOutput{Status: http.StatusFound, Location: url}, nil
 }

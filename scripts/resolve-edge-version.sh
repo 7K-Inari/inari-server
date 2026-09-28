@@ -49,12 +49,14 @@ elif [ -f "$manifest" ]; then
   base="$(printf '%s\n' "$current" | awk -F. '{printf "%d.%d.%d", $1, $2, $3+1}')"
 else
   # Simple mode (no manifest): latest stable tag + patch.
-  current="$(git tag --list 'v*' --sort=-v:refname | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+-' | head -1)"
+  current="$(git tag --list 'v*' --sort=-v:refname | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+-' | head -1 || true)"
   if [ -z "$current" ]; then
-    echo "resolve-edge-version: no manifest and no stable v* tag" >&2
-    exit 1
+    # Unversioned repo (e.g. inari-docs): start the line at 0.1.0.
+    echo "resolve-edge-version: no manifest and no stable v* tag — using 0.1.0" >&2
+    base="0.1.0"
+  else
+    base="$(printf '%s\n' "${current#v}" | awk -F. '{printf "%d.%d.%d", $1, $2, $3+1}')"
   fi
-  base="$(printf '%s\n' "${current#v}" | awk -F. '{printf "%d.%d.%d", $1, $2, $3+1}')"
 fi
 
 if [ "${RAW:-}" = "1" ]; then

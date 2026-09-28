@@ -968,7 +968,7 @@ EOF
   # pre-kill deliveries).
   CONSUMER=$(kubectl -n "$NAMESPACE" exec deploy/nats-box -- \
     nats consumer info INARI_OUTBOX outbox-rbac-materialize --server nats:4222 --json 2>/dev/null || true)
-  jq -e '.ack_floor.stream > 0 and .num_pending == 0' <<<"$CONSUMER" >/dev/null 2>&1 \
+  jq -e '.ack_floor.stream_seq > 0 and .num_pending == 0' <<<"$CONSUMER" >/dev/null 2>&1 \
     || die "HA(a): outbox-rbac-materialize consumer did not drain after failover (consumer info: ${CONSUMER:-empty})"
   log "HA(a): outbox relay + durable consumers continued on the surviving pod; driving a scaffold run"
   # The go-service skeleton templates .Values.goVersion/.Values.port too;

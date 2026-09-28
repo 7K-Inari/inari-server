@@ -57,14 +57,14 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Summary:     "Start the git OAuth flow (302 to the provider consent URL; 200 {authorizeUrl} for JSON clients)",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.authorize)
-	// The console navigates via GET (apiFetch); same handler, same contract.
+	// The console navigates via GET (apiFetch); same contract, no body.
 	huma.Register(api, huma.Operation{
 		OperationID: "authorizeGitConnectionGet",
 		Method:      http.MethodGet,
 		Path:        "/api/v1/tenants/{org}/git-connections/{provider}/authorize",
 		Summary:     "Start the git OAuth flow (302 or JSON authorizeUrl, per Accept)",
 		Security:    httpserver.SecurityRequirement(),
-	}, h.authorize)
+	}, h.authorizeGet)
 
 	huma.Register(api, huma.Operation{
 		OperationID: "gitConnectionCallback",
@@ -166,15 +166,29 @@ type authorizeURLBody struct {
 	AuthorizeURL string `json:"authorizeUrl"`
 }
 
+type authorizeGetInput struct {
+	Org      string `path:"org"`
+	Provider string `path:"provider"`
+	Accept   string `header:"Accept"`
+}
+
+func (h *Handler) authorizeGet(ctx context.Context, in *authorizeGetInput) (*redirectOutput, error) {
+	return h.beginAuthorize(ctx, in.Org, in.Provider, "", in.Accept)
+}
+
 func (h *Handler) authorize(ctx context.Context, in *authorizeInput) (*redirectOutput, error) {
+	return h.beginAuthorize(ctx, in.Org, in.Provider, in.Body.APIBase, in.Accept)
+}
+
+func (h *Handler) beginAuthorize(ctx context.Context, orgSlug, provider, apiBase, accept string) (*redirectOutput, error) {
 	if h.svc == nil {
 		return nil, errDisabled
 	}
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, id, err := h.authorizeOrg(ctx, orgSlug, authz.RelationViewer)
 	if err != nil {
 		return nil, err
 	}
-	url, err := h.svc.BeginAuthorize(ctx, org.ID, id.Subject, in.Provider, in.Body.APIBase)
+	url, err := h.svc.BeginAuthorize(ctx, org.ID, id.Subject, provider, apiBase)
 	if errors.Is(err, ErrUnknownProvider) {
 		return nil, huma.Error404NotFound("unknown git provider")
 	}
@@ -189,7 +203,7 @@ func (h *Handler) authorize(ctx context.Context, in *authorizeInput) (*redirectO
 	}
 	// Contract negotiation: JSON clients (the console) want the consent URL
 	// in a body to navigate to themselves; browsers/CLI keep the 302.
-	if strings.Contains(in.Accept, "application/json") {
+	if strings.Contains(accept, "application/json") {
 		return &redirectOutput{Status: http.StatusOK, Body: &authorizeURLBody{AuthorizeURL: url}}, nil
 	}
 	return &redirectOutput{Status: http.StatusFound, Location: url}, nil

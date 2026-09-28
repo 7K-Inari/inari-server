@@ -21,3 +21,15 @@ services:
     image: openfga/openfga:v1.8
     command: run
     ports: ["8082:8080"]
+
+  # NATS JetStream event bus (ADR-0014): obligatory — run the server with
+  # INARI_NATS_URL=nats://localhost:4222.
+  nats:
+    image: nats:2.11-alpine
+    command: ["-js", "-sd", "/data"]
+    volumes:
+      - nats-data:/data
+    ports: ["4222:4222"]
+
+volumes:
+  nats-data:

@@ -141,7 +141,13 @@ func (h *Handler) list(ctx context.Context, in *orgPathInput) (*listConnectionsO
 	}
 	out := &listConnectionsOutput{}
 	out.Body.Connections = conns
-	for name := range h.svc.providers {
+	for name, p := range h.svc.providers {
+		// Only actually-configured providers are advertised: registry
+		// placeholders (PlannedProvider) authorize nothing and would render
+		// as dead connect buttons in the console.
+		if _, planned := p.(PlannedProvider); planned {
+			continue
+		}
 		out.Body.Providers = append(out.Body.Providers, ProviderInfo{ID: name, Enabled: true})
 	}
 	return out, nil

@@ -43,6 +43,14 @@ const (
 	ResultDenied  = "denied"
 )
 
+// Outbox consumer delivery result label values (ADR-0014).
+const (
+	ResultAck        = "ack"
+	ResultRetry      = "retry"
+	ResultDeadletter = "deadletter"
+	ResultSkip       = "skip"
+)
+
 var (
 	meter = otel.Meter("github.com/7K-Inari/inari-server")
 
@@ -55,6 +63,24 @@ var (
 	fgaCheckDuration, _ = meter.Float64Histogram("inari.fga.check.duration",
 		metric.WithDescription("OpenFGA Check latency in seconds (uncached calls measure the FGA round trip)."),
 		metric.WithUnit("s"))
+
+	outboxRelayPublished, _ = meter.Int64Counter("inari.outbox.relay.published",
+		metric.WithDescription("Outbox rows relayed to JetStream (ADR-0014)."))
+	outboxRelayErrors, _ = meter.Int64Counter("inari.outbox.relay.errors",
+		metric.WithDescription("Outbox relay publish failures; rows stay unpublished and retry."))
+	outboxUnpublished, _ = meter.Int64Gauge("inari.outbox.unpublished",
+		metric.WithDescription("Outbox backlog depth (rows awaiting relay); the primary NATS-degradation signal."))
+	consumerDeliveries, _ = meter.Int64Counter("inari.outbox.consumer.deliveries",
+		metric.WithDescription("Outbox consumer deliveries by handler and result (ack, retry, deadletter, skip)."))
+	consumerDuration, _ = meter.Float64Histogram("inari.outbox.consumer.duration",
+		metric.WithDescription("Outbox handler execution latency in seconds."),
+		metric.WithUnit("s"))
+	natsConnectionState, _ = meter.Int64Gauge("inari.nats.connection.state",
+		metric.WithDescription("NATS connection state: 1 connected, 0 disconnected."))
+	natsReconnects, _ = meter.Int64Counter("inari.nats.reconnects",
+		metric.WithDescription("NATS reconnect events."))
+	ephemeralErrors, _ = meter.Int64Counter("inari.eventbus.ephemeral.errors",
+		metric.WithDescription("Ephemeral core-NATS publish failures by subject domain (lossy by design)."))
 )
 
 // New builds a Prometheus exporter on its own registry and installs the
@@ -98,4 +124,57 @@ func ObserveFGACheck(ctx context.Context, d time.Duration, result string, cached
 	)
 	fgaChecks.Add(ctx, 1, attrs)
 	fgaCheckDuration.Record(ctx, d.Seconds(), attrs)
+}
+
+// RecordRelayPublished counts outbox rows successfully relayed to JetStream.
+func RecordRelayPublished(ctx context.Context, n int64) {
+	if n > 0 {
+		outboxRelayPublished.Add(ctx, n)
+	}
+}
+
+// RecordRelayError counts one relay publish failure (the row stays
+// unpublished and is retried — fail-open, never fatal at runtime).
+func RecordRelayError(ctx context.Context) {
+	outboxRelayErrors.Add(ctx, 1)
+}
+
+// SetOutboxUnpublished samples the outbox backlog depth after each relay
+// poll. A rising value with a healthy API means NATS degradation.
+func SetOutboxUnpublished(ctx context.Context, n int64) {
+	outboxUnpublished.Record(ctx, n)
+}
+
+// RecordConsumerDelivery counts one consumer delivery attempt and observes
+// handler latency (zero for skip).
+func RecordConsumerDelivery(ctx context.Context, handler, result string, d time.Duration) {
+	attrs := metric.WithAttributes(
+		attribute.String("handler", handler),
+		attribute.String("result", result),
+	)
+	consumerDeliveries.Add(ctx, 1, attrs)
+	if result == ResultAck {
+		consumerDuration.Record(ctx, d.Seconds(), metric.WithAttributes(attribute.String("handler", handler)))
+	}
+}
+
+// SetNATSConnected tracks the core NATS connection state.
+func SetNATSConnected(ctx context.Context, connected bool) {
+	var v int64
+	if connected {
+		v = 1
+	}
+	natsConnectionState.Record(ctx, v)
+}
+
+// RecordNATSReconnect counts one reconnect after a connection drop.
+func RecordNATSReconnect(ctx context.Context) {
+	natsReconnects.Add(ctx, 1)
+}
+
+// RecordEphemeralError counts one ephemeral core-NATS publish failure by
+// subject domain (e.g. tunnel). Lossy by design — logged and metered, never
+// fatal.
+func RecordEphemeralError(ctx context.Context, domain string) {
+	ephemeralErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("domain", domain)))
 }

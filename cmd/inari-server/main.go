@@ -867,6 +867,8 @@ func run() error {
 		AllowedAPIBases:   cfg.GitHubAllowedAPIBases,
 		RemoteEntries:     remoteEntries,
 
+		PlatformAdminGroup: cfg.PlatformAdminGroup,
+
 		AgentSupportedRange:     cfg.AgentSupportedRange,
 		AgentCurrentVersion:     cfg.CurrentAgentVersion,
 		AgentRecommendedVersion: cfg.AgentRecommendedVersion,

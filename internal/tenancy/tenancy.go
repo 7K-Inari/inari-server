@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -359,13 +360,21 @@ type OrgMemberView struct {
 }
 
 // ListOrgMembers returns org members grouped per user with highest role.
-func (s *Store) ListOrgMembers(ctx context.Context, q db.Querier, orgID string) ([]OrgMemberView, error) {
-	const sql = `SELECT m.user_id, COALESCE(u.email,''), COALESCE(u.display_name,''), m.role, COALESCE(t.name,'')
+// A non-empty query filters by case-insensitive email substring (access
+// console user picker).
+func (s *Store) ListOrgMembers(ctx context.Context, q db.Querier, orgID, query string) ([]OrgMemberView, error) {
+	sql := `SELECT m.user_id, COALESCE(u.email,''), COALESCE(u.display_name,''), m.role, COALESCE(t.name,'')
 	             FROM memberships m
 	             LEFT JOIN users u ON u.id = m.user_id
 	             LEFT JOIN teams t ON t.id = m.team_id
-	             WHERE m.org_id = $1 ORDER BY m.user_id`
-	rows, err := q.Query(ctx, sql, orgID)
+	             WHERE m.org_id = $1`
+	args := []any{orgID}
+	if query != "" {
+		sql += ` AND u.email ILIKE '%' || $2 || '%' ESCAPE '\'`
+		args = append(args, escapeLike(query))
+	}
+	sql += ` ORDER BY m.user_id`
+	rows, err := q.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -432,12 +441,20 @@ type MemberView struct {
 	Role        string `json:"role"`
 }
 
-// ListMembers returns team members with their user profiles.
-func (s *Store) ListMembers(ctx context.Context, q db.Querier, orgID, teamID string) ([]MemberView, error) {
-	const sql = `SELECT m.user_id, COALESCE(u.email,''), COALESCE(u.display_name,''), m.role
+// ListMembers returns team members with their user profiles. A non-empty
+// query filters by case-insensitive email substring (access console user
+// picker).
+func (s *Store) ListMembers(ctx context.Context, q db.Querier, orgID, teamID, query string) ([]MemberView, error) {
+	sql := `SELECT m.user_id, COALESCE(u.email,''), COALESCE(u.display_name,''), m.role
 	             FROM memberships m LEFT JOIN users u ON u.id = m.user_id
-	             WHERE m.org_id = $1 AND m.team_id = $2 ORDER BY m.user_id`
-	rows, err := q.Query(ctx, sql, orgID, teamID)
+	             WHERE m.org_id = $1 AND m.team_id = $2`
+	args := []any{orgID, teamID}
+	if query != "" {
+		sql += ` AND u.email ILIKE '%' || $3 || '%' ESCAPE '\'`
+		args = append(args, escapeLike(query))
+	}
+	sql += ` ORDER BY m.user_id`
+	rows, err := q.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -457,6 +474,12 @@ func (s *Store) ListMembers(ctx context.Context, q db.Querier, orgID, teamID str
 func GroupPath(slug, team string) string {
 	return fmt.Sprintf("tenant-%s/%s", slug, team)
 }
+
+// likeEscaper escapes ILIKE wildcards so a user-supplied search string is
+// matched literally (paired with ESCAPE '\' in the query).
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+func escapeLike(s string) string { return likeEscaper.Replace(s) }
 
 // HighestRole returns the highest role a user holds in an org
 // (org-admin > platform-engineer > developer > viewer). Returns false when

@@ -127,14 +127,16 @@ func (s *Service) RemoveMember(ctx context.Context, actor, slug, teamName, userI
 	})
 }
 
-// ListMembers returns the team's members for the console.
-func (s *Service) ListMembers(ctx context.Context, orgID, teamID string) ([]MemberView, error) {
-	return s.store.ListMembers(ctx, s.db.Pool, orgID, teamID)
+// ListMembers returns the team's members for the console. A non-empty
+// query filters by case-insensitive email substring.
+func (s *Service) ListMembers(ctx context.Context, orgID, teamID, query string) ([]MemberView, error) {
+	return s.store.ListMembers(ctx, s.db.Pool, orgID, teamID, query)
 }
 
-// ListOrgMembers returns the org-wide member view (highest role + teams).
-func (s *Service) ListOrgMembers(ctx context.Context, orgID string) ([]OrgMemberView, error) {
-	return s.store.ListOrgMembers(ctx, s.db.Pool, orgID)
+// ListOrgMembers returns the org-wide member view (highest role + teams). A
+// non-empty query filters by case-insensitive email substring.
+func (s *Service) ListOrgMembers(ctx context.Context, orgID, query string) ([]OrgMemberView, error) {
+	return s.store.ListOrgMembers(ctx, s.db.Pool, orgID, query)
 }
 
 // SetMemberRole sets a user's org role by placing them in the role's anchor

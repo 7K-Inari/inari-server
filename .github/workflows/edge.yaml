@@ -139,11 +139,15 @@ jobs:
           EDGE: ${{ needs.version.outputs.edge }}
         run: |
           set -euo pipefail
-          gh release create "v${EDGE}" \
-            --prerelease \
-            --target "$GITHUB_SHA" \
-            --title "edge ${EDGE}" \
-            --notes "Edge build from ${GITHUB_SHA}. Image: \`${{ env.IMAGE }}:${EDGE}\`; OpenAPI spec: \`ghcr.io/7k-inari/inari-server-openapi:${EDGE}\`. Superseded by the next stable vX.Y.Z release."
+          if gh release view "v${EDGE}" > /dev/null 2>&1; then
+            echo "prerelease v${EDGE} already exists — skipping create (workflow rerun)"
+          else
+            gh release create "v${EDGE}" \
+              --prerelease \
+              --target "$GITHUB_SHA" \
+              --title "edge ${EDGE}" \
+              --notes "Edge build from ${GITHUB_SHA}. Image: \`${{ env.IMAGE }}:${EDGE}\`; OpenAPI spec: \`ghcr.io/7k-inari/inari-server-openapi:${EDGE}\`. Superseded by the next stable vX.Y.Z release."
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -f edge "$GITHUB_SHA"

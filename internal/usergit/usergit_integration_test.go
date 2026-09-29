@@ -132,6 +132,11 @@ func itDB(t *testing.T) *db.DB {
 
 func itService(t *testing.T, d *db.DB, p usergit.Provider) (*usergit.Service, *usergit.Cipher) {
 	t.Helper()
+	return itServiceCfg(t, d, p, usergit.Config{UIReturnURL: "https://ui.example/settings/git"})
+}
+
+func itServiceCfg(t *testing.T, d *db.DB, p usergit.Provider, cfg usergit.Config) (*usergit.Service, *usergit.Cipher) {
+	t.Helper()
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
 		t.Fatal(err)
@@ -149,7 +154,7 @@ func itService(t *testing.T, d *db.DB, p usergit.Provider) (*usergit.Service, *u
 			"fakehub": p,
 			"gitlab":  usergit.PlannedProvider{ProviderName: "gitlab"},
 		},
-		[]byte("test-state-key-test-state-key-32!!"), usergit.Config{UIReturnURL: "https://ui.example/settings/git"})
+		[]byte("test-state-key-test-state-key-32!!"), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -617,4 +622,42 @@ func TestUserGitHTTP(t *testing.T) {
 		t.Errorf("re-disconnect: %d", resp.StatusCode)
 	}
 	resp.Body.Close()
+}
+
+// TestCallbackTenantPrefixedReturnURL pins the live-run finding (7045f491):
+// with a relative UIReturnURL the post-callback 302 must target the
+// tenant-scoped console route (/<slug>/settings/...), not the site root.
+func TestCallbackTenantPrefixedReturnURL(t *testing.T) {
+	d := itDB(t)
+	p := &fakeProvider{exchangeTTL: time.Hour}
+	svc, _ := itServiceCfg(t, d, p, usergit.Config{UIReturnURL: "/settings/org/git-connections"})
+	router, api := httpserver.NewRouter(slog.Default(), itValidator{}, d)
+	usergit.NewHandler(svc, itTenants{"acme": {ID: "org:1", Slug: "acme"}}, itAuthorizer{allow: true}).RegisterRoutes(api)
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+	client := noRedirectClient()
+
+	authURL, err := svc.BeginAuthorize(context.Background(), "org:1", "user-1", "fakehub", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse(authURL)
+	state := u.Query().Get("state")
+
+	r, err := http.NewRequest("GET", srv.URL+"/api/v1/tenants/acme/git-connections/fakehub/callback?code=good-code&state="+url.QueryEscape(state), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("callback: %d", resp.StatusCode)
+	}
+	loc := resp.Header.Get("Location")
+	if !strings.HasPrefix(loc, "/acme/settings/org/git-connections?") || !strings.Contains(loc, "connected=fakehub") {
+		t.Fatalf("callback location: %s, want tenant-prefixed return URL", loc)
+	}
 }

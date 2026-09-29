@@ -119,6 +119,9 @@ const (
 	EventInstanceCreated          = "instance.created"
 	EventInstanceStatus           = "instance.status"
 	EventInstanceUpgraded         = "instance.upgraded"
+	EventInstanceUpdated          = "instance.updated"
+	EventInstanceDeleted          = "instance.deleted"
+	EventInstanceRolledBack       = "instance.rolled_back"
 
 	EventCloudAccountRegistered   = "cloud_account.registered"
 	EventCloudAccountValidated    = "cloud_account.validated"

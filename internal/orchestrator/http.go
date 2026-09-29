@@ -68,6 +68,30 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 	}, h.upgrade)
 
 	huma.Register(api, huma.Operation{
+		OperationID: "updateInstance",
+		Method:      http.MethodPatch,
+		Path:        "/api/v1/tenants/{org}/instances/{id}",
+		Summary:     "Update an instance's spec (re-render at the current version)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.updateInstance)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "deleteInstance",
+		Method:      http.MethodDelete,
+		Path:        "/api/v1/tenants/{org}/instances/{id}",
+		Summary:     "Undeploy an instance (delete desired state + inventory row)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.deleteInstance)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "rollbackInstance",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/tenants/{org}/instances/{id}/rollback",
+		Summary:     "Rollback an instance to an explicit earlier catalog version",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.rollback)
+
+	huma.Register(api, huma.Operation{
 		OperationID: "instanceDiff",
 		Method:      http.MethodGet,
 		Path:        "/api/v1/tenants/{org}/instances/{id}/diff",
@@ -218,6 +242,103 @@ func (h *Handler) upgrade(ctx context.Context, in *upgradeInput) (*deployOutput,
 	}
 	if err != nil {
 		return nil, err
+	}
+	out := &deployOutput{}
+	out.Body.Deploy = *res
+	return out, nil
+}
+
+// instanceMutationError maps the shared instance-mutation service errors to
+// HTTP statuses (update/rollback/delete share the same mapping).
+func instanceMutationError(err error) error {
+	var pve *PolicyViolationError
+	if errors.As(err, &pve) {
+		return huma.Error422UnprocessableEntity(pve.Error())
+	}
+	if errors.Is(err, inventory.ErrInstanceNotFound) {
+		return huma.Error404NotFound("instance not found")
+	}
+	if errors.Is(err, ErrClusterNotActive) {
+		return huma.Error409Conflict(err.Error())
+	}
+	if errors.Is(err, ErrNoGitConfig) {
+		return huma.Error409Conflict(err.Error())
+	}
+	if errors.Is(err, ErrSameVersion) {
+		return huma.Error409Conflict(err.Error())
+	}
+	if errors.Is(err, clusterregistry.ErrClusterNotFound) || errors.Is(err, ErrClusterMismatch) {
+		return huma.Error404NotFound("cluster not found")
+	}
+	if errors.Is(err, catalog.ErrItemNotFound) {
+		return huma.Error404NotFound("catalog item not found")
+	}
+	if errors.Is(err, catalog.ErrVersionNotFound) {
+		return huma.Error404NotFound("catalog item version not found")
+	}
+	return err
+}
+
+type updateInstanceInput struct {
+	Org  string `path:"org"`
+	ID   string `path:"id"`
+	Body struct {
+		Spec json.RawMessage `json:"spec"`
+	}
+}
+
+func (h *Handler) updateInstance(ctx context.Context, in *updateInstanceInput) (*deployOutput, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	if err != nil {
+		return nil, err
+	}
+	if len(in.Body.Spec) == 0 {
+		return nil, huma.Error422UnprocessableEntity("spec is required")
+	}
+	res, err := h.svc.UpdateSpec(ctx, org.ID, in.ID, in.Body.Spec, "user:"+id.Subject)
+	if err != nil {
+		return nil, instanceMutationError(err)
+	}
+	out := &deployOutput{}
+	out.Body.Deploy = *res
+	return out, nil
+}
+
+type deleteInstanceInput struct {
+	Org string `path:"org"`
+	ID  string `path:"id"`
+}
+
+func (h *Handler) deleteInstance(ctx context.Context, in *deleteInstanceInput) (*deployOutput, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	if err != nil {
+		return nil, err
+	}
+	res, err := h.svc.DeleteInstance(ctx, org.ID, in.ID, "user:"+id.Subject)
+	if err != nil {
+		return nil, instanceMutationError(err)
+	}
+	out := &deployOutput{}
+	out.Body.Deploy = *res
+	return out, nil
+}
+
+type rollbackInput struct {
+	Org  string `path:"org"`
+	ID   string `path:"id"`
+	Body struct {
+		ToVersion string `json:"toVersion" minLength:"1"`
+	}
+}
+
+func (h *Handler) rollback(ctx context.Context, in *rollbackInput) (*deployOutput, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	if err != nil {
+		return nil, err
+	}
+	res, err := h.svc.Rollback(ctx, org.ID, in.ID, in.Body.ToVersion, "user:"+id.Subject)
+	if err != nil {
+		return nil, instanceMutationError(err)
 	}
 	out := &deployOutput{}
 	out.Body.Deploy = *res

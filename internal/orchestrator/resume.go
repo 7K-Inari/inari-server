@@ -52,6 +52,25 @@ func (h *ResumeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) error
 	if err != nil {
 		return fmt.Errorf("orchestrator: resume: load approval %s: %w", p.ApprovalID, err)
 	}
+	// Double-audit: the real actor is the approvals automation; the
+	// impersonated identity is the tenant-scoped virtual user (§5.4).
+	ctx = impersonation.WithImpersonator(ctx, impersonation.VirtualUser(req.OrgID))
+	// Instance mutation approvals (edit spec / undeploy) resume on their
+	// own paths — never as deploys.
+	switch req.Action {
+	case GateActionInstanceUpdate:
+		if err := h.svc.UpdateSpecResume(ctx, req.OrgID, req.InstanceID, req.Spec, impersonation.SystemActor("approvals")); err != nil {
+			return fmt.Errorf("orchestrator: resume update approval %s: %w", p.ApprovalID, err)
+		}
+		h.log.Info("orchestrator: approval-gated spec update resumed", "approval", p.ApprovalID, "instance", req.InstanceID)
+		return nil
+	case GateActionInstanceDelete:
+		if err := h.svc.DeleteInstanceResume(ctx, req.OrgID, req.InstanceID, impersonation.SystemActor("approvals")); err != nil {
+			return fmt.Errorf("orchestrator: resume delete approval %s: %w", p.ApprovalID, err)
+		}
+		h.log.Info("orchestrator: approval-gated instance delete resumed", "approval", p.ApprovalID, "instance", req.InstanceID)
+		return nil
+	}
 	// Lifecycle approvals (tenant decommission, zone lifecycle) are not
 	// deploy resumes — they carry no catalog item and are handled by the
 	// tenancy deletion resume handler. Treating them as deploys poisons
@@ -62,9 +81,6 @@ func (h *ResumeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) error
 		h.log.Debug("orchestrator: resume: skipping lifecycle approval", "approval", p.ApprovalID, "action", req.Action)
 		return nil
 	}
-	// Double-audit: the real actor is the approvals automation; the
-	// impersonated identity is the tenant-scoped virtual user (§5.4).
-	ctx = impersonation.WithImpersonator(ctx, impersonation.VirtualUser(req.OrgID))
 	deploy := DeployRequest{
 		OrgID: req.OrgID, ClusterID: req.ClusterID, ItemID: req.ItemID,
 		Version: req.Version, Channel: req.Channel, Name: req.Name,

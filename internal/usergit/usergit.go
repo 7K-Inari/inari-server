@@ -151,15 +151,20 @@ func (s *Service) BeginAuthorize(ctx context.Context, orgID, userSub, provider, 
 }
 
 // CompleteAuthorize validates the state, exchanges the code, persists the
-// encrypted refresh token (reconnect replaces the row), and audits.
-func (s *Service) CompleteAuthorize(ctx context.Context, actor, state, code string) (*Connection, error) {
+// encrypted refresh token (reconnect replaces the row), and audits. orgID is
+// the organization the callback was invoked under; the state is bound to the
+// org and user that started the flow, so the signed state itself
+// authenticates the callback (it is issued only to an authorized viewer at
+// authorize time) — no bearer token is required on the callback.
+func (s *Service) CompleteAuthorize(ctx context.Context, orgID, state, code string) (*Connection, error) {
 	payload, err := s.state.Validate(state)
 	if err != nil {
 		return nil, err
 	}
-	if payload.UserSub != actor {
-		return nil, fmt.Errorf("%w: state bound to a different user", ErrStateInvalid)
+	if payload.OrgID != orgID {
+		return nil, fmt.Errorf("%w: state bound to a different organization", ErrStateInvalid)
 	}
+	actor := payload.UserSub
 	if code == "" {
 		return nil, fmt.Errorf("%w: missing authorization code", ErrInvalidInput)
 	}

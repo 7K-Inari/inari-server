@@ -31,6 +31,9 @@ type IdentityProvider interface {
 	// ListGroupMembers returns the Keycloak user ids in the group at the path.
 	ListGroupMembers(ctx context.Context, groupPath string) ([]string, error)
 	GetUser(ctx context.Context, userID string) (*types.User, error)
+	// GetUserByEmail resolves a realm user by exact email match (member
+	// management accepts an email in place of a Keycloak UUID).
+	GetUserByEmail(ctx context.Context, email string) (*types.User, error)
 }
 
 // DefaultTeams are created with every tenant; each grants its org role.

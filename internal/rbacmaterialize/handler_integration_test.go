@@ -72,6 +72,7 @@ func (f *fakeIdP) AddGroupMember(context.Context, string, string) error         
 func (f *fakeIdP) RemoveGroupMember(context.Context, string, string) error        { return nil }
 func (f *fakeIdP) ListGroupMembers(context.Context, string) ([]string, error)     { return nil, nil }
 func (f *fakeIdP) GetUser(context.Context, string) (*types.User, error)           { return nil, nil }
+func (f *fakeIdP) GetUserByEmail(context.Context, string) (*types.User, error)     { return nil, nil }
 
 func setup(t *testing.T) (*db.DB, *tenancy.Service, *gitprovider.Fake, *audit.Dispatcher, context.Context) {
 	t.Helper()

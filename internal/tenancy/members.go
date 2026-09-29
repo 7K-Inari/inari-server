@@ -2,7 +2,9 @@ package tenancy
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -20,13 +22,28 @@ func (s *Service) teamByName(ctx context.Context, orgID, teamName string) (*type
 	return team, team.Role, nil
 }
 
+// resolveMemberSubject resolves a member subject: a Keycloak user UUID, or a
+// user email (the console's invite form submits an email). It returns the
+// user profile; callers must use user.ID for all subsequent operations.
+func (s *Service) resolveMemberSubject(ctx context.Context, subject string) (*types.User, error) {
+	user, err := s.idp.GetUser(ctx, subject)
+	if err == nil {
+		return user, nil
+	}
+	if !errors.Is(err, ErrUserNotFound) || !strings.Contains(subject, "@") {
+		return nil, err
+	}
+	return s.idp.GetUserByEmail(ctx, subject)
+}
+
 // AddMember validates the subject, joins them to the Keycloak org + team
 // group, then records the membership with audit + outbox in one tx.
 func (s *Service) AddMember(ctx context.Context, actor, slug, teamName, userID string) error {
-	user, err := s.idp.GetUser(ctx, userID)
+	user, err := s.resolveMemberSubject(ctx, userID)
 	if err != nil {
 		return err
 	}
+	userID = user.ID
 	org, err := s.store.GetOrganizationBySlug(ctx, s.db.Pool, slug)
 	if err != nil {
 		return err
@@ -128,10 +145,11 @@ func (s *Service) SetMemberRole(ctx context.Context, actor, slug, userID string,
 	if !ok {
 		return fmt.Errorf("tenancy: invalid role %q", role)
 	}
-	user, err := s.idp.GetUser(ctx, userID)
+	user, err := s.resolveMemberSubject(ctx, userID)
 	if err != nil {
 		return err
 	}
+	userID = user.ID
 	org, err := s.store.GetOrganizationBySlug(ctx, s.db.Pool, slug)
 	if err != nil {
 		return err

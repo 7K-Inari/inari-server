@@ -93,15 +93,19 @@ type Store struct{}
 func NewStore() *Store { return &Store{} }
 
 const clusterCols = `id, org_id, name, kubernetes_version, distribution, oidc_issuer_url, labels, keycloak_client_id, state,
-	capability_checksum, connected_at, last_seen_at, created_at`
+	capability_checksum, connected_at, last_seen_at, created_at, agent_version`
 
 func scanCluster(row interface{ Scan(...any) error }) (*types.Cluster, error) {
 	var c types.Cluster
 	var labels []byte
+	var agentVersion *string
 	err := row.Scan(&c.ID, &c.OrgID, &c.Name, &c.KubernetesVersion, &c.Distribution, &c.OIDCIssuerURL, &labels, &c.KeycloakClientID,
-		&c.State, &c.CapabilityChecksum, &c.ConnectedAt, &c.LastSeenAt, &c.CreatedAt)
+		&c.State, &c.CapabilityChecksum, &c.ConnectedAt, &c.LastSeenAt, &c.CreatedAt, &agentVersion)
 	if err != nil {
 		return nil, err
+	}
+	if agentVersion != nil {
+		c.AgentVersion = *agentVersion
 	}
 	if len(labels) > 0 {
 		if err := json.Unmarshal(labels, &c.Labels); err != nil {

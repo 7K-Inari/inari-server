@@ -4,13 +4,14 @@ go 1.26.3
 
 require (
 	connectrpc.com/connect v1.20.0
-	github.com/7K-Inari/inari-api v0.6.1-0.20260926220016-52ea5837ecac
+	github.com/7K-Inari/inari-api v0.6.1-0.20260929125831-bb8d0a69fd0e
 	github.com/aws/aws-sdk-go-v2 v1.43.6
 	github.com/aws/aws-sdk-go-v2/config v1.32.37
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.36
 	github.com/aws/aws-sdk-go-v2/service/iam v1.59.1
 	github.com/aws/aws-sdk-go-v2/service/organizations v1.54.0
 	github.com/aws/aws-sdk-go-v2/service/sts v1.45.6
+	github.com/blang/semver v3.5.1+incompatible
 	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/danielgtaylor/huma/v2 v2.39.1
 	github.com/go-chi/chi/v5 v5.3.1
@@ -59,7 +60,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.38.6 // indirect
 	github.com/aws/smithy-go v1.27.8 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/blang/semver v3.5.1+incompatible // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

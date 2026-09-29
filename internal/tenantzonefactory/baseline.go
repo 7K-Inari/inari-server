@@ -22,11 +22,17 @@ const agentChartRepo = "ghcr.io/7k-inari/charts"
 // AgentInstallParams configure the rendered agent ArgoCD Application.
 type AgentInstallParams struct {
 	// ImageRepo references the published agent image from the inari-agent
-	// release pipeline (never a locally built tag). The tag floats on
-	// latest.
+	// release pipeline (never a locally built tag).
 	ImageRepo string
 	// GatewayAddress is the base URL agents dial out to (pull, never push).
 	GatewayAddress string
+	// Version is the platform-recommended agent version (chart
+	// targetRevision + image tag). Empty floats on the newest published
+	// release ("*" / latest) — the pre-policy behavior.
+	Version string
+	// FloatLatest is the dev escape hatch: float on "*" / latest even when
+	// Version is set.
+	FloatLatest bool
 	// ESO delivery wiring for the per-cluster OIDC client secret (plan
 	// §5.3). When ESOSecretStore is set the chart renders an ExternalSecret
 	// projecting the Vault path inari/clusters/<id>/oidc-client-secret.
@@ -111,9 +117,14 @@ spec:
 // inari-agent from the published OCI Helm chart. The one-time registration
 // token is hardcoded in the values: it is consumed once at registration, and
 // on a fresh zone cluster ExternalSecrets is not installed yet. Chart and
-// image float on the latest published release (targetRevision "*" resolves
-// to the newest semver chart tag).
+// image are pinned to the platform-recommended version when one is declared
+// (AgentInstallParams.Version); otherwise they float on the latest published
+// release (targetRevision "*" resolves to the newest semver chart tag).
 func renderAgentApplication(cluster *types.Cluster, token string, p AgentInstallParams) (string, error) {
+	targetRevision, imageTag := `"*"`, "latest"
+	if p.Version != "" && !p.FloatLatest {
+		targetRevision, imageTag = p.Version, p.Version
+	}
 	var b strings.Builder
 	b.WriteString(`apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -125,12 +136,12 @@ spec:
   source:
     repoURL: ` + agentChartRepo + `
     chart: inari-agent
-    targetRevision: "*"
+    targetRevision: ` + targetRevision + `
     helm:
       values: |
         image:
           repository: ` + p.ImageRepo + `
-          tag: latest
+          tag: ` + imageTag + `
         config:
           tenantID: ` + cluster.OrgID + `
           controlPlane: ` + p.GatewayAddress + `

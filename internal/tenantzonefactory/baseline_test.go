@@ -57,6 +57,65 @@ func TestRenderBaselineAgentApplication(t *testing.T) {
 	}
 }
 
+func TestRenderBaselineAgentApplicationPinned(t *testing.T) {
+	c := &types.Cluster{ID: "cl-1", OrgID: "org-1", Name: "acme-eks"}
+	zone := &types.TenantZone{Slug: "acme", Region: "eu-west-1"}
+	p := AgentInstallParams{
+		ImageRepo:      "ghcr.io/7k-inari/inari-agent",
+		GatewayAddress: "https://gw.example",
+		Version:        "0.5.1",
+	}
+	files, err := RenderBaseline(c, zone, "tok-xyz", p, "https://git.example/acme-inari-state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var app string
+	for _, f := range files {
+		if f.Path == "baseline/inari-agent/application.yaml" {
+			app = string(f.Content)
+		}
+	}
+	for _, want := range []string{
+		"targetRevision: 0.5.1",
+		"tag: 0.5.1",
+	} {
+		if !strings.Contains(app, want) {
+			t.Errorf("pinned application missing %q:\n%s", want, app)
+		}
+	}
+	for _, unwanted := range []string{`targetRevision: "*"`, "tag: latest"} {
+		if strings.Contains(app, unwanted) {
+			t.Errorf("pinned application must not contain %q:\n%s", unwanted, app)
+		}
+	}
+}
+
+func TestRenderBaselineAgentApplicationFloatLatestEscapeHatch(t *testing.T) {
+	c := &types.Cluster{ID: "cl-1", OrgID: "org-1", Name: "acme-eks"}
+	zone := &types.TenantZone{Slug: "acme", Region: "eu-west-1"}
+	p := AgentInstallParams{
+		ImageRepo:      "ghcr.io/7k-inari/inari-agent",
+		GatewayAddress: "https://gw.example",
+		Version:        "0.5.1",
+		FloatLatest:    true,
+	}
+	files, err := RenderBaseline(c, zone, "tok-xyz", p, "https://git.example/acme-inari-state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var app string
+	for _, f := range files {
+		if f.Path == "baseline/inari-agent/application.yaml" {
+			app = string(f.Content)
+		}
+	}
+	for _, want := range []string{`targetRevision: "*"`, "tag: latest"} {
+		if !strings.Contains(app, want) {
+			t.Errorf("FloatLatest application missing %q:\n%s", want, app)
+		}
+	}
+}
+
 func TestRenderBaselineAgentApplicationWithESO(t *testing.T) {
 	c := &types.Cluster{ID: "cl-9", OrgID: "org-1", Name: "acme-eks"}
 	zone := &types.TenantZone{Slug: "acme", Region: "eu-west-1"}

@@ -69,6 +69,12 @@ type Deps struct {
 	OIDCIssuerURL   string
 	AllowedAPIBases []string
 	RemoteEntries   *extensionhost.RemoteEntryFetcher
+
+	// Platform-declared agent compatibility policy (config.Agent* fields);
+	// all empty omits the agentCompat block from cluster responses.
+	AgentSupportedRange     string
+	AgentCurrentVersion     string
+	AgentRecommendedVersion string
 }
 
 // Register mounts every module's REST routes on the huma API. The call order
@@ -78,7 +84,8 @@ func Register(api huma.API, d Deps) {
 	tenancy.NewHandler(d.Tenancy, d.Authz).WithScopesCatalog(d.IdentityScopes).RegisterRoutes(api)
 	tenancy.NewMeHandler(d.Authz, d.Tenancy).RegisterRoutes(api)
 	clusterregistry.NewHandler(d.Clusters, d.Tenancy, d.Authz, d.CapabilitiesLister).
-		WithAccessInfo(d.OIDCIssuerURL).RegisterRoutes(api)
+		WithAccessInfo(d.OIDCIssuerURL).
+		WithAgentCompat(d.AgentSupportedRange, d.AgentCurrentVersion, d.AgentRecommendedVersion).RegisterRoutes(api)
 	catalog.NewHandler(d.Catalog, d.Tenancy, d.Authz).RegisterRoutes(api)
 	approvals.NewHandler(d.Approvals, d.Tenancy, d.Authz, d.Tenancy).RegisterRoutes(api)
 	inventory.NewHandler(d.Inventory, d.Tenancy, d.Authz).RegisterRoutes(api)

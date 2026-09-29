@@ -192,6 +192,29 @@ type Cluster struct {
 	ConnectedAt        *time.Time        `json:"connectedAt,omitempty"`
 	LastSeenAt         *time.Time        `json:"lastSeenAt,omitempty"`
 	CreatedAt          time.Time         `json:"createdAt"`
+	// AgentVersion is the inari-agent version last reported on the
+	// handshake (persisted as clusters.agent_version).
+	AgentVersion string `json:"agentVersion,omitempty"`
+	// AgentCompat is the platform's compatibility assessment of the
+	// running agent, computed at read time from the platform-declared
+	// agent supportedRange/recommended; nil when the platform declares no
+	// agent compatibility policy.
+	AgentCompat *AgentCompatStatus `json:"agentCompat,omitempty"`
+}
+
+// AgentCompatStatus is the computed compatibility assessment of a cluster's
+// running inari-agent against the platform's declared compatibility window
+// (inari-platform chart agent.supportedRange / agent.recommended).
+type AgentCompatStatus struct {
+	// Supported reports whether the running agent version is inside the
+	// platform's declared supported range (or legacy N/N−1 window).
+	Supported bool `json:"supported"`
+	// RecommendedVersion is the agent version the platform recommends for
+	// install/upgrade; empty when none is declared.
+	RecommendedVersion string `json:"recommendedVersion,omitempty"`
+	// UpgradeAvailable reports whether the running agent is behind the
+	// recommended version.
+	UpgradeAvailable bool `json:"upgradeAvailable"`
 }
 
 // ClusterAccessInfo is everything a developer needs to build a kubelogin

@@ -216,10 +216,12 @@ func (s *session) handleEvent(ctx context.Context, ev *agentv1.Event) ([]*agentv
 				if err := s.gw.registry.SetAgentVersion(ctx, s.cluster.ID, hs.AgentVersion); err != nil {
 					slog.Warn("agentgateway: persist agent version", "cluster", s.cluster.ID, "error", err)
 				}
-				if cur := s.gw.cfg.CurrentAgentVersion; cur != "" &&
-					!fleetmanager.SupportedAgentVersion(cur, hs.AgentVersion) {
-					slog.Warn("agentgateway: unsupported agent version skew (supported: N, N-1)",
-						"cluster", s.cluster.ID, "agent", hs.AgentVersion, "server", cur)
+				if !fleetmanager.AgentSupported(s.gw.cfg.AgentSupportedRange, s.gw.cfg.CurrentAgentVersion, hs.AgentVersion) {
+					slog.Warn("agentgateway: unsupported agent version",
+						"cluster", s.cluster.ID, "agent", hs.AgentVersion,
+						"supportedRange", s.gw.cfg.AgentSupportedRange,
+						"server", s.gw.cfg.CurrentAgentVersion,
+						"recommended", s.gw.cfg.AgentRecommendedVersion)
 				}
 			}
 			resync := hs.LastSeenStateChecksum != "" && s.cluster.CapabilityChecksum != "" &&
@@ -228,6 +230,7 @@ func (s *session) handleEvent(ctx context.Context, ev *agentv1.Event) ([]*agentv
 				SessionId:              uuid.NewString(),
 				ServerContractVersions: "inari.agent.v1",
 				ResyncRequired:         resync,
+				DesiredAgentVersion:    s.gw.cfg.AgentRecommendedVersion,
 			})
 			if err != nil {
 				return nil, err

@@ -195,6 +195,12 @@ func (p *GitHubProvider) Exchange(ctx context.Context, code, codeVerifier, apiBa
 		RefreshToken: tr.RefreshToken,
 		Scopes:       tr.Scope,
 	}
+	// GitHub App user tokens omit the scope field (GitHub Apps authorize via
+	// permissions, not OAuth scopes); fall back to the requested scopes so
+	// the connection record reflects what the consent screen granted.
+	if grant.Scopes == "" {
+		grant.Scopes = p.cfg.Scopes
+	}
 	if tr.ExpiresIn > 0 {
 		grant.AccessExpiry = time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second)
 	}

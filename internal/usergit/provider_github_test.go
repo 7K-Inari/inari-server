@@ -233,3 +233,21 @@ func TestPlannedProviderStubs(t *testing.T) {
 		t.Errorf("revoke: %v", err)
 	}
 }
+
+// TestGitHubExchangeScopesFallback pins the GitHub App behavior seen live
+// (7045f491): user tokens from a GitHub App omit the scope field, so the
+// grant falls back to the requested scopes.
+func TestGitHubExchangeScopesFallback(t *testing.T) {
+	f := newFakeGitHub(t)
+	f.tokenJSON = map[string]any{
+		"access_token": "ghu_access", "refresh_token": "ghr_refresh", "expires_in": 3600,
+	}
+	p := f.provider(t)
+	grant, err := p.Exchange(context.Background(), "code-1", "verifier-1", f.srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grant.Scopes != "repo read:user" {
+		t.Errorf("scopes = %q, want fallback to requested %q", grant.Scopes, "repo read:user")
+	}
+}

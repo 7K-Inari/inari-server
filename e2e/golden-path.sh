@@ -14,9 +14,11 @@
 # Prereqs: docker, kind, kubectl, helm, jq. Configurable via env:
 #   CLUSTER_NAME (default inari-e2e)
 #   SERVER_IMAGE / AGENT_IMAGE (default inari/server:e2e / inari/agent:e2e)
-#   HELM_CHARTS_DIR (default ../inari-helm-charts — checkout of the
-#     inari-helm-charts repo providing charts/platform-config + scripts)
-#   SERVER_CHART_DIR (default ./charts/inari-server)
+#   HELM_CHARTS_DIR (default ../inari-release-bundle — checkout of the
+#     inari-release-bundle repo providing charts/inari-platform + scripts;
+#     falls back to a sibling inari-helm-charts checkout)
+#   SERVER_CHART_DIR (default $HELM_CHARTS_DIR/charts/inari-server — the
+#     chart lives in the release-bundle repo now)
 #   AGENT_CHART_DIR (default ../inari-agent/charts/inari-agent — the
 #     inari-agent repo checkout the e2e workflow nests in the repo root)
 #   KEEP_CLUSTER=true to skip teardown
@@ -47,9 +49,13 @@ set -euo pipefail
 CLUSTER_NAME="${CLUSTER_NAME:-inari-e2e}"
 SERVER_IMAGE="${SERVER_IMAGE:-inari/server:e2e}"
 AGENT_IMAGE="${AGENT_IMAGE:-inari/agent:e2e}"
-HELM_CHARTS_DIR="${HELM_CHARTS_DIR:-$(dirname "$0")/../../inari-helm-charts}"
-PLATFORM_CHART_DIR="${PLATFORM_CHART_DIR:-$HELM_CHARTS_DIR/charts/platform-config}"
-SERVER_CHART_DIR="${SERVER_CHART_DIR:-$(dirname "$0")/../charts/inari-server}"
+HELM_CHARTS_DIR="${HELM_CHARTS_DIR:-$(dirname "$0")/../../inari-release-bundle}"
+if [ ! -d "$HELM_CHARTS_DIR" ]; then
+  # Pre-rename checkout layout.
+  HELM_CHARTS_DIR="$(dirname "$0")/../../inari-helm-charts"
+fi
+PLATFORM_CHART_DIR="${PLATFORM_CHART_DIR:-$HELM_CHARTS_DIR/charts/inari-platform}"
+SERVER_CHART_DIR="${SERVER_CHART_DIR:-$HELM_CHARTS_DIR/charts/inari-server}"
 AGENT_CHART_DIR="${AGENT_CHART_DIR:-$(dirname "$0")/../inari-agent/charts/inari-agent}"
 NAMESPACE="${NAMESPACE:-inari}"
 TENANT="${TENANT:-e2e-org}"

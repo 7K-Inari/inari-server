@@ -567,16 +567,34 @@ func TestUserGitHTTP(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	// Happy-path callback → 302 connected=fakehub.
-	resp = req("GET", "/api/v1/tenants/acme/git-connections/fakehub/callback?code=good-code&state="+url.QueryEscape(state), "good", "")
+	// The callback carries no bearer token (provider redirect): an unsigned
+	// request must NOT 401 — the signed state authenticates the flow.
+	resp = req("GET", "/api/v1/tenants/acme/git-connections/fakehub/callback?code=good-code&state=garbage.sig", "", "")
+	if resp.StatusCode != http.StatusFound || !strings.Contains(resp.Header.Get("Location"), "error=state_invalid") {
+		t.Fatalf("no-token bad-state callback: %d %s", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	resp.Body.Close()
+
+	// Happy-path callback without a token → 302 connected=fakehub. (The
+	// first state was consumed by the tampered probe? No — garbage.sig
+	// fails signature validation before the nonce check, so the real state
+	// is still redeemable exactly once.)
+	resp = req("GET", "/api/v1/tenants/acme/git-connections/fakehub/callback?code=good-code&state="+url.QueryEscape(state), "", "")
 	if resp.StatusCode != http.StatusFound {
-		t.Fatalf("callback: %d", resp.StatusCode)
+		t.Fatalf("no-token callback: %d", resp.StatusCode)
 	}
 	loc = resp.Header.Get("Location")
 	resp.Body.Close()
 	if !strings.HasPrefix(loc, "https://ui.example/settings/git?") || !strings.Contains(loc, "connected=fakehub") {
-		t.Fatalf("callback location: %s", loc)
+		t.Fatalf("no-token callback location: %s", loc)
 	}
+
+	// The consumed state cannot be replayed, even with a token.
+	resp = req("GET", "/api/v1/tenants/acme/git-connections/fakehub/callback?code=good-code&state="+url.QueryEscape(state), "good", "")
+	if resp.StatusCode != http.StatusFound || !strings.Contains(resp.Header.Get("Location"), "error=state_invalid") {
+		t.Fatalf("replayed-state callback: %d %s", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	resp.Body.Close()
 
 	// List shows metadata and leaks no token material.
 	resp = req("GET", "/api/v1/tenants/acme/git-connections", "good", "")

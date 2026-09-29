@@ -5,15 +5,60 @@ on:
     branches: [main]
 
 permissions:
-  contents: read
+  contents: write
   packages: write
   id-token: write
 
 env:
   IMAGE: ghcr.io/7k-inari/inari-server
 
+concurrency:
+  group: edge-main
+  cancel-in-progress: false
+
 jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.gate.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Skip on release merges
+        id: gate
+        # The release merge is covered by the stable release.yml run.
+        run: |
+          set -euo pipefail
+          msg="$(git log -1 --pretty=%s)"
+          parent2=""
+          if [ "$(git rev-list --parents -n1 HEAD | wc -w)" -gt 2 ]; then
+            parent2="$(git log -1 --pretty=%s HEAD^2)"
+          fi
+          if echo "$msg" | grep -qiE '^chore(\(.*\))?: release' \
+             || echo "$parent2" | grep -qiE '^chore(\(.*\))?: release'; then
+            echo "release merge detected ($msg) — skipping edge"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  version:
+    needs: gate
+    if: needs.gate.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      edge: ${{ steps.v.outputs.edge }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve edge version
+        id: v
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "edge=$(scripts/resolve-edge-version.sh .)" >> "$GITHUB_OUTPUT"
+
   edge-image:
+    needs: version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,11 +80,13 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:edge
             ${{ env.IMAGE }}:edge-${{ github.sha }}
+            ${{ env.IMAGE }}:${{ needs.version.outputs.edge }}
 
   # Publish the huma-generated OpenAPI contract as an edge OCI artifact so
   # inari-ui can sync its pinned client types between releases. The :edge
   # tag moves with main; :main-<shortsha> is the immutable, signed pin.
   openapi:
+    needs: version
     runs-on: ubuntu-latest
     env:
       SPEC_IMAGE: ghcr.io/7k-inari/inari-server-openapi
@@ -63,9 +110,11 @@ jobs:
 
       - name: push spec to GHCR
         id: push
+        env:
+          EDGE: ${{ needs.version.outputs.edge }}
         run: |
           short_sha="${GITHUB_SHA::7}"
-          for tag in "edge" "main-${short_sha}"; do
+          for tag in "edge" "main-${short_sha}" "${EDGE}"; do
             out="$(oras push "${SPEC_IMAGE}:${tag}" \
               dist/openapi.yaml:application/vnd.oai.openapi+yaml)"
             echo "${out}"
@@ -78,3 +127,36 @@ jobs:
 
       - name: sign spec (keyless)
         run: cosign sign --yes ${{ env.SPEC_IMAGE }}@${{ steps.push.outputs.digest }}
+
+  prerelease:
+    needs: [version, edge-image, openapi]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create edge prerelease + move the edge channel tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EDGE: ${{ needs.version.outputs.edge }}
+        run: |
+          set -euo pipefail
+          if gh release view "v${EDGE}" > /dev/null 2>&1; then
+            echo "prerelease v${EDGE} already exists — skipping create (workflow rerun)"
+          else
+            gh release create "v${EDGE}" \
+              --prerelease \
+              --target "$GITHUB_SHA" \
+              --title "edge ${EDGE}" \
+              --notes "Edge build from ${GITHUB_SHA}. Image: \`${{ env.IMAGE }}:${EDGE}\`; OpenAPI spec: \`ghcr.io/7k-inari/inari-server-openapi:${EDGE}\`. Superseded by the next stable vX.Y.Z release."
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f edge "$GITHUB_SHA"
+          git push -f origin refs/tags/edge
+          if gh release view edge > /dev/null 2>&1; then
+            gh release edit edge --prerelease --title "edge (v${EDGE})" \
+              --notes "Latest edge build: \`v${EDGE}\` (${GITHUB_SHA})."
+          else
+            gh release create edge --prerelease --target "$GITHUB_SHA" \
+              --title "edge (v${EDGE})" \
+              --notes "Latest edge build: \`v${EDGE}\` (${GITHUB_SHA})."
+          fi

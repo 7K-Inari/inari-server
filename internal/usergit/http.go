@@ -67,12 +67,14 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Security:    httpserver.SecurityRequirement(),
 	}, h.authorizeGet)
 
+	// The callback is reached by a provider redirect and carries no bearer
+	// token; the signed single-use state (issued only to an authorized
+	// viewer at authorize time) authenticates the flow. No Security spec.
 	huma.Register(api, huma.Operation{
 		OperationID: "gitConnectionCallback",
 		Method:      http.MethodGet,
 		Path:        "/api/v1/tenants/{org}/git-connections/{provider}/callback",
 		Summary:     "OAuth callback (302 back to the UI)",
-		Security:    httpserver.SecurityRequirement(),
 	}, h.callback)
 
 	huma.Register(api, huma.Operation{
@@ -236,11 +238,14 @@ func (h *Handler) callback(ctx context.Context, in *callbackInput) (*redirectOut
 	if h.svc == nil {
 		return nil, errDisabled
 	}
-	_, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, err := h.tenants.GetTenant(ctx, in.Org)
+	if errors.Is(err, tenancy.ErrOrgNotFound) {
+		return nil, huma.Error404NotFound("organization not found")
+	}
 	if err != nil {
 		return nil, err
 	}
-	if _, err := h.svc.CompleteAuthorize(ctx, id.Subject, in.State, in.Code); err != nil {
+	if _, err := h.svc.CompleteAuthorize(ctx, org.ID, in.State, in.Code); err != nil {
 		return &redirectOutput{Status: http.StatusFound, Location: h.uiErrorURL(in.Provider, callbackErrorCode(err))}, nil
 	}
 	return &redirectOutput{Status: http.StatusFound, Location: h.uiSuccessURL(in.Provider)}, nil

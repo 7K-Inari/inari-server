@@ -172,7 +172,7 @@ func connect(t *testing.T, svc *usergit.Service, orgID, userSub string) *usergit
 	if state == "" || u.Query().Get("code_challenge") == "" {
 		t.Fatalf("authorize URL missing state/challenge: %s", authURL)
 	}
-	conn, err := svc.CompleteAuthorize(ctx, userSub, state, "good-code")
+	conn, err := svc.CompleteAuthorize(ctx, orgID, state, "good-code")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ func TestTenantIsolation(t *testing.T) {
 	}
 }
 
-func TestStateBoundToUser(t *testing.T) {
+func TestStateBoundToOrg(t *testing.T) {
 	d := itDB(t)
 	p := &fakeProvider{exchangeTTL: time.Hour}
 	svc, _ := itService(t, d, p)
@@ -271,8 +271,8 @@ func TestStateBoundToUser(t *testing.T) {
 		t.Fatal(err)
 	}
 	u, _ := url.Parse(authURL)
-	// A different authenticated user cannot redeem user-1's state.
-	if _, err := svc.CompleteAuthorize(ctx, "user-2", u.Query().Get("state"), "good-code"); !errors.Is(err, usergit.ErrStateInvalid) {
+	// A callback under a different organization cannot redeem org:1's state.
+	if _, err := svc.CompleteAuthorize(ctx, "org:2", u.Query().Get("state"), "good-code"); !errors.Is(err, usergit.ErrStateInvalid) {
 		t.Fatalf("err = %v, want ErrStateInvalid", err)
 	}
 }

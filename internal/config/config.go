@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/blang/semver"
 )
 
 // ServiceScopes is one entry of the read-only identity scopes catalog: the
@@ -228,8 +230,26 @@ type Config struct {
 
 	// M4: Extension Host + Fleet Manager (plan §5.8, §5.11).
 	// CurrentAgentVersion is the supported agent version (N); agents at N
-	// and N−1 are admitted (§11/5).
-	CurrentAgentVersion  string
+	// and N−1 are admitted (§11/5). Legacy fallback policy, superseded by
+	// AgentSupportedRange when that is set.
+	CurrentAgentVersion string
+	// AgentSupportedRange is the platform-declared semver range of
+	// supported inari-agent versions (e.g. ">=0.5.0 <0.6.0", sourced from
+	// the inari-platform chart's agent.supportedRange via the
+	// inari-agent-compat ConfigMap). When set, the handshake skew check
+	// evaluates reported versions against this range; when empty, the
+	// legacy N/N−1 policy against CurrentAgentVersion applies unchanged.
+	AgentSupportedRange string
+	// AgentRecommendedVersion is the exact agent version the platform
+	// recommends for installs/upgrades (inari-platform agent.recommended).
+	// Advertised to agents in the handshake response, surfaced through the
+	// cluster registry API, and used to pin Tenant Zone Factory install
+	// manifests. Empty means "no recommendation" (installs float latest).
+	AgentRecommendedVersion string
+	// AgentFloatLatest is the dev escape hatch: even with
+	// AgentRecommendedVersion set, TZF install manifests float on
+	// "targetRevision: *" / "image.tag: latest".
+	AgentFloatLatest     bool
 	FleetAdvanceInterval time.Duration
 	DriftSweepInterval   time.Duration
 
@@ -340,9 +360,12 @@ func Load() (*Config, error) {
 		PlatformGitOpsRepo: env("INARI_PLATFORM_GITOPS_REPO", ""),
 		GitStateRepoOrg:    env("INARI_GIT_STATE_REPO_ORG", ""),
 
-		CurrentAgentVersion:  env("INARI_AGENT_VERSION", ""),
-		FleetAdvanceInterval: durEnv("INARI_FLEET_ADVANCE_INTERVAL", 10*time.Second),
-		DriftSweepInterval:   durEnv("INARI_DRIFT_SWEEP_INTERVAL", time.Minute),
+		CurrentAgentVersion:     env("INARI_AGENT_VERSION", ""),
+		AgentSupportedRange:     env("INARI_AGENT_SUPPORTED_RANGE", ""),
+		AgentRecommendedVersion: env("INARI_AGENT_RECOMMENDED_VERSION", ""),
+		AgentFloatLatest:        boolEnv("INARI_AGENT_FLOAT_LATEST", false),
+		FleetAdvanceInterval:    durEnv("INARI_FLEET_ADVANCE_INTERVAL", 10*time.Second),
+		DriftSweepInterval:      durEnv("INARI_DRIFT_SWEEP_INTERVAL", time.Minute),
 
 		IdentityScopes: identityScopesEnv("INARI_IDENTITY_SCOPES", DefaultIdentityScopes),
 	}
@@ -354,6 +377,11 @@ func Load() (*Config, error) {
 	}
 	if c.NATSURL == "" {
 		return nil, fmt.Errorf("config: INARI_NATS_URL must not be empty (ADR-0014: the event bus is obligatory)")
+	}
+	if c.AgentSupportedRange != "" {
+		if _, err := semver.ParseRange(c.AgentSupportedRange); err != nil {
+			return nil, fmt.Errorf("config: INARI_AGENT_SUPPORTED_RANGE %q is not a valid semver range: %w", c.AgentSupportedRange, err)
+		}
 	}
 	if c.NATSStreamReplicas < 1 {
 		return nil, fmt.Errorf("config: INARI_NATS_STREAM_REPLICAS must be >= 1, got %d", c.NATSStreamReplicas)

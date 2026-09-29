@@ -32,9 +32,17 @@ type Config struct {
 	// OIDCIssuerURL is advertised to agents at registration.
 	OIDCIssuerURL string
 	// CurrentAgentVersion is the control plane's supported agent version
-	// (N); agents at N and N−1 are supported (plan §11/5). Empty disables
-	// the skew check.
+	// (N); agents at N and N−1 are supported (plan §11/5). Legacy fallback
+	// policy, superseded by AgentSupportedRange when set.
 	CurrentAgentVersion string
+	// AgentSupportedRange is the platform-declared semver range of
+	// supported agent versions (e.g. ">=0.5.0 <0.6.0"). When set, the
+	// handshake skew check evaluates against it instead of N/N−1.
+	AgentSupportedRange string
+	// AgentRecommendedVersion is the agent version the platform
+	// recommends; advertised to agents in the handshake response. Empty
+	// means no recommendation.
+	AgentRecommendedVersion string
 	// ESO delivery reference for the OIDC client secret (plan §5.3) — the
 	// secret value itself never transits this API.
 	ESOSecretStore     string

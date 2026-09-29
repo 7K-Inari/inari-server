@@ -86,6 +86,48 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 }
 
+func TestAgentCompatDefaults(t *testing.T) {
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.AgentSupportedRange != "" {
+		t.Errorf("AgentSupportedRange = %q, want empty", c.AgentSupportedRange)
+	}
+	if c.AgentRecommendedVersion != "" {
+		t.Errorf("AgentRecommendedVersion = %q, want empty", c.AgentRecommendedVersion)
+	}
+	if c.AgentFloatLatest {
+		t.Error("AgentFloatLatest = true, want false")
+	}
+}
+
+func TestAgentCompatEnvOverride(t *testing.T) {
+	t.Setenv("INARI_AGENT_SUPPORTED_RANGE", ">=0.5.0 <0.6.0")
+	t.Setenv("INARI_AGENT_RECOMMENDED_VERSION", "0.5.1")
+	t.Setenv("INARI_AGENT_FLOAT_LATEST", "true")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.AgentSupportedRange != ">=0.5.0 <0.6.0" {
+		t.Errorf("AgentSupportedRange = %q, want >=0.5.0 <0.6.0", c.AgentSupportedRange)
+	}
+	if c.AgentRecommendedVersion != "0.5.1" {
+		t.Errorf("AgentRecommendedVersion = %q, want 0.5.1", c.AgentRecommendedVersion)
+	}
+	if !c.AgentFloatLatest {
+		t.Error("AgentFloatLatest = false, want true")
+	}
+}
+
+func TestAgentCompatInvalidRangeFails(t *testing.T) {
+	t.Setenv("INARI_AGENT_SUPPORTED_RANGE", "not-a-range")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load: expected error for invalid INARI_AGENT_SUPPORTED_RANGE")
+	}
+}
+
 func TestGitStateRepoOrgEnvOverride(t *testing.T) {
 	t.Setenv("INARI_GIT_STATE_REPO_ORG", "7k-group")
 	c, err := Load()

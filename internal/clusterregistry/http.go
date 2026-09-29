@@ -10,6 +10,7 @@ import (
 
 	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/authz"
+	"github.com/7K-Inari/inari-server/internal/fleetmanager"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -27,6 +28,12 @@ type Handler struct {
 	authz     authz.Authorizer
 	caps      CapabilitiesLister
 	issuerURL string
+	// Platform-declared agent compatibility policy (INARI_AGENT_* envs);
+	// when all three are empty the agentCompat block is omitted from
+	// responses (pre-policy behavior).
+	agentSupportedRange string
+	agentCurrent        string
+	agentRecommended    string
 }
 
 // CapabilitiesLister reads the live capabilities of a cluster (implemented
@@ -52,6 +59,30 @@ func NewHandler(svc *Service, tenants TenantResolver, az authz.Authorizer, caps 
 func (h *Handler) WithAccessInfo(issuerURL string) *Handler {
 	h.issuerURL = issuerURL
 	return h
+}
+
+// WithAgentCompat wires the platform-declared agent compatibility policy
+// (supported range, legacy current version, recommended version) so cluster
+// responses carry the computed agentCompat assessment.
+func (h *Handler) WithAgentCompat(supportedRange, current, recommended string) *Handler {
+	h.agentSupportedRange = supportedRange
+	h.agentCurrent = current
+	h.agentRecommended = recommended
+	return h
+}
+
+// enrichAgentCompat populates the computed agentCompat assessment on a
+// cluster response; a no-op when the platform declares no agent
+// compatibility policy (responses stay byte-identical to pre-policy).
+func (h *Handler) enrichAgentCompat(c *types.Cluster) {
+	if h.agentSupportedRange == "" && h.agentCurrent == "" && h.agentRecommended == "" {
+		return
+	}
+	c.AgentCompat = &types.AgentCompatStatus{
+		Supported:          fleetmanager.AgentSupported(h.agentSupportedRange, h.agentCurrent, c.AgentVersion),
+		RecommendedVersion: h.agentRecommended,
+		UpgradeAvailable:   fleetmanager.UpgradeAvailable(h.agentRecommended, c.AgentVersion),
+	}
 }
 
 // RegisterRoutes mounts the cluster API on the huma API instance.
@@ -219,6 +250,9 @@ func (h *Handler) listClusters(ctx context.Context, in *orgPathInput) (*listClus
 	if err != nil {
 		return nil, err
 	}
+	for i := range clusters {
+		h.enrichAgentCompat(&clusters[i])
+	}
 	out := &listClustersOutput{}
 	out.Body.Clusters = clusters
 	return out, nil
@@ -244,6 +278,7 @@ func (h *Handler) getCluster(ctx context.Context, in *clusterPathInput) (*cluste
 	if c.OrgID != org.ID {
 		return nil, huma.Error404NotFound("cluster not found")
 	}
+	h.enrichAgentCompat(c)
 	out := &clusterOutput{}
 	out.Body.Cluster = *c
 	return out, nil

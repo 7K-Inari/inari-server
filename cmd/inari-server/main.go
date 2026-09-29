@@ -500,15 +500,19 @@ func run() error {
 	agentParams := tenantzonefactory.AgentInstallParams{
 		ImageRepo:      cfg.AgentImageRepo,
 		GatewayAddress: cfg.AgentGatewayAddress,
+		Version:        cfg.AgentRecommendedVersion,
+		FloatLatest:    cfg.AgentFloatLatest,
 		ESOSecretStore: cfg.ESOSecretStore,
 		ESOSecretKey:   "client-secret",
 		ESOSecretName:  "inari-agent-oidc-client",
 	}
 	caps := capabilities.NewService(database, capsStore, auditStore)
 	gateway := agentgateway.NewGateway(database, registry, idp, caps, auditStore, agentgateway.Config{
-		OIDCIssuerURL:       cfg.OIDCIssuerURL,
-		ESOSecretStore:      cfg.ESOSecretStore,
-		CurrentAgentVersion: cfg.CurrentAgentVersion,
+		OIDCIssuerURL:           cfg.OIDCIssuerURL,
+		ESOSecretStore:          cfg.ESOSecretStore,
+		CurrentAgentVersion:     cfg.CurrentAgentVersion,
+		AgentSupportedRange:     cfg.AgentSupportedRange,
+		AgentRecommendedVersion: cfg.AgentRecommendedVersion,
 	}).WithSecretWriter(secretWriter).WithPlatformResources(platformResourcesSvc)
 
 	// W3 credential vault (plan §5.8): envelope-encrypted per-user tokens
@@ -862,6 +866,10 @@ func run() error {
 		OIDCIssuerURL:     cfg.OIDCIssuerURL,
 		AllowedAPIBases:   cfg.GitHubAllowedAPIBases,
 		RemoteEntries:     remoteEntries,
+
+		AgentSupportedRange:     cfg.AgentSupportedRange,
+		AgentCurrentVersion:     cfg.CurrentAgentVersion,
+		AgentRecommendedVersion: cfg.AgentRecommendedVersion,
 	})
 
 	// Agent-facing Connect-RPC services mount on chi directly, outside the

@@ -96,6 +96,49 @@ func TestSessionHandshakeChecksumDecision(t *testing.T) {
 	}
 }
 
+func TestSessionHandshakeAdvertisesDesiredAgentVersion(t *testing.T) {
+	mkHandshake := func() *agentv1.Event {
+		any, err := anypb.New(&agentv1.HandshakeRequest{
+			AgentVersion: "0.5.0", TenantId: "org:test", ContractVersion: "inari.agent.v1",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &agentv1.Event{EventId: "h1", Type: "inari.agent.handshake.v1", Payload: any}
+	}
+
+	s := (&Gateway{cfg: Config{AgentRecommendedVersion: "0.5.1"}}).newSession(&types.Cluster{
+		ID: "cluster:test", OrgID: "org:test",
+	})
+	out, err := s.handleEvent(context.Background(), mkHandshake())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("want 1 reply, got %d", len(out))
+	}
+	var resp agentv1.HandshakeResponse
+	if err := out[0].Payload.UnmarshalTo(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.DesiredAgentVersion != "0.5.1" {
+		t.Errorf("DesiredAgentVersion = %q, want 0.5.1", resp.DesiredAgentVersion)
+	}
+
+	// No recommendation configured -> empty desired version.
+	s = testSession("")
+	out, err = s.handleEvent(context.Background(), mkHandshake())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := out[0].Payload.UnmarshalTo(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.DesiredAgentVersion != "" {
+		t.Errorf("DesiredAgentVersion = %q, want empty", resp.DesiredAgentVersion)
+	}
+}
+
 func TestSessionUnknownTypeDropped(t *testing.T) {
 	s := testSession("")
 	out, err := s.handleEvent(context.Background(), &agentv1.Event{EventId: "x", Type: "inari.agent.future-thing.v9"})

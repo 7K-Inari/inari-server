@@ -93,10 +93,10 @@ func scanApproval(row interface{ Scan(...any) error }) (*types.ApprovalRequest, 
 
 func (s *Store) create(ctx context.Context, q db.Querier, req *types.ApprovalRequest) error {
 	const sql = `INSERT INTO approval_requests (org_id, item_id, version, cluster_id, spec, requester,
-	             name, namespace, owner_team, channel, instance_id, expires_at)
-	             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id, state, created_at`
+	             name, namespace, owner_team, channel, instance_id, action, expires_at)
+	             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id, state, created_at`
 	return q.QueryRow(ctx, sql, req.OrgID, req.ItemID, req.Version, req.ClusterID, req.Spec, req.Requester,
-		req.Name, req.Namespace, req.OwnerTeam, req.Channel, req.InstanceID, req.ExpiresAt).
+		req.Name, req.Namespace, req.OwnerTeam, req.Channel, req.InstanceID, req.Action, req.ExpiresAt).
 		Scan(&req.ID, &req.State, &req.CreatedAt)
 }
 
@@ -235,6 +235,10 @@ type GateInput struct {
 	OwnerTeam  string
 	Channel    string
 	InstanceID string
+	// Action marks non-deploy gated actions (e.g. "instance.update",
+	// "instance.delete") so resume handlers dispatch to the right path
+	// instead of resuming a deploy.
+	Action string
 }
 
 // Gate evaluates the item's approval policy. auto → approved; otherwise an
@@ -248,7 +252,7 @@ func (s *Service) Gate(ctx context.Context, in GateInput) (*GateResult, error) {
 		OrgID: in.OrgID, ItemID: in.Item.ID, Version: in.Version, ClusterID: in.ClusterID,
 		Spec: in.Spec, Requester: in.Requester, Name: in.Name, Namespace: in.Namespace,
 		OwnerTeam: in.OwnerTeam, Channel: in.Channel, InstanceID: in.InstanceID,
-		ExpiresAt: &expires,
+		Action: in.Action, ExpiresAt: &expires,
 	}
 	err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		if err := s.store.create(ctx, tx, req); err != nil {

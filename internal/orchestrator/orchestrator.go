@@ -256,6 +256,13 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 // apply renders + commits + enqueues + records the instance. When existing
 // is non-nil this is an upgrade of that instance.
 func (s *Service) apply(ctx context.Context, req DeployRequest, item *types.CatalogItem, version string, existing *types.ResourceInstance) (*DeployResult, error) {
+	return s.applyWithEvent(ctx, req, item, version, existing, "", false)
+}
+
+// applyWithEvent is apply with an overridable outbox event type and, for
+// spec-only updates (same version), spec persistence. An empty eventType
+// keeps the default (deploy.requested / instance.upgraded).
+func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *types.CatalogItem, version string, existing *types.ResourceInstance, eventType string, specUpdate bool) (*DeployResult, error) {
 	ver, err := s.catalog.GetVersion(ctx, req.ItemID, version)
 	if err != nil {
 		return nil, err
@@ -355,6 +362,10 @@ func (s *Service) apply(ctx context.Context, req DeployRequest, item *types.Cata
 				}
 				return err
 			}
+		} else if specUpdate {
+			if err := s.instances.MarkSpecUpdated(ctx, tx, instanceID, req.Spec, gitResult.CommitSHA, gitResult.PRURL, state); err != nil {
+				return err
+			}
 		} else if err := s.instances.MarkDeployed(ctx, tx, instanceID, version, gitResult.CommitSHA, gitResult.PRURL, state, true); err != nil {
 			return err
 		}
@@ -370,9 +381,11 @@ func (s *Service) apply(ctx context.Context, req DeployRequest, item *types.Cata
 		if err := s.audit.Record(ctx, tx, ev); err != nil {
 			return err
 		}
-		eventType := types.EventDeployRequested
-		if existing != nil {
-			eventType = types.EventInstanceUpgraded
+		if eventType == "" {
+			eventType = types.EventDeployRequested
+			if existing != nil {
+				eventType = types.EventInstanceUpgraded
+			}
 		}
 		return audit.AppendOutbox(ctx, tx, req.OrgID, eventType, types.DeployRequestedPayload{
 			OrgID: req.OrgID, InstanceID: instanceID, ItemID: req.ItemID, ClusterID: req.ClusterID,
@@ -421,9 +434,43 @@ func (s *Service) enqueueAppRegistration(ctx context.Context, clusterID, instanc
 	})
 }
 
+// ErrSameVersion rejects a rollback to the version the instance already runs.
+var ErrSameVersion = fmt.Errorf("orchestrator: target version is the current version")
+
+// Gate actions for instance mutations that must not resume as deploys
+// (ResumeHandler dispatches on these).
+const (
+	GateActionInstanceUpdate = "instance.update"
+	GateActionInstanceDelete = "instance.delete"
+)
+
 // Upgrade re-deploys an existing instance at a newer version through the
 // same path (§5.11 resource upgrade flow).
 func (s *Service) Upgrade(ctx context.Context, orgID, instanceID, toVersion, requester string) (*DeployResult, error) {
+	return s.revert(ctx, orgID, instanceID, toVersion, requester, "")
+}
+
+// Rollback re-deploys an existing instance at an explicit (older) catalog
+// version. There is no version history yet, so the target version is
+// caller-supplied; the mechanics are the upgrade path with a distinct
+// outbox event.
+func (s *Service) Rollback(ctx context.Context, orgID, instanceID, toVersion, requester string) (*DeployResult, error) {
+	existing, err := s.instances.Get(ctx, s.db.Pool, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	if existing.OrgID != orgID {
+		return nil, inventory.ErrInstanceNotFound
+	}
+	if existing.Version == toVersion {
+		return nil, ErrSameVersion
+	}
+	return s.revert(ctx, orgID, instanceID, toVersion, requester, types.EventInstanceRolledBack)
+}
+
+// revert is the shared upgrade/rollback path; eventType overrides the
+// outbox event emitted by apply (empty = instance.upgraded).
+func (s *Service) revert(ctx context.Context, orgID, instanceID, toVersion, requester, eventType string) (*DeployResult, error) {
 	existing, err := s.instances.Get(ctx, s.db.Pool, instanceID)
 	if err != nil {
 		return nil, err
@@ -460,10 +507,206 @@ func (s *Service) Upgrade(ctx context.Context, orgID, instanceID, toVersion, req
 	if !gate.Approved {
 		return &DeployResult{Status: "pending_approval", ApprovalID: gate.ApprovalID, Version: toVersion}, nil
 	}
-	return s.apply(ctx, DeployRequest{
+	return s.applyWithEvent(ctx, DeployRequest{
 		OrgID: orgID, ClusterID: existing.ClusterID, ItemID: existing.CatalogItemID,
 		Version: toVersion, OwnerTeam: existing.OwnerTeam, Spec: existing.Spec, Requester: requester,
-	}, item, toVersion, existing)
+	}, item, toVersion, existing, eventType, false)
+}
+
+// UpdateSpec re-renders an instance at its current version with a new spec
+// (edit-spec flow). Approval-gated like upgrades; the gated request carries
+// GateActionInstanceUpdate so the resume handler re-enters updateSpecResume
+// instead of the deploy path.
+func (s *Service) UpdateSpec(ctx context.Context, orgID, instanceID string, spec json.RawMessage, requester string) (*DeployResult, error) {
+	existing, err := s.instances.Get(ctx, s.db.Pool, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	if existing.OrgID != orgID {
+		return nil, inventory.ErrInstanceNotFound
+	}
+	cluster, err := s.clusters.GetCluster(ctx, existing.ClusterID)
+	if err != nil {
+		return nil, err
+	}
+	if cluster.State != types.ClusterStateActive && cluster.State != types.ClusterStateDegraded {
+		return nil, ErrClusterNotActive
+	}
+	item, err := s.catalog.GetItemByID(ctx, existing.CatalogItemID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.preFlight(ctx, PolicyInput{
+		OrgID: orgID, ItemID: existing.CatalogItemID, Version: existing.Version,
+		ClusterID: existing.ClusterID, Spec: spec, Requester: requester,
+		ClusterLabels: cluster.Labels, ClusterDistribution: cluster.Distribution,
+	}); err != nil {
+		return nil, err
+	}
+	gate, err := s.gate.Gate(ctx, approvals.GateInput{
+		OrgID: orgID, Item: item, Version: existing.Version, ClusterID: existing.ClusterID,
+		Spec: spec, Requester: requester, OwnerTeam: existing.OwnerTeam,
+		InstanceID: instanceID, Action: GateActionInstanceUpdate,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !gate.Approved {
+		return &DeployResult{Status: "pending_approval", ApprovalID: gate.ApprovalID, Version: existing.Version}, nil
+	}
+	return s.applyWithEvent(ctx, DeployRequest{
+		OrgID: orgID, ClusterID: existing.ClusterID, ItemID: existing.CatalogItemID,
+		Version: existing.Version, OwnerTeam: existing.OwnerTeam, Spec: spec, Requester: requester,
+	}, item, existing.Version, existing, types.EventInstanceUpdated, true)
+}
+
+// UpdateSpecResume re-enters the spec update after its approval was granted
+// (ResumeHandler; the gate already ran at request time).
+func (s *Service) UpdateSpecResume(ctx context.Context, orgID, instanceID string, spec json.RawMessage, requester string) error {
+	existing, err := s.instances.Get(ctx, s.db.Pool, instanceID)
+	if err != nil {
+		return err
+	}
+	if existing.OrgID != orgID {
+		return inventory.ErrInstanceNotFound
+	}
+	item, err := s.catalog.GetItemByID(ctx, existing.CatalogItemID)
+	if err != nil {
+		return err
+	}
+	_, err = s.applyWithEvent(ctx, DeployRequest{
+		OrgID: orgID, ClusterID: existing.ClusterID, ItemID: existing.CatalogItemID,
+		Version: existing.Version, OwnerTeam: existing.OwnerTeam, Spec: spec, Requester: requester,
+	}, item, existing.Version, existing, types.EventInstanceUpdated, true)
+	return err
+}
+
+// DeleteInstance undeploys an instance. Approval-gated like deploys; the
+// gated request carries GateActionInstanceDelete so the resume handler
+// re-enters DeleteInstanceResume instead of the deploy path.
+func (s *Service) DeleteInstance(ctx context.Context, orgID, instanceID, requester string) (*DeployResult, error) {
+	existing, err := s.instances.Get(ctx, s.db.Pool, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	if existing.OrgID != orgID {
+		return nil, inventory.ErrInstanceNotFound
+	}
+	item, err := s.catalog.GetItemByID(ctx, existing.CatalogItemID)
+	if err != nil {
+		return nil, err
+	}
+	gate, err := s.gate.Gate(ctx, approvals.GateInput{
+		OrgID: orgID, Item: item, Version: existing.Version, ClusterID: existing.ClusterID,
+		Spec: existing.Spec, Requester: requester, OwnerTeam: existing.OwnerTeam,
+		InstanceID: instanceID, Action: GateActionInstanceDelete,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !gate.Approved {
+		return &DeployResult{Status: "pending_approval", ApprovalID: gate.ApprovalID, Version: existing.Version}, nil
+	}
+	if err := s.deleteInstance(ctx, existing, requester); err != nil {
+		return nil, err
+	}
+	return &DeployResult{InstanceID: instanceID, Version: existing.Version, Status: string(types.InstanceStateDeleting)}, nil
+}
+
+// DeleteInstanceResume re-enters the delete after its approval was granted
+// (ResumeHandler; the gate already ran at request time).
+func (s *Service) DeleteInstanceResume(ctx context.Context, orgID, instanceID, requester string) error {
+	existing, err := s.instances.Get(ctx, s.db.Pool, instanceID)
+	if err != nil {
+		return err
+	}
+	if existing.OrgID != orgID {
+		return inventory.ErrInstanceNotFound
+	}
+	return s.deleteInstance(ctx, existing, requester)
+}
+
+// deleteInstance removes the instance's desired state from the tenant state
+// repo, asks the agent to remove the ArgoCD app (best-effort), and deletes
+// the inventory row with audit + outbox in one TX.
+func (s *Service) deleteInstance(ctx context.Context, existing *types.ResourceInstance, requester string) error {
+	orgID, instanceID := existing.OrgID, existing.ID
+	gitCfg, err := s.instances.GitConfig(ctx, s.db.Pool, orgID)
+	if err != nil {
+		return err
+	}
+	if gitCfg == nil {
+		return ErrNoGitConfig
+	}
+	git, _, err := s.git.ForTenant(ctx, gitCfg)
+	if err != nil {
+		return err
+	}
+	if _, err := git.EnsureRepo(ctx, gitCfg.Repo); err != nil {
+		return err
+	}
+	path := RepoPath(existing.ClusterID, existing.CatalogItemID, instanceID)
+	message := fmt.Sprintf("undeploy %s from %s (instance %s)", existing.CatalogItemID, existing.ClusterID, instanceID)
+	// NOTE: DeleteFiles commits directly even for pull-request-policy
+	// tenants (no PR-delete path in the provider yet).
+	if _, err := git.DeleteFiles(ctx, gitCfg.Repo, gitCfg.BaseBranch,
+		[]string{path + "/instance.yaml", path + "/application.yaml"}, message); err != nil {
+		return fmt.Errorf("orchestrator: git delete: %w", err)
+	}
+	// Best-effort agent cleanup: ask the tenant-local ArgoCD to delete the
+	// app. A failure here must not block the undeploy — the git delete
+	// already stops reconciliation of the kro CR source.
+	_ = s.enqueueAppDeletion(ctx, existing.ClusterID, instanceID)
+
+	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		if err := s.instances.Delete(ctx, tx, instanceID); err != nil {
+			return err
+		}
+		ev := &types.AuditEvent{
+			OrgID: orgID, Actor: requester, Impersonator: impersonation.FromContext(ctx), Action: "instance.deleted",
+			ObjectType: "resource_instance", ObjectID: instanceID,
+			Payload: json.RawMessage(fmt.Sprintf(`{"item":%q,"version":%q,"cluster":%q}`,
+				existing.CatalogItemID, existing.Version, existing.ClusterID)),
+		}
+		if err := impersonation.Stamp(ctx, ev); err != nil {
+			return err
+		}
+		if err := s.audit.Record(ctx, tx, ev); err != nil {
+			return err
+		}
+		return audit.AppendOutbox(ctx, tx, orgID, types.EventInstanceDeleted, types.InstancePayload{
+			OrgID: orgID, InstanceID: instanceID, ItemID: existing.CatalogItemID,
+			ClusterID: existing.ClusterID, Version: existing.Version,
+		})
+	})
+}
+
+// enqueueAppDeletion dispatches an InvokeAction (delete) for the instance's
+// ArgoCD Application to the cluster's agent.
+func (s *Service) enqueueAppDeletion(ctx context.Context, clusterID, instanceID string) error {
+	cmd := &agentv1.InvokeAction{
+		CommandId: instanceID,
+		Action:    "delete",
+		Resource: &agentv1.ResourceRef{
+			Kind:      "Application",
+			Name:      "inari-" + instanceID,
+			Namespace: "argocd",
+		},
+	}
+	any, err := anypb.New(cmd)
+	if err != nil {
+		return err
+	}
+	raw, err := protojson.Marshal(any)
+	if err != nil {
+		return err
+	}
+	return s.queue.Enqueue(ctx, &types.AgentCommand{
+		ID:        "delete-argocd-app:" + instanceID,
+		ClusterID: clusterID,
+		Type:      agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_INVOKE_ACTION),
+		Payload:   raw,
+	})
 }
 
 // DiffPreview returns the data the console needs to render an upgrade diff:

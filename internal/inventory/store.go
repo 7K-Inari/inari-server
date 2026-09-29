@@ -101,6 +101,18 @@ func (s *Store) List(ctx context.Context, q db.Querier, orgID string, f ListFilt
 	return out, rows.Err()
 }
 
+// Delete removes an instance row (undeploy).
+func (s *Store) Delete(ctx context.Context, q db.Querier, id string) error {
+	tag, err := q.Exec(ctx, `DELETE FROM resource_instances WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrInstanceNotFound
+	}
+	return nil
+}
+
 // ApplyStatus updates health/sync/message/state from an agent status-update.
 // Returns the updated instance and whether it matched an existing row.
 func (s *Store) ApplyStatus(ctx context.Context, q db.Querier, clusterID string, ref types.ResourceRef,
@@ -131,6 +143,23 @@ func (s *Store) MarkDeployed(ctx context.Context, q db.Querier, id, version, com
 	}
 	sql += ` WHERE id = $1`
 	tag, err := q.Exec(ctx, sql, id, version, commitSHA, prURL, state)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrInstanceNotFound
+	}
+	return nil
+}
+
+// MarkSpecUpdated records a spec-only update (same version): stores the new
+// spec plus the git outcome and bumps the generation.
+func (s *Store) MarkSpecUpdated(ctx context.Context, q db.Querier, id string, spec json.RawMessage, commitSHA, prURL string, state types.InstanceState) error {
+	const sql = `UPDATE resource_instances
+	             SET spec = $2, commit_sha = $3, pr_url = $4, state = $5,
+	                 generation = generation + 1, updated_at = now()
+	             WHERE id = $1`
+	tag, err := q.Exec(ctx, sql, id, spec, commitSHA, prURL, state)
 	if err != nil {
 		return err
 	}

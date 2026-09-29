@@ -610,3 +610,114 @@ func TestGitConfigAllOrNoneConstraint(t *testing.T) {
 		t.Fatal("partial BYO columns accepted; want CHECK violation")
 	}
 }
+
+// TestInstanceLifecycle covers the new instance mutations: PATCH spec
+// (re-render at the same version), rollback to an explicit older version,
+// and DELETE (git delete + agent app-delete command + row removal).
+func TestInstanceLifecycle(t *testing.T) {
+	srv, database, git, queue := itServer(t)
+	defer srv.Close()
+	ctx := context.Background()
+
+	// Deploy pinned at 1.0.0 so upgrade/rollback have somewhere to go.
+	if code, body := itReq(t, srv, "PUT", "/api/v1/tenants/acme/catalog/curated:postgres-aws/pin", "good", `{"version":"1.0.0"}`); code >= 300 {
+		t.Fatalf("pin: %d %s", code, body)
+	}
+	code, body := itReq(t, srv, "POST", "/api/v1/tenants/acme/deploys", "good",
+		`{"itemId":"curated:postgres-aws","clusterId":"cluster-1","name":"db1","spec":{"storageGB":20}}`)
+	if code != http.StatusOK {
+		t.Fatalf("deploy: %d %s", code, body)
+	}
+
+	// PATCH spec: same version, new spec persisted + re-rendered to git.
+	code, body = itReq(t, srv, "PATCH", "/api/v1/tenants/acme/instances/db1", "good",
+		`{"spec":{"storageGB":42}}`)
+	if code != http.StatusOK {
+		t.Fatalf("update spec: %d %s", code, body)
+	}
+	var out struct {
+		Deploy orchestrator.DeployResult `json:"deploy"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Deploy.Version != "1.0.0" || out.Deploy.Status != "upgrading" {
+		t.Errorf("update result = %+v", out.Deploy)
+	}
+	inst := git.Files("inari-dev/acme-inari-state", "main")["clusters/cluster-1/postgres-aws/db1/instance.yaml"]
+	if !strings.Contains(inst, "storageGB: 42") {
+		t.Errorf("re-rendered manifest missing new spec:\n%s", inst)
+	}
+	var spec string
+	var version string
+	if err := database.Pool.QueryRow(ctx,
+		`SELECT spec::text, version FROM resource_instances WHERE id = 'db1'`).Scan(&spec, &version); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(spec, "42") || version != "1.0.0" {
+		t.Errorf("spec=%s version=%s", spec, version)
+	}
+	// An empty spec is a 422, not a silent wipe.
+	if code, _ := itReq(t, srv, "PATCH", "/api/v1/tenants/acme/instances/db1", "good", `{}`); code != http.StatusUnprocessableEntity {
+		t.Errorf("empty spec patch: got %d, want 422", code)
+	}
+
+	// Upgrade then rollback to 1.0.0.
+	if code, body := itReq(t, srv, "POST", "/api/v1/tenants/acme/instances/db1/upgrade", "good", `{"toVersion":"1.1.0"}`); code != http.StatusOK {
+		t.Fatalf("upgrade: %d %s", code, body)
+	}
+	code, body = itReq(t, srv, "POST", "/api/v1/tenants/acme/instances/db1/rollback", "good", `{"toVersion":"1.0.0"}`)
+	if code != http.StatusOK {
+		t.Fatalf("rollback: %d %s", code, body)
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Deploy.Version != "1.0.0" || out.Deploy.Status != "upgrading" {
+		t.Errorf("rollback result = %+v", out.Deploy)
+	}
+	if err := database.Pool.QueryRow(ctx,
+		`SELECT version FROM resource_instances WHERE id = 'db1'`).Scan(&version); err != nil || version != "1.0.0" {
+		t.Errorf("version after rollback = %q err=%v", version, err)
+	}
+	// Rolling back to the current version is a conflict.
+	if code, _ := itReq(t, srv, "POST", "/api/v1/tenants/acme/instances/db1/rollback", "good", `{"toVersion":"1.0.0"}`); code != http.StatusConflict {
+		t.Errorf("same-version rollback: got %d, want 409", code)
+	}
+	// Unknown target version reads as 404.
+	if code, _ := itReq(t, srv, "POST", "/api/v1/tenants/acme/instances/db1/rollback", "good", `{"toVersion":"9.9.9"}`); code != http.StatusNotFound {
+		t.Errorf("bogus-version rollback: got %d, want 404", code)
+	}
+
+	// DELETE: git delete + app-delete command + row removal + audit event.
+	cmdsBefore := len(queue.cmds)
+	code, body = itReq(t, srv, "DELETE", "/api/v1/tenants/acme/instances/db1", "good", "")
+	if code != http.StatusOK {
+		t.Fatalf("delete: %d %s", code, body)
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Deploy.Status != "deleting" {
+		t.Errorf("delete result = %+v", out.Deploy)
+	}
+	if len(git.Deletions) != 1 || len(git.Deletions[0].Paths) != 2 {
+		t.Errorf("git deletions = %+v", git.Deletions)
+	}
+	if len(queue.cmds) != cmdsBefore+1 || queue.cmds[len(queue.cmds)-1].Type != "inari.agent.invoke-action.v1" {
+		t.Errorf("queue cmds = %+v", queue.cmds)
+	}
+	var n int
+	if err := database.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM resource_instances WHERE id = 'db1'`).Scan(&n); err != nil || n != 0 {
+		t.Errorf("instance row after delete = %d err=%v", n, err)
+	}
+	if err := database.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM outbox WHERE event_type = 'instance.deleted'`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("instance.deleted outbox rows = %d err=%v", n, err)
+	}
+	// Deleting again is a 404.
+	if code, _ := itReq(t, srv, "DELETE", "/api/v1/tenants/acme/instances/db1", "good", ""); code != http.StatusNotFound {
+		t.Errorf("re-delete: got %d, want 404", code)
+	}
+}

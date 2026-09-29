@@ -16,8 +16,10 @@
 #   3. Repos without a manifest (release-please simple mode): the latest
 #      stable (non-prerelease) v* tag with a patch bump.
 #
-# Output: <version>-edge.<short-sha> (short sha from GITHUB_SHA or HEAD).
-# Set RAW=1 to print only the base version.
+# Output: <version>-<short-sha> (short sha from GITHUB_SHA or HEAD) — the
+# immutable per-commit edge version; the moving `edge` channel tag is
+# maintained separately by the edge workflows. Set RAW=1 to print only the
+# base version.
 #
 # Requires: gh (GH_TOKEN), jq, git. Identical copy in every inari repo —
 # keep in sync (see docs/ops/release-process.md).
@@ -65,4 +67,4 @@ if [ "${RAW:-}" = "1" ]; then
 fi
 
 sha="${GITHUB_SHA:-$(git rev-parse HEAD)}"
-printf '%s-edge.%s\n' "$base" "${sha:0:7}"
+printf '%s-%s\n' "$base" "${sha:0:7}"

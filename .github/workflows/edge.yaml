@@ -132,12 +132,27 @@ jobs:
     needs: [version, edge-image, openapi]
     runs-on: ubuntu-latest
     steps:
-      - name: Create edge prerelease
+      - uses: actions/checkout@v4
+      - name: Create edge prerelease + move the edge channel tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EDGE: ${{ needs.version.outputs.edge }}
         run: |
+          set -euo pipefail
           gh release create "v${EDGE}" \
             --prerelease \
+            --target "$GITHUB_SHA" \
             --title "edge ${EDGE}" \
             --notes "Edge build from ${GITHUB_SHA}. Image: \`${{ env.IMAGE }}:${EDGE}\`; OpenAPI spec: \`ghcr.io/7k-inari/inari-server-openapi:${EDGE}\`. Superseded by the next stable vX.Y.Z release."
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f edge "$GITHUB_SHA"
+          git push -f origin refs/tags/edge
+          if gh release view edge > /dev/null 2>&1; then
+            gh release edit edge --prerelease --title "edge (v${EDGE})" \
+              --notes "Latest edge build: \`v${EDGE}\` (${GITHUB_SHA})."
+          else
+            gh release create edge --prerelease --target "$GITHUB_SHA" \
+              --title "edge (v${EDGE})" \
+              --notes "Latest edge build: \`v${EDGE}\` (${GITHUB_SHA})."
+          fi

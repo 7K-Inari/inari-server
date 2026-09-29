@@ -246,9 +246,9 @@ func (h *Handler) callback(ctx context.Context, in *callbackInput) (*redirectOut
 		return nil, err
 	}
 	if _, err := h.svc.CompleteAuthorize(ctx, org.ID, in.State, in.Code); err != nil {
-		return &redirectOutput{Status: http.StatusFound, Location: h.uiErrorURL(in.Provider, callbackErrorCode(err))}, nil
+		return &redirectOutput{Status: http.StatusFound, Location: h.uiErrorURL(in.Org, in.Provider, callbackErrorCode(err))}, nil
 	}
-	return &redirectOutput{Status: http.StatusFound, Location: h.uiSuccessURL(in.Provider)}, nil
+	return &redirectOutput{Status: http.StatusFound, Location: h.uiSuccessURL(in.Org, in.Provider)}, nil
 }
 
 func callbackErrorCode(err error) string {
@@ -264,20 +264,34 @@ func callbackErrorCode(err error) string {
 	}
 }
 
-func (h *Handler) uiSuccessURL(provider string) string {
-	sep := "?"
-	if u, err := url.Parse(h.svc.UIReturnURL()); err == nil && u.RawQuery != "" {
-		sep = "&"
+// uiReturnURL resolves the post-callback browser target. Relative return
+// URLs are prefixed with the tenant slug because console routes are
+// tenant-scoped (/:tenant/settings/...) — an unprefixed relative URL falls
+// through the router to the root page.
+func (h *Handler) uiReturnURL(slug string) string {
+	u := h.svc.UIReturnURL()
+	if strings.HasPrefix(u, "/") {
+		return "/" + slug + u
 	}
-	return h.svc.UIReturnURL() + sep + "connected=" + url.QueryEscape(provider)
+	return u
 }
 
-func (h *Handler) uiErrorURL(provider, code string) string {
+func (h *Handler) uiSuccessURL(slug, provider string) string {
+	base := h.uiReturnURL(slug)
 	sep := "?"
-	if u, err := url.Parse(h.svc.UIReturnURL()); err == nil && u.RawQuery != "" {
+	if u, err := url.Parse(base); err == nil && u.RawQuery != "" {
 		sep = "&"
 	}
-	return h.svc.UIReturnURL() + sep + "provider=" + url.QueryEscape(provider) + "&error=" + url.QueryEscape(code)
+	return base + sep + "connected=" + url.QueryEscape(provider)
+}
+
+func (h *Handler) uiErrorURL(slug, provider, code string) string {
+	base := h.uiReturnURL(slug)
+	sep := "?"
+	if u, err := url.Parse(base); err == nil && u.RawQuery != "" {
+		sep = "&"
+	}
+	return base + sep + "provider=" + url.QueryEscape(provider) + "&error=" + url.QueryEscape(code)
 }
 
 type disconnectInput struct {

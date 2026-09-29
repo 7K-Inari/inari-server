@@ -32,8 +32,10 @@ jobs:
 
       - name: Resolve matching inari-release-bundle ref
         id: chart
+        env:
+          HEAD_REF: ${{ github.head_ref || github.ref_name }}
         run: |
-          BRANCH="${{ github.head_ref || github.ref_name }}"
+          BRANCH="$HEAD_REF"
           if git ls-remote --exit-code https://github.com/7K-Inari/inari-release-bundle.git "refs/heads/$BRANCH" >/dev/null 2>&1; then
             echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
           else
@@ -49,8 +51,10 @@ jobs:
 
       - name: Resolve matching inari-agent ref
         id: agent
+        env:
+          HEAD_REF: ${{ github.head_ref || github.ref_name }}
         run: |
-          BRANCH="${{ github.head_ref || github.ref_name }}"
+          BRANCH="$HEAD_REF"
           if git ls-remote --exit-code https://github.com/7K-Inari/inari-agent.git "refs/heads/$BRANCH" >/dev/null 2>&1; then
             echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
           else

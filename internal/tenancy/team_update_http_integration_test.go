@@ -24,7 +24,7 @@ import (
 type qaAdminAuthz struct{ allow bool }
 
 func (a qaAdminAuthz) Check(_ context.Context, _, relation, _ string) (bool, error) {
-	return a.allow && relation == authz.RelationAdmin, nil
+	return a.allow && relation == authz.RelationTenantTeamsManage, nil
 }
 func (a qaAdminAuthz) ListObjects(context.Context, string, string, string) ([]string, error) {
 	return nil, nil
@@ -51,7 +51,7 @@ func TestUpdateTeamHTTP(t *testing.T) {
 	if _, _, err := svc.CreateTenant(context.Background(), "user-1", "qa-org", "QA"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.CreateTeam(context.Background(), "user-1", "qa-org", "custom", types.RoleDeveloper); err != nil {
+	if _, err := svc.CreateTeam(context.Background(), "user-1", "qa-org", "custom", "editor"); err != nil {
 		t.Fatal(err)
 	}
 

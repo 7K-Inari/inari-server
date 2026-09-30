@@ -98,7 +98,7 @@ type requestZoneOutput struct {
 }
 
 func (h *Handler) requestZone(ctx context.Context, in *requestZoneInput) (*requestZoneOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationZonesManage)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +130,7 @@ type listZonesOutput struct {
 }
 
 func (h *Handler) listZones(ctx context.Context, in *orgPathInput) (*listZonesOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +156,7 @@ type getZoneOutput struct {
 }
 
 func (h *Handler) getZone(ctx context.Context, in *zonePathInput) (*getZoneOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -177,7 +177,7 @@ func (h *Handler) getZone(ctx context.Context, in *zonePathInput) (*getZoneOutpu
 }
 
 func (h *Handler) resumeZone(ctx context.Context, in *zonePathInput) (*struct{}, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationZonesManage)
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +199,7 @@ type decommissionOutput struct {
 }
 
 func (h *Handler) decommissionZone(ctx context.Context, in *zonePathInput) (*decommissionOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationZonesManage)
 	if err != nil {
 		return nil, err
 	}

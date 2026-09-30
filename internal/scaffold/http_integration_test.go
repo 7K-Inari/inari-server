@@ -23,6 +23,7 @@ import (
 
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/authn"
+	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
@@ -355,14 +356,14 @@ func TestHTTPAuthz(t *testing.T) {
 		t.Fatalf("want 403 for unknown org, got %d", code)
 	}
 	// Authorizer denies developer: reads pass, create is forbidden.
-	f.az.deny["developer"] = true
+	f.az.deny[authz.RelationDeploymentsCreate] = true
 	if code, _ := f.req(t, "GET", "/api/v1/tenants/acme/templates", "good", ""); code != http.StatusOK {
 		t.Fatalf("want 200 for viewer-allowed list, got %d", code)
 	}
 	if code, _ := f.req(t, "POST", "/api/v1/tenants/acme/templates/go-service/runs", "good", `{"values":{"name":"payments-api"}}`); code != http.StatusForbidden {
 		t.Fatalf("want 403 when developer denied, got %d", code)
 	}
-	f.az.deny["developer"] = false
+	f.az.deny[authz.RelationDeploymentsCreate] = false
 }
 
 func TestHTTPTemplates(t *testing.T) {

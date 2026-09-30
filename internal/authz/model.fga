@@ -12,24 +12,42 @@ type team
   relations
     define member: [user]
 
+# Role engine (ADR-0013): one relation per permission-catalog slug, granted
+# directly via team member usersets. The model is static — roles are DB
+# rows; role edits rewrite tuples, never the model.
 type organization
   relations
-    define admin: [team#member]
-    define platform_engineer: [team#member] or admin
-    define developer: [team#member] or platform_engineer
-    define viewer: [team#member] or developer
+    define tenant_read: [team#member]
+    define tenant_settings_write: [team#member]
+    define tenant_members_manage: [team#member]
+    define tenant_teams_manage: [team#member]
+    define tenant_rbac_manage: [team#member]
+    define tenant_identity_manage: [team#member]
+    define tenant_notifications_manage: [team#member]
+    define tenant_admin: [team#member]
+    define clusters_register: [team#member]
+    define cloudaccounts_manage: [team#member]
+    define zones_manage: [team#member]
+    define fleet_manage: [team#member]
+    define policies_manage: [team#member]
+    define secretstores_manage: [team#member]
+    define extensions_manage: [team#member]
+    define extensions_invoke: [team#member]
+    define catalog_manage: [team#member]
+    define deployments_create: [team#member]
+    define approvals_manage: [team#member]
 
 type cluster
   relations
     define parent: [organization]
-    define operator: platform_engineer from parent
-    define viewer: viewer from parent
+    define operator: clusters_register from parent
+    define viewer: tenant_read from parent
 
 type catalog_item
   relations
     define parent: [organization]
-    define deployer: developer from parent
-    define viewer: viewer from parent
+    define deployer: catalog_manage from parent
+    define viewer: tenant_read from parent
 
 type resource_instance
   relations
@@ -40,40 +58,40 @@ type resource_instance
 type cloud_account
   relations
     define parent: [organization]
-    define operator: platform_engineer from parent
-    define viewer: viewer from parent
+    define operator: cloudaccounts_manage from parent
+    define viewer: tenant_read from parent
 
 type policy_pack
   relations
     define parent: [organization]
-    define operator: platform_engineer from parent
-    define viewer: viewer from parent
+    define operator: policies_manage from parent
+    define viewer: tenant_read from parent
 
 type cluster_set
   relations
     define parent: [organization]
-    define operator: platform_engineer from parent
-    define viewer: viewer from parent
+    define operator: fleet_manage from parent
+    define viewer: tenant_read from parent
 
 type tenant_zone
   relations
     define parent: [organization]
-    define operator: platform_engineer from parent
-    define viewer: viewer from parent
+    define operator: zones_manage from parent
+    define viewer: tenant_read from parent
 
 type extension
   relations
     define parent: [organization]
-    define invoke: platform_engineer from parent or developer from parent
-    define viewer: viewer from parent
+    define invoke: extensions_invoke from parent
+    define viewer: tenant_read from parent
 
 type rollout
   relations
     define parent: [organization]
-    define operator: platform_engineer from parent
-    define viewer: viewer from parent
+    define operator: deployments_create from parent
+    define viewer: tenant_read from parent
 
 type drift_event
   relations
     define parent: [organization]
-    define viewer: viewer from parent
+    define viewer: tenant_read from parent

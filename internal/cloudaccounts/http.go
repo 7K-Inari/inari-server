@@ -135,7 +135,7 @@ type accountOutput struct {
 }
 
 func (h *Handler) register(ctx context.Context, in *registerInput) (*accountOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationCloudAccountsManage)
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +172,7 @@ type listAccountsOutput struct {
 }
 
 func (h *Handler) list(ctx context.Context, in *orgPathInput) (*listAccountsOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -191,7 +191,7 @@ type accountPathInput struct {
 }
 
 func (h *Handler) get(ctx context.Context, in *accountPathInput) (*accountOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -212,7 +212,7 @@ func (h *Handler) get(ctx context.Context, in *accountPathInput) (*accountOutput
 }
 
 func (h *Handler) validate(ctx context.Context, in *accountPathInput) (*accountOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationCloudAccountsManage)
 	if err != nil {
 		return nil, err
 	}
@@ -232,7 +232,7 @@ func (h *Handler) validate(ctx context.Context, in *accountPathInput) (*accountO
 }
 
 func (h *Handler) deregister(ctx context.Context, in *accountPathInput) (*struct{}, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationCloudAccountsManage)
 	if err != nil {
 		return nil, err
 	}
@@ -257,7 +257,7 @@ type manifestOutput struct {
 }
 
 func (h *Handler) providerConfig(ctx context.Context, in *providerConfigInput) (*manifestOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}

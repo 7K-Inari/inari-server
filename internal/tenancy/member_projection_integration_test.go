@@ -28,7 +28,7 @@ func setupProjectionTenant(t *testing.T) (context.Context, *db.DB, *tenancy.Serv
 	for _, team := range teams {
 		if team.Name == "viewers" {
 			return ctx, database, svc, idp, org, authz.TeamGroupRef{
-				TeamID: team.ID, OrgID: org.ID, Role: team.Role, GroupPath: team.KeycloakGroupPath,
+				TeamID: team.ID, OrgID: org.ID, RoleID: team.RoleID, Permissions: []string{"tenant.read"}, GroupPath: team.KeycloakGroupPath,
 			}
 		}
 	}
@@ -69,7 +69,7 @@ func TestSyncTeamMembersUpsert(t *testing.T) {
 		t.Fatalf("members = %+v, want 2", members)
 	}
 	if members[0].UserID != "kc-u1" || members[0].Email != "ada@example.com" ||
-		members[0].DisplayName != "Ada Lovelace" || members[0].Role != string(types.RoleViewer) {
+		members[0].DisplayName != "Ada Lovelace" || members[0].Role != "viewer" {
 		t.Errorf("members[0] = %+v, want projected kc-u1 viewer", members[0])
 	}
 	if members[1].UserID != "kc-u2" || members[1].Email != "bob@example.com" {
@@ -170,34 +170,35 @@ func TestSyncTeamMembersNeverDowngrades(t *testing.T) {
 	ctx, database, svc, idp, org, ref := setupProjectionTenant(t)
 	idp.users["kc-u1"] = true
 
-	// Invite flow grants org-admin via the anchor team.
-	if err := svc.SetMemberRole(ctx, "admin", "acme", "kc-u1", types.RoleOrgAdmin); err != nil {
+	// Invite flow grants the admin role via the anchor team.
+	if err := svc.SetMemberRole(ctx, "admin", "acme", "kc-u1", "admin"); err != nil {
 		t.Fatalf("SetMemberRole: %v", err)
 	}
 	// The IdP mapper also lands the user in the viewers group: the reconcile
-	// adds the viewer row but must not touch the org-admin row.
+	// adds the viewer row but must not touch the admin row.
 	if err := svc.SyncTeamMembers(ctx, ref, []*types.User{{ID: "kc-u1"}}); err != nil {
 		t.Fatalf("SyncTeamMembers: %v", err)
 	}
-	role, ok, err := tenancy.NewStore().HighestRole(ctx, database.Pool, org.ID, "kc-u1")
+	store := tenancy.NewStore()
+	isAdmin, err := store.HasPermission(ctx, database.Pool, org.ID, "kc-u1", "tenant.admin")
 	if err != nil {
-		t.Fatalf("HighestRole: %v", err)
+		t.Fatalf("HasPermission: %v", err)
 	}
-	if !ok || role != types.RoleOrgAdmin {
-		t.Errorf("highest role = %q ok=%v, want org-admin (never downgrade)", role, ok)
+	if !isAdmin {
+		t.Error("tenant.admin lost after projection sync (never downgrade)")
 	}
 
 	// When the user leaves the viewers group, only the viewer row is
-	// deleted; the org-admin membership survives.
+	// deleted; the admin membership survives.
 	if err := svc.SyncTeamMembers(ctx, ref, nil); err != nil {
 		t.Fatalf("SyncTeamMembers (empty): %v", err)
 	}
-	role, ok, err = tenancy.NewStore().HighestRole(ctx, database.Pool, org.ID, "kc-u1")
+	isAdmin, err = store.HasPermission(ctx, database.Pool, org.ID, "kc-u1", "tenant.admin")
 	if err != nil {
-		t.Fatalf("HighestRole: %v", err)
+		t.Fatalf("HasPermission: %v", err)
 	}
-	if !ok || role != types.RoleOrgAdmin {
-		t.Errorf("highest role after stale delete = %q ok=%v, want org-admin", role, ok)
+	if !isAdmin {
+		t.Error("tenant.admin lost after stale delete")
 	}
 	if got := teamMembers(t, svc, org.ID, ref.TeamID); len(got) != 0 {
 		t.Errorf("viewers members = %+v, want empty", got)

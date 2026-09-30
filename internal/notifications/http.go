@@ -137,7 +137,7 @@ type endpointOutput struct {
 }
 
 func (h *Handler) create(ctx context.Context, in *createInput) (*endpointOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantNotificationsManage)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +164,7 @@ type listOutput struct {
 }
 
 func (h *Handler) list(ctx context.Context, in *listInput) (*listOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +183,7 @@ type getInput struct {
 }
 
 func (h *Handler) get(ctx context.Context, in *getInput) (*endpointOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -209,7 +209,7 @@ type updateInput struct {
 }
 
 func (h *Handler) update(ctx context.Context, in *updateInput) (*endpointOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantNotificationsManage)
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +235,7 @@ type deleteOutput struct {
 }
 
 func (h *Handler) delete(ctx context.Context, in *deleteInput) (*deleteOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantNotificationsManage)
 	if err != nil {
 		return nil, err
 	}
@@ -257,7 +257,7 @@ type testOutput struct {
 }
 
 func (h *Handler) test(ctx context.Context, in *testInput) (*testOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantNotificationsManage)
 	if err != nil {
 		return nil, err
 	}

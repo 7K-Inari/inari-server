@@ -162,7 +162,7 @@ type deployOutput struct {
 }
 
 func (h *Handler) deploy(ctx context.Context, in *deployInput) (*deployOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeploymentsCreate)
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +219,7 @@ type upgradeInput struct {
 }
 
 func (h *Handler) upgrade(ctx context.Context, in *upgradeInput) (*deployOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeploymentsCreate)
 	if err != nil {
 		return nil, err
 	}
@@ -288,7 +288,7 @@ type updateInstanceInput struct {
 }
 
 func (h *Handler) updateInstance(ctx context.Context, in *updateInstanceInput) (*deployOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeploymentsCreate)
 	if err != nil {
 		return nil, err
 	}
@@ -310,7 +310,7 @@ type deleteInstanceInput struct {
 }
 
 func (h *Handler) deleteInstance(ctx context.Context, in *deleteInstanceInput) (*deployOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeploymentsCreate)
 	if err != nil {
 		return nil, err
 	}
@@ -332,7 +332,7 @@ type rollbackInput struct {
 }
 
 func (h *Handler) rollback(ctx context.Context, in *rollbackInput) (*deployOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeploymentsCreate)
 	if err != nil {
 		return nil, err
 	}
@@ -358,7 +358,7 @@ type diffOutput struct {
 }
 
 func (h *Handler) diff(ctx context.Context, in *diffInput) (*diffOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -455,7 +455,7 @@ func (h *Handler) validateGitHubApp(app *types.GitHubAppConfig) error {
 }
 
 func (h *Handler) setGitConfig(ctx context.Context, in *gitConfigInput) (*struct{}, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantSettingsWrite)
 	if err != nil {
 		return nil, err
 	}
@@ -488,7 +488,7 @@ type gitConfigGetInput struct {
 }
 
 func (h *Handler) getGitConfig(ctx context.Context, in *gitConfigGetInput) (*gitConfigOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}

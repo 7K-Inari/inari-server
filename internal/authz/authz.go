@@ -12,20 +12,21 @@ import (
 	"github.com/openfga/go-sdk/client"
 )
 
-// Relation names in the OpenFGA model.
+// Relation names in the OpenFGA model. The retired org hierarchy relations
+// (admin/platform_engineer/developer) are gone (ADR-0013 clean swap):
+// organization relations are one-per-permission-slug, defined in
+// permissions.go. RelationViewer survives only as the read-only relation
+// name on child types (never on organization).
 const (
-	RelationAdmin            = "admin"
-	RelationPlatformEngineer = "platform_engineer"
-	RelationDeveloper        = "developer"
-	RelationViewer           = "viewer"
-	RelationMember           = "member"
-	RelationParent           = "parent"
-	RelationOperator         = "operator"
-	RelationDeployer         = "deployer"
-	RelationEditor           = "editor"
-	RelationInvoke           = "invoke"
-	RelationSuperuser        = "superuser"
-	RelationOrgCreator       = "org_creator"
+	RelationMember     = "member"
+	RelationParent     = "parent"
+	RelationOperator   = "operator"
+	RelationDeployer   = "deployer"
+	RelationEditor     = "editor"
+	RelationInvoke     = "invoke"
+	RelationViewer     = "viewer"
+	RelationSuperuser  = "superuser"
+	RelationOrgCreator = "org_creator"
 )
 
 // Object types.
@@ -236,9 +237,11 @@ func isTupleMissingErr(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "does not exist")
 }
 
-// ModelV1 is the authorization model: organization roles derive from team
-// membership; higher roles imply lower ones. Includes the global platform type (M1).
-// Mirrors model.fga.
+// ModelV1 is the authorization model (ADR-0013): one organization relation
+// per permission-catalog slug, granted directly via team#member usersets.
+// The model is static — role CRUD rewrites tuples, never the model. Child
+// types derive from domain-matched permission relations through their
+// parent chain. Includes the global platform type (M1). Mirrors model.fga.
 func ModelV1() client.ClientWriteAuthorizationModelRequest {
 	this := func() *map[string]any { m := map[string]any{}; return &m }
 	computed := func(rel string) openfga.Userset {
@@ -254,17 +257,13 @@ func ModelV1() client.ClientWriteAuthorizationModelRequest {
 		RelationMember: openfga.Userset{This: this()},
 	}
 	direct := func() openfga.Userset { return openfga.Userset{This: this()} }
-	orgRelations := map[string]openfga.Userset{
-		RelationAdmin:            direct(),
-		RelationPlatformEngineer: union(direct(), computed(RelationAdmin)),
-		RelationDeveloper:        union(direct(), computed(RelationPlatformEngineer)),
-		RelationViewer:           union(direct(), computed(RelationDeveloper)),
-	}
-	orgMeta := map[string]openfga.RelationMetadata{
-		RelationAdmin:            {DirectlyRelatedUserTypes: &teamMemberRef},
-		RelationPlatformEngineer: {DirectlyRelatedUserTypes: &teamMemberRef},
-		RelationDeveloper:        {DirectlyRelatedUserTypes: &teamMemberRef},
-		RelationViewer:           {DirectlyRelatedUserTypes: &teamMemberRef},
+	// One direct relation per catalog slug (tenant.read → tenant_read …).
+	orgRelations := map[string]openfga.Userset{}
+	orgMeta := map[string]openfga.RelationMetadata{}
+	for _, p := range PermissionCatalog() {
+		rel, _ := PermissionRelation(p.Slug)
+		orgRelations[rel] = direct()
+		orgMeta[rel] = openfga.RelationMetadata{DirectlyRelatedUserTypes: &teamMemberRef}
 	}
 	teamMeta := map[string]openfga.RelationMetadata{
 		RelationMember: {DirectlyRelatedUserTypes: &userRef},
@@ -278,16 +277,16 @@ func ModelV1() client.ClientWriteAuthorizationModelRequest {
 	}
 	clusterRelations := map[string]openfga.Userset{
 		RelationParent:   direct(),
-		RelationOperator: fromParent(RelationPlatformEngineer),
-		RelationViewer:   fromParent(RelationViewer),
+		RelationOperator: fromParent(RelationClustersRegister),
+		RelationViewer:   fromParent(RelationTenantRead),
 	}
 	clusterMeta := map[string]openfga.RelationMetadata{
 		RelationParent: {DirectlyRelatedUserTypes: &orgRef},
 	}
 	catalogRelations := map[string]openfga.Userset{
 		RelationParent:   direct(),
-		RelationDeployer: fromParent(RelationDeveloper),
-		RelationViewer:   fromParent(RelationViewer),
+		RelationDeployer: fromParent(RelationCatalogManage),
+		RelationViewer:   fromParent(RelationTenantRead),
 	}
 	catalogMeta := map[string]openfga.RelationMetadata{
 		RelationParent: {DirectlyRelatedUserTypes: &orgRef},
@@ -301,11 +300,12 @@ func ModelV1() client.ClientWriteAuthorizationModelRequest {
 	instanceMeta := map[string]openfga.RelationMetadata{
 		RelationParent: {DirectlyRelatedUserTypes: &clusterRef},
 	}
-	orgScopedRelations := func() map[string]openfga.Userset {
+	// Org-scoped child types derive operator from their domain permission.
+	orgScopedRelations := func(operatorRel string) map[string]openfga.Userset {
 		return map[string]openfga.Userset{
 			RelationParent:   direct(),
-			RelationOperator: fromParent(RelationPlatformEngineer),
-			RelationViewer:   fromParent(RelationViewer),
+			RelationOperator: fromParent(operatorRel),
+			RelationViewer:   fromParent(RelationTenantRead),
 		}
 	}
 	orgScopedMeta := map[string]openfga.RelationMetadata{
@@ -313,15 +313,15 @@ func ModelV1() client.ClientWriteAuthorizationModelRequest {
 	}
 	extensionRelations := map[string]openfga.Userset{
 		RelationParent: direct(),
-		RelationInvoke: union(fromParent(RelationPlatformEngineer), fromParent(RelationDeveloper)),
-		RelationViewer: fromParent(RelationViewer),
+		RelationInvoke: fromParent(RelationExtensionsInvoke),
+		RelationViewer: fromParent(RelationTenantRead),
 	}
 	extensionMeta := map[string]openfga.RelationMetadata{
 		RelationParent: {DirectlyRelatedUserTypes: &orgRef},
 	}
 	driftRelations := map[string]openfga.Userset{
 		RelationParent: direct(),
-		RelationViewer: fromParent(RelationViewer),
+		RelationViewer: fromParent(RelationTenantRead),
 	}
 	driftMeta := map[string]openfga.RelationMetadata{
 		RelationParent: {DirectlyRelatedUserTypes: &orgRef},
@@ -344,12 +344,12 @@ func ModelV1() client.ClientWriteAuthorizationModelRequest {
 			{Type: TypeCluster, Relations: &clusterRelations, Metadata: &openfga.Metadata{Relations: &clusterMeta}},
 			{Type: TypeCatalogItem, Relations: &catalogRelations, Metadata: &openfga.Metadata{Relations: &catalogMeta}},
 			{Type: TypeResourceInstance, Relations: &instanceRelations, Metadata: &openfga.Metadata{Relations: &instanceMeta}},
-			{Type: TypeCloudAccount, Relations: ptr(orgScopedRelations()), Metadata: &openfga.Metadata{Relations: &orgScopedMeta}},
-			{Type: TypePolicyPack, Relations: ptr(orgScopedRelations()), Metadata: &openfga.Metadata{Relations: &orgScopedMeta}},
-			{Type: TypeClusterSet, Relations: ptr(orgScopedRelations()), Metadata: &openfga.Metadata{Relations: &orgScopedMeta}},
-			{Type: TypeTenantZone, Relations: ptr(orgScopedRelations()), Metadata: &openfga.Metadata{Relations: &orgScopedMeta}},
+			{Type: TypeCloudAccount, Relations: ptr(orgScopedRelations(RelationCloudAccountsManage)), Metadata: &openfga.Metadata{Relations: &orgScopedMeta}},
+			{Type: TypePolicyPack, Relations: ptr(orgScopedRelations(RelationPoliciesManage)), Metadata: &openfga.Metadata{Relations: &orgScopedMeta}},
+			{Type: TypeClusterSet, Relations: ptr(orgScopedRelations(RelationFleetManage)), Metadata: &openfga.Metadata{Relations: &orgScopedMeta}},
+			{Type: TypeTenantZone, Relations: ptr(orgScopedRelations(RelationZonesManage)), Metadata: &openfga.Metadata{Relations: &orgScopedMeta}},
 			{Type: TypeExtension, Relations: &extensionRelations, Metadata: &openfga.Metadata{Relations: &extensionMeta}},
-			{Type: TypeRollout, Relations: ptr(orgScopedRelations()), Metadata: &openfga.Metadata{Relations: &orgScopedMeta}},
+			{Type: TypeRollout, Relations: ptr(orgScopedRelations(RelationDeploymentsCreate)), Metadata: &openfga.Metadata{Relations: &orgScopedMeta}},
 			{Type: TypeDriftEvent, Relations: &driftRelations, Metadata: &openfga.Metadata{Relations: &driftMeta}},
 		},
 	}

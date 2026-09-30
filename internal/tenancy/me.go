@@ -13,11 +13,13 @@ import (
 )
 
 // MeHandler exposes the caller's platform-level permission surface (M1.W2),
-// backed by OpenFGA checks. The response is a flat struct so new flags are
-// additive, non-breaking changes.
+// backed by OpenFGA permission checks plus the DB membership→roles
+// projection. The response is a flat struct so new flags are additive,
+// non-breaking changes.
 type MeHandler struct {
 	authz   authz.Authorizer
 	tenants MeTenantResolver
+	members MeMembershipResolver
 }
 
 // MeTenantResolver resolves a tenant slug to its record (tenancy.Service).
@@ -25,8 +27,14 @@ type MeTenantResolver interface {
 	GetTenant(ctx context.Context, slug string) (*types.Organization, error)
 }
 
-func NewMeHandler(az authz.Authorizer, tenants MeTenantResolver) *MeHandler {
-	return &MeHandler{authz: az, tenants: tenants}
+// MeMembershipResolver lists the caller's role names in one org from the DB
+// membership projection (tenancy.Service seam, ADR-0013).
+type MeMembershipResolver interface {
+	ListMemberRoleNames(ctx context.Context, orgID, userID string) ([]string, error)
+}
+
+func NewMeHandler(az authz.Authorizer, tenants MeTenantResolver, members MeMembershipResolver) *MeHandler {
+	return &MeHandler{authz: az, tenants: tenants, members: members}
 }
 
 func (h *MeHandler) RegisterRoutes(api huma.API) {
@@ -42,27 +50,23 @@ func (h *MeHandler) RegisterRoutes(api huma.API) {
 type myPermissionsOutput struct {
 	Body struct {
 		CanCreateOrganizations bool `json:"canCreateOrganizations" doc:"Caller may create tenants (platform:inari org_creator)"`
-		// OrgRoles maps every organization the caller belongs to (slug) to
-		// its effective role, using the same role strings as the members API
-		// ("org-admin", "platform-engineer", "developer", "viewer"). The
-		// console derives its write-enablement from this; without it the UI
-		// can only guess from the token and falls back to read-only
-		// (live incident 2026-09-16).
-		OrgRoles map[string]types.Role `json:"orgRoles,omitempty"`
+		// Roles maps every organization the caller belongs to (slug) to the
+		// role names they hold there (DB memberships → roles; custom roles
+		// have no total order, so this is a set, replacing the retired
+		// single "effective role" string — ADR-0013).
+		Roles map[string][]string `json:"roles,omitempty"`
 		// Tenants maps every organization the caller belongs to (slug) to
-		// its capability projection, derived from the same FGA relations as
-		// OrgRoles in a single pass (RBAC redesign Phase A). The access
-		// console gates individual actions on these flags instead of the
-		// binary admin/viewer split.
+		// its capability projection, derived from FGA permission checks.
+		// The access console gates individual actions on these flags
+		// instead of the binary admin/viewer split.
 		Tenants map[string]TenantCapabilities `json:"tenants,omitempty"`
 	}
 }
 
 // TenantCapabilities is the per-tenant action projection the access console
-// disables/enables on. Flags mirror the REST route gates:
-// canDeploy=developer+ (orchestrator deploys), canManageMembers=
-// platform-engineer+ (team member add/remove), canManageTeams and
-// canManageRbac=org-admin (team CRUD, rbac/mappings).
+// disables/enables on. Flags map 1:1 onto permission-catalog slugs:
+// canDeploy=deployments.create, canManageMembers=tenant.members.manage,
+// canManageTeams=tenant.teams.manage, canManageRbac=tenant.rbac.manage.
 type TenantCapabilities struct {
 	CanDeploy        bool `json:"canDeploy"`
 	CanManageMembers bool `json:"canManageMembers"`
@@ -81,11 +85,11 @@ func (h *MeHandler) getMyPermissions(ctx context.Context, _ *struct{}) (*myPermi
 	}
 	out := &myPermissionsOutput{}
 	out.Body.CanCreateOrganizations = ok
-	if h.tenants != nil && len(id.Organizations) > 0 {
-		out.Body.OrgRoles = map[string]types.Role{}
+	if h.tenants != nil && h.members != nil && len(id.Organizations) > 0 {
+		out.Body.Roles = map[string][]string{}
 		out.Body.Tenants = map[string]TenantCapabilities{}
 		for _, slug := range id.Organizations {
-			role, caps, err := h.effectiveAccess(ctx, id.Subject, slug)
+			roles, caps, err := h.effectiveAccess(ctx, id.Subject, slug)
 			if errors.Is(err, ErrOrgNotFound) {
 				// Stale claim (e.g. a deleted tenant still in the token):
 				// skip it instead of failing the whole projection.
@@ -94,8 +98,8 @@ func (h *MeHandler) getMyPermissions(ctx context.Context, _ *struct{}) (*myPermi
 			if err != nil {
 				return nil, err
 			}
-			if role != "" {
-				out.Body.OrgRoles[slug] = role
+			if len(roles) > 0 {
+				out.Body.Roles[slug] = roles
 				out.Body.Tenants[slug] = caps
 			}
 		}
@@ -103,40 +107,40 @@ func (h *MeHandler) getMyPermissions(ctx context.Context, _ *struct{}) (*myPermi
 	return out, nil
 }
 
-// effectiveAccess reports the caller's strongest role in one org and the
-// capability set that role grants, in a single strongest-first pass:
-// admin ⊇ platform_engineer ⊇ developer ⊇ viewer (model.fga hierarchy), so
-// the first passing relation determines the whole projection.
-func (h *MeHandler) effectiveAccess(ctx context.Context, subject, slug string) (types.Role, TenantCapabilities, error) {
+// effectiveAccess reports the caller's role names in one org (DB
+// projection) and the capability set their permissions grant (one FGA check
+// per capability flag).
+func (h *MeHandler) effectiveAccess(ctx context.Context, subject, slug string) ([]string, TenantCapabilities, error) {
 	org, err := h.tenants.GetTenant(ctx, slug)
 	if err != nil {
-		return "", TenantCapabilities{}, err
+		return nil, TenantCapabilities{}, err
+	}
+	roles, err := h.members.ListMemberRoleNames(ctx, org.ID, subject)
+	if err != nil {
+		return nil, TenantCapabilities{}, err
+	}
+	if len(roles) == 0 {
+		return nil, TenantCapabilities{}, nil
 	}
 	user := authz.UserObject(subject)
 	obj := authz.OrgObject(org.ID)
+	var caps TenantCapabilities
 	for _, step := range []struct {
 		relation string
-		role     types.Role
-		caps     TenantCapabilities
+		set      func()
 	}{
-		{authz.RelationAdmin, types.RoleOrgAdmin, TenantCapabilities{
-			CanDeploy: true, CanManageMembers: true, CanManageTeams: true, CanManageRbac: true,
-		}},
-		{authz.RelationPlatformEngineer, types.RolePlatformEngineer, TenantCapabilities{
-			CanDeploy: true, CanManageMembers: true,
-		}},
-		{authz.RelationDeveloper, types.RoleDeveloper, TenantCapabilities{
-			CanDeploy: true,
-		}},
-		{authz.RelationViewer, types.RoleViewer, TenantCapabilities{}},
+		{authz.RelationDeploymentsCreate, func() { caps.CanDeploy = true }},
+		{authz.RelationTenantMembersManage, func() { caps.CanManageMembers = true }},
+		{authz.RelationTenantTeamsManage, func() { caps.CanManageTeams = true }},
+		{authz.RelationTenantRBACManage, func() { caps.CanManageRbac = true }},
 	} {
 		ok, err := h.authz.Check(ctx, user, step.relation, obj)
 		if err != nil {
-			return "", TenantCapabilities{}, err
+			return nil, TenantCapabilities{}, err
 		}
 		if ok {
-			return step.role, step.caps, nil
+			step.set()
 		}
 	}
-	return "", TenantCapabilities{}, nil
+	return roles, caps, nil
 }

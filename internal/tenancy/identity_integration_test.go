@@ -294,17 +294,17 @@ func TestSetRBACMappings(t *testing.T) {
 		}
 	}
 
-	// Invalid role fails the whole request.
+	// Unknown role fails the whole request.
 	if _, err := svc.SetRBACMappings(ctx, "user-1", "acme", []types.TeamRoleMapping{
-		{Team: "developers", Role: "superuser"},
-	}); err == nil {
-		t.Error("expected error for invalid role")
+		{Team: "developers", RoleID: "superuser"},
+	}); !errors.Is(err, tenancy.ErrRoleNotFound) {
+		t.Errorf("err = %v, want ErrRoleNotFound", err)
 	}
 
 	// Unknown team fails the whole request with no partial writes.
 	if _, err := svc.SetRBACMappings(ctx, "user-1", "acme", []types.TeamRoleMapping{
-		{Team: "developers", Role: types.RoleViewer},
-		{Team: "ghost", Role: types.RoleViewer},
+		{Team: "developers", RoleID: "viewer"},
+		{Team: "ghost", RoleID: "viewer"},
 	}); !errors.Is(err, tenancy.ErrTeamNotFound) {
 		t.Errorf("err = %v, want ErrTeamNotFound", err)
 	}
@@ -313,16 +313,16 @@ func TestSetRBACMappings(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tm := range after {
-		if tm.Name == "developers" && tm.Role != types.RoleDeveloper {
-			t.Errorf("developers role changed despite failed request: %q", tm.Role)
+		if tm.Name == "developers" && tm.RoleName != "editor" {
+			t.Errorf("developers role changed despite failed request: %q", tm.RoleName)
 		}
 	}
 
 	// Valid bulk set applies atomically.
 	changes, err := svc.SetRBACMappings(ctx, "user-1", "acme", []types.TeamRoleMapping{
-		{Team: "developers", Role: types.RolePlatformEngineer},
-		{Team: "viewers", Role: types.RoleOrgAdmin},
-		{Team: "platform-team", Role: types.RolePlatformEngineer}, // unchanged
+		{Team: "developers", RoleID: "operator"},
+		{Team: "viewers", RoleID: "admin"},
+		{Team: "platform-team", RoleID: "operator"}, // unchanged
 	})
 	if err != nil {
 		t.Fatalf("SetRBACMappings: %v", err)
@@ -331,11 +331,11 @@ func TestSetRBACMappings(t *testing.T) {
 		t.Fatalf("changes = %v, want 2 (unchanged team skipped)", changes)
 	}
 	after, _ = svc.ListTeams(ctx, org.ID)
-	roles := map[string]types.Role{}
+	roles := map[string]string{}
 	for _, tm := range after {
-		roles[tm.Name] = tm.Role
+		roles[tm.Name] = tm.RoleName
 	}
-	if roles["developers"] != types.RolePlatformEngineer || roles["viewers"] != types.RoleOrgAdmin {
+	if roles["developers"] != "operator" || roles["viewers"] != "admin" {
 		t.Errorf("roles = %v", roles)
 	}
 
@@ -361,12 +361,12 @@ func TestSetRBACMappings(t *testing.T) {
 	}
 	var delDev, addDev bool
 	for _, tp := range rec.deleted {
-		if tp.User == "team:"+devTeamID+"#member" && tp.Relation == "developer" {
+		if tp.User == "team:"+devTeamID+"#member" && tp.Relation == "deployments_create" {
 			delDev = true
 		}
 	}
 	for _, tp := range rec.written {
-		if tp.User == "team:"+devTeamID+"#member" && tp.Relation == "platform_engineer" {
+		if tp.User == "team:"+devTeamID+"#member" && tp.Relation == "clusters_register" {
 			addDev = true
 		}
 	}
@@ -375,11 +375,18 @@ func TestSetRBACMappings(t *testing.T) {
 	}
 }
 
-// allowAdmin grants the org admin relation (fine PEP pass-through).
+// allowAdmin grants the tenant administration permission relations (fine
+// PEP pass-through).
 type allowAdmin struct{}
 
 func (allowAdmin) Check(_ context.Context, _, relation, _ string) (bool, error) {
-	return relation == authz.RelationAdmin, nil
+	switch relation {
+	case authz.RelationTenantIdentityManage, authz.RelationTenantRBACManage,
+		authz.RelationTenantTeamsManage, authz.RelationTenantMembersManage,
+		authz.RelationTenantRead, authz.RelationTenantAdmin:
+		return true, nil
+	}
+	return false, nil
 }
 func (allowAdmin) ListObjects(context.Context, string, string, string) ([]string, error) {
 	return nil, nil
@@ -502,22 +509,22 @@ func TestIdentityClientHTTPRoutes(t *testing.T) {
 
 	// RBAC mappings.
 	resp = do(http.MethodPut, "/api/v1/tenants/acme/rbac/mappings",
-		`{"mappings":[{"team":"developers","role":"viewer"}]}`)
+		`{"mappings":[{"team":"developers","roleId":"viewer"}]}`)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("mappings: got %d", resp.StatusCode)
 	}
 	resp = do(http.MethodPut, "/api/v1/tenants/acme/rbac/mappings",
-		`{"mappings":[{"team":"ghost","role":"viewer"}]}`)
+		`{"mappings":[{"team":"ghost","roleId":"viewer"}]}`)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("mappings unknown team: got %d, want 404", resp.StatusCode)
 	}
 	resp = do(http.MethodPut, "/api/v1/tenants/acme/rbac/mappings",
-		`{"mappings":[{"team":"developers","role":"superuser"}]}`)
+		`{"mappings":[{"team":"developers","roleId":"superuser"}]}`)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("mappings bad role: got %d, want 400", resp.StatusCode)
 	}
 	resp = do(http.MethodPut, "/api/v1/tenants/acme/rbac/mappings",
-		`{"mappings":[{"team":"developers","role":"viewer"},{"team":"developers","role":"org-admin"}]}`)
+		`{"mappings":[{"team":"developers","roleId":"viewer"},{"team":"developers","roleId":"admin"}]}`)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("mappings duplicate team: got %d, want 400", resp.StatusCode)
 	}

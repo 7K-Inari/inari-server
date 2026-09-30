@@ -19,6 +19,7 @@ import (
 
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/authn"
+	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/capabilities"
 	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/7K-Inari/inari-server/internal/db"
@@ -49,7 +50,7 @@ func (itAuthorizer) Check(_ context.Context, user, relation, _ string) (bool, er
 	case "user:user-1":
 		return true, nil
 	case "user:user-2":
-		return relation == "viewer", nil
+		return relation == authz.RelationTenantRead, nil
 	}
 	return false, nil
 }

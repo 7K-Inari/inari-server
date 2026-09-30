@@ -7,11 +7,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"sort"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/7K-Inari/inari-server/internal/audit"
+	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -37,19 +40,19 @@ type IdentityProvider interface {
 	GetUserByEmail(ctx context.Context, email string) (*types.User, error)
 }
 
-// DefaultTeams are created with every tenant; each grants its org role.
-// org-admins is the anchor team for the tenant's first administrator —
-// without it no one could ever reach the org-admin role (every
-// admin-granting route is org-admin gated, and the deletion/RBAC routes
-// require it), which the live e2e run proved makes tenants unmanageable.
+// DefaultTeams are created with every tenant, each bound to a built-in
+// role. org-admins is the anchor team for the tenant's first administrator
+// — without it no one could ever reach the admin role (every admin-granting
+// route is admin gated, and the deletion/RBAC routes require it), which the
+// live e2e run proved makes tenants unmanageable.
 var DefaultTeams = []struct {
-	Name string
-	Role types.Role
+	Name     string
+	RoleName string
 }{
-	{"org-admins", types.RoleOrgAdmin},
-	{"platform-team", types.RolePlatformEngineer},
-	{"developers", types.RoleDeveloper},
-	{"viewers", types.RoleViewer},
+	{OrgAdminsTeamName, authz.BuiltinRoleAdmin},
+	{PlatformTeamName, authz.BuiltinRoleOperator},
+	{DevelopersTeamName, authz.BuiltinRoleEditor},
+	{ViewersTeamName, authz.BuiltinRoleViewer},
 }
 
 var (
@@ -68,10 +71,38 @@ var (
 // PlatformTeamName is the default team that receives the tenant creator.
 const PlatformTeamName = "platform-team"
 
-// OrgAdminsTeamName is the anchor team granting the org-admin role; it is
-// also created with every tenant and receives the tenant creator so the
-// first administrator exists without a circular admin-gated grant.
+// OrgAdminsTeamName is the anchor team granting the admin role; it is also
+// created with every tenant and receives the tenant creator so the first
+// administrator exists without a circular admin-gated grant.
 const OrgAdminsTeamName = "org-admins"
+
+// DevelopersTeamName and ViewersTeamName are the remaining built-in anchor
+// teams (editor and viewer bundles).
+const (
+	DevelopersTeamName = "developers"
+	ViewersTeamName    = "viewers"
+)
+
+// builtinAnchorTeam maps a built-in role name onto its anchor team. Anchor
+// teams are protected from rename/delete (ErrDefaultTeam); a custom role's
+// anchor is a team named after the role (materialized lazily on first
+// SetMemberRole).
+var builtinAnchorTeam = map[string]string{
+	authz.BuiltinRoleAdmin:    OrgAdminsTeamName,
+	authz.BuiltinRoleOperator: PlatformTeamName,
+	authz.BuiltinRoleEditor:   DevelopersTeamName,
+	authz.BuiltinRoleViewer:   ViewersTeamName,
+}
+
+// AnchorTeamForRole returns the name of the team granting the role.
+func AnchorTeamForRole(r *types.Role) string {
+	if r.Builtin {
+		if name, ok := builtinAnchorTeam[r.Name]; ok {
+			return name
+		}
+	}
+	return r.Name
+}
 
 // membersTeamName is the team materialized for a brokered IdP's Hardcoded
 // Group mapper target (tenant-<slug>/members), granting org viewer.
@@ -153,8 +184,8 @@ func (s *Store) ListOrganizations(ctx context.Context, q db.Querier) ([]types.Or
 }
 
 func (s *Store) CreateTeam(ctx context.Context, q db.Querier, team *types.Team) error {
-	const sql = `INSERT INTO teams (org_id, name, role, keycloak_group_path) VALUES ($1,$2,$3,$4) RETURNING id, created_at`
-	err := q.QueryRow(ctx, sql, team.OrgID, team.Name, team.Role, team.KeycloakGroupPath).Scan(&team.ID, &team.CreatedAt)
+	const sql = `INSERT INTO teams (org_id, name, role_id, keycloak_group_path) VALUES ($1,$2,$3,$4) RETURNING id, created_at`
+	err := q.QueryRow(ctx, sql, team.OrgID, team.Name, team.RoleID, team.KeycloakGroupPath).Scan(&team.ID, &team.CreatedAt)
 	if isUniqueViolation(err) {
 		return ErrTeamNameTaken
 	}
@@ -168,14 +199,20 @@ func (s *Store) UpdateOrganizationDisplayName(ctx context.Context, q db.Querier,
 	return err
 }
 
+// teamColumns is the team projection with the role name joined in (views
+// and ClusterRole naming consume RoleName; FK writes use RoleID).
+const teamColumns = `t.id, t.org_id, t.name, t.display_name, t.role_id, r.name, t.keycloak_group_path, t.created_at`
+
+const teamJoin = ` FROM teams t JOIN roles r ON r.id = t.role_id`
+
 // UpdateTeamDisplayName updates a team's mutable display name and returns
 // the updated record (name and keycloak_group_path are immutable, ADR-0007).
 func (s *Store) UpdateTeamDisplayName(ctx context.Context, q db.Querier, orgID, name, displayName string) (*types.Team, error) {
 	const sql = `UPDATE teams SET display_name = $3 WHERE org_id = $1 AND name = $2
-	             RETURNING id, org_id, name, display_name, role, keycloak_group_path, created_at`
+	             RETURNING id, org_id, name, display_name, role_id, keycloak_group_path, created_at`
 	var t types.Team
 	err := q.QueryRow(ctx, sql, orgID, name, displayName).
-		Scan(&t.ID, &t.OrgID, &t.Name, &t.DisplayName, &t.Role, &t.KeycloakGroupPath, &t.CreatedAt)
+		Scan(&t.ID, &t.OrgID, &t.Name, &t.DisplayName, &t.RoleID, &t.KeycloakGroupPath, &t.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrTeamNotFound
 	}
@@ -189,9 +226,9 @@ func (s *Store) UpdateTeamDisplayName(ctx context.Context, q db.Querier, orgID, 
 // payloads; membership rows cascade away via FK.
 func (s *Store) DeleteTeam(ctx context.Context, q db.Querier, orgID, name string) (*types.Team, error) {
 	const sql = `DELETE FROM teams WHERE org_id = $1 AND name = $2
-	             RETURNING id, org_id, name, display_name, role, keycloak_group_path, created_at`
+	             RETURNING id, org_id, name, display_name, role_id, keycloak_group_path, created_at`
 	var t types.Team
-	err := q.QueryRow(ctx, sql, orgID, name).Scan(&t.ID, &t.OrgID, &t.Name, &t.DisplayName, &t.Role, &t.KeycloakGroupPath, &t.CreatedAt)
+	err := q.QueryRow(ctx, sql, orgID, name).Scan(&t.ID, &t.OrgID, &t.Name, &t.DisplayName, &t.RoleID, &t.KeycloakGroupPath, &t.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrTeamNotFound
 	}
@@ -202,27 +239,14 @@ func (s *Store) DeleteTeam(ctx context.Context, q db.Querier, orgID, name string
 }
 
 func (s *Store) ListTeams(ctx context.Context, q db.Querier, orgID string) ([]types.Team, error) {
-	const sql = `SELECT id, org_id, name, display_name, role, keycloak_group_path, created_at FROM teams WHERE org_id = $1 ORDER BY name`
-	rows, err := q.Query(ctx, sql, orgID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []types.Team
-	for rows.Next() {
-		var t types.Team
-		if err := rows.Scan(&t.ID, &t.OrgID, &t.Name, &t.DisplayName, &t.Role, &t.KeycloakGroupPath, &t.CreatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, t)
-	}
-	return out, rows.Err()
+	const sql = `SELECT ` + teamColumns + teamJoin + ` WHERE t.org_id = $1 ORDER BY t.name`
+	return s.scanTeams(ctx, q, sql, orgID)
 }
 
 // ListAllTeams returns every team across all orgs (the authz org-team
 // reconciler enumerates team groups without an org scope).
 func (s *Store) ListAllTeams(ctx context.Context, q db.Querier) ([]types.Team, error) {
-	const sql = `SELECT id, org_id, name, display_name, role, keycloak_group_path, created_at FROM teams ORDER BY org_id, name`
+	const sql = `SELECT ` + teamColumns + teamJoin + ` ORDER BY t.org_id, t.name`
 	return s.scanTeams(ctx, q, sql)
 }
 
@@ -230,8 +254,7 @@ func (s *Store) ListAllTeams(ctx context.Context, q db.Querier) ([]types.Team, e
 // Teams of a deleting tenant are excluded so the reconciler cannot
 // resurrect tuples the teardown is retracting (ADR-0006).
 func (s *Store) ListActiveTeams(ctx context.Context, q db.Querier) ([]types.Team, error) {
-	const sql = `SELECT t.id, t.org_id, t.name, t.display_name, t.role, t.keycloak_group_path, t.created_at
-	             FROM teams t JOIN organizations o ON o.id = t.org_id
+	const sql = `SELECT ` + teamColumns + teamJoin + ` JOIN organizations o ON o.id = t.org_id
 	             WHERE o.status = 'active' ORDER BY t.org_id, t.name`
 	return s.scanTeams(ctx, q, sql)
 }
@@ -245,7 +268,7 @@ func (s *Store) scanTeams(ctx context.Context, q db.Querier, sql string, args ..
 	var out []types.Team
 	for rows.Next() {
 		var t types.Team
-		if err := rows.Scan(&t.ID, &t.OrgID, &t.Name, &t.DisplayName, &t.Role, &t.KeycloakGroupPath, &t.CreatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.OrgID, &t.Name, &t.DisplayName, &t.RoleID, &t.RoleName, &t.KeycloakGroupPath, &t.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -269,13 +292,13 @@ func (s *Store) UpsertUser(ctx context.Context, q db.Querier, u *types.User) err
 // actually inserted (false on conflict). Callers use the flag to emit
 // outbox events exactly once even under concurrent adds.
 func (s *Store) AddMembership(ctx context.Context, q db.Querier, m *types.Membership) (bool, error) {
-	const sql = `INSERT INTO memberships (user_id, org_id, team_id, role) VALUES ($1,$2,$3,$4)
-	             ON CONFLICT (user_id, org_id, role) DO NOTHING`
+	const sql = `INSERT INTO memberships (user_id, org_id, team_id, role_id) VALUES ($1,$2,$3,$4)
+	             ON CONFLICT (user_id, org_id, role_id) DO NOTHING`
 	var teamID *string
 	if m.TeamID != "" {
 		teamID = &m.TeamID
 	}
-	tag, err := q.Exec(ctx, sql, m.UserID, m.OrgID, teamID, m.Role)
+	tag, err := q.Exec(ctx, sql, m.UserID, m.OrgID, teamID, m.RoleID)
 	if err != nil {
 		return false, err
 	}
@@ -298,13 +321,13 @@ func (s *Store) RemoveMembership(ctx context.Context, q db.Querier, m *types.Mem
 type MembershipWithPath struct {
 	TeamID    string
 	GroupPath string
-	Role      types.Role
+	RoleID    string
 }
 
 // ListMembershipsWithPaths returns all of a user's memberships in an org
 // with the group's Keycloak path.
 func (s *Store) ListMembershipsWithPaths(ctx context.Context, q db.Querier, orgID, userID string) ([]MembershipWithPath, error) {
-	const sql = `SELECT m.team_id, COALESCE(t.keycloak_group_path,''), m.role
+	const sql = `SELECT m.team_id, COALESCE(t.keycloak_group_path,''), m.role_id
 	             FROM memberships m LEFT JOIN teams t ON t.id = m.team_id
 	             WHERE m.org_id = $1 AND m.user_id = $2`
 	rows, err := q.Query(ctx, sql, orgID, userID)
@@ -316,7 +339,7 @@ func (s *Store) ListMembershipsWithPaths(ctx context.Context, q db.Querier, orgI
 	for rows.Next() {
 		var mp MembershipWithPath
 		var teamID *string
-		if err := rows.Scan(&teamID, &mp.GroupPath, &mp.Role); err != nil {
+		if err := rows.Scan(&teamID, &mp.GroupPath, &mp.RoleID); err != nil {
 			return nil, err
 		}
 		if teamID != nil {
@@ -331,7 +354,7 @@ func (s *Store) ListMembershipsWithPaths(ctx context.Context, q db.Querier, orgI
 // org, returning the removed rows so exactly one outbox event is emitted
 // per removed tuple.
 func (s *Store) RemoveMembershipsForUser(ctx context.Context, q db.Querier, orgID, userID string) ([]types.Membership, error) {
-	const sql = `DELETE FROM memberships WHERE org_id = $1 AND user_id = $2 RETURNING team_id, role`
+	const sql = `DELETE FROM memberships WHERE org_id = $1 AND user_id = $2 RETURNING team_id, role_id`
 	rows, err := q.Query(ctx, sql, orgID, userID)
 	if err != nil {
 		return nil, err
@@ -341,7 +364,7 @@ func (s *Store) RemoveMembershipsForUser(ctx context.Context, q db.Querier, orgI
 	for rows.Next() {
 		var m types.Membership
 		var teamID *string
-		if err := rows.Scan(&teamID, &m.Role); err != nil {
+		if err := rows.Scan(&teamID, &m.RoleID); err != nil {
 			return nil, err
 		}
 		m.OrgID = orgID
@@ -354,23 +377,25 @@ func (s *Store) RemoveMembershipsForUser(ctx context.Context, q db.Querier, orgI
 	return out, rows.Err()
 }
 
-// OrgMemberView is the org-wide console view of a user: profile, highest
-// role, and the teams they belong to.
+// OrgMemberView is the org-wide console view of a user: profile, the roles
+// they hold (custom roles have no total order, so this is a sorted set, not
+// a "highest" role), and the teams they belong to.
 type OrgMemberView struct {
 	UserID      string   `json:"userId"`
 	Email       string   `json:"email"`
 	DisplayName string   `json:"displayName"`
-	Role        string   `json:"role"`
+	Roles       []string `json:"roles"`
 	Teams       []string `json:"teams"`
 }
 
-// ListOrgMembers returns org members grouped per user with highest role.
+// ListOrgMembers returns org members grouped per user with their role set.
 // A non-empty query filters by case-insensitive email substring (access
 // console user picker).
 func (s *Store) ListOrgMembers(ctx context.Context, q db.Querier, orgID, query string) ([]OrgMemberView, error) {
-	sql := `SELECT m.user_id, COALESCE(u.email,''), COALESCE(u.display_name,''), m.role, COALESCE(t.name,'')
+	sql := `SELECT m.user_id, COALESCE(u.email,''), COALESCE(u.display_name,''), COALESCE(r.name,''), COALESCE(t.name,'')
 	             FROM memberships m
 	             LEFT JOIN users u ON u.id = m.user_id
+	             LEFT JOIN roles r ON r.id = m.role_id
 	             LEFT JOIN teams t ON t.id = m.team_id
 	             WHERE m.org_id = $1`
 	args := []any{orgID}
@@ -384,15 +409,11 @@ func (s *Store) ListOrgMembers(ctx context.Context, q db.Querier, orgID, query s
 		return nil, err
 	}
 	defer rows.Close()
-	rank := map[types.Role]int{
-		types.RoleViewer: 1, types.RoleDeveloper: 2, types.RolePlatformEngineer: 3, types.RoleOrgAdmin: 4,
-	}
 	byUser := map[string]*OrgMemberView{}
 	var order []string
 	for rows.Next() {
-		var userID, email, displayName, teamName string
-		var role types.Role
-		if err := rows.Scan(&userID, &email, &displayName, &role, &teamName); err != nil {
+		var userID, email, displayName, roleName, teamName string
+		if err := rows.Scan(&userID, &email, &displayName, &roleName, &teamName); err != nil {
 			return nil, err
 		}
 		mv, ok := byUser[userID]
@@ -407,8 +428,8 @@ func (s *Store) ListOrgMembers(ctx context.Context, q db.Querier, orgID, query s
 		if displayName != "" {
 			mv.DisplayName = displayName
 		}
-		if rank[role] > rank[types.Role(mv.Role)] {
-			mv.Role = string(role)
+		if roleName != "" && !slices.Contains(mv.Roles, roleName) {
+			mv.Roles = append(mv.Roles, roleName)
 		}
 		if teamName != "" {
 			mv.Teams = append(mv.Teams, teamName)
@@ -419,16 +440,18 @@ func (s *Store) ListOrgMembers(ctx context.Context, q db.Querier, orgID, query s
 	}
 	out := make([]OrgMemberView, 0, len(order))
 	for _, id := range order {
-		out = append(out, *byUser[id])
+		mv := byUser[id]
+		sort.Strings(mv.Roles)
+		out = append(out, *mv)
 	}
 	return out, nil
 }
 
 // GetTeamByName resolves a team within an org.
 func (s *Store) GetTeamByName(ctx context.Context, q db.Querier, orgID, name string) (*types.Team, error) {
-	const sql = `SELECT id, org_id, name, display_name, role, keycloak_group_path, created_at FROM teams WHERE org_id = $1 AND name = $2`
+	const sql = `SELECT ` + teamColumns + teamJoin + ` WHERE t.org_id = $1 AND t.name = $2`
 	var t types.Team
-	err := q.QueryRow(ctx, sql, orgID, name).Scan(&t.ID, &t.OrgID, &t.Name, &t.DisplayName, &t.Role, &t.KeycloakGroupPath, &t.CreatedAt)
+	err := q.QueryRow(ctx, sql, orgID, name).Scan(&t.ID, &t.OrgID, &t.Name, &t.DisplayName, &t.RoleID, &t.RoleName, &t.KeycloakGroupPath, &t.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrTeamNotFound
 	}
@@ -438,7 +461,8 @@ func (s *Store) GetTeamByName(ctx context.Context, q db.Querier, orgID, name str
 	return &t, nil
 }
 
-// MemberView is a membership row joined with the user profile (console view).
+// MemberView is a membership row joined with the user profile (console
+// view); Role is the granted role's name.
 type MemberView struct {
 	UserID      string `json:"userId"`
 	Email       string `json:"email"`
@@ -450,8 +474,9 @@ type MemberView struct {
 // query filters by case-insensitive email substring (access console user
 // picker).
 func (s *Store) ListMembers(ctx context.Context, q db.Querier, orgID, teamID, query string) ([]MemberView, error) {
-	sql := `SELECT m.user_id, COALESCE(u.email,''), COALESCE(u.display_name,''), m.role
+	sql := `SELECT m.user_id, COALESCE(u.email,''), COALESCE(u.display_name,''), COALESCE(r.name,'')
 	             FROM memberships m LEFT JOIN users u ON u.id = m.user_id
+	             LEFT JOIN roles r ON r.id = m.role_id
 	             WHERE m.org_id = $1 AND m.team_id = $2`
 	args := []any{orgID, teamID}
 	if query != "" {
@@ -485,32 +510,6 @@ func GroupPath(slug, team string) string {
 var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 
 func escapeLike(s string) string { return likeEscaper.Replace(s) }
-
-// HighestRole returns the highest role a user holds in an org
-// (org-admin > platform-engineer > developer > viewer). Returns false when
-// the user is not a member.
-func (s *Store) HighestRole(ctx context.Context, q db.Querier, orgID, userID string) (types.Role, bool, error) {
-	const sql = `SELECT role FROM memberships WHERE org_id = $1 AND user_id = $2`
-	rows, err := q.Query(ctx, sql, orgID, userID)
-	if err != nil {
-		return "", false, err
-	}
-	defer rows.Close()
-	best := types.Role("")
-	rank := map[types.Role]int{
-		types.RoleViewer: 1, types.RoleDeveloper: 2, types.RolePlatformEngineer: 3, types.RoleOrgAdmin: 4,
-	}
-	for rows.Next() {
-		var r types.Role
-		if err := rows.Scan(&r); err != nil {
-			return "", false, err
-		}
-		if rank[r] > rank[best] {
-			best = r
-		}
-	}
-	return best, best != "", rows.Err()
-}
 
 // PlatformResourceEnsurer upserts the tenant's base platform resources
 // (platformresources.Service seam, M7.W2).
@@ -592,19 +591,27 @@ func (s *Service) CreateTenant(ctx context.Context, actor, slug, displayName str
 		if err := s.store.CreateOrganization(ctx, tx, org); err != nil {
 			return err
 		}
+		if err := s.store.SeedBuiltinRoles(ctx, tx, org.ID); err != nil {
+			return err
+		}
 		seeds := make([]types.TeamSeed, 0, len(DefaultTeams))
 		for _, dt := range DefaultTeams {
+			role, err := s.store.GetRoleByName(ctx, tx, org.ID, dt.RoleName)
+			if err != nil {
+				return err
+			}
 			team := types.Team{
 				OrgID:             org.ID,
 				Name:              dt.Name,
-				Role:              dt.Role,
+				RoleID:            role.ID,
+				RoleName:          role.Name,
 				KeycloakGroupPath: GroupPath(slug, dt.Name),
 			}
 			if err := s.store.CreateTeam(ctx, tx, &team); err != nil {
 				return err
 			}
 			teams = append(teams, team)
-			seeds = append(seeds, types.TeamSeed{TeamID: team.ID, Name: team.Name, Role: dt.Role})
+			seeds = append(seeds, types.TeamSeed{TeamID: team.ID, Name: team.Name, Permissions: role.Permissions})
 			if err := s.audit.Record(ctx, tx, &types.AuditEvent{
 				OrgID: org.ID, Actor: actor, Action: "team.created", ObjectType: "team", ObjectID: team.ID,
 			}); err != nil {
@@ -667,14 +674,13 @@ func (s *Service) CreateTenant(ctx context.Context, actor, slug, displayName str
 		}
 		joins := []struct {
 			team *types.Team
-			role types.Role
 		}{
-			{findTeam(OrgAdminsTeamName), types.RoleOrgAdmin},
-			{findTeam(PlatformTeamName), types.RolePlatformEngineer},
+			{findTeam(OrgAdminsTeamName)},
+			{findTeam(PlatformTeamName)},
 		}
 		for _, j := range joins {
 			if j.team == nil {
-				return nil, nil, fmt.Errorf("tenancy: default team not found for role %s", j.role)
+				return nil, nil, fmt.Errorf("tenancy: default anchor team not found")
 			}
 			if err := s.idp.AddGroupMember(ctx, j.team.KeycloakGroupPath, actor); err != nil {
 				return nil, nil, fmt.Errorf("tenancy: add creator to %s: %w", j.team.Name, err)
@@ -686,7 +692,7 @@ func (s *Service) CreateTenant(ctx context.Context, actor, slug, displayName str
 			}
 			for _, j := range joins {
 				if _, err := s.store.AddMembership(ctx, tx, &types.Membership{
-					UserID: actor, OrgID: org.ID, TeamID: j.team.ID, Role: j.role,
+					UserID: actor, OrgID: org.ID, TeamID: j.team.ID, RoleID: j.team.RoleID,
 				}); err != nil {
 					return err
 				}
@@ -696,7 +702,7 @@ func (s *Service) CreateTenant(ctx context.Context, actor, slug, displayName str
 					return err
 				}
 				if err := audit.AppendOutbox(ctx, tx, org.ID, types.EventMembershipAdded, types.MembershipPayload{
-					OrgID: org.ID, TeamID: j.team.ID, UserID: actor, Role: j.role,
+					OrgID: org.ID, TeamID: j.team.ID, UserID: actor, RoleID: j.team.RoleID,
 				}); err != nil {
 					return err
 				}
@@ -780,33 +786,25 @@ func (s *Service) UpdateTenantProfile(ctx context.Context, actor, slug, displayN
 	return org, nil
 }
 
-// roleAnchorTeam maps an org role to the team whose membership grants it.
-// org-admins is not among DefaultTeams (created lazily on first assignment).
-var roleAnchorTeam = map[types.Role]string{
-	types.RoleOrgAdmin:         "org-admins",
-	types.RolePlatformEngineer: "platform-team",
-	types.RoleDeveloper:        "developers",
-	types.RoleViewer:           "viewers",
-}
-
-// AnchorTeamForRole returns the team granting the role, and whether the role
-// is valid.
-func AnchorTeamForRole(r types.Role) (string, bool) {
-	name, ok := roleAnchorTeam[r]
-	return name, ok
-}
-
 // CreateTeam creates a team (Keycloak group + DB row) granting the given
-// org role; role defaults to viewer.
-func (s *Service) CreateTeam(ctx context.Context, actor, slug, name string, role types.Role) (*types.Team, error) {
+// org role (by ID, falling back to role name).
+func (s *Service) CreateTeam(ctx context.Context, actor, slug, name, roleID string) (*types.Team, error) {
 	org, err := s.store.GetOrganizationBySlug(ctx, s.db.Pool, slug)
+	if err != nil {
+		return nil, err
+	}
+	role, err := s.store.GetRoleByID(ctx, s.db.Pool, org.ID, roleID)
+	if errors.Is(err, ErrRoleNotFound) {
+		role, err = s.store.GetRoleByName(ctx, s.db.Pool, org.ID, roleID)
+	}
 	if err != nil {
 		return nil, err
 	}
 	team := &types.Team{
 		OrgID:             org.ID,
 		Name:              name,
-		Role:              role,
+		RoleID:            role.ID,
+		RoleName:          role.Name,
 		KeycloakGroupPath: GroupPath(slug, name),
 	}
 	// The Keycloak group is created first (idempotent by path); the DB tx
@@ -820,12 +818,13 @@ func (s *Service) CreateTeam(ctx context.Context, actor, slug, name string, role
 		}
 		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
 			OrgID: org.ID, Actor: actor, Action: "team.created", ObjectType: "team", ObjectID: team.ID,
-			Payload: []byte(fmt.Sprintf(`{"team":%q,"role":%q}`, team.Name, role)),
+			Payload: []byte(fmt.Sprintf(`{"team":%q,"role":%q}`, team.Name, role.Name)),
 		}); err != nil {
 			return err
 		}
 		return audit.AppendOutbox(ctx, tx, org.ID, types.EventTeamCreated, types.TeamCreatedPayload{
-			OrgID: org.ID, TeamID: team.ID, Name: team.Name, Role: role,
+			OrgID: org.ID, TeamID: team.ID, Name: team.Name,
+			RoleID: role.ID, RoleName: role.Name, Permissions: role.Permissions,
 		})
 	})
 	if err != nil {
@@ -835,12 +834,16 @@ func (s *Service) CreateTeam(ctx context.Context, actor, slug, name string, role
 }
 
 // EnsureTeam returns the named team, creating it (Keycloak group + DB row
-// + audit/outbox) with the given role when missing — the scaffold
+// + audit/outbox) bound to the named org role when missing — the scaffold
 // binding-rbac seam (M8.W4, plan §6): component maintainer teams follow
 // the same KC group → DB role → outbox → OpenFGA tuple model as every
 // other team.
-func (s *Service) EnsureTeam(ctx context.Context, actor, slug, name string, role types.Role) (*types.Team, error) {
+func (s *Service) EnsureTeam(ctx context.Context, actor, slug, name, roleName string) (*types.Team, error) {
 	org, err := s.store.GetOrganizationBySlug(ctx, s.db.Pool, slug)
+	if err != nil {
+		return nil, err
+	}
+	role, err := s.store.GetRoleByName(ctx, s.db.Pool, org.ID, roleName)
 	if err != nil {
 		return nil, err
 	}
@@ -850,7 +853,7 @@ func (s *Service) EnsureTeam(ctx context.Context, actor, slug, name string, role
 // ensureTeam returns the team with the given name, creating it (with audit
 // + outbox) when missing. Used to lazily materialize role anchor teams such
 // as org-admins.
-func (s *Service) ensureTeam(ctx context.Context, actor string, org *types.Organization, name string, role types.Role) (*types.Team, error) {
+func (s *Service) ensureTeam(ctx context.Context, actor string, org *types.Organization, name string, role *types.Role) (*types.Team, error) {
 	team, err := s.store.GetTeamByName(ctx, s.db.Pool, org.ID, name)
 	if err == nil {
 		return team, nil
@@ -858,7 +861,7 @@ func (s *Service) ensureTeam(ctx context.Context, actor string, org *types.Organ
 	if !errors.Is(err, ErrTeamNotFound) {
 		return nil, err
 	}
-	team, err = s.CreateTeam(ctx, actor, org.Slug, name, role)
+	team, err = s.CreateTeam(ctx, actor, org.Slug, name, role.ID)
 	if errors.Is(err, ErrTeamNameTaken) {
 		// Lost a concurrent create race: the team now exists.
 		return s.store.GetTeamByName(ctx, s.db.Pool, org.ID, name)
@@ -871,7 +874,7 @@ func (s *Service) ensureTeam(ctx context.Context, actor string, org *types.Organ
 // by the stable team ID are immutable (ADR-0007), so no Keycloak call or
 // outbox event is needed — only the DB projection and audit row change.
 func (s *Service) UpdateTeam(ctx context.Context, actor, slug, name, displayName string) (*types.Team, error) {
-	for _, anchor := range roleAnchorTeam {
+	for _, anchor := range builtinAnchorTeam {
 		if anchor == name {
 			return nil, ErrDefaultTeam
 		}
@@ -907,9 +910,11 @@ func (s *Service) UpdateTeam(ctx context.Context, actor, slug, name, displayName
 
 // DeleteTeam removes a non-default team: membership rows, the DB row, and
 // the Keycloak group. The outbox team.deleted event retracts the team's
-// org role tuple from OpenFGA.
+// org permission tuples from OpenFGA. The admin guardrail is re-checked
+// inside the TX: deleting the last team whose role carries tenant.admin is
+// rejected (tenant lockout).
 func (s *Service) DeleteTeam(ctx context.Context, actor, slug, name string) error {
-	for _, anchor := range roleAnchorTeam {
+	for _, anchor := range builtinAnchorTeam {
 		if anchor == name {
 			return ErrDefaultTeam
 		}
@@ -930,7 +935,7 @@ func (s *Service) DeleteTeam(ctx context.Context, actor, slug, name string) erro
 		}
 	}
 	// Resolve the role the team grants before deletion (needed for the
-	// outbox payload that retracts the OpenFGA tuple).
+	// outbox payload that retracts the OpenFGA tuples).
 	existing, err := s.store.GetTeamByName(ctx, s.db.Pool, org.ID, name)
 	if errors.Is(err, ErrTeamNotFound) {
 		return ErrTeamNotFound
@@ -938,22 +943,36 @@ func (s *Service) DeleteTeam(ctx context.Context, actor, slug, name string) erro
 	if err != nil {
 		return err
 	}
-	role := existing.Role
+	role, err := s.store.GetRoleByID(ctx, s.db.Pool, org.ID, existing.RoleID)
+	if err != nil {
+		return err
+	}
 	var deleted *types.Team
 	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		if err := s.store.LockOrgForGuardrail(ctx, tx, org.ID); err != nil {
+			return err
+		}
 		var err error
 		deleted, err = s.store.DeleteTeam(ctx, tx, org.ID, name)
 		if err != nil {
 			return err
 		}
+		ok, err := s.store.AdminGuardrailHolds(ctx, tx, org.ID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return ErrAdminGuardrail
+		}
 		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
 			OrgID: org.ID, Actor: actor, Action: "team.deleted", ObjectType: "team", ObjectID: deleted.ID,
-			Payload: []byte(fmt.Sprintf(`{"team":%q,"role":%q}`, deleted.Name, role)),
+			Payload: []byte(fmt.Sprintf(`{"team":%q,"role":%q}`, deleted.Name, role.Name)),
 		}); err != nil {
 			return err
 		}
 		return audit.AppendOutbox(ctx, tx, org.ID, types.EventTeamDeleted, types.TeamCreatedPayload{
-			OrgID: org.ID, TeamID: deleted.ID, Name: deleted.Name, Role: role,
+			OrgID: org.ID, TeamID: deleted.ID, Name: deleted.Name,
+			RoleID: role.ID, RoleName: role.Name, Permissions: role.Permissions,
 		})
 	})
 	if err != nil {
@@ -966,20 +985,24 @@ func (s *Service) DeleteTeam(ctx context.Context, actor, slug, name string) erro
 	return nil
 }
 
-// RoleOf resolves a user's highest org role (approvals.RoleResolver seam).
-// Non-members get the empty role with no error.
-func (s *Service) RoleOf(ctx context.Context, orgID, userID string) (types.Role, error) {
-	role, _, err := s.store.HighestRole(ctx, s.db.Pool, orgID, userID)
-	return role, err
+// HasPermission reports whether the user holds any role containing the
+// permission slug in the org (approvals.PermissionResolver seam). DB-backed:
+// survives the tenant-freeze FGA tuple sweep.
+func (s *Service) HasPermission(ctx context.Context, orgID, userID, permission string) (bool, error) {
+	return s.store.HasPermission(ctx, s.db.Pool, orgID, userID, permission)
 }
 
 func isUniqueViolation(err error) bool {
+	return isSQLState(err, "23505")
+}
+
+func isSQLState(err error, state string) bool {
 	if err == nil {
 		return false
 	}
 	var pgErr interface{ SQLState() string }
 	if errors.As(err, &pgErr) {
-		return pgErr.SQLState() == "23505"
+		return pgErr.SQLState() == state
 	}
 	return false
 }

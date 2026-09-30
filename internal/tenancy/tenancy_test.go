@@ -3,6 +3,7 @@ package tenancy
 import (
 	"testing"
 
+	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -19,13 +20,13 @@ func TestDefaultTeams(t *testing.T) {
 	}
 	var haveOrgAdmins bool
 	for _, dt := range DefaultTeams {
-		if !dt.Role.Valid() {
-			t.Errorf("invalid role %q", dt.Role)
+		if authz.BuiltinRolePermissions(dt.RoleName) == nil {
+			t.Errorf("default team %q bound to unknown built-in role %q", dt.Name, dt.RoleName)
 		}
 		if dt.Name == OrgAdminsTeamName {
 			haveOrgAdmins = true
-			if dt.Role != types.RoleOrgAdmin {
-				t.Errorf("org-admins team grants %q, want org-admin", dt.Role)
+			if dt.RoleName != authz.BuiltinRoleAdmin {
+				t.Errorf("org-admins team grants %q, want admin", dt.RoleName)
 			}
 		}
 	}
@@ -35,36 +36,33 @@ func TestDefaultTeams(t *testing.T) {
 }
 
 func TestAnchorTeamForRole(t *testing.T) {
-	want := map[types.Role]string{
-		types.RoleOrgAdmin:         "org-admins",
-		types.RolePlatformEngineer: "platform-team",
-		types.RoleDeveloper:        "developers",
-		types.RoleViewer:           "viewers",
+	want := map[string]string{
+		authz.BuiltinRoleAdmin:    "org-admins",
+		authz.BuiltinRoleOperator: "platform-team",
+		authz.BuiltinRoleEditor:   "developers",
+		authz.BuiltinRoleViewer:   "viewers",
 	}
-	for role, team := range want {
-		got, ok := AnchorTeamForRole(role)
-		if !ok || got != team {
-			t.Errorf("AnchorTeamForRole(%q) = %q, %v; want %q", role, got, ok, team)
+	for roleName, team := range want {
+		got := AnchorTeamForRole(&types.Role{Name: roleName, Builtin: true})
+		if got != team {
+			t.Errorf("AnchorTeamForRole(%q) = %q, want %q", roleName, got, team)
 		}
 	}
-	if _, ok := AnchorTeamForRole(types.Role("bogus")); ok {
-		t.Error("AnchorTeamForRole(bogus) ok = true, want false")
+	// A custom role's anchor is a team named after it.
+	if got := AnchorTeamForRole(&types.Role{Name: "deployer"}); got != "deployer" {
+		t.Errorf("AnchorTeamForRole(custom) = %q, want deployer", got)
 	}
-	// Every anchor team granting a default role must be a default team,
-	// except org-admins which is materialized lazily.
-	for role, dt := range map[types.Role]string{
-		types.RolePlatformEngineer: "platform-team",
-		types.RoleDeveloper:        "developers",
-		types.RoleViewer:           "viewers",
-	} {
+	// Every built-in anchor team must be a default team bound to the same
+	// role (org-admins is created with every tenant, ADR-0013).
+	for roleName, dt := range want {
 		found := false
 		for _, d := range DefaultTeams {
-			if d.Name == dt && d.Role == role {
+			if d.Name == dt && d.RoleName == roleName {
 				found = true
 			}
 		}
 		if !found {
-			t.Errorf("anchor team %q for %q not among DefaultTeams", dt, role)
+			t.Errorf("anchor team %q for %q not among DefaultTeams", dt, roleName)
 		}
 	}
 }

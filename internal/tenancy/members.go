@@ -12,14 +12,9 @@ import (
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
-// teamByName resolves a team and the org role its membership grants
-// (persisted on the teams row since migration 0011).
-func (s *Service) teamByName(ctx context.Context, orgID, teamName string) (*types.Team, types.Role, error) {
-	team, err := s.store.GetTeamByName(ctx, s.db.Pool, orgID, teamName)
-	if err != nil {
-		return nil, "", err
-	}
-	return team, team.Role, nil
+// teamByName resolves a team and the org role its membership grants.
+func (s *Service) teamByName(ctx context.Context, orgID, teamName string) (*types.Team, error) {
+	return s.store.GetTeamByName(ctx, s.db.Pool, orgID, teamName)
 }
 
 // resolveMemberSubject resolves a member subject: a Keycloak user UUID, or a
@@ -48,7 +43,7 @@ func (s *Service) AddMember(ctx context.Context, actor, slug, teamName, userID s
 	if err != nil {
 		return err
 	}
-	team, role, err := s.teamByName(ctx, org.ID, teamName)
+	team, err := s.teamByName(ctx, org.ID, teamName)
 	if err != nil {
 		return err
 	}
@@ -66,7 +61,7 @@ func (s *Service) AddMember(ctx context.Context, actor, slug, teamName, userID s
 		// row, and only that tx emits audit + outbox. This keeps OpenFGA safe
 		// from duplicate membership tuples (which would stall the dispatcher).
 		inserted, err := s.store.AddMembership(ctx, tx, &types.Membership{
-			UserID: userID, OrgID: org.ID, TeamID: team.ID, Role: role,
+			UserID: userID, OrgID: org.ID, TeamID: team.ID, RoleID: team.RoleID,
 		})
 		if err != nil {
 			return err
@@ -76,12 +71,12 @@ func (s *Service) AddMember(ctx context.Context, actor, slug, teamName, userID s
 		}
 		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
 			OrgID: org.ID, Actor: actor, Action: "membership.added", ObjectType: "user", ObjectID: userID,
-			Payload: []byte(fmt.Sprintf(`{"teamId":%q,"team":%q,"role":%q}`, team.ID, team.Name, role)),
+			Payload: []byte(fmt.Sprintf(`{"teamId":%q,"team":%q,"role":%q}`, team.ID, team.Name, team.RoleName)),
 		}); err != nil {
 			return err
 		}
 		return audit.AppendOutbox(ctx, tx, org.ID, types.EventMembershipAdded, types.MembershipPayload{
-			OrgID: org.ID, TeamID: team.ID, UserID: userID, Role: role,
+			OrgID: org.ID, TeamID: team.ID, UserID: userID, RoleID: team.RoleID,
 		})
 	})
 }
@@ -93,7 +88,7 @@ func (s *Service) RemoveMember(ctx context.Context, actor, slug, teamName, userI
 	if err != nil {
 		return err
 	}
-	team, role, err := s.teamByName(ctx, org.ID, teamName)
+	team, err := s.teamByName(ctx, org.ID, teamName)
 	if err != nil {
 		return err
 	}
@@ -122,7 +117,7 @@ func (s *Service) RemoveMember(ctx context.Context, actor, slug, teamName, userI
 			return err
 		}
 		return audit.AppendOutbox(ctx, tx, org.ID, types.EventMembershipRemoved, types.MembershipPayload{
-			OrgID: org.ID, TeamID: team.ID, UserID: userID, Role: role,
+			OrgID: org.ID, TeamID: team.ID, UserID: userID, RoleID: team.RoleID,
 		})
 	})
 }
@@ -140,13 +135,10 @@ func (s *Service) ListOrgMembers(ctx context.Context, orgID, query string) ([]Or
 }
 
 // SetMemberRole sets a user's org role by placing them in the role's anchor
-// team and removing them from every other anchor team. Emits member.added
-// for new members and member.role_changed for existing ones.
-func (s *Service) SetMemberRole(ctx context.Context, actor, slug, userID string, role types.Role) error {
-	anchorName, ok := AnchorTeamForRole(role)
-	if !ok {
-		return fmt.Errorf("tenancy: invalid role %q", role)
-	}
+// team (built-in anchors for built-ins, a team named after a custom role —
+// materialized lazily) and removing them from every other team. Emits
+// member.added for new members and member.role_changed for existing ones.
+func (s *Service) SetMemberRole(ctx context.Context, actor, slug, userID, roleID string) error {
 	user, err := s.resolveMemberSubject(ctx, userID)
 	if err != nil {
 		return err
@@ -156,7 +148,14 @@ func (s *Service) SetMemberRole(ctx context.Context, actor, slug, userID string,
 	if err != nil {
 		return err
 	}
-	anchor, err := s.ensureTeam(ctx, actor, org, anchorName, role)
+	role, err := s.store.GetRoleByID(ctx, s.db.Pool, org.ID, roleID)
+	if errors.Is(err, ErrRoleNotFound) {
+		role, err = s.store.GetRoleByName(ctx, s.db.Pool, org.ID, roleID)
+	}
+	if err != nil {
+		return err
+	}
+	anchor, err := s.ensureTeam(ctx, actor, org, AnchorTeamForRole(role), role)
 	if err != nil {
 		return err
 	}
@@ -190,7 +189,7 @@ func (s *Service) SetMemberRole(ctx context.Context, actor, slug, userID string,
 			return err
 		}
 		// Remove other-team rows first: memberships are keyed
-		// (user, org, role), so an insert would conflict (and be
+		// (user, org, role_id), so an insert would conflict (and be
 		// skipped) when the user already holds the same role via
 		// another team — leaving them with no row at all.
 		for _, m := range removed {
@@ -202,21 +201,21 @@ func (s *Service) SetMemberRole(ctx context.Context, actor, slug, userID string,
 			}
 			if removedRow {
 				if err := audit.AppendOutbox(ctx, tx, org.ID, types.EventMembershipRemoved, types.MembershipPayload{
-					OrgID: org.ID, TeamID: m.TeamID, UserID: userID, Role: m.Role,
+					OrgID: org.ID, TeamID: m.TeamID, UserID: userID, RoleID: m.RoleID,
 				}); err != nil {
 					return err
 				}
 			}
 		}
 		inserted, err := s.store.AddMembership(ctx, tx, &types.Membership{
-			UserID: userID, OrgID: org.ID, TeamID: anchor.ID, Role: role,
+			UserID: userID, OrgID: org.ID, TeamID: anchor.ID, RoleID: role.ID,
 		})
 		if err != nil {
 			return err
 		}
 		if inserted {
 			if err := audit.AppendOutbox(ctx, tx, org.ID, types.EventMembershipAdded, types.MembershipPayload{
-				OrgID: org.ID, TeamID: anchor.ID, UserID: userID, Role: role,
+				OrgID: org.ID, TeamID: anchor.ID, UserID: userID, RoleID: role.ID,
 			}); err != nil {
 				return err
 			}
@@ -228,7 +227,7 @@ func (s *Service) SetMemberRole(ctx context.Context, actor, slug, userID string,
 			}
 			if err := s.audit.Record(ctx, tx, &types.AuditEvent{
 				OrgID: org.ID, Actor: actor, Action: action, ObjectType: "user", ObjectID: userID,
-				Payload: []byte(fmt.Sprintf(`{"role":%q,"team":%q}`, role, anchor.Name)),
+				Payload: []byte(fmt.Sprintf(`{"role":%q,"team":%q}`, role.Name, anchor.Name)),
 			}); err != nil {
 				return err
 			}
@@ -276,7 +275,7 @@ func (s *Service) RemoveOrgMember(ctx context.Context, actor, slug, userID strin
 		}
 		for _, m := range removed {
 			if err := audit.AppendOutbox(ctx, tx, org.ID, types.EventMembershipRemoved, types.MembershipPayload{
-				OrgID: org.ID, TeamID: m.TeamID, UserID: userID, Role: m.Role,
+				OrgID: org.ID, TeamID: m.TeamID, UserID: userID, RoleID: m.RoleID,
 			}); err != nil {
 				return err
 			}

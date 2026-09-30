@@ -139,7 +139,7 @@ func (h *Handler) authorizePlatform(ctx context.Context) (*authn.Identity, error
 	if err != nil {
 		return nil, huma.Error403Forbidden("platform organization not found")
 	}
-	ok, err := h.authz.Check(ctx, authz.UserObject(id.Subject), authz.RelationPlatformEngineer, authz.OrgObject(org.ID))
+	ok, err := h.authz.Check(ctx, authz.UserObject(id.Subject), authz.RelationClustersRegister, authz.OrgObject(org.ID))
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +168,7 @@ type listCatalogOutput struct {
 }
 
 func (h *Handler) listCatalog(ctx context.Context, in *listCatalogInput) (*listCatalogOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -203,7 +203,7 @@ type itemOutput struct {
 }
 
 func (h *Handler) getItem(ctx context.Context, in *itemPathInput) (*itemOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +228,7 @@ type pinInput struct {
 }
 
 func (h *Handler) setPin(ctx context.Context, in *pinInput) (*struct{}, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationCatalogManage)
 	if err != nil {
 		return nil, err
 	}
@@ -239,7 +239,7 @@ func (h *Handler) setPin(ctx context.Context, in *pinInput) (*struct{}, error) {
 }
 
 func (h *Handler) deletePin(ctx context.Context, in *itemPathInput) (*struct{}, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationCatalogManage)
 	if err != nil {
 		return nil, err
 	}
@@ -257,7 +257,7 @@ type listOrgVisibilityOutput struct {
 }
 
 func (h *Handler) listOrgVisibility(ctx context.Context, in *listOrgVisibilityInput) (*listOrgVisibilityOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -279,7 +279,7 @@ type orgVisibilityInput struct {
 }
 
 func (h *Handler) setOrgVisibility(ctx context.Context, in *orgVisibilityInput) (*struct{}, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantAdmin)
 	if err != nil {
 		return nil, err
 	}

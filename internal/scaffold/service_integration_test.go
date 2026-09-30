@@ -100,7 +100,7 @@ func TestReconcileDrivesRendering(t *testing.T) {
 		t.Fatalf("binding-rbac step = %+v", steps[4])
 	}
 	if len(rbac.teams) != 1 || rbac.teams[0].Name != "payments-api-maintainers" ||
-		rbac.teams[0].Role != types.RoleDeveloper || len(rbac.members) != 1 || rbac.members[0].UserID != "dev-1" {
+		rbac.teams[0].RoleName != "editor" || len(rbac.members) != 1 || rbac.members[0].UserID != "dev-1" {
 		t.Fatalf("rbac binding = teams %+v members %+v", rbac.teams, rbac.members)
 	}
 	var outputs map[string]any

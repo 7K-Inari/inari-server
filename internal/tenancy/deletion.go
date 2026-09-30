@@ -174,7 +174,8 @@ func (s *Store) ListDeletionBlockers(ctx context.Context, q db.Querier, orgID st
 // tenantSnapshot builds the TenantDeletingPayload: the full set of OpenFGA
 // tuples the teardown must retract. Enumerated from the DB (deterministic,
 // no FGA Reads) at request time and stored on the tenant_deletions row so
-// retries work even after partial teardown.
+// retries work even after partial teardown. Team permission bundles are
+// flattened from the roles table at freeze time.
 func (s *Store) tenantSnapshot(ctx context.Context, q db.Querier, org *types.Organization) (*types.TenantDeletingPayload, error) {
 	p := &types.TenantDeletingPayload{OrgID: org.ID, Slug: org.Slug, Objects: map[string][]string{}}
 	teams, err := s.ListTeams(ctx, q, org.ID)
@@ -182,16 +183,20 @@ func (s *Store) tenantSnapshot(ctx context.Context, q db.Querier, org *types.Org
 		return nil, err
 	}
 	for _, t := range teams {
-		p.Teams = append(p.Teams, types.TeamSeed{TeamID: t.ID, Name: t.Name, Role: t.Role})
+		role, err := s.GetRoleByID(ctx, q, org.ID, t.RoleID)
+		if err != nil {
+			return nil, err
+		}
+		p.Teams = append(p.Teams, types.TeamSeed{TeamID: t.ID, Name: t.Name, Permissions: role.Permissions})
 	}
-	mrows, err := q.Query(ctx, `SELECT user_id, team_id, role FROM memberships WHERE org_id = $1 AND team_id IS NOT NULL`, org.ID)
+	mrows, err := q.Query(ctx, `SELECT user_id, team_id, role_id FROM memberships WHERE org_id = $1 AND team_id IS NOT NULL`, org.ID)
 	if err != nil {
 		return nil, err
 	}
 	defer mrows.Close()
 	for mrows.Next() {
 		var m types.MembershipPayload
-		if err := mrows.Scan(&m.UserID, &m.TeamID, &m.Role); err != nil {
+		if err := mrows.Scan(&m.UserID, &m.TeamID, &m.RoleID); err != nil {
 			return nil, err
 		}
 		m.OrgID = org.ID

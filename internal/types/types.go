@@ -8,21 +8,20 @@ import (
 	"time"
 )
 
-type Role string
-
-const (
-	RoleOrgAdmin         Role = "org-admin"
-	RolePlatformEngineer Role = "platform-engineer"
-	RoleDeveloper        Role = "developer"
-	RoleViewer           Role = "viewer"
-)
-
-func (r Role) Valid() bool {
-	switch r {
-	case RoleOrgAdmin, RolePlatformEngineer, RoleDeveloper, RoleViewer:
-		return true
-	}
-	return false
+// Role is an org-scoped, admin-customizable bundle of permission slugs
+// (ADR-0013). Four built-ins (admin/operator/editor/viewer) are seeded per
+// tenant — deletion-protected but editable. Name is the URL identifier and
+// the ClusterRole suffix; it is immutable for built-ins.
+type Role struct {
+	ID          string    `json:"id"`
+	OrgID       string    `json:"orgId"`
+	Name        string    `json:"name"`
+	DisplayName string    `json:"displayName"`
+	Description string    `json:"description"`
+	Builtin     bool      `json:"builtin"`
+	Permissions []string  `json:"permissions"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 // Organization lifecycle statuses (ADR-0006): a deleting tenant is frozen
@@ -44,11 +43,14 @@ type Organization struct {
 }
 
 type Team struct {
-	ID                string    `json:"id"`
-	OrgID             string    `json:"orgId"`
-	Name              string    `json:"name"`
-	DisplayName       string    `json:"displayName"`
-	Role              Role      `json:"role"`
+	ID          string `json:"id"`
+	OrgID       string `json:"orgId"`
+	Name        string `json:"name"`
+	DisplayName string `json:"displayName"`
+	// RoleID references the org role the team grants (roles.id); RoleName
+	// is its joined name (views and ClusterRole naming).
+	RoleID            string    `json:"roleId"`
+	RoleName          string    `json:"roleName"`
 	KeycloakGroupPath string    `json:"keycloakGroupPath"`
 	CreatedAt         time.Time `json:"createdAt"`
 }
@@ -63,7 +65,7 @@ type Membership struct {
 	UserID string `json:"userId"`
 	OrgID  string `json:"orgId"`
 	TeamID string `json:"teamId,omitempty"`
-	Role   Role   `json:"role"`
+	RoleID string `json:"roleId"`
 }
 
 type AuditEvent struct {
@@ -98,6 +100,9 @@ const (
 	EventMembershipAdded       = "membership.added"
 	EventMembershipRemoved     = "membership.removed"
 	EventTeamDeleted           = "team.deleted"
+	EventRoleCreated           = "role.created"
+	EventRoleUpdated           = "role.updated"
+	EventRoleDeleted           = "role.deleted"
 
 	EventClusterCreated        = "cluster.created"
 	EventClusterRegistered     = "cluster.registered"
@@ -792,11 +797,13 @@ type PlatformResourceReconcilePayload struct {
 	ClustersNotified     int    `json:"clustersNotified"`
 }
 
-// TeamSeed is one default team to create with a tenant and the org role it grants.
+// TeamSeed is one default team to create with a tenant and the permission
+// bundle its role grants (snapshot at event time, so tuple consumers never
+// need DB reads).
 type TeamSeed struct {
-	TeamID string `json:"teamId"`
-	Name   string `json:"name"`
-	Role   Role   `json:"role"`
+	TeamID      string   `json:"teamId"`
+	Name        string   `json:"name"`
+	Permissions []string `json:"permissions"`
 }
 
 // TenantCreatedPayload is the outbox payload for EventTenantCreated.
@@ -853,12 +860,16 @@ type TenantDeletion struct {
 	UpdatedAt   time.Time       `json:"updatedAt"`
 }
 
-// TeamCreatedPayload is the outbox payload for EventTeamCreated.
+// TeamCreatedPayload is the outbox payload for EventTeamCreated and
+// EventTeamDeleted; Permissions is the team's role bundle snapshot driving
+// the per-permission org tuple write/retraction.
 type TeamCreatedPayload struct {
-	OrgID  string `json:"orgId"`
-	TeamID string `json:"teamId"`
-	Name   string `json:"name"`
-	Role   Role   `json:"role"`
+	OrgID       string   `json:"orgId"`
+	TeamID      string   `json:"teamId"`
+	Name        string   `json:"name"`
+	RoleID      string   `json:"roleId"`
+	RoleName    string   `json:"roleName"`
+	Permissions []string `json:"permissions"`
 }
 
 // MembershipPayload is the outbox payload for membership add/remove events.
@@ -866,7 +877,7 @@ type MembershipPayload struct {
 	OrgID  string `json:"orgId"`
 	TeamID string `json:"teamId"`
 	UserID string `json:"userId"`
-	Role   Role   `json:"role"`
+	RoleID string `json:"roleId"`
 }
 
 // Identity client types (Settings design §3.1). The client secret lives only
@@ -897,16 +908,20 @@ type IdentityClient struct {
 // TeamRoleMapping is one team → org role assignment in the declarative RBAC
 // mapping set.
 type TeamRoleMapping struct {
-	Team string `json:"team"`
-	Role Role   `json:"role"`
+	Team   string `json:"team"`
+	RoleID string `json:"roleId"`
 }
 
 // TeamRoleChange records one role transition applied by a mappings update.
+// The permission snapshots let the tuple writer retract old-permission and
+// write new-permission tuples without DB reads.
 type TeamRoleChange struct {
-	TeamID  string `json:"teamId"`
-	Name    string `json:"name"`
-	OldRole Role   `json:"oldRole"`
-	NewRole Role   `json:"newRole"`
+	TeamID         string   `json:"teamId"`
+	Name           string   `json:"name"`
+	OldRoleID      string   `json:"oldRoleId"`
+	OldPermissions []string `json:"oldPermissions"`
+	NewRoleID      string   `json:"newRoleId"`
+	NewPermissions []string `json:"newPermissions"`
 }
 
 // RBACMappingsPayload is the outbox payload for EventRBACMappingsUpdated;
@@ -914,6 +929,20 @@ type TeamRoleChange struct {
 type RBACMappingsPayload struct {
 	OrgID   string           `json:"orgId"`
 	Changes []TeamRoleChange `json:"changes"`
+}
+
+// RolePayload is the outbox payload for role.created/updated/deleted. For
+// role.updated, TeamIDs lists the teams bound to the role so the tuple
+// writer can rewrite their org tuples from the old/new permission snapshots
+// without DB reads. Created roles have no bound teams; deletion of a role
+// with bound teams is rejected, so TeamIDs is defensive there.
+type RolePayload struct {
+	OrgID          string   `json:"orgId"`
+	RoleID         string   `json:"roleId"`
+	Name           string   `json:"name"`
+	OldPermissions []string `json:"oldPermissions,omitempty"`
+	NewPermissions []string `json:"newPermissions,omitempty"`
+	TeamIDs        []string `json:"teamIds,omitempty"`
 }
 
 // IdP brokering types (Settings design §3.3, OIDC-only v1). The IdP client

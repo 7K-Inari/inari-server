@@ -120,28 +120,32 @@ func TestMaterializesOnTenantAndMappingLifecycle(t *testing.T) {
 
 	// A mapping change must render a NEW role-qualified binding (roleRef
 	// is immutable; the syncer applies the new object and prunes the old).
-	team := teams[0]
-	newRole := types.RoleViewer
-	if team.Role == newRole {
-		newRole = types.RoleOrgAdmin
+	// Use the developers team: flipping an admin-bearing team would trip
+	// the tenant.admin guardrail (ADR-0013).
+	var team types.Team
+	for _, tm := range teams {
+		if tm.Name == "developers" {
+			team = tm
+		}
 	}
-	oldBinding, ok := rbacmaterialize.BindingName("acme", team.Name, team.Role)
-	if !ok {
-		t.Fatalf("seeded team role %q has no anchor role", team.Role)
+	newRole := "viewer"
+	if team.RoleName == newRole {
+		newRole = "operator"
 	}
+	oldBinding := rbacmaterialize.BindingName("acme", team.Name, team.RoleName)
 	if _, err := svc.SetRBACMappings(ctx, "user-1", "acme",
-		[]types.TeamRoleMapping{{Team: team.Name, Role: newRole}}); err != nil {
+		[]types.TeamRoleMapping{{Team: team.Name, RoleID: newRole}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := eventbustest.DispatchOnce(ctx, disp); err != nil {
 		t.Fatal(err)
 	}
 	updated := git.Files("acme-inari-state", "main")[rbacmaterialize.ClusterRoleBindingsPath]
-	wantRef, _ := rbacmaterialize.ClusterRoleName("acme", newRole)
+	wantRef := rbacmaterialize.ClusterRoleName("acme", newRole)
 	if !strings.Contains(updated, "name: "+wantRef) {
 		t.Errorf("binding roleRef not updated to %s:\n%s", wantRef, updated)
 	}
-	newBinding, _ := rbacmaterialize.BindingName("acme", team.Name, newRole)
+	newBinding := rbacmaterialize.BindingName("acme", team.Name, newRole)
 	if !strings.Contains(updated, "name: "+newBinding) {
 		t.Errorf("new role-qualified binding %s missing:\n%s", newBinding, updated)
 	}
@@ -167,7 +171,7 @@ func TestMaterializesTeamDelete(t *testing.T) {
 	if _, _, err := svc.CreateTenant(ctx, "user-1", "acme", "Acme"); err != nil {
 		t.Fatal(err)
 	}
-	extra, err := svc.CreateTeam(ctx, "user-1", "acme", "temp", types.RoleViewer)
+	extra, err := svc.CreateTeam(ctx, "user-1", "acme", "temp", "viewer")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -24,7 +24,7 @@ import (
 type viewerAuthz struct{}
 
 func (viewerAuthz) Check(_ context.Context, _, relation, _ string) (bool, error) {
-	return relation == authz.RelationViewer, nil
+	return relation == authz.RelationTenantRead, nil
 }
 func (viewerAuthz) ListObjects(context.Context, string, string, string) ([]string, error) {
 	return nil, nil

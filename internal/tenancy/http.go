@@ -167,6 +167,7 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 	}, h.removeMember)
 
 	h.registerIdentityRoutes(api)
+	h.registerRoleRoutes(api)
 	h.registerBrokerRoutes(api)
 }
 
@@ -225,7 +226,7 @@ func (h *Handler) listTenants(ctx context.Context, _ *struct{}) (*listTenantsOut
 		return nil, huma.Error401Unauthorized("unauthenticated")
 	}
 	// Fine PEP: objects the caller may view per OpenFGA.
-	allowed, err := h.authz.ListObjects(ctx, authz.UserObject(id.Subject), authz.RelationViewer, authz.TypeOrganization)
+	allowed, err := h.authz.ListObjects(ctx, authz.UserObject(id.Subject), authz.RelationTenantRead, authz.TypeOrganization)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +253,7 @@ type orgPathInput struct {
 }
 
 func (h *Handler) getTenant(ctx context.Context, in *orgPathInput) (*tenantOutput, error) {
-	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -287,7 +288,7 @@ type deleteTenantOutput struct {
 }
 
 func (h *Handler) deleteTenant(ctx context.Context, in *deleteTenantInput) (*deleteTenantOutput, error) {
-	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantAdmin); err != nil {
 		// Platform org_creators may force-decommission a tenant whose admin
 		// chain is broken (e.g. orgs created before the org-admin bootstrap
 		// fix, where no org-admin exists at all).
@@ -320,7 +321,7 @@ type deletionDependenciesOutput struct {
 }
 
 func (h *Handler) deletionDependencies(ctx context.Context, in *orgPathInput) (*deletionDependenciesOutput, error) {
-	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantAdmin); err != nil {
 		return nil, err
 	}
 	blockers, err := h.svc.DeletionDependencies(ctx, in.Org)
@@ -361,7 +362,7 @@ func (h *Handler) authorizePlatform(ctx context.Context) error {
 }
 
 func (h *Handler) retryDeletion(ctx context.Context, in *orgPathInput) (*retryDeletionOutput, error) {
-	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantAdmin); err != nil {
 		// A frozen org's tuples are already swept, so the original org-admin
 		// can no longer pass the org check; platform org_creators may retry.
 		if perr := h.authorizePlatform(ctx); perr != nil {
@@ -389,7 +390,7 @@ type listTeamsOutput struct {
 }
 
 func (h *Handler) listTeams(ctx context.Context, in *orgPathInput) (*listTeamsOutput, error) {
-	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -420,7 +421,7 @@ type listMembersOutput struct {
 }
 
 func (h *Handler) listMembers(ctx context.Context, in *listMembersInput) (*listMembersOutput, error) {
-	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -449,7 +450,7 @@ type addMemberInput struct {
 }
 
 func (h *Handler) addMember(ctx context.Context, in *addMemberInput) (*struct{}, error) {
-	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantMembersManage)
 	if err != nil {
 		return nil, err
 	}
@@ -478,7 +479,7 @@ type removeMemberInput struct {
 }
 
 func (h *Handler) removeMember(ctx context.Context, in *removeMemberInput) (*struct{}, error) {
-	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantMembersManage)
 	if err != nil {
 		return nil, err
 	}
@@ -506,7 +507,7 @@ type updateTenantInput struct {
 }
 
 func (h *Handler) updateTenant(ctx context.Context, in *updateTenantInput) (*tenantOutput, error) {
-	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantSettingsWrite)
 	if err != nil {
 		return nil, err
 	}
@@ -531,8 +532,8 @@ func (h *Handler) updateTenant(ctx context.Context, in *updateTenantInput) (*ten
 type createTeamInput struct {
 	Org  string `path:"org" doc:"Tenant slug"`
 	Body struct {
-		Name string     `json:"name" minLength:"1" maxLength:"63" pattern:"^[a-z0-9][a-z0-9-]*$" doc:"URL-safe team name"`
-		Role types.Role `json:"role,omitempty" doc:"Org role the team grants (default viewer)"`
+		Name   string `json:"name" minLength:"1" maxLength:"63" pattern:"^[a-z0-9][a-z0-9-]*$" doc:"URL-safe team name"`
+		RoleID string `json:"roleId,omitempty" doc:"Org role the team grants (roles.id or built-in role name; default viewer)"`
 	}
 }
 
@@ -543,25 +544,24 @@ type teamOutput struct {
 }
 
 func (h *Handler) createTeam(ctx context.Context, in *createTeamInput) (*teamOutput, error) {
-	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantTeamsManage)
 	if err != nil {
 		return nil, err
 	}
 	if err := ensureOrgActive(org); err != nil {
 		return nil, err
 	}
-	role := in.Body.Role
-	if role == "" {
-		role = types.RoleViewer
-	}
-	if !role.Valid() {
-		return nil, huma.Error400BadRequest("invalid role")
+	roleID := in.Body.RoleID
+	if roleID == "" {
+		roleID = authz.BuiltinRoleViewer
 	}
 	id := identity(ctx)
-	team, err := h.svc.CreateTeam(ctx, id.Subject, in.Org, in.Body.Name, role)
+	team, err := h.svc.CreateTeam(ctx, id.Subject, in.Org, in.Body.Name, roleID)
 	switch {
 	case errors.Is(err, ErrTeamNameTaken):
 		return nil, huma.Error409Conflict("team name already exists in tenant")
+	case errors.Is(err, ErrRoleNotFound):
+		return nil, huma.Error400BadRequest("role not found")
 	case errors.Is(err, ErrOrgNotFound):
 		return nil, huma.Error404NotFound("organization not found")
 	case err != nil:
@@ -581,7 +581,7 @@ type updateTeamInput struct {
 }
 
 func (h *Handler) updateTeam(ctx context.Context, in *updateTeamInput) (*teamOutput, error) {
-	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantTeamsManage)
 	if err != nil {
 		return nil, err
 	}
@@ -606,7 +606,7 @@ func (h *Handler) updateTeam(ctx context.Context, in *updateTeamInput) (*teamOut
 }
 
 func (h *Handler) deleteTeam(ctx context.Context, in *teamPathInput) (*struct{}, error) {
-	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantTeamsManage)
 	if err != nil {
 		return nil, err
 	}
@@ -618,6 +618,8 @@ func (h *Handler) deleteTeam(ctx context.Context, in *teamPathInput) (*struct{},
 	switch {
 	case errors.Is(err, ErrDefaultTeam):
 		return nil, huma.Error409Conflict("default teams cannot be deleted")
+	case errors.Is(err, ErrAdminGuardrail):
+		return nil, huma.Error409Conflict("at least one team must retain the tenant.admin permission")
 	case errors.Is(err, ErrMembersTeamInUse):
 		return nil, huma.Error409Conflict("members team is required by the brokered identity provider")
 	case errors.Is(err, ErrTeamNotFound):
@@ -642,7 +644,7 @@ type listOrgMembersOutput struct {
 }
 
 func (h *Handler) listOrgMembers(ctx context.Context, in *listOrgMembersInput) (*listOrgMembersOutput, error) {
-	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -659,12 +661,12 @@ type putMemberInput struct {
 	Org     string `path:"org"`
 	Subject string `path:"subject"`
 	Body    struct {
-		Role types.Role `json:"role" doc:"Org role to grant"`
+		RoleID string `json:"roleId" doc:"Org role to grant (roles.id or built-in role name)"`
 	}
 }
 
 func (h *Handler) putMember(ctx context.Context, in *putMemberInput) (*struct{}, error) {
-	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRBACManage)
 	if err != nil {
 		// Platform org_creators may repair the admin chain of tenants that
 		// predate the org-admin bootstrap (no org-admin exists, so the
@@ -680,12 +682,14 @@ func (h *Handler) putMember(ctx context.Context, in *putMemberInput) (*struct{},
 	if err := ensureOrgActive(org); err != nil {
 		return nil, err
 	}
-	if !in.Body.Role.Valid() {
-		return nil, huma.Error400BadRequest("invalid role")
+	if in.Body.RoleID == "" {
+		return nil, huma.Error400BadRequest("roleId is required")
 	}
 	id := identity(ctx)
-	err = h.svc.SetMemberRole(ctx, id.Subject, in.Org, in.Subject, in.Body.Role)
+	err = h.svc.SetMemberRole(ctx, id.Subject, in.Org, in.Subject, in.Body.RoleID)
 	switch {
+	case errors.Is(err, ErrRoleNotFound):
+		return nil, huma.Error400BadRequest("role not found")
 	case errors.Is(err, ErrUserNotFound):
 		return nil, huma.Error404NotFound("user not found")
 	case errors.Is(err, ErrOrgNotFound):
@@ -702,7 +706,7 @@ type removeOrgMemberInput struct {
 }
 
 func (h *Handler) removeOrgMember(ctx context.Context, in *removeOrgMemberInput) (*struct{}, error) {
-	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantMembersManage)
 	if err != nil {
 		return nil, err
 	}

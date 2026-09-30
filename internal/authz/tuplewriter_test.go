@@ -15,9 +15,9 @@ func TestTupleWriterRestoresSweptTuples(t *testing.T) {
 	p := types.TenantDeletingPayload{
 		OrgID: "org:1",
 		Slug:  "acme",
-		Teams: []types.TeamSeed{{TeamID: "team-1", Name: "core", Role: types.RoleOrgAdmin}},
+		Teams: []types.TeamSeed{{TeamID: "team-1", Name: "core", Permissions: []string{"tenant.admin", "tenant.read"}}},
 		Members: []types.MembershipPayload{
-			{OrgID: "org:1", TeamID: "team-1", UserID: "user-1", Role: types.RoleOrgAdmin},
+			{OrgID: "org:1", TeamID: "team-1", UserID: "user-1", RoleID: "r-admin"},
 		},
 		Objects: map[string][]string{"cluster": {"clu-1"}},
 	}

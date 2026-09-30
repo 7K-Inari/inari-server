@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -121,7 +122,7 @@ func TestUIScaffoldContract(t *testing.T) {
 	if code, _ := f.req(t, "GET", "/api/v1/tenants/acme/scaffolds/"+sc.ID, "other", ""); code != http.StatusForbidden {
 		t.Fatalf("want 403 for non-member, got %d", code)
 	}
-	f.az.deny["developer"] = true
+	f.az.deny[authz.RelationDeploymentsCreate] = true
 	if code, _ := f.req(t, "POST", "/api/v1/tenants/acme/scaffolds", "good",
 		`{"templateId":"template:go-service","name":"orders-api","parameters":{"name":"orders-api"}}`); code != http.StatusForbidden {
 		t.Fatalf("want 403 when developer denied, got %d", code)
@@ -129,7 +130,7 @@ func TestUIScaffoldContract(t *testing.T) {
 	if code, _ := f.req(t, "GET", "/api/v1/tenants/acme/scaffolds/"+sc.ID, "good", ""); code != http.StatusOK {
 		t.Fatalf("want 200 for viewer read, got %d", code)
 	}
-	f.az.deny["developer"] = false
+	f.az.deny[authz.RelationDeploymentsCreate] = false
 }
 
 func countRuns(t *testing.T, f *itFixture) int {

@@ -3,24 +3,28 @@ package authz
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
-// RoleRelation maps a tenancy role to an OpenFGA organization relation.
-func RoleRelation(r types.Role) (string, error) {
-	switch r {
-	case types.RoleOrgAdmin:
-		return RelationAdmin, nil
-	case types.RolePlatformEngineer:
-		return RelationPlatformEngineer, nil
-	case types.RoleDeveloper:
-		return RelationDeveloper, nil
-	case types.RoleViewer:
-		return RelationViewer, nil
+// permissionTuples flattens (team, permissions) into one org tuple per
+// permission slug. Unknown slugs are skipped defensively (the FGA model is
+// static; an outbox row written against a retired slug must not stall the
+// dispatcher — the OrgRoleSync reconciler converges the difference).
+func permissionTuples(orgID, teamID string, permissions []string) []Tuple {
+	tuples := make([]Tuple, 0, len(permissions))
+	for _, p := range permissions {
+		rel, ok := PermissionRelation(p)
+		if !ok {
+			continue
+		}
+		tuples = append(tuples, Tuple{
+			User:     TeamMemberUserset(teamID),
+			Relation: rel,
+			Object:   OrgObject(orgID),
+		})
 	}
-	return "", fmt.Errorf("authz: unknown role %q", r)
+	return tuples
 }
 
 // TupleWriter consumes outbox events and syncs OpenFGA tuples.
@@ -58,6 +62,9 @@ func (w *TupleWriter) EventTypes() []string {
 		types.EventRolloutCreated,
 		types.EventDriftDetected,
 		types.EventRBACMappingsUpdated,
+		types.EventRoleCreated,
+		types.EventRoleUpdated,
+		types.EventRoleDeleted,
 	}
 }
 
@@ -105,15 +112,16 @@ func (w *TupleWriter) Handle(ctx context.Context, ev *types.OutboxEvent) error {
 		if err := json.Unmarshal(ev.Payload, &p); err != nil {
 			return err
 		}
-		return w.writeOrgRoleTuples(ctx, p.OrgID, []types.TeamSeed{{TeamID: p.TeamID, Name: p.Name, Role: p.Role}}, false)
+		return w.store.WriteTuples(ctx, permissionTuples(p.OrgID, p.TeamID, p.Permissions))
 	case types.EventTeamDeleted:
 		var p types.TeamCreatedPayload
 		if err := json.Unmarshal(ev.Payload, &p); err != nil {
 			return err
 		}
-		// Removes the team#member → role org tuple. Per-member team:<id>#member
-		// tuples dangle harmlessly once the team object is gone.
-		return w.writeOrgRoleTuples(ctx, p.OrgID, []types.TeamSeed{{TeamID: p.TeamID, Name: p.Name, Role: p.Role}}, true)
+		// Removes the team#member → permission org tuples. Per-member
+		// team:<id>#member tuples dangle harmlessly once the team object is
+		// gone.
+		return w.store.DeleteTuples(ctx, permissionTuples(p.OrgID, p.TeamID, p.Permissions))
 	case types.EventMembershipAdded:
 		var p types.MembershipPayload
 		if err := json.Unmarshal(ev.Payload, &p); err != nil {
@@ -284,16 +292,8 @@ func (w *TupleWriter) Handle(ctx context.Context, ev *types.OutboxEvent) error {
 		}
 		var del, add []Tuple
 		for _, c := range p.Changes {
-			oldRel, err := RoleRelation(c.OldRole)
-			if err != nil {
-				return err
-			}
-			newRel, err := RoleRelation(c.NewRole)
-			if err != nil {
-				return err
-			}
-			del = append(del, Tuple{User: TeamMemberUserset(c.TeamID), Relation: oldRel, Object: OrgObject(p.OrgID)})
-			add = append(add, Tuple{User: TeamMemberUserset(c.TeamID), Relation: newRel, Object: OrgObject(p.OrgID)})
+			del = append(del, permissionTuples(p.OrgID, c.TeamID, c.OldPermissions)...)
+			add = append(add, permissionTuples(p.OrgID, c.TeamID, c.NewPermissions)...)
 		}
 		if len(del) > 0 {
 			if err := w.store.DeleteTuples(ctx, del); err != nil {
@@ -303,23 +303,57 @@ func (w *TupleWriter) Handle(ctx context.Context, ev *types.OutboxEvent) error {
 		if len(add) > 0 {
 			return w.store.WriteTuples(ctx, add)
 		}
+	case types.EventRoleCreated:
+		// A fresh role has no bound teams, so no tuples to write; the event
+		// exists for audit/rbacmaterialize.
+		return nil
+	case types.EventRoleUpdated:
+		// Permission bundle changed: rewrite the org tuples of every team
+		// bound to the role from the payload snapshots.
+		var p types.RolePayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		var del, add []Tuple
+		for _, teamID := range p.TeamIDs {
+			del = append(del, permissionTuples(p.OrgID, teamID, p.OldPermissions)...)
+			add = append(add, permissionTuples(p.OrgID, teamID, p.NewPermissions)...)
+		}
+		if len(del) > 0 {
+			if err := w.store.DeleteTuples(ctx, del); err != nil {
+				return err
+			}
+		}
+		if len(add) > 0 {
+			return w.store.WriteTuples(ctx, add)
+		}
+	case types.EventRoleDeleted:
+		// Deleting a role with bound teams is rejected, so there is nothing
+		// to retract; retract defensively if TeamIDs ever arrives non-empty.
+		var p types.RolePayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		var del []Tuple
+		for _, teamID := range p.TeamIDs {
+			del = append(del, permissionTuples(p.OrgID, teamID, p.OldPermissions)...)
+		}
+		if len(del) > 0 {
+			return w.store.DeleteTuples(ctx, del)
+		}
 	}
 	return nil
 }
 
-// writeOrgRoleTuples seeds org role tuples: each team grants its role on the org.
+// writeOrgRoleTuples seeds org permission tuples: each team grants one
+// tuple per permission in its role's bundle.
 func (w *TupleWriter) writeOrgRoleTuples(ctx context.Context, orgID string, teams []types.TeamSeed, del bool) error {
 	var tuples []Tuple
 	for _, t := range teams {
-		rel, err := RoleRelation(t.Role)
-		if err != nil {
-			return err
-		}
-		tuples = append(tuples, Tuple{
-			User:     TeamMemberUserset(t.TeamID),
-			Relation: rel,
-			Object:   OrgObject(orgID),
-		})
+		tuples = append(tuples, permissionTuples(orgID, t.TeamID, t.Permissions)...)
+	}
+	if len(tuples) == 0 {
+		return nil
 	}
 	if del {
 		return w.store.DeleteTuples(ctx, tuples)

@@ -90,7 +90,7 @@ type listOutput struct {
 }
 
 func (h *Handler) list(ctx context.Context, in *listInput) (*listOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +117,7 @@ type getOutput struct {
 }
 
 func (h *Handler) get(ctx context.Context, in *getInput) (*getOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}

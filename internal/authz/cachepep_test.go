@@ -88,12 +88,12 @@ func newPEP(s Store, c cache.Cache) Authorizer {
 
 func TestCachedAuthorizerCachesCheckResults(t *testing.T) {
 	store := newCountingStore()
-	store.setAllowed("user:u1", RelationViewer, "organization:o1", true)
+	store.setAllowed("user:u1", RelationTenantRead, "organization:o1", true)
 	a := newPEP(store, cache.NewMemory(100))
 	ctx := context.Background()
 
 	for i := 0; i < 5; i++ {
-		ok, err := a.Check(ctx, "user:u1", RelationViewer, "organization:o1")
+		ok, err := a.Check(ctx, "user:u1", RelationTenantRead, "organization:o1")
 		if err != nil || !ok {
 			t.Fatalf("Check %d = %v,%v, want true,nil", i, ok, err)
 		}
@@ -109,7 +109,7 @@ func TestCachedAuthorizerCachesDenies(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 3; i++ {
-		ok, err := a.Check(ctx, "user:u1", RelationAdmin, "organization:o1")
+		ok, err := a.Check(ctx, "user:u1", RelationTenantAdmin, "organization:o1")
 		if err != nil || ok {
 			t.Fatalf("Check %d = %v,%v, want false,nil", i, ok, err)
 		}
@@ -121,14 +121,14 @@ func TestCachedAuthorizerCachesDenies(t *testing.T) {
 
 func TestCachedAuthorizerKeysByUserRelationObject(t *testing.T) {
 	store := newCountingStore()
-	store.setAllowed("user:u1", RelationViewer, "organization:o1", true)
+	store.setAllowed("user:u1", RelationTenantRead, "organization:o1", true)
 	a := newPEP(store, cache.NewMemory(100))
 	ctx := context.Background()
 
-	_, _ = a.Check(ctx, "user:u1", RelationViewer, "organization:o1")
-	_, _ = a.Check(ctx, "user:u2", RelationViewer, "organization:o1")
-	_, _ = a.Check(ctx, "user:u1", RelationAdmin, "organization:o1")
-	_, _ = a.Check(ctx, "user:u1", RelationViewer, "organization:o2")
+	_, _ = a.Check(ctx, "user:u1", RelationTenantRead, "organization:o1")
+	_, _ = a.Check(ctx, "user:u2", RelationTenantRead, "organization:o1")
+	_, _ = a.Check(ctx, "user:u1", RelationTenantAdmin, "organization:o1")
+	_, _ = a.Check(ctx, "user:u1", RelationTenantRead, "organization:o2")
 	if n := store.checkCount(); n != 4 {
 		t.Fatalf("store checks = %d, want 4 (distinct key tuples)", n)
 	}
@@ -142,24 +142,24 @@ func TestCachedAuthorizerInvalidatedByTupleWrite(t *testing.T) {
 	a := NewCachedAuthorizer(NewAuthorizer(store), c, "memory", time.Minute)
 	ctx := context.Background()
 
-	ok, err := a.Check(ctx, "user:u1", RelationViewer, "organization:o1")
+	ok, err := a.Check(ctx, "user:u1", RelationTenantRead, "organization:o1")
 	if err != nil || ok {
 		t.Fatalf("Check before grant = %v,%v, want false,nil", ok, err)
 	}
-	store.setAllowed("user:u1", RelationViewer, "organization:o1", true)
-	if err := inv.WriteTuples(ctx, []Tuple{{User: "user:u1", Relation: RelationViewer, Object: "organization:o1"}}); err != nil {
+	store.setAllowed("user:u1", RelationTenantRead, "organization:o1", true)
+	if err := inv.WriteTuples(ctx, []Tuple{{User: "user:u1", Relation: RelationTenantRead, Object: "organization:o1"}}); err != nil {
 		t.Fatalf("WriteTuples: %v", err)
 	}
-	ok, err = a.Check(ctx, "user:u1", RelationViewer, "organization:o1")
+	ok, err = a.Check(ctx, "user:u1", RelationTenantRead, "organization:o1")
 	if err != nil || !ok {
 		t.Fatalf("Check after write invalidation = %v,%v, want true,nil", ok, err)
 	}
 
-	if err := inv.DeleteTuples(ctx, []Tuple{{User: "user:u1", Relation: RelationViewer, Object: "organization:o1"}}); err != nil {
+	if err := inv.DeleteTuples(ctx, []Tuple{{User: "user:u1", Relation: RelationTenantRead, Object: "organization:o1"}}); err != nil {
 		t.Fatalf("DeleteTuples: %v", err)
 	}
-	store.setAllowed("user:u1", RelationViewer, "organization:o1", false)
-	ok, err = a.Check(ctx, "user:u1", RelationViewer, "organization:o1")
+	store.setAllowed("user:u1", RelationTenantRead, "organization:o1", false)
+	ok, err = a.Check(ctx, "user:u1", RelationTenantRead, "organization:o1")
 	if err != nil || ok {
 		t.Fatalf("Check after delete invalidation = %v,%v, want false,nil", ok, err)
 	}
@@ -167,13 +167,13 @@ func TestCachedAuthorizerInvalidatedByTupleWrite(t *testing.T) {
 
 func TestCachedAuthorizerFailOpenOnCacheOutage(t *testing.T) {
 	store := newCountingStore()
-	store.setAllowed("user:u1", RelationViewer, "organization:o1", true)
+	store.setAllowed("user:u1", RelationTenantRead, "organization:o1", true)
 	a := newPEP(store, errCache{})
 	ctx := context.Background()
 
 	// Every request must still be served by the underlying store.
 	for i := 0; i < 3; i++ {
-		ok, err := a.Check(ctx, "user:u1", RelationViewer, "organization:o1")
+		ok, err := a.Check(ctx, "user:u1", RelationTenantRead, "organization:o1")
 		if err != nil || !ok {
 			t.Fatalf("Check %d with cache down = %v,%v, want true,nil", i, ok, err)
 		}
@@ -198,10 +198,10 @@ func TestCachedAuthorizerTTLExpiry(t *testing.T) {
 	a := NewCachedAuthorizer(NewAuthorizer(store), c, "memory", 30*time.Millisecond)
 	ctx := context.Background()
 
-	_, _ = a.Check(ctx, "user:u1", RelationViewer, "organization:o1")
-	store.setAllowed("user:u1", RelationViewer, "organization:o1", true)
+	_, _ = a.Check(ctx, "user:u1", RelationTenantRead, "organization:o1")
+	store.setAllowed("user:u1", RelationTenantRead, "organization:o1", true)
 	time.Sleep(60 * time.Millisecond)
-	ok, err := a.Check(ctx, "user:u1", RelationViewer, "organization:o1")
+	ok, err := a.Check(ctx, "user:u1", RelationTenantRead, "organization:o1")
 	if err != nil || !ok {
 		t.Fatalf("Check after TTL expiry = %v,%v, want true,nil", ok, err)
 	}
@@ -213,7 +213,7 @@ func TestCachedAuthorizerListObjectsNotCached(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 3; i++ {
-		objs, err := a.ListObjects(ctx, "user:u1", RelationViewer, TypeOrganization)
+		objs, err := a.ListObjects(ctx, "user:u1", RelationTenantRead, TypeOrganization)
 		if err != nil || len(objs) != 1 {
 			t.Fatalf("ListObjects %d = %v,%v", i, objs, err)
 		}
@@ -238,7 +238,7 @@ func TestCachedAuthorizerConcurrentChecksAndWrites(t *testing.T) {
 		go func(g int) { // reader
 			defer wg.Done()
 			for i := 0; i < 100; i++ {
-				if _, err := a.Check(ctx, fmt.Sprintf("user:u%d", g), RelationViewer, "organization:o1"); err != nil {
+				if _, err := a.Check(ctx, fmt.Sprintf("user:u%d", g), RelationTenantRead, "organization:o1"); err != nil {
 					t.Errorf("Check: %v", err)
 				}
 			}
@@ -246,7 +246,7 @@ func TestCachedAuthorizerConcurrentChecksAndWrites(t *testing.T) {
 		go func(g int) { // writer (invalidates)
 			defer wg.Done()
 			for i := 0; i < 20; i++ {
-				if err := inv.WriteTuples(ctx, []Tuple{{User: fmt.Sprintf("user:u%d", g), Relation: RelationViewer, Object: "organization:o1"}}); err != nil {
+				if err := inv.WriteTuples(ctx, []Tuple{{User: fmt.Sprintf("user:u%d", g), Relation: RelationTenantRead, Object: "organization:o1"}}); err != nil {
 					t.Errorf("WriteTuples: %v", err)
 				}
 			}
@@ -256,11 +256,11 @@ func TestCachedAuthorizerConcurrentChecksAndWrites(t *testing.T) {
 
 	// After all writes have completed, a grant must be visible immediately
 	// (generation bumped), not after TTL.
-	store.setAllowed("user:u9", RelationViewer, "organization:o1", true)
-	if err := inv.WriteTuples(ctx, []Tuple{{User: "user:u9", Relation: RelationViewer, Object: "organization:o1"}}); err != nil {
+	store.setAllowed("user:u9", RelationTenantRead, "organization:o1", true)
+	if err := inv.WriteTuples(ctx, []Tuple{{User: "user:u9", Relation: RelationTenantRead, Object: "organization:o1"}}); err != nil {
 		t.Fatalf("WriteTuples: %v", err)
 	}
-	ok, err := a.Check(ctx, "user:u9", RelationViewer, "organization:o1")
+	ok, err := a.Check(ctx, "user:u9", RelationTenantRead, "organization:o1")
 	if err != nil || !ok {
 		t.Fatalf("Check after final write = %v,%v, want true,nil", ok, err)
 	}

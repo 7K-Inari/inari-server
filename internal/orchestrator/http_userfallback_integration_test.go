@@ -79,14 +79,14 @@ func TestGitConfigUserTemplateFallback(t *testing.T) {
 	}
 
 	// platform_app round-trips; the PUT must be guarded by
-	// RelationPlatformEngineer (admin-only policy update).
+	// RelationTenantSettingsWrite (admin-only policy update).
 	code, body = itReq(t, srv, "PUT", "/api/v1/tenants/acme/git-config", "good",
 		`{"repo":"acme/acme-inari-state","commitPolicy":"direct","userTemplateFallback":"platform_app"}`)
 	if code != http.StatusOK && code != http.StatusNoContent {
 		t.Fatalf("set fallback: %d %s", code, body)
 	}
-	if !az.saw(authz.RelationPlatformEngineer) {
-		t.Fatal("git-config PUT must check RelationPlatformEngineer")
+	if !az.saw(authz.RelationTenantSettingsWrite) {
+		t.Fatal("git-config PUT must check RelationTenantSettingsWrite")
 	}
 	code, body = itReq(t, srv, "GET", "/api/v1/tenants/acme/git-config", "good", "")
 	if code != http.StatusOK {

@@ -48,21 +48,24 @@ func TestTupleWriterTenantCreatedSeedsRoleTuples(t *testing.T) {
 		OrgID: "org:1",
 		Slug:  "acme",
 		Teams: []types.TeamSeed{
-			{TeamID: "t1", Name: "platform-team", Role: types.RolePlatformEngineer},
-			{TeamID: "t2", Name: "devs", Role: types.RoleDeveloper},
+			{TeamID: "t1", Name: "platform-team", Permissions: []string{"clusters.register", "tenant.read"}},
+			{TeamID: "t2", Name: "devs", Permissions: []string{"deployments.create"}},
 		},
 	})
 	if err := w.Handle(context.Background(), ev); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if len(fs.written) != 2 {
-		t.Fatalf("written = %v, want 2 tuples", fs.written)
+	if len(fs.written) != 3 {
+		t.Fatalf("written = %v, want 3 tuples", fs.written)
 	}
-	if fs.written[0] != (Tuple{User: "team:t1#member", Relation: "platform_engineer", Object: "organization:1"}) {
+	if fs.written[0] != (Tuple{User: "team:t1#member", Relation: "clusters_register", Object: "organization:1"}) {
 		t.Errorf("tuple[0] = %+v", fs.written[0])
 	}
-	if fs.written[1] != (Tuple{User: "team:t2#member", Relation: "developer", Object: "organization:1"}) {
+	if fs.written[1] != (Tuple{User: "team:t1#member", Relation: "tenant_read", Object: "organization:1"}) {
 		t.Errorf("tuple[1] = %+v", fs.written[1])
+	}
+	if fs.written[2] != (Tuple{User: "team:t2#member", Relation: "deployments_create", Object: "organization:1"}) {
+		t.Errorf("tuple[2] = %+v", fs.written[2])
 	}
 }
 
@@ -72,8 +75,12 @@ func TestTupleWriterRBACMappingsUpdatedRewritesRoleTuples(t *testing.T) {
 	ev := event(t, types.EventRBACMappingsUpdated, types.RBACMappingsPayload{
 		OrgID: "org:1",
 		Changes: []types.TeamRoleChange{
-			{TeamID: "t1", Name: "developers", OldRole: types.RoleDeveloper, NewRole: types.RolePlatformEngineer},
-			{TeamID: "t2", Name: "viewers", OldRole: types.RoleViewer, NewRole: types.RoleOrgAdmin},
+			{TeamID: "t1", Name: "developers",
+				OldRoleID: "r-editor", OldPermissions: []string{"deployments.create"},
+				NewRoleID: "r-operator", NewPermissions: []string{"clusters.register"}},
+			{TeamID: "t2", Name: "viewers",
+				OldRoleID: "r-viewer", OldPermissions: []string{"tenant.read"},
+				NewRoleID: "r-admin", NewPermissions: []string{"tenant.admin"}},
 		},
 	})
 	if err := w.Handle(context.Background(), ev); err != nil {
@@ -82,20 +89,57 @@ func TestTupleWriterRBACMappingsUpdatedRewritesRoleTuples(t *testing.T) {
 	if len(fs.deleted) != 2 {
 		t.Fatalf("deleted = %v, want 2 tuples", fs.deleted)
 	}
-	if fs.deleted[0] != (Tuple{User: "team:t1#member", Relation: "developer", Object: "organization:1"}) {
+	if fs.deleted[0] != (Tuple{User: "team:t1#member", Relation: "deployments_create", Object: "organization:1"}) {
 		t.Errorf("deleted[0] = %+v", fs.deleted[0])
 	}
-	if fs.deleted[1] != (Tuple{User: "team:t2#member", Relation: "viewer", Object: "organization:1"}) {
+	if fs.deleted[1] != (Tuple{User: "team:t2#member", Relation: "tenant_read", Object: "organization:1"}) {
 		t.Errorf("deleted[1] = %+v", fs.deleted[1])
 	}
 	if len(fs.written) != 2 {
 		t.Fatalf("written = %v, want 2 tuples", fs.written)
 	}
-	if fs.written[0] != (Tuple{User: "team:t1#member", Relation: "platform_engineer", Object: "organization:1"}) {
+	if fs.written[0] != (Tuple{User: "team:t1#member", Relation: "clusters_register", Object: "organization:1"}) {
 		t.Errorf("written[0] = %+v", fs.written[0])
 	}
-	if fs.written[1] != (Tuple{User: "team:t2#member", Relation: "admin", Object: "organization:1"}) {
+	if fs.written[1] != (Tuple{User: "team:t2#member", Relation: "tenant_admin", Object: "organization:1"}) {
 		t.Errorf("written[1] = %+v", fs.written[1])
+	}
+}
+
+func TestTupleWriterRoleUpdatedRewritesBoundTeamTuples(t *testing.T) {
+	fs := &fakeStore{}
+	w := NewTupleWriter(fs)
+	ev := event(t, types.EventRoleUpdated, types.RolePayload{
+		OrgID: "org:1", RoleID: "r1", Name: "deployer",
+		OldPermissions: []string{"deployments.create"},
+		NewPermissions: []string{"deployments.create", "catalog.manage"},
+		TeamIDs:        []string{"t1", "t2"},
+	})
+	if err := w.Handle(context.Background(), ev); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(fs.deleted) != 2 || len(fs.written) != 4 {
+		t.Fatalf("deleted = %v, written = %v; want 2/4", fs.deleted, fs.written)
+	}
+	if fs.written[3] != (Tuple{User: "team:t2#member", Relation: "catalog_manage", Object: "organization:1"}) {
+		t.Errorf("written[3] = %+v", fs.written[3])
+	}
+	// role.created/deleted are registered; created writes no tuples.
+	for _, et := range []string{types.EventRoleCreated, types.EventRoleUpdated, types.EventRoleDeleted} {
+		found := false
+		for _, got := range w.EventTypes() {
+			if got == et {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("EventTypes missing %s", et)
+		}
+	}
+	if err := w.Handle(context.Background(), event(t, types.EventRoleCreated, types.RolePayload{
+		OrgID: "org:1", RoleID: "r2", Name: "x", NewPermissions: []string{"tenant.read"},
+	})); err != nil {
+		t.Fatalf("Handle role.created: %v", err)
 	}
 }
 
@@ -121,23 +165,23 @@ func TestTupleWriterMembership(t *testing.T) {
 func TestTupleWriterTeamDeletedRetractsRoleTuple(t *testing.T) {
 	fs := &fakeStore{}
 	w := NewTupleWriter(fs)
+	perms := []string{"deployments.create", "tenant.read"}
 	create := event(t, types.EventTeamCreated, types.TeamCreatedPayload{
-		OrgID: "org:1", TeamID: "t9", Name: "ops", Role: types.RoleDeveloper,
+		OrgID: "org:1", TeamID: "t9", Name: "ops", RoleID: "r-editor", RoleName: "editor", Permissions: perms,
 	})
 	if err := w.Handle(context.Background(), create); err != nil {
 		t.Fatalf("Handle create: %v", err)
 	}
 	del := event(t, types.EventTeamDeleted, types.TeamCreatedPayload{
-		OrgID: "org:1", TeamID: "t9", Name: "ops", Role: types.RoleDeveloper,
+		OrgID: "org:1", TeamID: "t9", Name: "ops", RoleID: "r-editor", RoleName: "editor", Permissions: perms,
 	})
 	if err := w.Handle(context.Background(), del); err != nil {
 		t.Fatalf("Handle delete: %v", err)
 	}
-	want := Tuple{User: "team:t9#member", Relation: "developer", Object: "organization:1"}
-	if len(fs.written) != 1 || fs.written[0] != want {
+	if len(fs.written) != 2 || fs.written[0] != (Tuple{User: "team:t9#member", Relation: "deployments_create", Object: "organization:1"}) {
 		t.Errorf("written = %+v", fs.written)
 	}
-	if len(fs.deleted) != 1 || fs.deleted[0] != want {
+	if len(fs.deleted) != 2 || fs.deleted[1] != (Tuple{User: "team:t9#member", Relation: "tenant_read", Object: "organization:1"}) {
 		t.Errorf("deleted = %+v", fs.deleted)
 	}
 	// EventTypes must include team.deleted or the dispatcher skips it.

@@ -142,7 +142,7 @@ func TestBrokeredIdPLifecycle(t *testing.T) {
 			membersTeam = &teams[i]
 		}
 	}
-	if membersTeam == nil || membersTeam.Role != types.RoleViewer || membersTeam.KeycloakGroupPath != "tenant-acme/members" {
+	if membersTeam == nil || membersTeam.RoleName != "viewer" || membersTeam.KeycloakGroupPath != "tenant-acme/members" {
 		t.Errorf("members team = %+v, want viewer team at tenant-acme/members", membersTeam)
 	}
 	// While the brokered IdP exists, the members team (its Hardcoded Group

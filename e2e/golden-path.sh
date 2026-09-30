@@ -505,7 +505,7 @@ FGA_STORE=$(xcurl "http://openfga:8080/stores" | jq -r '.stores[0].id')
 ALLOWED=false
 for i in $(seq 1 18); do
   ALLOWED=$(xcurl -X POST "http://openfga:8080/stores/$FGA_STORE/check" -H "Content-Type: application/json" \
-    -d "{\"tuple_key\":{\"user\":\"user:$KC_UID\",\"relation\":\"platform_engineer\",\"object\":\"organization:$ORG_KC_ID\"}}" | jq -r .allowed 2>/dev/null || echo false)
+    -d "{\"tuple_key\":{\"user\":\"user:$KC_UID\",\"relation\":\"tenant_admin\",\"object\":\"organization:$ORG_KC_ID\"}}" | jq -r .allowed 2>/dev/null || echo false)
   [ "$ALLOWED" = "true" ] && break
   sleep 5
 done
@@ -734,7 +734,7 @@ fi
 
 log "flipping the viewers team mapping to editor and expecting a binding update"
 xcurl -X PUT -H "Authorization: Bearer $(user_token)" -H "Content-Type: application/json" \
-  -d "{\"mappings\":[{\"team\":\"viewers\",\"role\":\"developer\"}]}" \
+  -d "{\"mappings\":[{\"team\":\"viewers\",\"roleId\":\"editor\"}]}" \
   "$API/tenants/$TENANT/rbac/mappings" >/dev/null || die "PUT rbac/mappings failed"
 for i in $(seq 1 36); do
   if git -C "$STATE_REPO" show main:baseline/rbac/clusterrolebindings.yaml 2>/dev/null \
@@ -975,7 +975,7 @@ EOF
   FAILS=$(sed -n 's/.*fail=\([0-9]*\).*/\1/p' <<<"$TRAFFIC")
   [ "${FAILS:-99}" = "0" ] || die "HA(a): $FAILS failed requests while a pod was being replaced ($TRAFFIC)"
   xcurl -X PUT -H "Authorization: Bearer $(user_token)" -H "Content-Type: application/json" \
-    -d "{\"mappings\":[{\"team\":\"viewers\",\"role\":\"org-admin\"}]}" \
+    -d "{\"mappings\":[{\"team\":\"viewers\",\"roleId\":\"admin\"}]}" \
     "$API/tenants/$TENANT/rbac/mappings" >/dev/null || die "HA(a): PUT rbac/mappings failed after the pod loss"
   for i in $(seq 1 36); do
     if git -C "$STATE_REPO" show main:baseline/rbac/clusterrolebindings.yaml 2>/dev/null \

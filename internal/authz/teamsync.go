@@ -11,13 +11,15 @@ import (
 )
 
 // TeamGroupRef pairs a team with the Keycloak group whose membership grants
-// team membership (tenant-<slug>/<team>). OrgID and Role are what the DB
-// membership projection denormalizes onto membership rows.
+// team membership (tenant-<slug>/<team>). OrgID and RoleID are what the DB
+// membership projection denormalizes onto membership rows; Permissions is
+// the team's role bundle snapshot used by the OrgRoleSync tuple reconciler.
 type TeamGroupRef struct {
-	TeamID    string
-	OrgID     string
-	Role      types.Role
-	GroupPath string
+	TeamID      string
+	OrgID       string
+	RoleID      string
+	Permissions []string
+	GroupPath   string
 }
 
 // TeamGroupLister enumerates every server-owned team group across all

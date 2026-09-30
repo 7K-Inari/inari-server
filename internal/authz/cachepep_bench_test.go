@@ -66,7 +66,7 @@ func BenchmarkMePermissions(b *testing.B) {
 		orgCount   = 5
 	)
 	ctx := context.Background()
-	roles := []string{RelationAdmin, RelationPlatformEngineer, RelationDeveloper, RelationViewer}
+	roles := []string{RelationTenantAdmin, RelationClustersRegister, RelationDeploymentsCreate, RelationTenantRead}
 
 	for _, cached := range []bool{false, true} {
 		name := "uncached"

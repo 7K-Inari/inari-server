@@ -325,7 +325,7 @@ func TestUiExtensionHTTPRoutes(t *testing.T) {
 	t.Run("viewer cannot register", func(t *testing.T) {
 		r, api2 := httpserver.NewRouter(slog.New(slog.NewTextHandler(io.Discard, nil)), itValidator{id}, itReady{})
 		extensionhost.NewHandler(svc, itTenantResolver{org},
-			itRelationAuthorizer{deny: map[string]bool{authz.RelationPlatformEngineer: true}}).RegisterRoutes(api2)
+			itRelationAuthorizer{deny: map[string]bool{authz.RelationExtensionsManage: true}}).RegisterRoutes(api2)
 		s := httptest.NewServer(r)
 		t.Cleanup(s.Close)
 		req, _ := http.NewRequest(http.MethodPost, s.URL+"/api/v1/tenants/acme/extensions/ui",

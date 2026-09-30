@@ -40,7 +40,7 @@ func newMeTestServer(t *testing.T, az authz.Authorizer) *httptest.Server {
 	t.Helper()
 	router, api := httpserver.NewRouter(slog.New(slog.NewTextHandler(nil, nil)),
 		stubValidator{id: &authn.Identity{Subject: "u1"}}, stubReady{})
-	NewMeHandler(az, nil).RegisterRoutes(api)
+	NewMeHandler(az, nil, nil).RegisterRoutes(api)
 	NewHandler(nil, az).RegisterRoutes(api)
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)
@@ -56,21 +56,30 @@ func (s stubTenantResolver) GetTenant(_ context.Context, slug string) (*types.Or
 	return nil, ErrOrgNotFound
 }
 
-// roleAuthorizer grants relation admin only for subject u1 on org:o1.
+// roleAuthorizer grants every capability relation for subject u1 on
+// org:o1.
 type roleAuthorizer struct{}
 
 func (roleAuthorizer) Check(_ context.Context, user, relation, object string) (bool, error) {
-	return user == authz.UserObject("u1") && relation == authz.RelationAdmin && object == authz.OrgObject("org:o1"), nil
+	return user == authz.UserObject("u1") && object == authz.OrgObject("org:o1"), nil
 }
 
 func (roleAuthorizer) ListObjects(context.Context, string, string, string) ([]string, error) {
 	return nil, nil
 }
 
-func TestMyPermissionsOrgRoles(t *testing.T) {
+type stubMemberResolver struct{ roles []string }
+
+func (s stubMemberResolver) ListMemberRoleNames(context.Context, string, string) ([]string, error) {
+	return s.roles, nil
+}
+
+func TestMyPermissionsRoles(t *testing.T) {
 	router, api := httpserver.NewRouter(slog.New(slog.NewTextHandler(nil, nil)),
 		stubValidator{id: &authn.Identity{Subject: "u1", Organizations: []string{"acme"}}}, stubReady{})
-	NewMeHandler(roleAuthorizer{}, stubTenantResolver{org: &types.Organization{ID: "org:o1", Slug: "acme"}}).RegisterRoutes(api)
+	NewMeHandler(roleAuthorizer{},
+		stubTenantResolver{org: &types.Organization{ID: "org:o1", Slug: "acme"}},
+		stubMemberResolver{roles: []string{"admin"}}).RegisterRoutes(api)
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)
 	resp := testTokenReq(t, http.MethodGet, srv.URL+"/api/v1/me/permissions", "")
@@ -78,13 +87,13 @@ func TestMyPermissionsOrgRoles(t *testing.T) {
 		t.Fatalf("got %d, want 200", resp.StatusCode)
 	}
 	var body struct {
-		OrgRoles map[string]types.Role `json:"orgRoles"`
+		Roles map[string][]string `json:"roles"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if body.OrgRoles["acme"] != types.RoleOrgAdmin {
-		t.Fatalf("orgRoles = %v, want acme=org-admin", body.OrgRoles)
+	if len(body.Roles["acme"]) != 1 || body.Roles["acme"][0] != "admin" {
+		t.Fatalf("roles = %v, want acme=[admin]", body.Roles)
 	}
 }
 
@@ -158,9 +167,10 @@ func TestMyPermissionsRequiresToken(t *testing.T) {
 	}
 }
 
-// multiRoleAuthorizer grants u1 admin on org:o1 (acme), developer on
-// org:o2 (beta), platform-engineer on org:o3 (gamma), and viewer on
-// org:o4 (delta), mirroring hierarchical FGA relations.
+// multiRoleAuthorizer grants u1 every capability on org:o1 (acme),
+// deployments.create only on org:o2 (beta), deployments.create +
+// tenant.members.manage on org:o3 (gamma), and nothing on org:o4 (delta,
+// viewer).
 type multiRoleAuthorizer struct{}
 
 func (multiRoleAuthorizer) Check(_ context.Context, user, relation, object string) (bool, error) {
@@ -169,19 +179,32 @@ func (multiRoleAuthorizer) Check(_ context.Context, user, relation, object strin
 	}
 	switch object {
 	case authz.OrgObject("org:o1"):
-		return true, nil // admin implies every relation
+		return true, nil
 	case authz.OrgObject("org:o2"):
-		return relation == authz.RelationDeveloper || relation == authz.RelationViewer, nil
+		return relation == authz.RelationDeploymentsCreate, nil
 	case authz.OrgObject("org:o3"):
-		return relation != authz.RelationAdmin, nil // platform-engineer implies developer + viewer
-	case authz.OrgObject("org:o4"):
-		return relation == authz.RelationViewer, nil
+		return relation == authz.RelationDeploymentsCreate || relation == authz.RelationTenantMembersManage, nil
 	}
 	return false, nil
 }
 
 func (multiRoleAuthorizer) ListObjects(context.Context, string, string, string) ([]string, error) {
 	return nil, nil
+}
+
+// orgRoleNames resolves one role name per org (matching the FGA grants
+// above) — the DB memberships → roles projection.
+type orgRoleNames map[string][]string
+
+func (m orgRoleNames) ListMemberRoleNames(_ context.Context, orgID, _ string) ([]string, error) {
+	return m[orgID], nil
+}
+
+var testOrgRoles = orgRoleNames{
+	"org:o1": {"admin"},
+	"org:o2": {"editor"},
+	"org:o3": {"operator"},
+	"org:o4": {"viewer"},
 }
 
 type multiTenantResolver struct {
@@ -203,7 +226,7 @@ func TestMyPermissionsTenantCapabilities(t *testing.T) {
 		"beta":  {ID: "org:o2", Slug: "beta"},
 		"gamma": {ID: "org:o3", Slug: "gamma"},
 		"delta": {ID: "org:o4", Slug: "delta"},
-	}}).RegisterRoutes(api)
+	}}, testOrgRoles).RegisterRoutes(api)
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)
 	resp := testTokenReq(t, http.MethodGet, srv.URL+"/api/v1/me/permissions", "")
@@ -211,16 +234,16 @@ func TestMyPermissionsTenantCapabilities(t *testing.T) {
 		t.Fatalf("got %d, want 200", resp.StatusCode)
 	}
 	var body struct {
-		OrgRoles map[string]types.Role         `json:"orgRoles"`
-		Tenants  map[string]TenantCapabilities `json:"tenants"`
+		Roles   map[string][]string           `json:"roles"`
+		Tenants map[string]TenantCapabilities `json:"tenants"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	// Existing fields unchanged.
-	if body.OrgRoles["acme"] != types.RoleOrgAdmin || body.OrgRoles["beta"] != types.RoleDeveloper ||
-		body.OrgRoles["gamma"] != types.RolePlatformEngineer || body.OrgRoles["delta"] != types.RoleViewer {
-		t.Fatalf("orgRoles = %v", body.OrgRoles)
+	// Role names come from the DB membership projection.
+	if body.Roles["acme"][0] != "admin" || body.Roles["beta"][0] != "editor" ||
+		body.Roles["gamma"][0] != "operator" || body.Roles["delta"][0] != "viewer" {
+		t.Fatalf("roles = %v", body.Roles)
 	}
 	// Admin gets every capability.
 	acme := body.Tenants["acme"]
@@ -254,7 +277,7 @@ func TestMyPermissionsSkipsStaleOrgClaim(t *testing.T) {
 		stubValidator{id: &authn.Identity{Subject: "u1", Organizations: []string{"acme", "ghost"}}}, stubReady{})
 	NewMeHandler(multiRoleAuthorizer{}, multiTenantResolver{orgs: map[string]*types.Organization{
 		"acme": {ID: "org:o1", Slug: "acme"},
-	}}).RegisterRoutes(api)
+	}}, testOrgRoles).RegisterRoutes(api)
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)
 	resp := testTokenReq(t, http.MethodGet, srv.URL+"/api/v1/me/permissions", "")
@@ -262,14 +285,14 @@ func TestMyPermissionsSkipsStaleOrgClaim(t *testing.T) {
 		t.Fatalf("got %d, want 200 (stale claim must not fail the request)", resp.StatusCode)
 	}
 	var body struct {
-		OrgRoles map[string]types.Role         `json:"orgRoles"`
-		Tenants  map[string]TenantCapabilities `json:"tenants"`
+		Roles   map[string][]string           `json:"roles"`
+		Tenants map[string]TenantCapabilities `json:"tenants"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if len(body.OrgRoles) != 1 || body.OrgRoles["acme"] != types.RoleOrgAdmin {
-		t.Errorf("orgRoles = %v, want only acme", body.OrgRoles)
+	if len(body.Roles) != 1 || body.Roles["acme"][0] != "admin" {
+		t.Errorf("roles = %v, want only acme", body.Roles)
 	}
 	if _, ok := body.Tenants["ghost"]; ok {
 		t.Errorf("tenants must not contain the stale org: %v", body.Tenants)

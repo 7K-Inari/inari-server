@@ -61,9 +61,9 @@ func (itAuthorizer) Check(_ context.Context, user, relation, object string) (boo
 	switch {
 	case object == authz.ObjectPlatform && relation == authz.RelationSuperuser:
 		return user == authz.UserObject("user-admin"), nil
-	case object == authz.OrgObject("org:1") && relation == authz.RelationAdmin:
+	case object == authz.OrgObject("org:1") && relation == authz.RelationSecretStoresManage:
 		return user == authz.UserObject("user-admin") || user == authz.UserObject("user-orgadmin"), nil
-	case object == authz.OrgObject("org:1") && relation == authz.RelationViewer:
+	case object == authz.OrgObject("org:1") && relation == authz.RelationTenantRead:
 		return true, nil
 	}
 	return false, nil

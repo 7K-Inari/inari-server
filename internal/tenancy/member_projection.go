@@ -24,10 +24,11 @@ import (
 //
 // Idempotent and conflict-safe against the invite flow: user and
 // membership writes are same-PK upserts (ON CONFLICT DO NOTHING), so an
-// invite-created row is never modified and an existing higher-role row is
-// never downgraded (roles are part of the membership PK). A stale-read
-// race with the invite flow converges on the next reconcile tick — the
-// same accepted trade-off as the tuple convergence (ADR-0003/0004).
+// invite-created row is never modified and a row granting another role via
+// another team is never downgraded (role_id is part of the membership PK).
+// A stale-read race with the invite flow converges on the next reconcile
+// tick — the same accepted trade-off as the tuple convergence
+// (ADR-0003/0004).
 func (s *Service) SyncTeamMembers(ctx context.Context, ref authz.TeamGroupRef, members []*types.User) error {
 	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		keep := make([]string, 0, len(members))
@@ -38,10 +39,10 @@ func (s *Service) SyncTeamMembers(ctx context.Context, ref authz.TeamGroupRef, m
 			if err := s.store.UpsertUser(ctx, tx, u); err != nil {
 				return err
 			}
-			// Same semantics as AddMember: role denormalized from the team,
-			// conflict on (user, org, role) is a no-op.
+			// Same semantics as AddMember: role reference denormalized from the
+			// team, conflict on (user, org, role_id) is a no-op.
 			if _, err := s.store.AddMembership(ctx, tx, &types.Membership{
-				UserID: u.ID, OrgID: ref.OrgID, TeamID: ref.TeamID, Role: ref.Role,
+				UserID: u.ID, OrgID: ref.OrgID, TeamID: ref.TeamID, RoleID: ref.RoleID,
 			}); err != nil {
 				return err
 			}

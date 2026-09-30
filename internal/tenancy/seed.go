@@ -53,19 +53,27 @@ func (s *Service) SeedPlatformOrg(ctx context.Context) error {
 		if err := s.store.CreateOrganization(ctx, tx, org); err != nil {
 			return err
 		}
+		if err := s.store.SeedBuiltinRoles(ctx, tx, org.ID); err != nil {
+			return err
+		}
 		seeds := make([]types.TeamSeed, 0, len(DefaultTeams))
 		for _, dt := range DefaultTeams {
+			role, err := s.store.GetRoleByName(ctx, tx, org.ID, dt.RoleName)
+			if err != nil {
+				return err
+			}
 			team := types.Team{
 				OrgID:             org.ID,
 				Name:              dt.Name,
-				Role:              dt.Role,
+				RoleID:            role.ID,
+				RoleName:          role.Name,
 				KeycloakGroupPath: GroupPath(PlatformOrgSlug, dt.Name),
 			}
 			if err := s.store.CreateTeam(ctx, tx, &team); err != nil {
 				return err
 			}
 			teams = append(teams, team)
-			seeds = append(seeds, types.TeamSeed{TeamID: team.ID, Name: team.Name, Role: dt.Role})
+			seeds = append(seeds, types.TeamSeed{TeamID: team.ID, Name: team.Name, Permissions: role.Permissions})
 			if err := s.audit.Record(ctx, tx, &types.AuditEvent{
 				OrgID: org.ID, Actor: seedActor, Action: "team.created", ObjectType: "team", ObjectID: team.ID,
 			}); err != nil {

@@ -30,9 +30,10 @@ func ValidLifecycleAction(action string) bool {
 // authorizeLifecycleApprover enforces the platform-admin policy on lifecycle
 // decisions. A tenant freeze sweeps the org's FGA tuples before its lifecycle
 // approval is decided (ADR-0006), so authorization accepts a platform
-// org_creator (FGA, platform:inari) OR a DB-backed org-admin/platform-engineer
-// role (RoleOf reads org_memberships, which survives the tuple sweep). The
-// requester may never decide their own request.
+// org_creator (FGA, platform:inari) OR a DB-backed platform-operations
+// permission (clusters.register — held by exactly the admin and operator
+// built-in bundles; the memberships→roles projection survives the tuple
+// sweep). The requester may never decide their own request.
 func (s *Service) authorizeLifecycleApprover(ctx context.Context, req *types.ApprovalRequest, approver string) error {
 	if sameActor(req.Requester, approver) {
 		return ErrSelfApproval
@@ -49,11 +50,11 @@ func (s *Service) authorizeLifecycleApprover(ctx context.Context, req *types.App
 	if s.roles == nil {
 		return ErrApproverRole
 	}
-	role, err := s.roles.RoleOf(ctx, req.OrgID, approver)
+	ok, err := s.roles.HasPermission(ctx, req.OrgID, approver, authz.PermClustersRegister)
 	if err != nil {
 		return err
 	}
-	if role != types.RoleOrgAdmin && role != types.RolePlatformEngineer {
+	if !ok {
 		return ErrApproverRole
 	}
 	return nil

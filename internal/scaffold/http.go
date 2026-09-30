@@ -157,7 +157,7 @@ type listTemplatesOutput struct {
 }
 
 func (h *Handler) listTemplates(ctx context.Context, in *listTemplatesInput) (*listTemplatesOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -182,7 +182,7 @@ type getTemplateOutput struct {
 }
 
 func (h *Handler) getTemplate(ctx context.Context, in *templatePathInput) (*getTemplateOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +216,7 @@ type createRunOutput struct {
 }
 
 func (h *Handler) createRun(ctx context.Context, in *createRunInput) (*createRunOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeploymentsCreate)
 	if err != nil {
 		return nil, err
 	}
@@ -263,7 +263,7 @@ type getRunOutput struct {
 }
 
 func (h *Handler) getRun(ctx context.Context, in *runPathInput) (*getRunOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +280,7 @@ func (h *Handler) getRun(ctx context.Context, in *runPathInput) (*getRunOutput, 
 }
 
 func (h *Handler) cancelRun(ctx context.Context, in *runPathInput) (*struct{}, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeploymentsCreate)
 	if err != nil {
 		return nil, err
 	}
@@ -301,7 +301,7 @@ type retryRunOutput struct {
 }
 
 func (h *Handler) retryRun(ctx context.Context, in *runPathInput) (*retryRunOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeploymentsCreate)
 	if err != nil {
 		return nil, err
 	}
@@ -391,7 +391,7 @@ type createScaffoldOutput struct {
 }
 
 func (h *Handler) createScaffold(ctx context.Context, in *createScaffoldInput) (*createScaffoldOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeploymentsCreate)
 	if err != nil {
 		return nil, err
 	}
@@ -438,7 +438,7 @@ type getScaffoldOutput struct {
 }
 
 func (h *Handler) getScaffold(ctx context.Context, in *scaffoldPathInput) (*getScaffoldOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}

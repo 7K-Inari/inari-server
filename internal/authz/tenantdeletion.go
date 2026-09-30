@@ -10,18 +10,12 @@ import (
 )
 
 // TuplesForTenantDeletion flattens a TenantDeletingPayload into the exact
-// OpenFGA tuple set to retract: org role tuples per team, team member
+// OpenFGA tuple set to retract: org permission tuples per team, team member
 // tuples, and org parent tuples per child object.
 func TuplesForTenantDeletion(p *types.TenantDeletingPayload) ([]Tuple, error) {
 	var tuples []Tuple
 	for _, t := range p.Teams {
-		rel, err := RoleRelation(t.Role)
-		if err != nil {
-			return nil, err
-		}
-		tuples = append(tuples, Tuple{
-			User: TeamMemberUserset(t.TeamID), Relation: rel, Object: OrgObject(p.OrgID),
-		})
+		tuples = append(tuples, permissionTuples(p.OrgID, t.TeamID, t.Permissions)...)
 	}
 	for _, m := range p.Members {
 		tuples = append(tuples, Tuple{

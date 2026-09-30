@@ -69,8 +69,11 @@ func itServerM3(t *testing.T, checker orchestrator.PolicyChecker) (*httptest.Ser
 	seed := `
 		INSERT INTO organizations (id, slug, display_name, keycloak_org_id) VALUES ('org:1','acme','Acme','kc-1');
 		INSERT INTO users (id, email) VALUES ('user-1','a@x.io'), ('user-2','b@x.io');
-		INSERT INTO memberships (user_id, org_id, role) VALUES
-		  ('user-1','org:1','developer'), ('user-2','org:1','platform-engineer');
+		INSERT INTO roles (org_id, name, display_name, builtin, permissions) VALUES
+		  ('org:1','editor','Developer',true,'["tenant.read","catalog.manage","deployments.create","extensions.invoke","approvals.manage"]'),
+		  ('org:1','operator','Platform Engineer',true,'["tenant.read","tenant.members.manage","clusters.register","cloudaccounts.manage","zones.manage","fleet.manage","policies.manage","secretstores.manage","extensions.manage","extensions.invoke","catalog.manage","deployments.create","approvals.manage"]');
+		INSERT INTO memberships (user_id, org_id, role_id) SELECT 'user-1','org:1',id FROM roles WHERE org_id='org:1' AND name='editor';
+		INSERT INTO memberships (user_id, org_id, role_id) SELECT 'user-2','org:1',id FROM roles WHERE org_id='org:1' AND name='operator';
 		INSERT INTO clusters (id, org_id, name, state) VALUES ('cluster-1','org:1','kind-dev','active');
 		INSERT INTO tenant_git_configs (org_id, repo, commit_policy, base_branch)
 		  VALUES ('org:1','inari-dev/acme-inari-state','direct','main');`

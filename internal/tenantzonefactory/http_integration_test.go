@@ -55,8 +55,8 @@ func (t itTenants) GetTenant(_ context.Context, slug string) (*types.Organizatio
 
 type itRoles struct{}
 
-func (itRoles) RoleOf(context.Context, string, string) (types.Role, error) {
-	return types.RolePlatformEngineer, nil
+func (itRoles) HasPermission(context.Context, string, string, string) (bool, error) {
+	return true, nil
 }
 
 type itItems struct{}

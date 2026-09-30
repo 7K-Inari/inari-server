@@ -21,6 +21,7 @@ import (
 
 	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
 
+	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/orchestrator"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
 	gitgithub "github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider/github"
@@ -582,12 +583,20 @@ type bindRBACResult struct {
 	Member    string `json:"member,omitempty"`
 }
 
-// rbacRole validates a manifest bindRbac.role value against the tenancy
-// org-role vocabulary.
-func rbacRole(raw string) (types.Role, error) {
-	switch types.Role(raw) {
-	case types.RoleOrgAdmin, types.RolePlatformEngineer, types.RoleDeveloper, types.RoleViewer:
-		return types.Role(raw), nil
+// rbacRole validates a manifest bindRbac.role value against the org role
+// vocabulary (ADR-0013). The built-in names (admin/operator/editor/viewer)
+// are canonical; the retired enum values are accepted and mapped for
+// template compatibility.
+func rbacRole(raw string) (string, error) {
+	switch raw {
+	case authz.BuiltinRoleAdmin, authz.BuiltinRoleOperator, authz.BuiltinRoleEditor, authz.BuiltinRoleViewer:
+		return raw, nil
+	case "org-admin":
+		return authz.BuiltinRoleAdmin, nil
+	case "platform-engineer":
+		return authz.BuiltinRoleOperator, nil
+	case "developer":
+		return authz.BuiltinRoleEditor, nil
 	}
 	return "", fmt.Errorf("scaffold: invalid bindRbac.role %q", raw)
 }
@@ -617,13 +626,13 @@ func stepBindingRBAC(ctx context.Context, env *ExecEnv, rc *RunContext, step *ty
 	if err != nil {
 		return false, err
 	}
-	role := types.RoleDeveloper
+	role := authz.BuiltinRoleEditor
 	if env.Templates != nil {
 		pkg, err := templatePackage(ctx, env, rc)
 		if err != nil {
 			return false, err
 		}
-		if role, err = rbacRole(manifestParam(&pkg.Manifest, "bindRbac", "role", string(types.RoleDeveloper))); err != nil {
+		if role, err = rbacRole(manifestParam(&pkg.Manifest, "bindRbac", "role", authz.BuiltinRoleEditor)); err != nil {
 			return false, err
 		}
 	}

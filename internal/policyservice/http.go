@@ -214,7 +214,7 @@ type policyOutput struct {
 }
 
 func (h *Handler) createPolicy(ctx context.Context, in *createPolicyInput) (*policyOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPoliciesManage)
 	if err != nil {
 		return nil, err
 	}
@@ -238,7 +238,7 @@ type listPoliciesOutput struct {
 }
 
 func (h *Handler) listPolicies(ctx context.Context, in *listPoliciesInput) (*listPoliciesOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -257,7 +257,7 @@ type policyIDInput struct {
 }
 
 func (h *Handler) getPolicy(ctx context.Context, in *policyIDInput) (*policyOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -282,7 +282,7 @@ type updatePolicyInput struct {
 }
 
 func (h *Handler) updatePolicy(ctx context.Context, in *updatePolicyInput) (*policyOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPoliciesManage)
 	if err != nil {
 		return nil, err
 	}
@@ -296,7 +296,7 @@ func (h *Handler) updatePolicy(ctx context.Context, in *updatePolicyInput) (*pol
 }
 
 func (h *Handler) deletePolicy(ctx context.Context, in *policyIDInput) (*struct{}, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPoliciesManage)
 	if err != nil {
 		return nil, err
 	}
@@ -323,7 +323,7 @@ type evaluateOutput struct {
 }
 
 func (h *Handler) evaluate(ctx context.Context, in *evaluateInput) (*evaluateOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeploymentsCreate)
 	if err != nil {
 		return nil, err
 	}
@@ -373,7 +373,7 @@ type packOutput struct {
 }
 
 func (h *Handler) createPack(ctx context.Context, in *createPackInput) (*packOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPoliciesManage)
 	if err != nil {
 		return nil, err
 	}
@@ -398,7 +398,7 @@ type listPacksOutput struct {
 }
 
 func (h *Handler) listPacks(ctx context.Context, in *listPacksInput) (*listPacksOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -417,7 +417,7 @@ type packIDInput struct {
 }
 
 func (h *Handler) getPack(ctx context.Context, in *packIDInput) (*packOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -437,7 +437,9 @@ type deletePackInput struct {
 }
 
 func (h *Handler) deletePack(ctx context.Context, in *deletePackInput) (*struct{}, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	// Pack deletion stays admin-only (it was org-admin gated before the
+	// role engine; CRUD/assign is policies.manage, ADR-0013).
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantAdmin)
 	if err != nil {
 		return nil, err
 	}
@@ -460,7 +462,7 @@ type listPackAssignmentsOutput struct {
 }
 
 func (h *Handler) listPackAssignments(ctx context.Context, in *packIDInput) (*listPackAssignmentsOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationPoliciesManage)
 	if err != nil {
 		return nil, err
 	}
@@ -489,7 +491,7 @@ type assignPackOutput struct {
 }
 
 func (h *Handler) assignPack(ctx context.Context, in *assignPackInput) (*assignPackOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPoliciesManage)
 	if err != nil {
 		return nil, err
 	}
@@ -509,7 +511,7 @@ type unassignPackInput struct {
 }
 
 func (h *Handler) unassignPack(ctx context.Context, in *unassignPackInput) (*struct{}, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPoliciesManage)
 	if err != nil {
 		return nil, err
 	}
@@ -536,7 +538,7 @@ type exemptionOutput struct {
 }
 
 func (h *Handler) requestExemption(ctx context.Context, in *requestExemptionInput) (*exemptionOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeploymentsCreate)
 	if err != nil {
 		return nil, err
 	}
@@ -560,7 +562,7 @@ type listExemptionsOutput struct {
 }
 
 func (h *Handler) listExemptions(ctx context.Context, in *listExemptionsInput) (*listExemptionsOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -582,7 +584,7 @@ type decideExemptionInput struct {
 }
 
 func (h *Handler) decideExemption(ctx context.Context, in *decideExemptionInput) (*exemptionOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPoliciesManage)
 	if err != nil {
 		return nil, err
 	}

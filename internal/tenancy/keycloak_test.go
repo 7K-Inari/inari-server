@@ -114,6 +114,50 @@ func TestListGroupMembersPaginates(t *testing.T) {
 	}
 }
 
+func TestListGroupMemberUsers(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/realms/inari/protocol/openid-connect/token":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"tok","expires_in":300}`))
+		case "/admin/realms/inari/groups":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"id":"g1","name":"tenant-acme"}]`))
+		case "/admin/realms/inari/groups/g1/children":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"id":"g2","name":"members"}]`))
+		case "/admin/realms/inari/groups/g2/members":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[
+				{"id":"u1","email":"a@example.com","firstName":"Ada","lastName":"Lovelace"},
+				{"id":"u2","email":"b@example.com"},
+				{"id":"u3"}
+			]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	k := NewKeycloakAdmin(srv.URL, "inari", "inari-platform-admin", "test-secret")
+	users, err := k.ListGroupMemberUsers(context.Background(), "tenant-acme/members")
+	if err != nil {
+		t.Fatalf("ListGroupMemberUsers: %v", err)
+	}
+	if len(users) != 3 {
+		t.Fatalf("users = %d, want 3", len(users))
+	}
+	if users[0].ID != "u1" || users[0].Email != "a@example.com" || users[0].DisplayName != "Ada Lovelace" {
+		t.Errorf("users[0] = %+v, want full profile", users[0])
+	}
+	if users[1].ID != "u2" || users[1].Email != "b@example.com" || users[1].DisplayName != "" {
+		t.Errorf("users[1] = %+v, want email-only profile", users[1])
+	}
+	if users[2].ID != "u3" || users[2].Email != "" {
+		t.Errorf("users[2] = %+v, want id-only profile", users[2])
+	}
+}
+
 func TestClusterClientSecret(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

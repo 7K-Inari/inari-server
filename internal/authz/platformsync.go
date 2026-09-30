@@ -41,6 +41,13 @@ func reconcileGroup(ctx context.Context, store Store, members GroupMemberLister,
 	if err != nil {
 		return err
 	}
+	return reconcileMembers(ctx, store, ids, object, relation)
+}
+
+// reconcileMembers is the reconcileGroup diff core over a pre-fetched
+// Keycloak member id set (OrgTeamSync fetches full member profiles once and
+// converges tuples and the DB projection from the same read).
+func reconcileMembers(ctx context.Context, store Store, ids []string, object, relation string) error {
 	desired := map[string]bool{}
 	for _, id := range ids {
 		desired[UserObject(id)] = true

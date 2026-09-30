@@ -974,12 +974,28 @@ func (k *KeycloakAdmin) DeleteGroup(ctx context.Context, groupPath string) error
 // the org-team reconciler (ADR-0004) diffs this set against FGA tuples and
 // would revoke members beyond the first page.
 func (k *KeycloakAdmin) ListGroupMembers(ctx context.Context, groupPath string) ([]string, error) {
+	users, err := k.ListGroupMemberUsers(ctx, groupPath)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(users))
+	for _, u := range users {
+		out = append(out, u.ID)
+	}
+	return out, nil
+}
+
+// ListGroupMemberUsers returns the full user profiles (id, email, display
+// name) of the group at path a/b/c, paging through the full membership
+// (same truncation constraint as ListGroupMembers: the org-team reconciler
+// also projects this set into the DB member list).
+func (k *KeycloakAdmin) ListGroupMemberUsers(ctx context.Context, groupPath string) ([]*types.User, error) {
 	gid, err := k.resolveGroupID(ctx, groupPath)
 	if err != nil {
 		return nil, err
 	}
 	const pageSize = 500
-	var out []string
+	var out []*types.User
 	for first := 0; ; first += pageSize {
 		resp, err := k.do(ctx, http.MethodGet,
 			fmt.Sprintf("/groups/%s/members?first=%d&max=%d", gid, first, pageSize), nil)
@@ -991,7 +1007,10 @@ func (k *KeycloakAdmin) ListGroupMembers(ctx context.Context, groupPath string) 
 			return nil, fmt.Errorf("keycloak: list group members: status %d", resp.StatusCode)
 		}
 		var users []struct {
-			ID string `json:"id"`
+			ID        string `json:"id"`
+			Email     string `json:"email"`
+			FirstName string `json:"firstName"`
+			LastName  string `json:"lastName"`
 		}
 		err = json.NewDecoder(resp.Body).Decode(&users)
 		_ = resp.Body.Close()
@@ -999,7 +1018,11 @@ func (k *KeycloakAdmin) ListGroupMembers(ctx context.Context, groupPath string) 
 			return nil, err
 		}
 		for _, u := range users {
-			out = append(out, u.ID)
+			out = append(out, &types.User{
+				ID:          u.ID,
+				Email:       u.Email,
+				DisplayName: strings.TrimSpace(u.FirstName + " " + u.LastName),
+			})
 		}
 		if len(users) < pageSize {
 			return out, nil

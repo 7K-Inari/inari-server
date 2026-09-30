@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/7K-Inari/inari-server/internal/audit"
+	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -45,9 +46,12 @@ func policyFor(item *types.CatalogItem) types.ApprovalPolicy {
 	return item.ApprovalPolicy
 }
 
-// checkApprover validates that approver (with their org role) may decide req
-// under the item's policy.
-func checkApprover(item *types.CatalogItem, req *types.ApprovalRequest, approver string, role types.Role) error {
+// checkApprover validates that approver may decide req under the item's
+// policy. platformOps reports whether the approver holds the
+// platform-operations floor permission (clusters.register — held by exactly
+// the admin and operator built-in bundles, ADR-0013), replacing the retired
+// org-admin/platform-engineer role check.
+func checkApprover(item *types.CatalogItem, req *types.ApprovalRequest, approver string, platformOps bool) error {
 	switch policyFor(item) {
 	case types.ApprovalPolicyPeer:
 		// The requester is stored with the actor prefix ("user:<subject>")
@@ -56,7 +60,7 @@ func checkApprover(item *types.CatalogItem, req *types.ApprovalRequest, approver
 			return ErrSelfApproval
 		}
 	case types.ApprovalPolicyPlatformAdmin:
-		if role != types.RoleOrgAdmin && role != types.RolePlatformEngineer {
+		if !platformOps {
 			return ErrApproverRole
 		}
 	}
@@ -166,9 +170,11 @@ func (s *Store) listExpired(ctx context.Context, q db.Querier, now time.Time) ([
 	return out, rows.Err()
 }
 
-// RoleResolver resolves a user's highest org role (tenancy.Service seam).
-type RoleResolver interface {
-	RoleOf(ctx context.Context, orgID, userID string) (types.Role, error)
+// PermissionResolver reports whether a user holds an org permission via any
+// role (tenancy.Service seam, ADR-0013). DB-backed: reads the memberships →
+// roles projection, which survives the tenant-freeze FGA tuple sweep.
+type PermissionResolver interface {
+	HasPermission(ctx context.Context, orgID, userID, permission string) (bool, error)
 }
 
 // ItemResolver loads a catalog item (catalog.Service seam).
@@ -181,7 +187,7 @@ type Service struct {
 	db    *db.DB
 	store *Store
 	audit *audit.Store
-	roles RoleResolver
+	roles PermissionResolver
 	items ItemResolver
 	ttl   time.Duration
 	now   func() time.Time
@@ -198,7 +204,7 @@ type PlatformChecker interface {
 	Check(ctx context.Context, user, relation, object string) (bool, error)
 }
 
-func NewService(d *db.DB, store *Store, auditStore *audit.Store, roles RoleResolver, items ItemResolver) *Service {
+func NewService(d *db.DB, store *Store, auditStore *audit.Store, roles PermissionResolver, items ItemResolver) *Service {
 	return &Service{db: d, store: store, audit: auditStore, roles: roles, items: items, ttl: DefaultTTL, now: time.Now}
 }
 
@@ -410,7 +416,7 @@ func (s *Service) Decide(ctx context.Context, orgID, approvalID, approver string
 			return nil, err
 		}
 	} else {
-		role, err := s.roles.RoleOf(ctx, req.OrgID, approver)
+		platformOps, err := s.roles.HasPermission(ctx, req.OrgID, approver, authz.PermClustersRegister)
 		if err != nil {
 			return nil, err
 		}
@@ -418,7 +424,7 @@ func (s *Service) Decide(ctx context.Context, orgID, approvalID, approver string
 		if err != nil {
 			return nil, err
 		}
-		if err := checkApprover(item, req, approver, role); err != nil {
+		if err := checkApprover(item, req, approver, platformOps); err != nil {
 			return nil, err
 		}
 	}

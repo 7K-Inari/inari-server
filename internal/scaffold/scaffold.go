@@ -77,9 +77,10 @@ type GitProvider interface {
 // RBACBinder ensures the component's maintainers team (Keycloak group +
 // DB role row + audit/outbox) and joins the run creator — the established
 // KC group → DB role → outbox → OpenFGA tuple model (tenancy.Service
-// subset; plan §6). Never direct Keycloak role assignments.
+// subset; plan §6). Never direct Keycloak role assignments. roleName is an
+// org role name (ADR-0013; built-ins admin/operator/editor/viewer).
 type RBACBinder interface {
-	EnsureTeam(ctx context.Context, actor, slug, name string, role types.Role) (*types.Team, error)
+	EnsureTeam(ctx context.Context, actor, slug, name, roleName string) (*types.Team, error)
 	AddMember(ctx context.Context, actor, slug, teamName, userID string) error
 }
 

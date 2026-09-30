@@ -105,7 +105,7 @@ func (h *Handler) registerIdentityRoutes(api huma.API) {
 		OperationID: "putRBACMappings",
 		Method:      http.MethodPut,
 		Path:        "/api/v1/tenants/{org}/rbac/mappings",
-		Summary:     "Declarative bulk set of team→role mappings, applied atomically (org admin only)",
+		Summary:     "Declarative bulk set of team→role mappings, applied atomically (tenant.rbac.manage)",
 		Security:    sec,
 	}, h.putRBACMappings)
 }
@@ -117,7 +117,7 @@ type listIdentityClientsOutput struct {
 }
 
 func (h *Handler) listIdentityClients(ctx context.Context, in *orgPathInput) (*listIdentityClientsOutput, error) {
-	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantIdentityManage)
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +155,7 @@ type createIdentityClientOutput struct {
 }
 
 func (h *Handler) createIdentityClient(ctx context.Context, in *createIdentityClientInput) (*createIdentityClientOutput, error) {
-	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantIdentityManage); err != nil {
 		return nil, err
 	}
 	id := identity(ctx)
@@ -186,7 +186,7 @@ type identityClientPathInput struct {
 }
 
 func (h *Handler) getIdentityClient(ctx context.Context, in *identityClientPathInput) (*identityClientOutput, error) {
-	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantIdentityManage); err != nil {
 		return nil, err
 	}
 	client, err := h.svc.GetIdentityClient(ctx, in.Org, in.ClientID)
@@ -205,7 +205,7 @@ type updateIdentityClientInput struct {
 }
 
 func (h *Handler) updateIdentityClient(ctx context.Context, in *updateIdentityClientInput) (*identityClientOutput, error) {
-	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantIdentityManage); err != nil {
 		return nil, err
 	}
 	client, err := h.svc.GetIdentityClient(ctx, in.Org, in.ClientID)
@@ -241,7 +241,7 @@ func (h *Handler) updateIdentityClient(ctx context.Context, in *updateIdentityCl
 }
 
 func (h *Handler) disableIdentityClient(ctx context.Context, in *identityClientPathInput) (*struct{}, error) {
-	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantIdentityManage); err != nil {
 		return nil, err
 	}
 	id := identity(ctx)
@@ -266,7 +266,7 @@ type putClientScopesInput struct {
 }
 
 func (h *Handler) putIdentityClientScopes(ctx context.Context, in *putClientScopesInput) (*identityClientOutput, error) {
-	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantIdentityManage); err != nil {
 		return nil, err
 	}
 	client, err := h.svc.GetIdentityClient(ctx, in.Org, in.ClientID)
@@ -294,7 +294,7 @@ type rotateSecretOutput struct {
 }
 
 func (h *Handler) rotateIdentityClientSecret(ctx context.Context, in *identityClientPathInput) (*rotateSecretOutput, error) {
-	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantIdentityManage); err != nil {
 		return nil, err
 	}
 	id := identity(ctx)
@@ -319,7 +319,7 @@ type listIdentityScopesOutput struct {
 }
 
 func (h *Handler) listIdentityScopes(ctx context.Context, in *orgPathInput) (*listIdentityScopesOutput, error) {
-	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantIdentityManage); err != nil {
 		return nil, err
 	}
 	out := &listIdentityScopesOutput{}
@@ -330,7 +330,7 @@ func (h *Handler) listIdentityScopes(ctx context.Context, in *orgPathInput) (*li
 type putRBACMappingsInput struct {
 	Org  string `path:"org"`
 	Body struct {
-		Mappings []types.TeamRoleMapping `json:"mappings" doc:"Declarative team→role set; applied atomically"`
+		Mappings []types.TeamRoleMapping `json:"mappings" doc:"Declarative team→roleId set; applied atomically"`
 	}
 }
 
@@ -376,21 +376,27 @@ type getRBACMatrixOutput struct {
 }
 
 func (h *Handler) getRBACMatrix(ctx context.Context, in *getRBACMatrixInput) (*getRBACMatrixOutput, error) {
-	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
-	roles := []rbacClusterRole{
-		{Name: "tenant-" + org.Slug + "-admin", Kind: "operator", Description: "Full tenant administration (org-admin)"},
-		{Name: "tenant-" + org.Slug + "-operator", Kind: "operator", Description: "Operate tenant resources (platform-engineer)"},
-		{Name: "tenant-" + org.Slug + "-editor", Kind: "operator", Description: "Deploy and edit resources (developer)"},
-		{Name: "tenant-" + org.Slug + "-viewer", Kind: "viewer", Description: "Read-only access (viewer)"},
+	orgRoles, err := h.svc.ListRoles(ctx, org.ID)
+	if err != nil {
+		return nil, err
 	}
-	roleName := map[types.Role]string{
-		types.RoleOrgAdmin:         roles[0].Name,
-		types.RolePlatformEngineer: roles[1].Name,
-		types.RoleDeveloper:        roles[2].Name,
-		types.RoleViewer:           roles[3].Name,
+	// One ClusterRole per org role (ADR-0013): tenant-<slug>-<role.Name> —
+	// the names rbacmaterialize renders (contract pinned in render.go).
+	roles := make([]rbacClusterRole, 0, len(orgRoles))
+	kindByName := map[string]string{}
+	for _, r := range orgRoles {
+		kind := "viewer"
+		switch authz.EffectiveK8sTier(r.Permissions) {
+		case "admin", "operator", "editor":
+			kind = "operator"
+		}
+		name := "tenant-" + org.Slug + "-" + r.Name
+		roles = append(roles, rbacClusterRole{Name: name, Kind: kind, Description: r.DisplayName})
+		kindByName[r.Name] = name
 	}
 	teams, err := h.svc.ListTeams(ctx, org.ID)
 	if err != nil {
@@ -403,7 +409,7 @@ func (h *Handler) getRBACMatrix(ctx context.Context, in *getRBACMatrixInput) (*g
 			count = ids
 		}
 		matrix.Groups = append(matrix.Groups, rbacGroup{Path: t.KeycloakGroupPath, Team: t.Name, MemberCount: count})
-		matrix.Mappings = append(matrix.Mappings, rbacMapping{GroupPath: t.KeycloakGroupPath, ClusterRole: roleName[t.Role]})
+		matrix.Mappings = append(matrix.Mappings, rbacMapping{GroupPath: t.KeycloakGroupPath, ClusterRole: kindByName[t.RoleName]})
 	}
 	out := &getRBACMatrixOutput{}
 	out.Body.RBAC = matrix
@@ -411,13 +417,13 @@ func (h *Handler) getRBACMatrix(ctx context.Context, in *getRBACMatrixInput) (*g
 }
 
 func (h *Handler) putRBACMappings(ctx context.Context, in *putRBACMappingsInput) (*putRBACMappingsOutput, error) {
-	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRBACManage); err != nil {
 		return nil, err
 	}
 	seen := make(map[string]bool, len(in.Body.Mappings))
 	for _, m := range in.Body.Mappings {
-		if !m.Role.Valid() {
-			return nil, huma.Error400BadRequest("invalid role: " + string(m.Role))
+		if m.RoleID == "" {
+			return nil, huma.Error400BadRequest("roleId is required for team: " + m.Team)
 		}
 		if seen[m.Team] {
 			return nil, huma.Error400BadRequest("duplicate team in mappings: " + m.Team)
@@ -427,6 +433,10 @@ func (h *Handler) putRBACMappings(ctx context.Context, in *putRBACMappingsInput)
 	id := identity(ctx)
 	changes, err := h.svc.SetRBACMappings(ctx, id.Subject, in.Org, in.Body.Mappings)
 	switch {
+	case errors.Is(err, ErrAdminGuardrail):
+		return nil, huma.Error409Conflict("at least one team must retain the tenant.admin permission")
+	case errors.Is(err, ErrRoleNotFound):
+		return nil, huma.Error400BadRequest("role not found")
 	case errors.Is(err, ErrTeamNotFound):
 		return nil, huma.Error404NotFound("team not found")
 	case errors.Is(err, ErrOrgNotFound):

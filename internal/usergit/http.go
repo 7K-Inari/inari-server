@@ -134,7 +134,7 @@ func (h *Handler) list(ctx context.Context, in *orgPathInput) (*listConnectionsO
 	if h.svc == nil {
 		return nil, errDisabled
 	}
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +199,7 @@ func (h *Handler) beginAuthorize(ctx context.Context, orgSlug, provider, apiBase
 	if h.svc == nil {
 		return nil, errDisabled
 	}
-	org, id, err := h.authorizeOrg(ctx, orgSlug, authz.RelationViewer)
+	org, id, err := h.authorizeOrg(ctx, orgSlug, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -307,7 +307,7 @@ func (h *Handler) disconnect(ctx context.Context, in *disconnectInput) (*disconn
 	if h.svc == nil {
 		return nil, errDisabled
 	}
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}

@@ -86,7 +86,7 @@ type Deps struct {
 // order-independent (routes key on method+path).
 func Register(api huma.API, d Deps) {
 	tenancy.NewHandler(d.Tenancy, d.Authz).WithScopesCatalog(d.IdentityScopes).RegisterRoutes(api)
-	tenancy.NewMeHandler(d.Authz, d.Tenancy).RegisterRoutes(api)
+	tenancy.NewMeHandler(d.Authz, d.Tenancy, d.Tenancy).RegisterRoutes(api)
 	tenancy.NewPlatformHandler(d.Tenancy, d.Authz, d.PlatformAdminGroup).RegisterRoutes(api)
 	clusterregistry.NewHandler(d.Clusters, d.Tenancy, d.Authz, d.CapabilitiesLister).
 		WithAccessInfo(d.OIDCIssuerURL).

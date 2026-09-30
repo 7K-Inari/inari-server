@@ -127,7 +127,7 @@ type listOutput struct {
 }
 
 func (h *Handler) list(ctx context.Context, in *listInput) (*listOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +157,7 @@ type storeOutput struct {
 }
 
 func (h *Handler) create(ctx context.Context, in *createInput) (*storeOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationSecretStoresManage)
 	if err != nil {
 		return nil, err
 	}
@@ -191,7 +191,7 @@ type storePathInput struct {
 }
 
 func (h *Handler) get(ctx context.Context, in *storePathInput) (*storeOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +233,7 @@ type updateInput struct {
 }
 
 func (h *Handler) update(ctx context.Context, in *updateInput) (*storeOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationSecretStoresManage)
 	if err != nil {
 		return nil, err
 	}
@@ -256,7 +256,7 @@ func (h *Handler) update(ctx context.Context, in *updateInput) (*storeOutput, er
 }
 
 func (h *Handler) delete(ctx context.Context, in *storePathInput) (*struct{}, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationSecretStoresManage)
 	if err != nil {
 		return nil, err
 	}
@@ -279,7 +279,7 @@ type statusOutput struct {
 }
 
 func (h *Handler) status(ctx context.Context, in *storePathInput) (*statusOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}

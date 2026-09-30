@@ -203,7 +203,7 @@ type extensionOutput struct {
 }
 
 func (h *Handler) register(ctx context.Context, in *registerInput) (*extensionOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationExtensionsManage)
 	if err != nil {
 		return nil, err
 	}
@@ -227,7 +227,7 @@ type rotateIdentityOutput struct {
 }
 
 func (h *Handler) rotateIdentity(ctx context.Context, in *idInput) (*rotateIdentityOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationExtensionsManage)
 	if err != nil {
 		return nil, err
 	}
@@ -251,7 +251,7 @@ type listOutput struct {
 }
 
 func (h *Handler) list(ctx context.Context, in *listInput) (*listOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -270,7 +270,7 @@ type idInput struct {
 }
 
 func (h *Handler) get(ctx context.Context, in *idInput) (*extensionOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -284,7 +284,7 @@ func (h *Handler) get(ctx context.Context, in *idInput) (*extensionOutput, error
 }
 
 func (h *Handler) unregister(ctx context.Context, in *idInput) (*struct{}, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationExtensionsManage)
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +295,7 @@ func (h *Handler) unregister(ctx context.Context, in *idInput) (*struct{}, error
 }
 
 func (h *Handler) verify(ctx context.Context, in *idInput) (*extensionOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationExtensionsManage)
 	if err != nil {
 		return nil, err
 	}
@@ -344,7 +344,7 @@ type listUiOutput struct {
 }
 
 func (h *Handler) listUi(ctx context.Context, in *listUiInput) (*listUiOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -387,7 +387,7 @@ type uiExtensionOutput struct {
 }
 
 func (h *Handler) registerUi(ctx context.Context, in *registerUiInput) (*uiExtensionOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationExtensionsManage)
 	if err != nil {
 		return nil, err
 	}
@@ -426,7 +426,7 @@ type uiNameInput struct {
 }
 
 func (h *Handler) unregisterUi(ctx context.Context, in *uiNameInput) (*struct{}, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationExtensionsManage)
 	if err != nil {
 		return nil, err
 	}
@@ -460,7 +460,7 @@ type selfPermissionsOutput struct {
 }
 
 func (h *Handler) selfExtensionPermissions(ctx context.Context, in *listUiInput) (*selfPermissionsOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -555,7 +555,7 @@ func jwtExpClaim(tok string) (time.Time, bool) {
 }
 
 func (h *Handler) putSession(ctx context.Context, in *sessionInput) (*sessionOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationExtensionsInvoke)
 	if err != nil {
 		return nil, err
 	}
@@ -591,7 +591,7 @@ type sessionPathInput struct {
 }
 
 func (h *Handler) deleteSession(ctx context.Context, in *sessionPathInput) (*struct{}, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationExtensionsInvoke)
 	if err != nil {
 		return nil, err
 	}

@@ -454,25 +454,56 @@ func run() error {
 	// convergence mechanism for IdP-brokered managed members, who never
 	// pass through the inline invite path: reflected members appear in the
 	// console member list within one sync interval.
-	teamSync := authz.NewOrgTeamSync(fgaInvalidating, idp, authz.TeamGroupListerFunc(
-		func(ctx context.Context) ([]authz.TeamGroupRef, error) {
-			// Active orgs only (ADR-0006): teams of a deleting tenant are
-			// excluded so the reconciler cannot resurrect tuples the
-			// teardown is retracting.
-			teams, err := svc.ListActiveTeams(ctx)
-			if err != nil {
-				return nil, err
+	// teamRoleRefs lists every active tenant's teams with their role's
+	// permission bundle — shared by OrgTeamSync (membership convergence)
+	// and OrgRoleSync (per-permission org tuple convergence, ADR-0013).
+	teamRoleRefs := authz.TeamGroupListerFunc(func(ctx context.Context) ([]authz.TeamGroupRef, error) {
+		// Active orgs only (ADR-0006): teams of a deleting tenant are
+		// excluded so the reconcilers cannot resurrect tuples the teardown
+		// is retracting.
+		teams, err := svc.ListActiveTeams(ctx)
+		if err != nil {
+			return nil, err
+		}
+		permsByOrg := map[string]map[string][]string{}
+		refs := make([]authz.TeamGroupRef, 0, len(teams))
+		for _, t := range teams {
+			perms, ok := permsByOrg[t.OrgID]
+			if !ok {
+				perms = map[string][]string{}
+				roles, err := svc.ListRoles(ctx, t.OrgID)
+				if err != nil {
+					return nil, err
+				}
+				for _, r := range roles {
+					perms[r.ID] = r.Permissions
+				}
+				permsByOrg[t.OrgID] = perms
 			}
-			refs := make([]authz.TeamGroupRef, 0, len(teams))
-			for _, t := range teams {
-				refs = append(refs, authz.TeamGroupRef{
-					TeamID: t.ID, OrgID: t.OrgID, Role: t.Role, GroupPath: t.KeycloakGroupPath,
-				})
-			}
-			return refs, nil
-		}), svc)
+			refs = append(refs, authz.TeamGroupRef{
+				TeamID: t.ID, OrgID: t.OrgID, RoleID: t.RoleID,
+				Permissions: perms[t.RoleID], GroupPath: t.KeycloakGroupPath,
+			})
+		}
+		return refs, nil
+	})
+	teamSync := authz.NewOrgTeamSync(fgaInvalidating, idp, teamRoleRefs, svc)
 	go leaderlease.Run(ctx, leaser, "authz-org-team-sync", func(lctx context.Context) {
 		teamSync.Run(lctx, cfg.OrgGroupSyncInterval)
+	}, log)
+
+	// Org role sync (ADR-0013): converges team → organization permission
+	// tuples from the DB roles projection (post-model-swap repopulation +
+	// drift self-heal). The first pass runs synchronously so the tuple
+	// rebuild completes before the server starts accepting traffic
+	// (org-level checks fail closed until it does); later passes run on
+	// the sync interval under the leader lease.
+	roleSync := authz.NewOrgRoleSync(fgaInvalidating, teamRoleRefs)
+	if err := roleSync.SyncOnce(ctx); err != nil {
+		slog.Warn("org role sync startup pass", "error", err)
+	}
+	go leaderlease.Run(ctx, leaser, "authz-org-role-sync", func(lctx context.Context) {
+		roleSync.Run(lctx, cfg.OrgGroupSyncInterval)
 	}, log)
 
 	registry := clusterregistry.NewService(database, idp, clusterregistry.NewStore(), auditStore,

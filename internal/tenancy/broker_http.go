@@ -109,7 +109,7 @@ func (h *Handler) registerBrokerRoutes(api huma.API) {
 
 // singleProvider returns the org's only brokered IdP (v1: at most one).
 func (h *Handler) singleProvider(ctx context.Context, slug string) (*types.BrokeredIdP, error) {
-	org, err := h.authorizeOrg(ctx, slug, authz.RelationAdmin)
+	org, err := h.authorizeOrg(ctx, slug, authz.RelationTenantIdentityManage)
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +155,7 @@ type putProviderCompatInput struct {
 }
 
 func (h *Handler) putProviderCompat(ctx context.Context, in *putProviderCompatInput) (*providerCompatOutput, error) {
-	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantIdentityManage); err != nil {
 		return nil, err
 	}
 	id := identity(ctx)
@@ -278,7 +278,7 @@ type listBrokeredIdPsOutput struct {
 }
 
 func (h *Handler) listBrokeredIdPs(ctx context.Context, in *orgPathInput) (*listBrokeredIdPsOutput, error) {
-	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantIdentityManage)
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +315,7 @@ type brokeredIdPOutput struct {
 }
 
 func (h *Handler) createBrokeredIdP(ctx context.Context, in *createBrokeredIdPInput) (*brokeredIdPOutput, error) {
-	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantIdentityManage); err != nil {
 		return nil, err
 	}
 	id := identity(ctx)
@@ -338,7 +338,7 @@ type brokeredIdPPathInput struct {
 }
 
 func (h *Handler) getBrokeredIdP(ctx context.Context, in *brokeredIdPPathInput) (*brokeredIdPOutput, error) {
-	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantIdentityManage); err != nil {
 		return nil, err
 	}
 	broker, err := h.svc.GetBrokeredIdP(ctx, in.Org, in.Alias)
@@ -358,7 +358,7 @@ type updateBrokeredIdPInput struct {
 }
 
 func (h *Handler) updateBrokeredIdP(ctx context.Context, in *updateBrokeredIdPInput) (*brokeredIdPOutput, error) {
-	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantIdentityManage); err != nil {
 		return nil, err
 	}
 	broker, err := h.svc.GetBrokeredIdP(ctx, in.Org, in.Alias)
@@ -392,7 +392,7 @@ func (h *Handler) updateBrokeredIdP(ctx context.Context, in *updateBrokeredIdPIn
 }
 
 func (h *Handler) deleteBrokeredIdP(ctx context.Context, in *brokeredIdPPathInput) (*struct{}, error) {
-	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin); err != nil {
+	if _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantIdentityManage); err != nil {
 		return nil, err
 	}
 	id := identity(ctx)

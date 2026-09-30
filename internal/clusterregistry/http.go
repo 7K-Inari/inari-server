@@ -215,7 +215,7 @@ type clusterOutput struct {
 }
 
 func (h *Handler) createCluster(ctx context.Context, in *createClusterInput) (*clusterOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationClustersRegister)
 	if err != nil {
 		return nil, err
 	}
@@ -242,7 +242,7 @@ type listClustersOutput struct {
 }
 
 func (h *Handler) listClusters(ctx context.Context, in *orgPathInput) (*listClustersOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -264,7 +264,7 @@ type clusterPathInput struct {
 }
 
 func (h *Handler) getCluster(ctx context.Context, in *clusterPathInput) (*clusterOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +295,7 @@ type accessInfoOutput struct {
 // (EnsureKubectlClient); the API-server URL is never returned — the hub
 // doesn't know it (pull-only).
 func (h *Handler) getAccessInfo(ctx context.Context, in *clusterPathInput) (*accessInfoOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -324,7 +324,7 @@ type tokenOutput struct {
 }
 
 func (h *Handler) issueToken(ctx context.Context, in *clusterPathInput) (*tokenOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationClustersRegister)
 	if err != nil {
 		return nil, err
 	}
@@ -352,7 +352,7 @@ type listTokensOutput struct {
 }
 
 func (h *Handler) listTokens(ctx context.Context, in *clusterPathInput) (*listTokensOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -375,7 +375,7 @@ type revokeTokenInput struct {
 }
 
 func (h *Handler) revokeToken(ctx context.Context, in *revokeTokenInput) (*struct{}, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationAdmin)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationClustersRegister)
 	if err != nil {
 		return nil, err
 	}
@@ -393,7 +393,7 @@ func (h *Handler) revokeToken(ctx context.Context, in *revokeTokenInput) (*struc
 }
 
 func (h *Handler) approveCluster(ctx context.Context, in *clusterPathInput) (*clusterOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationClustersRegister)
 	if err != nil {
 		return nil, err
 	}
@@ -413,7 +413,7 @@ func (h *Handler) approveCluster(ctx context.Context, in *clusterPathInput) (*cl
 }
 
 func (h *Handler) revokeCluster(ctx context.Context, in *clusterPathInput) (*struct{}, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationClustersRegister)
 	if err != nil {
 		return nil, err
 	}
@@ -427,7 +427,7 @@ func (h *Handler) revokeCluster(ctx context.Context, in *clusterPathInput) (*str
 }
 
 func (h *Handler) deleteCluster(ctx context.Context, in *clusterPathInput) (*struct{}, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationClustersRegister)
 	if err != nil {
 		return nil, err
 	}
@@ -466,7 +466,7 @@ type decommissionOutput struct {
 }
 
 func (h *Handler) decommissionCluster(ctx context.Context, in *decommissionInput) (*decommissionOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationClustersRegister)
 	if err != nil {
 		return nil, err
 	}
@@ -491,7 +491,7 @@ func (h *Handler) decommissionCluster(ctx context.Context, in *decommissionInput
 
 // lifecycle runs a simple state-transition endpoint (cordon/uncordon).
 func (h *Handler) lifecycle(ctx context.Context, in *clusterPathInput, fn func(context.Context, string, string) (*types.Cluster, error)) (*clusterOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationClustersRegister)
 	if err != nil {
 		return nil, err
 	}
@@ -517,7 +517,7 @@ type listCapabilitiesOutput struct {
 }
 
 func (h *Handler) listCapabilities(ctx context.Context, in *clusterPathInput) (*listCapabilitiesOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}

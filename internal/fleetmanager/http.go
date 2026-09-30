@@ -118,7 +118,7 @@ type clusterSetOutput struct {
 }
 
 func (h *Handler) createClusterSet(ctx context.Context, in *createClusterSetInput) (*clusterSetOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationFleetManage)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +142,7 @@ type listClusterSetsOutput struct {
 }
 
 func (h *Handler) listClusterSets(ctx context.Context, in *listClusterSetsInput) (*listClusterSetsOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +161,7 @@ type clusterSetIDInput struct {
 }
 
 func (h *Handler) getClusterSet(ctx context.Context, in *clusterSetIDInput) (*clusterSetOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +175,7 @@ func (h *Handler) getClusterSet(ctx context.Context, in *clusterSetIDInput) (*cl
 }
 
 func (h *Handler) deleteClusterSet(ctx context.Context, in *clusterSetIDInput) (*struct{}, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationFleetManage)
 	if err != nil {
 		return nil, err
 	}
@@ -192,7 +192,7 @@ type membersOutput struct {
 }
 
 func (h *Handler) clusterSetMembers(ctx context.Context, in *clusterSetIDInput) (*membersOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +223,7 @@ type rolloutOutput struct {
 }
 
 func (h *Handler) createRollout(ctx context.Context, in *createRolloutInput) (*rolloutOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationFleetManage)
 	if err != nil {
 		return nil, err
 	}
@@ -250,7 +250,7 @@ type listRolloutsOutput struct {
 }
 
 func (h *Handler) listRollouts(ctx context.Context, in *listRolloutsInput) (*listRolloutsOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -269,7 +269,7 @@ type rolloutIDInput struct {
 }
 
 func (h *Handler) getRollout(ctx context.Context, in *rolloutIDInput) (*rolloutOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -283,7 +283,7 @@ func (h *Handler) getRollout(ctx context.Context, in *rolloutIDInput) (*rolloutO
 }
 
 func (h *Handler) startRollout(ctx context.Context, in *rolloutIDInput) (*rolloutOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationFleetManage)
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +297,7 @@ func (h *Handler) startRollout(ctx context.Context, in *rolloutIDInput) (*rollou
 }
 
 func (h *Handler) stopRollout(ctx context.Context, in *rolloutIDInput) (*rolloutOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationFleetManage)
 	if err != nil {
 		return nil, err
 	}
@@ -311,7 +311,7 @@ func (h *Handler) stopRollout(ctx context.Context, in *rolloutIDInput) (*rollout
 }
 
 func (h *Handler) resumeRollout(ctx context.Context, in *rolloutIDInput) (*rolloutOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationFleetManage)
 	if err != nil {
 		return nil, err
 	}
@@ -333,7 +333,7 @@ type rollbackInput struct {
 }
 
 func (h *Handler) rollbackRollout(ctx context.Context, in *rollbackInput) (*rolloutOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationFleetManage)
 	if err != nil {
 		return nil, err
 	}
@@ -359,7 +359,7 @@ type targetsOutput struct {
 }
 
 func (h *Handler) rolloutTargets(ctx context.Context, in *targetsInput) (*targetsOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -388,7 +388,7 @@ type channelOutput struct {
 }
 
 func (h *Handler) setAgentChannel(ctx context.Context, in *setChannelInput) (*channelOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationFleetManage)
 	if err != nil {
 		return nil, err
 	}
@@ -412,7 +412,7 @@ type listChannelsOutput struct {
 }
 
 func (h *Handler) listAgentChannels(ctx context.Context, in *listChannelsInput) (*listChannelsOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -438,7 +438,7 @@ type listDriftOutput struct {
 }
 
 func (h *Handler) listDrift(ctx context.Context, in *listDriftInput) (*listDriftOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -459,7 +459,7 @@ type bulkQueryInput struct {
 }
 
 func (h *Handler) bulkQueryClusters(ctx context.Context, in *bulkQueryInput) (*membersOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -488,7 +488,7 @@ type bulkResultsOutput struct {
 }
 
 func (h *Handler) bulkDecideApprovals(ctx context.Context, in *bulkDecideInput) (*bulkResultsOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationFleetManage)
 	if err != nil {
 		return nil, err
 	}
@@ -510,7 +510,7 @@ type bulkAssignPolicyInput struct {
 }
 
 func (h *Handler) bulkAssignPolicy(ctx context.Context, in *bulkAssignPolicyInput) (*bulkResultsOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationFleetManage)
 	if err != nil {
 		return nil, err
 	}
@@ -532,7 +532,7 @@ type bulkPinCatalogInput struct {
 }
 
 func (h *Handler) bulkPinCatalog(ctx context.Context, in *bulkPinCatalogInput) (*bulkResultsOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationFleetManage)
 	if err != nil {
 		return nil, err
 	}

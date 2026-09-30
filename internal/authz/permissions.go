@@ -131,6 +131,23 @@ func K8sFragmentTier(slug string) string {
 	return p.k8sFragment
 }
 
+// k8sTierRank orders the rule fragments from least to most privileged;
+// a role's ClusterRole renders the highest fragment any of its permissions
+// contributes (rbacmaterialize rule union).
+var k8sTierRank = map[string]int{"": 0, "viewer": 1, "editor": 2, "operator": 3, "admin": 4}
+
+// EffectiveK8sTier returns the highest k8s rule-fragment tier across a
+// permission set ("" when no permission contributes Kubernetes rules).
+func EffectiveK8sTier(permissions []string) string {
+	best := ""
+	for _, p := range permissions {
+		if k8sTierRank[K8sFragmentTier(p)] > k8sTierRank[best] {
+			best = K8sFragmentTier(p)
+		}
+	}
+	return best
+}
+
 // BuiltinRole is one seeded, deletion-protected default role. Names double
 // as the ClusterRole suffix (tenant-<slug>-<name>) so the four built-ins
 // preserve the pinned tenant-<slug>-{admin,operator,editor,viewer}

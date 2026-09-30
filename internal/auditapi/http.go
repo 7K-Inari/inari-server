@@ -105,7 +105,7 @@ type listEventsOutput struct {
 }
 
 func (h *Handler) list(ctx context.Context, in *listEventsInput) (*listEventsOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +171,7 @@ func toUIEvents(slug string, events []types.AuditEvent) []uiAuditEvent {
 }
 
 func (h *Handler) listUI(ctx context.Context, in *listAuditUIInput) (*listAuditUIOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -191,7 +191,7 @@ func (h *Handler) exportCSV(ctx context.Context, in *listAuditUIInput) (*struct 
 	ContentType string `header:"Content-Type"`
 	Body        []byte
 }, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}

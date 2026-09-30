@@ -260,7 +260,8 @@ func (s *Service) GroupMemberCount(ctx context.Context, groupPath string) (int, 
 // SetRBACMappings applies the declarative team → role mapping set
 // atomically: every mapping is validated first, then all role changes land
 // in one TX with a single audit row and one outbox event driving the
-// OpenFGA tuple rewrite.
+// OpenFGA tuple rewrite. The admin guardrail is re-checked inside the TX:
+// a mapping set that leaves no team with tenant.admin rolls back (409).
 func (s *Service) SetRBACMappings(ctx context.Context, actor, slug string, mappings []types.TeamRoleMapping) ([]types.TeamRoleChange, error) {
 	// Reject duplicate teams up front: each entry is compared against the
 	// team's original role, so a repeated team would emit multiple changes
@@ -280,32 +281,52 @@ func (s *Service) SetRBACMappings(ctx context.Context, actor, slug string, mappi
 	// Validate everything before touching the DB so a bad entry fails the
 	// whole request with no partial writes.
 	teams := make(map[string]*types.Team, len(mappings))
+	roles := make(map[string]*types.Role, len(mappings))
 	for _, m := range mappings {
-		if !m.Role.Valid() {
-			return nil, fmt.Errorf("tenancy: invalid role %q", m.Role)
-		}
 		team, err := s.store.GetTeamByName(ctx, s.db.Pool, org.ID, m.Team)
 		if err != nil {
 			return nil, err
 		}
 		teams[m.Team] = team
+		role, err := s.store.GetRoleByID(ctx, s.db.Pool, org.ID, m.RoleID)
+		if errors.Is(err, ErrRoleNotFound) {
+			role, err = s.store.GetRoleByName(ctx, s.db.Pool, org.ID, m.RoleID)
+		}
+		if err != nil {
+			return nil, err
+		}
+		roles[m.Team] = role
 	}
 	var changes []types.TeamRoleChange
 	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		for _, m := range mappings {
 			team := teams[m.Team]
-			if team.Role == m.Role {
+			newRole := roles[m.Team]
+			if team.RoleID == newRole.ID {
 				continue
 			}
-			if err := s.store.UpdateTeamRole(ctx, tx, team.ID, m.Role); err != nil {
+			oldPerms, err := s.rolePermissions(ctx, tx, org.ID, team.RoleID)
+			if err != nil {
+				return err
+			}
+			if err := s.store.UpdateTeamRole(ctx, tx, team.ID, newRole.ID); err != nil {
 				return err
 			}
 			changes = append(changes, types.TeamRoleChange{
-				TeamID: team.ID, Name: team.Name, OldRole: team.Role, NewRole: m.Role,
+				TeamID: team.ID, Name: team.Name,
+				OldRoleID: team.RoleID, OldPermissions: oldPerms,
+				NewRoleID: newRole.ID, NewPermissions: newRole.Permissions,
 			})
 		}
 		if len(changes) == 0 {
 			return nil
+		}
+		ok, err := s.store.AdminGuardrailHolds(ctx, tx, org.ID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return ErrAdminGuardrail
 		}
 		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
 			OrgID: org.ID, Actor: actor, Action: "rbac.mappings.updated", ObjectType: "organization", ObjectID: org.ID,
@@ -321,6 +342,15 @@ func (s *Service) SetRBACMappings(ctx context.Context, actor, slug string, mappi
 		return nil, err
 	}
 	return changes, nil
+}
+
+// rolePermissions loads a role's permission bundle by ID.
+func (s *Service) rolePermissions(ctx context.Context, q db.Querier, orgID, roleID string) ([]string, error) {
+	role, err := s.store.GetRoleByID(ctx, q, orgID, roleID)
+	if err != nil {
+		return nil, err
+	}
+	return role.Permissions, nil
 }
 
 func mustJSON(v any) []byte {
@@ -388,9 +418,9 @@ func (s *Store) SetIdentityClientStatus(ctx context.Context, q db.Querier, orgID
 }
 
 // UpdateTeamRole sets the org role a team grants (RBAC mappings route).
-func (s *Store) UpdateTeamRole(ctx context.Context, q db.Querier, teamID string, role types.Role) error {
-	const sql = `UPDATE teams SET role=$2 WHERE id=$1`
-	_, err := q.Exec(ctx, sql, teamID, role)
+func (s *Store) UpdateTeamRole(ctx context.Context, q db.Querier, teamID, roleID string) error {
+	const sql = `UPDATE teams SET role_id=$2 WHERE id=$1`
+	_, err := q.Exec(ctx, sql, teamID, roleID)
 	return err
 }
 

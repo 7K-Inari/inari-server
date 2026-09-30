@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/7K-Inari/inari-server/internal/audit"
+	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -117,7 +118,11 @@ func (s *Service) CreateBrokeredIdP(ctx context.Context, actor, slug string, in 
 	// The Hardcoded Group mapper lands brokered managed members in
 	// tenant-<slug>/members; materialize the matching viewer team so the
 	// org-team reconciler (ADR-0004) has a team object to converge tuples on.
-	if _, err := s.ensureTeam(ctx, actor, org, membersTeamName, types.RoleViewer); err != nil {
+	viewer, err := s.store.GetRoleByName(ctx, s.db.Pool, org.ID, authz.BuiltinRoleViewer)
+	if err != nil {
+		return nil, fmt.Errorf("tenancy: resolve viewer role: %w", err)
+	}
+	if _, err := s.ensureTeam(ctx, actor, org, membersTeamName, viewer); err != nil {
 		return nil, fmt.Errorf("tenancy: ensure members team: %w", err)
 	}
 	if err := s.brokers.CreateIdP(ctx, s.brokerSpec(slug, broker, clientSecret)); err != nil {

@@ -30,10 +30,10 @@ type Handler struct {
 	// roles backs the decide fallback that survives the tenant-freeze FGA
 	// tuple sweep (RoleOf reads org_memberships). May be nil in route-only
 	// wiring (export-openapi); the fallback then denies.
-	roles RoleResolver
+	roles PermissionResolver
 }
 
-func NewHandler(svc *Service, tenants TenantResolver, az authz.Authorizer, roles RoleResolver) *Handler {
+func NewHandler(svc *Service, tenants TenantResolver, az authz.Authorizer, roles PermissionResolver) *Handler {
 	return &Handler{svc: svc, tenants: tenants, authz: az, roles: roles}
 }
 
@@ -134,7 +134,7 @@ type listOutput struct {
 }
 
 func (h *Handler) list(ctx context.Context, in *listInput) (*listOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -194,7 +194,7 @@ func (h *Handler) inbox(ctx context.Context, in *inboxInput) (*inboxOutput, erro
 		if err != nil {
 			continue // claim/org drift — omit silently
 		}
-		ok, err := h.authz.Check(ctx, authz.UserObject(id.Subject), authz.RelationViewer, authz.OrgObject(org.ID))
+		ok, err := h.authz.Check(ctx, authz.UserObject(id.Subject), authz.RelationTenantRead, authz.OrgObject(org.ID))
 		if err != nil || !ok {
 			continue
 		}
@@ -225,7 +225,7 @@ type approvalOutput struct {
 }
 
 func (h *Handler) get(ctx context.Context, in *approvalPathInput) (*approvalOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -242,9 +242,9 @@ func (h *Handler) get(ctx context.Context, in *approvalPathInput) (*approvalOutp
 }
 
 func (h *Handler) cancel(ctx context.Context, in *approvalPathInput) (*approvalOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationApprovalsManage)
 	if err != nil {
-		org, id, err = h.authorizeOrgFallback(ctx, in.Org, types.RoleDeveloper, err)
+		org, id, err = h.authorizeOrgFallback(ctx, in.Org, authz.PermApprovalsManage, err)
 		if err != nil {
 			return nil, err
 		}
@@ -287,7 +287,7 @@ func configBody(out *configOutput, rec *types.ApprovalConfigRecord) {
 }
 
 func (h *Handler) getConfig(ctx context.Context, in *configPathInput) (*configOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
 	if err != nil {
 		return nil, err
 	}
@@ -308,7 +308,7 @@ type updateConfigInput struct {
 }
 
 func (h *Handler) updateConfig(ctx context.Context, in *updateConfigInput) (*configOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPlatformEngineer)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationApprovalsManage)
 	if err != nil {
 		return nil, err
 	}
@@ -356,22 +356,11 @@ func (h *Handler) authorizePlatform(ctx context.Context) error {
 	return nil
 }
 
-// roleAtLeast reports whether role ranks at or above floor
-// (viewer < developer < platform-engineer < org-admin).
-func roleAtLeast(role, floor types.Role) bool {
-	rank := map[types.Role]int{
-		types.RoleViewer:           1,
-		types.RoleDeveloper:        2,
-		types.RolePlatformEngineer: 3,
-		types.RoleOrgAdmin:         4,
-	}
-	return rank[role] >= rank[floor] && role.Valid()
-}
-
-// authorizeOrgRole is the last-resort decide authorization: a DB-backed org
-// role check (RoleOf reads org_memberships) that survives the tenant-freeze
-// FGA tuple sweep, unlike the OpenFGA org check in authorizeOrg.
-func (h *Handler) authorizeOrgRole(ctx context.Context, orgID string, floor types.Role) error {
+// authorizeOrgPermission is the last-resort decide authorization: a
+// DB-backed org permission check (the memberships→roles projection survives
+// the tenant-freeze FGA tuple sweep, unlike the OpenFGA org check in
+// authorizeOrg).
+func (h *Handler) authorizeOrgPermission(ctx context.Context, orgID, permission string) error {
 	id := httpserver.IdentityFromContext(ctx)
 	if id == nil {
 		return huma.Error401Unauthorized("unauthenticated")
@@ -379,23 +368,23 @@ func (h *Handler) authorizeOrgRole(ctx context.Context, orgID string, floor type
 	if h.roles == nil {
 		return huma.Error403Forbidden("insufficient permissions")
 	}
-	role, err := h.roles.RoleOf(ctx, orgID, id.Subject)
+	ok, err := h.roles.HasPermission(ctx, orgID, id.Subject, permission)
 	if err != nil {
 		return err
 	}
-	if !roleAtLeast(role, floor) {
+	if !ok {
 		return huma.Error403Forbidden("insufficient permissions")
 	}
 	return nil
 }
 
 // authorizeOrgFallback authorizes org access when the primary FGA check
-// fails: platform org_creator first, then the DB-backed org role (issue
-// #74: a tenant freeze sweeps the org's FGA tuples before its lifecycle
-// approval is resolved, so even legitimate actors lose org-level access;
-// org-admins are not org_creators and the DB role survives the sweep).
-// Returns the original cause when every layer denies.
-func (h *Handler) authorizeOrgFallback(ctx context.Context, slug string, floor types.Role, cause error) (*types.Organization, *authn.Identity, error) {
+// fails: platform org_creator first, then the DB-backed org permission
+// (issue #74: a tenant freeze sweeps the org's FGA tuples before its
+// lifecycle approval is resolved, so even legitimate actors lose org-level
+// access; org-admins are not org_creators and the DB projection survives
+// the sweep). Returns the original cause when every layer denies.
+func (h *Handler) authorizeOrgFallback(ctx context.Context, slug, permission string, cause error) (*types.Organization, *authn.Identity, error) {
 	if perr := h.authorizePlatform(ctx); perr != nil {
 		orgID := ""
 		if org, rerr := h.tenants.GetTenant(ctx, slug); rerr == nil {
@@ -404,7 +393,7 @@ func (h *Handler) authorizeOrgFallback(ctx context.Context, slug string, floor t
 		if orgID == "" {
 			return nil, nil, cause
 		}
-		if rerr := h.authorizeOrgRole(ctx, orgID, floor); rerr != nil {
+		if rerr := h.authorizeOrgPermission(ctx, orgID, permission); rerr != nil {
 			return nil, nil, cause
 		}
 	}
@@ -417,9 +406,9 @@ func (h *Handler) authorizeOrgFallback(ctx context.Context, slug string, floor t
 }
 
 func (h *Handler) decide(ctx context.Context, in *decideInput) (*decideOutput, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeveloper)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationApprovalsManage)
 	if err != nil {
-		org, id, err = h.authorizeOrgFallback(ctx, in.Org, types.RoleDeveloper, err)
+		org, id, err = h.authorizeOrgFallback(ctx, in.Org, authz.PermApprovalsManage, err)
 		if err != nil {
 			return nil, err
 		}

@@ -17,6 +17,7 @@ import (
 type Tenancy interface {
 	GetTenantByID(ctx context.Context, id string) (*types.Organization, error)
 	ListTeams(ctx context.Context, orgID string) ([]types.Team, error)
+	ListRoles(ctx context.Context, orgID string) ([]types.Role, error)
 }
 
 // GitConfigs resolves the tenant's git target (satisfied by an adapter
@@ -67,6 +68,9 @@ func (h *Handler) EventTypes() []string {
 		types.EventTenantCreated,
 		types.EventTeamCreated,
 		types.EventTeamDeleted,
+		types.EventRoleCreated,
+		types.EventRoleUpdated,
+		types.EventRoleDeleted,
 	}
 }
 
@@ -95,8 +99,12 @@ func (h *Handler) Handle(ctx context.Context, ev *types.OutboxEvent) error {
 	if err != nil {
 		return fmt.Errorf("rbacmaterialize: list teams: %w", err)
 	}
+	roles, err := h.tenancy.ListRoles(ctx, org.ID)
+	if err != nil {
+		return fmt.Errorf("rbacmaterialize: list roles: %w", err)
+	}
 	repo, branch, policy := h.target(ctx, org)
-	files := RenderTenantRBAC(org.Slug, teams)
+	files := RenderTenantRBAC(org.Slug, roles, teams)
 	cloneURL, err := h.git.EnsureRepo(ctx, repo)
 	if err != nil {
 		return fmt.Errorf("rbacmaterialize: ensure repo %s: %w", repo, err)

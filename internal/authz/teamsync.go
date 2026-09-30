@@ -6,12 +6,17 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/7K-Inari/inari-server/internal/types"
 )
 
 // TeamGroupRef pairs a team with the Keycloak group whose membership grants
-// team membership (tenant-<slug>/<team>).
+// team membership (tenant-<slug>/<team>). OrgID and Role are what the DB
+// membership projection denormalizes onto membership rows.
 type TeamGroupRef struct {
 	TeamID    string
+	OrgID     string
+	Role      types.Role
 	GroupPath string
 }
 
@@ -29,25 +34,45 @@ func (f TeamGroupListerFunc) ListTeamGroups(ctx context.Context) ([]TeamGroupRef
 	return f(ctx)
 }
 
+// GroupUserLister lists the full user profiles of a Keycloak group's
+// members (tenancy.IdentityProvider seam). User IDs feed FGA tuple
+// convergence; the profiles feed the DB membership projection, so one
+// Keycloak read per group drives both.
+type GroupUserLister interface {
+	ListGroupMemberUsers(ctx context.Context, groupPath string) ([]*types.User, error)
+}
+
+// TeamMemberProjector projects a Keycloak team group's membership into the
+// DB users/memberships projection (tenancy.Service seam). Implementations
+// must be idempotent and must NOT emit membership outbox events: this
+// reconciler converges the FGA tuples itself, and the outbox tuple writer
+// stays scoped to the invite API (single-writer discipline, ADR-0004).
+type TeamMemberProjector interface {
+	SyncTeamMembers(ctx context.Context, ref TeamGroupRef, members []*types.User) error
+}
+
 // OrgTeamSync reconciles Keycloak org-team group membership to
-// team:<id>#member tuples for every tenant (M6.W7, ADR-0004). It is the
-// convergence mechanism for IdP-brokered managed members, who never pass
-// through the inline invite path. Consistency window: one Run interval.
+// team:<id>#member tuples AND to the DB users/memberships projection for
+// every tenant (M6.W7 + M1.W1, ADR-0004). It is the convergence mechanism
+// for IdP-brokered managed members, who never pass through the inline
+// invite path: reflected members appear in the console member list within
+// one Run interval.
 type OrgTeamSync struct {
-	store   Store
-	members GroupMemberLister
-	teams   TeamGroupLister
+	store      Store
+	users      GroupUserLister
+	teams      TeamGroupLister
+	projection TeamMemberProjector
 }
 
-func NewOrgTeamSync(store Store, members GroupMemberLister, teams TeamGroupLister) *OrgTeamSync {
-	return &OrgTeamSync{store: store, members: members, teams: teams}
+func NewOrgTeamSync(store Store, users GroupUserLister, teams TeamGroupLister, projection TeamMemberProjector) *OrgTeamSync {
+	return &OrgTeamSync{store: store, users: users, teams: teams, projection: projection}
 }
 
-// SyncOnce reconciles every team group in both directions: missing members
-// get tuples, tuples for principals no longer in the Keycloak group are
-// deleted. A failing group is logged and skipped so one tenant cannot
-// starve the others; the joined error is returned for the Run loop's log.
-// Idempotent.
+// SyncOnce reconciles every team group in both directions — FGA tuples and
+// DB projection rows: missing members get tuples + rows, tuples/rows for
+// principals no longer in the Keycloak group are deleted. A failing group
+// is logged and skipped so one tenant cannot starve the others; the joined
+// error is returned for the Run loop's log. Idempotent.
 func (s *OrgTeamSync) SyncOnce(ctx context.Context) error {
 	groups, err := s.teams.ListTeamGroups(ctx)
 	if err != nil {
@@ -58,10 +83,33 @@ func (s *OrgTeamSync) SyncOnce(ctx context.Context) error {
 		if g.GroupPath == "" {
 			continue
 		}
-		if err := reconcileGroup(ctx, s.store, s.members, g.GroupPath, TeamObject(g.TeamID), RelationMember); err != nil {
+		if err := s.reconcileTeamGroup(ctx, g); err != nil {
 			slog.Warn("org team sync", "group", g.GroupPath, "error", err)
 			errs = append(errs, fmt.Errorf("%s: %w", g.GroupPath, err))
 		}
+	}
+	return errors.Join(errs...)
+}
+
+// reconcileTeamGroup fetches the group's members once and converges both
+// derived states from it. Tuple convergence and DB projection are
+// independent: a failure in one does not suppress the other, and both
+// retry on the next tick.
+func (s *OrgTeamSync) reconcileTeamGroup(ctx context.Context, g TeamGroupRef) error {
+	users, err := s.users.ListGroupMemberUsers(ctx, g.GroupPath)
+	if err != nil {
+		return err
+	}
+	ids := make([]string, 0, len(users))
+	for _, u := range users {
+		ids = append(ids, u.ID)
+	}
+	var errs []error
+	if err := reconcileMembers(ctx, s.store, ids, TeamObject(g.TeamID), RelationMember); err != nil {
+		errs = append(errs, err)
+	}
+	if err := s.projection.SyncTeamMembers(ctx, g, users); err != nil {
+		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
 }

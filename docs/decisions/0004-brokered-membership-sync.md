@@ -74,7 +74,30 @@ ADR 0003).
   page.
 - The `members` team backs the brokered IdP's Hardcoded Group mapper and
   cannot be deleted while a brokered IdP exists for the org.
-- Membership **DB rows** remain invite-projection only; console member
-  lists are unaffected. FGA tuples are the authz-relevant state.
 - SAML brokering (W8) reuses this reconciler unchanged — its mappers land
   users in the same Keycloak groups.
+
+## Follow-up (M1.W1): DB membership projection moved into the reconciler
+
+The consequence above — "membership DB rows remain invite-projection only"
+— is superseded. `OrgTeamSync` now also projects Keycloak group membership
+into the DB (`users` + `memberships` rows) in the same reconcile pass, so
+reflected/brokered members appear in the console member list within one
+`INARI_ORG_GROUP_SYNC_INTERVAL` (default 30s):
+
+- One paged Keycloak read per group (`ListGroupMemberUsers`, full profiles)
+  drives both the FGA tuple diff and the DB projection.
+- Projection writes are idempotent same-PK upserts (`ON CONFLICT DO
+  NOTHING` on `(user_id, org_id, role)`), conflict-safe against the invite
+  flow: an existing row is never modified and a higher-role row never
+  downgraded. Delete-stale is scoped to the reconciled `team_id` only.
+- Single-writer discipline: the projection emits **no** `membership.*`
+  outbox events (and no audit rows) — the reconciler owns the FGA tuples
+  for reflected membership, and the tuple writer stays scoped to the
+  invite API, so emitting events would double tuple writes.
+
+Login-time claim provisioning (a `me/sync` endpoint writing rows from
+token claims) was considered and **rejected**: it would only shave the
+≤30s convergence window while adding a new write path, claim trust, and
+races with the invite flow — this ADR's stance (Keycloak group membership
+is the source of truth, everything else is reconciled) stands unchanged.

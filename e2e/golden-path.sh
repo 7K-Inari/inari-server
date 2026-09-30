@@ -975,7 +975,7 @@ EOF
   FAILS=$(sed -n 's/.*fail=\([0-9]*\).*/\1/p' <<<"$TRAFFIC")
   [ "${FAILS:-99}" = "0" ] || die "HA(a): $FAILS failed requests while a pod was being replaced ($TRAFFIC)"
   xcurl -X PUT -H "Authorization: Bearer $(user_token)" -H "Content-Type: application/json" \
-    -d "{\"mappings\":[{\"team\":\"viewers\",\"role\":\"org-admin\"}]}" \
+    -d "{\"mappings\":[{\"team\":\"viewers\",\"roleId\":\"admin\"}]}" \
     "$API/tenants/$TENANT/rbac/mappings" >/dev/null || die "HA(a): PUT rbac/mappings failed after the pod loss"
   for i in $(seq 1 36); do
     if git -C "$STATE_REPO" show main:baseline/rbac/clusterrolebindings.yaml 2>/dev/null \

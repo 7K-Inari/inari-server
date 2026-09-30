@@ -2,6 +2,7 @@ package tenancy
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -48,7 +49,25 @@ type myPermissionsOutput struct {
 		// can only guess from the token and falls back to read-only
 		// (live incident 2026-09-16).
 		OrgRoles map[string]types.Role `json:"orgRoles,omitempty"`
+		// Tenants maps every organization the caller belongs to (slug) to
+		// its capability projection, derived from the same FGA relations as
+		// OrgRoles in a single pass (RBAC redesign Phase A). The access
+		// console gates individual actions on these flags instead of the
+		// binary admin/viewer split.
+		Tenants map[string]TenantCapabilities `json:"tenants,omitempty"`
 	}
+}
+
+// TenantCapabilities is the per-tenant action projection the access console
+// disables/enables on. Flags mirror the REST route gates:
+// canDeploy=developer+ (orchestrator deploys), canManageMembers=
+// platform-engineer+ (team member add/remove), canManageTeams and
+// canManageRbac=org-admin (team CRUD, rbac/mappings).
+type TenantCapabilities struct {
+	CanDeploy        bool `json:"canDeploy"`
+	CanManageMembers bool `json:"canManageMembers"`
+	CanManageTeams   bool `json:"canManageTeams"`
+	CanManageRbac    bool `json:"canManageRbac"`
 }
 
 func (h *MeHandler) getMyPermissions(ctx context.Context, _ *struct{}) (*myPermissionsOutput, error) {
@@ -64,44 +83,60 @@ func (h *MeHandler) getMyPermissions(ctx context.Context, _ *struct{}) (*myPermi
 	out.Body.CanCreateOrganizations = ok
 	if h.tenants != nil && len(id.Organizations) > 0 {
 		out.Body.OrgRoles = map[string]types.Role{}
+		out.Body.Tenants = map[string]TenantCapabilities{}
 		for _, slug := range id.Organizations {
-			role, err := h.effectiveRole(ctx, id.Subject, slug)
+			role, caps, err := h.effectiveAccess(ctx, id.Subject, slug)
+			if errors.Is(err, ErrOrgNotFound) {
+				// Stale claim (e.g. a deleted tenant still in the token):
+				// skip it instead of failing the whole projection.
+				continue
+			}
 			if err != nil {
 				return nil, err
 			}
 			if role != "" {
 				out.Body.OrgRoles[slug] = role
+				out.Body.Tenants[slug] = caps
 			}
 		}
 	}
 	return out, nil
 }
 
-// effectiveRole reports the caller's strongest role in one org, strongest
-// first: admin ⊇ platform_engineer ⊇ developer ⊇ viewer.
-func (h *MeHandler) effectiveRole(ctx context.Context, subject, slug string) (types.Role, error) {
+// effectiveAccess reports the caller's strongest role in one org and the
+// capability set that role grants, in a single strongest-first pass:
+// admin ⊇ platform_engineer ⊇ developer ⊇ viewer (model.fga hierarchy), so
+// the first passing relation determines the whole projection.
+func (h *MeHandler) effectiveAccess(ctx context.Context, subject, slug string) (types.Role, TenantCapabilities, error) {
 	org, err := h.tenants.GetTenant(ctx, slug)
 	if err != nil {
-		return "", err
+		return "", TenantCapabilities{}, err
 	}
 	user := authz.UserObject(subject)
 	obj := authz.OrgObject(org.ID)
 	for _, step := range []struct {
 		relation string
 		role     types.Role
+		caps     TenantCapabilities
 	}{
-		{authz.RelationAdmin, types.RoleOrgAdmin},
-		{authz.RelationPlatformEngineer, types.RolePlatformEngineer},
-		{authz.RelationDeveloper, types.RoleDeveloper},
-		{authz.RelationViewer, types.RoleViewer},
+		{authz.RelationAdmin, types.RoleOrgAdmin, TenantCapabilities{
+			CanDeploy: true, CanManageMembers: true, CanManageTeams: true, CanManageRbac: true,
+		}},
+		{authz.RelationPlatformEngineer, types.RolePlatformEngineer, TenantCapabilities{
+			CanDeploy: true, CanManageMembers: true,
+		}},
+		{authz.RelationDeveloper, types.RoleDeveloper, TenantCapabilities{
+			CanDeploy: true,
+		}},
+		{authz.RelationViewer, types.RoleViewer, TenantCapabilities{}},
 	} {
 		ok, err := h.authz.Check(ctx, user, step.relation, obj)
 		if err != nil {
-			return "", err
+			return "", TenantCapabilities{}, err
 		}
 		if ok {
-			return step.role, nil
+			return step.role, step.caps, nil
 		}
 	}
-	return "", nil
+	return "", TenantCapabilities{}, nil
 }

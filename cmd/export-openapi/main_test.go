@@ -102,6 +102,9 @@ func TestExportContainsFullRESTSurface(t *testing.T) {
 		"/api/v1/admin/catalog/sync",
 		// me
 		"/api/v1/me/permissions",
+		// platform admins (RBAC redesign Phase A)
+		"/api/v1/platform/admins",
+		"/api/v1/platform/admins/{subject}",
 		// auditapi
 		"/api/v1/tenants/{org}/audit-events",
 		"/api/v1/tenants/{org}/audit",

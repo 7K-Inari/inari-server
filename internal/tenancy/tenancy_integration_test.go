@@ -345,7 +345,7 @@ func TestMembershipLifecycle(t *testing.T) {
 	}
 
 	// List for the console.
-	members, err := svc.ListMembers(ctx, org.ID, devTeam.ID)
+	members, err := svc.ListMembers(ctx, org.ID, devTeam.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -807,7 +807,7 @@ func TestOrgMemberRoleLifecycle(t *testing.T) {
 	}
 
 	// Org-wide view groups per user with highest role.
-	members, err := svc.ListOrgMembers(ctx, org.ID)
+	members, err := svc.ListOrgMembers(ctx, org.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}

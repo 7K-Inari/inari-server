@@ -407,13 +407,19 @@ type teamPathInput struct {
 	Team string `path:"team" doc:"Team name"`
 }
 
+type listMembersInput struct {
+	Org  string `path:"org" doc:"Tenant slug"`
+	Team string `path:"team" doc:"Team name"`
+	Q    string `query:"q" maxLength:"200" doc:"Case-insensitive email substring filter"`
+}
+
 type listMembersOutput struct {
 	Body struct {
 		Members []MemberView `json:"members"`
 	}
 }
 
-func (h *Handler) listMembers(ctx context.Context, in *teamPathInput) (*listMembersOutput, error) {
+func (h *Handler) listMembers(ctx context.Context, in *listMembersInput) (*listMembersOutput, error) {
 	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
 	if err != nil {
 		return nil, err
@@ -425,7 +431,7 @@ func (h *Handler) listMembers(ctx context.Context, in *teamPathInput) (*listMemb
 	if err != nil {
 		return nil, err
 	}
-	members, err := h.svc.ListMembers(ctx, org.ID, team.ID)
+	members, err := h.svc.ListMembers(ctx, org.ID, team.ID, in.Q)
 	if err != nil {
 		return nil, err
 	}
@@ -624,18 +630,23 @@ func (h *Handler) deleteTeam(ctx context.Context, in *teamPathInput) (*struct{},
 	return nil, nil
 }
 
+type listOrgMembersInput struct {
+	Org string `path:"org" doc:"Tenant slug"`
+	Q   string `query:"q" maxLength:"200" doc:"Case-insensitive email substring filter"`
+}
+
 type listOrgMembersOutput struct {
 	Body struct {
 		Members []OrgMemberView `json:"members"`
 	}
 }
 
-func (h *Handler) listOrgMembers(ctx context.Context, in *orgPathInput) (*listOrgMembersOutput, error) {
+func (h *Handler) listOrgMembers(ctx context.Context, in *listOrgMembersInput) (*listOrgMembersOutput, error) {
 	org, err := h.authorizeOrg(ctx, in.Org, authz.RelationViewer)
 	if err != nil {
 		return nil, err
 	}
-	members, err := h.svc.ListOrgMembers(ctx, org.ID)
+	members, err := h.svc.ListOrgMembers(ctx, org.ID, in.Q)
 	if err != nil {
 		return nil, err
 	}

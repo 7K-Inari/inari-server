@@ -70,6 +70,10 @@ type Deps struct {
 	AllowedAPIBases []string
 	RemoteEntries   *extensionhost.RemoteEntryFetcher
 
+	// PlatformAdminGroup is the Keycloak realm group backing the platform
+	// admins API (config INARI_PLATFORM_ADMIN_GROUP).
+	PlatformAdminGroup string
+
 	// Platform-declared agent compatibility policy (config.Agent* fields);
 	// all empty omits the agentCompat block from cluster responses.
 	AgentSupportedRange     string
@@ -83,6 +87,7 @@ type Deps struct {
 func Register(api huma.API, d Deps) {
 	tenancy.NewHandler(d.Tenancy, d.Authz).WithScopesCatalog(d.IdentityScopes).RegisterRoutes(api)
 	tenancy.NewMeHandler(d.Authz, d.Tenancy).RegisterRoutes(api)
+	tenancy.NewPlatformHandler(d.Tenancy, d.Authz, d.PlatformAdminGroup).RegisterRoutes(api)
 	clusterregistry.NewHandler(d.Clusters, d.Tenancy, d.Authz, d.CapabilitiesLister).
 		WithAccessInfo(d.OIDCIssuerURL).
 		WithAgentCompat(d.AgentSupportedRange, d.AgentCurrentVersion, d.AgentRecommendedVersion).RegisterRoutes(api)

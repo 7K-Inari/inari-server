@@ -204,6 +204,56 @@ func TestSyncTeamMembersNeverDowngrades(t *testing.T) {
 	}
 }
 
+// Duplicate entries in the Keycloak member list (defensive: the Admin API
+// should not produce them) collapse to one row and keep the user in the
+// keep set.
+func TestSyncTeamMembersDuplicateEntries(t *testing.T) {
+	ctx, _, svc, _, org, ref := setupProjectionTenant(t)
+
+	dup := &types.User{ID: "kc-u1", Email: "ada@example.com"}
+	if err := svc.SyncTeamMembers(ctx, ref, []*types.User{dup, dup}); err != nil {
+		t.Fatalf("SyncTeamMembers: %v", err)
+	}
+	if got := teamMembers(t, svc, org.ID, ref.TeamID); len(got) != 1 {
+		t.Errorf("members = %+v, want exactly 1 row for duplicated input", got)
+	}
+}
+
+// The reconcile projection and the invite flow racing on the same user
+// must converge to exactly one membership row, with no error on either
+// side (plan risk 6: projection vs invite flow interaction).
+func TestSyncTeamMembersConcurrentWithInvite(t *testing.T) {
+	ctx, database, svc, idp, org, ref := setupProjectionTenant(t)
+	idp.users["kc-u9"] = true
+
+	const racers = 8
+	errs := make(chan error, 2*racers)
+	for i := 0; i < racers; i++ {
+		go func() {
+			errs <- svc.SyncTeamMembers(ctx, ref, []*types.User{{ID: "kc-u9", Email: "nine@example.com"}})
+		}()
+		go func() {
+			// AddMember is idempotent by design (same-PK upsert); concurrent
+			// repeats race the projection the way an invite retry would.
+			errs <- svc.AddMember(ctx, "admin", "acme", "viewers", "kc-u9")
+		}()
+	}
+	for i := 0; i < 2*racers; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("racer error: %v", err)
+		}
+	}
+	var rows int
+	if err := database.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM memberships WHERE org_id=$1 AND team_id=$2 AND user_id='kc-u9'`,
+		org.ID, ref.TeamID).Scan(&rows); err != nil {
+		t.Fatalf("count memberships: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("membership rows for kc-u9 = %d, want exactly 1 after concurrent writers", rows)
+	}
+}
+
 func teamIDByName(t *testing.T, database *db.DB, orgID, name string) string {
 	t.Helper()
 	team, err := tenancy.NewStore().GetTeamByName(context.Background(), database.Pool, orgID, name)

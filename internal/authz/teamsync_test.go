@@ -221,7 +221,7 @@ func TestOrgTeamSyncProjectsMembersToDB(t *testing.T) {
 	syncer := NewOrgTeamSync(st,
 		&pathUserLister{byPath: map[string][]*types.User{"tenant-acme/members": members}},
 		&fakeTeamGroupLister{groups: []TeamGroupRef{{
-			TeamID: "t1", OrgID: "org:1", Role: types.RoleViewer, GroupPath: "tenant-acme/members",
+			TeamID: "t1", OrgID: "org:1", RoleID: "r-viewer", GroupPath: "tenant-acme/members",
 		}}},
 		proj)
 	if err := syncer.SyncOnce(context.Background()); err != nil {
@@ -231,7 +231,7 @@ func TestOrgTeamSyncProjectsMembersToDB(t *testing.T) {
 		t.Fatalf("projector calls = %d, want 1", len(proj.calls))
 	}
 	call := proj.calls[0]
-	if call.ref.TeamID != "t1" || call.ref.OrgID != "org:1" || call.ref.Role != types.RoleViewer {
+	if call.ref.TeamID != "t1" || call.ref.OrgID != "org:1" || call.ref.RoleID != "r-viewer" {
 		t.Errorf("projected ref = %+v, want t1/org:1/viewer", call.ref)
 	}
 	if len(call.members) != 2 || call.members[0].ID != "u1" || call.members[1].ID != "u2" {

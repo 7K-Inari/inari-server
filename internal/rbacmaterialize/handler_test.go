@@ -16,6 +16,7 @@ import (
 type fakeTenancy struct {
 	org   *types.Organization
 	teams []types.Team
+	roles []types.Role
 	err   error
 }
 
@@ -28,6 +29,10 @@ func (f *fakeTenancy) GetTenantByID(context.Context, string) (*types.Organizatio
 
 func (f *fakeTenancy) ListTeams(context.Context, string) ([]types.Team, error) {
 	return f.teams, nil
+}
+
+func (f *fakeTenancy) ListRoles(context.Context, string) ([]types.Role, error) {
+	return f.roles, nil
 }
 
 type fakeGitConfigs struct {
@@ -56,6 +61,9 @@ func TestHandlerEventTypes(t *testing.T) {
 		types.EventTenantCreated:       true,
 		types.EventTeamCreated:         true,
 		types.EventTeamDeleted:         true,
+		types.EventRoleCreated:         true,
+		types.EventRoleUpdated:         true,
+		types.EventRoleDeleted:         true,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("EventTypes = %v", got)
@@ -72,7 +80,7 @@ func TestHandlerCommitsRenderedRBAC(t *testing.T) {
 	h := NewHandler(&fakeTenancy{
 		org: &types.Organization{ID: "org:1", Slug: "acme", Status: "active"},
 		teams: []types.Team{
-			{Name: "admins", Role: types.RoleOrgAdmin, KeycloakGroupPath: "tenant-acme/admins"},
+			{Name: "admins", RoleID: "r-admin", RoleName: "admin", KeycloakGroupPath: "tenant-acme/admins"},
 		},
 	}, &fakeGitConfigs{}, git, nil)
 

@@ -11,11 +11,11 @@ func TestTuplesForTenantDeletion(t *testing.T) {
 		OrgID: "org:kc-1",
 		Slug:  "acme",
 		Teams: []types.TeamSeed{
-			{TeamID: "t1", Name: "platform-team", Role: types.RolePlatformEngineer},
-			{TeamID: "t2", Name: "viewers", Role: types.RoleViewer},
+			{TeamID: "t1", Name: "platform-team", Permissions: []string{"clusters.register", "tenant.read"}},
+			{TeamID: "t2", Name: "viewers", Permissions: []string{"tenant.read"}},
 		},
 		Members: []types.MembershipPayload{
-			{OrgID: "org:kc-1", TeamID: "t1", UserID: "u1", Role: types.RolePlatformEngineer},
+			{OrgID: "org:kc-1", TeamID: "t1", UserID: "u1", RoleID: "r-operator"},
 		},
 		Objects: map[string][]string{
 			"cluster":       {"c1"},
@@ -29,8 +29,9 @@ func TestTuplesForTenantDeletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[Tuple]bool{
-		{User: "team:t1#member", Relation: "platform_engineer", Object: "organization:kc-1"}:     false,
-		{User: "team:t2#member", Relation: "viewer", Object: "organization:kc-1"}:                false,
+		{User: "team:t1#member", Relation: "clusters_register", Object: "organization:kc-1"}:     false,
+		{User: "team:t1#member", Relation: "tenant_read", Object: "organization:kc-1"}:           false,
+		{User: "team:t2#member", Relation: "tenant_read", Object: "organization:kc-1"}:           false,
 		{User: "user:u1", Relation: "member", Object: "team:t1"}:                                 false,
 		{User: "organization:kc-1", Relation: "parent", Object: "cluster:c1"}:                    false,
 		{User: "organization:kc-1", Relation: "parent", Object: "cloud_account:a1"}:              false,
@@ -62,7 +63,7 @@ func TestTupleWriterTenantDeletingSweep(t *testing.T) {
 	w := NewTupleWriter(fs)
 	p := types.TenantDeletingPayload{
 		OrgID: "org:1",
-		Teams: []types.TeamSeed{{TeamID: "t9", Name: "devs", Role: types.RoleDeveloper}},
+		Teams: []types.TeamSeed{{TeamID: "t9", Name: "devs", Permissions: []string{"deployments.create"}}},
 	}
 	ev := event(t, types.EventTenantDeleting, p)
 	if err := w.Handle(t.Context(), ev); err != nil {
@@ -71,7 +72,7 @@ func TestTupleWriterTenantDeletingSweep(t *testing.T) {
 	if len(fs.deleted) != 1 {
 		t.Fatalf("deleted = %d, want 1", len(fs.deleted))
 	}
-	want := Tuple{User: "team:t9#member", Relation: "developer", Object: "organization:1"}
+	want := Tuple{User: "team:t9#member", Relation: "deployments_create", Object: "organization:1"}
 	if fs.deleted[0] != want {
 		t.Errorf("deleted[0] = %+v, want %+v", fs.deleted[0], want)
 	}

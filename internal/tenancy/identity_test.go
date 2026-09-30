@@ -27,8 +27,8 @@ func TestIdentityClientID(t *testing.T) {
 func TestSetRBACMappingsRejectsDuplicateTeams(t *testing.T) {
 	svc := NewService(nil, nil, nil, nil)
 	_, err := svc.SetRBACMappings(context.Background(), "u1", "acme", []types.TeamRoleMapping{
-		{Team: "developers", Role: types.RoleViewer},
-		{Team: "developers", Role: types.RoleOrgAdmin},
+		{Team: "developers", RoleID: "r-viewer"},
+		{Team: "developers", RoleID: "r-admin"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "duplicate team") {
 		t.Errorf("err = %v, want duplicate team error", err)
@@ -56,7 +56,7 @@ func TestIdentityRoutesRequireOrgMembership(t *testing.T) {
 		{http.MethodPut, "/api/v1/tenants/acme/identity/clients/org-acme-foo/scopes", `{"scopes":["read"]}`},
 		{http.MethodPost, "/api/v1/tenants/acme/identity/clients/org-acme-foo/secret:rotate", "{}"},
 		{http.MethodGet, "/api/v1/tenants/acme/identity/scopes", ""},
-		{http.MethodPut, "/api/v1/tenants/acme/rbac/mappings", `{"mappings":[{"team":"developers","role":"viewer"}]}`},
+		{http.MethodPut, "/api/v1/tenants/acme/rbac/mappings", `{"mappings":[{"team":"developers","roleId":"viewer"}]}`},
 	} {
 		resp := testTokenReq(t, tc.method, srv.URL+tc.path, tc.body)
 		if resp.StatusCode != http.StatusForbidden {

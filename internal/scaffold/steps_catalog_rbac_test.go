@@ -155,17 +155,17 @@ type fakeRBACBinder struct {
 
 type ensureTeamCall struct {
 	Actor, Slug, Name string
-	Role              types.Role
+	RoleName          string
 }
 
 type addMemberCall struct {
 	Actor, Slug, Team, UserID string
 }
 
-func (f *fakeRBACBinder) EnsureTeam(_ context.Context, actor, slug, name string, role types.Role) (*types.Team, error) {
-	f.teams = append(f.teams, ensureTeamCall{actor, slug, name, role})
+func (f *fakeRBACBinder) EnsureTeam(_ context.Context, actor, slug, name, roleName string) (*types.Team, error) {
+	f.teams = append(f.teams, ensureTeamCall{actor, slug, name, roleName})
 	return &types.Team{
-		ID: "team:" + name, OrgID: "org:acme", Name: name, Role: role,
+		ID: "team:" + name, OrgID: "org:acme", Name: name, RoleName: roleName,
 		KeycloakGroupPath: "tenant-" + slug + "/" + name,
 	}, nil
 }
@@ -192,7 +192,7 @@ func TestBindingRBACHappyPath(t *testing.T) {
 		t.Fatalf("EnsureTeam calls = %+v", b.teams)
 	}
 	team := b.teams[0]
-	if team.Slug != "acme" || team.Name != "payments-api-maintainers" || team.Role != types.RoleDeveloper {
+	if team.Slug != "acme" || team.Name != "payments-api-maintainers" || team.RoleName != "editor" {
 		t.Fatalf("EnsureTeam = %+v", team)
 	}
 	if len(b.members) != 1 {
@@ -208,7 +208,7 @@ func TestBindingRBACHappyPath(t *testing.T) {
 	}
 	if res.TeamID != "team:payments-api-maintainers" ||
 		res.GroupPath != "tenant-acme/payments-api-maintainers" ||
-		res.Role != string(types.RoleDeveloper) || res.Member != "user:dev-1" {
+		res.Role != "editor" || res.Member != "user:dev-1" {
 		t.Fatalf("result = %+v", res)
 	}
 }
@@ -297,8 +297,8 @@ func TestBindingRBACManifestRoleOverride(t *testing.T) {
 	if err != nil || !done {
 		t.Fatalf("done=%v err=%v", done, err)
 	}
-	if b.teams[0].Role != types.RolePlatformEngineer {
-		t.Fatalf("role = %q", b.teams[0].Role)
+	if b.teams[0].RoleName != "operator" {
+		t.Fatalf("role = %q", b.teams[0].RoleName)
 	}
 }
 
@@ -363,7 +363,8 @@ func TestRBACOutboxPayloadsFeedTupleWriter(t *testing.T) {
 	teamEvent := func() *types.OutboxEvent {
 		raw, err := json.Marshal(types.TeamCreatedPayload{
 			OrgID: "org:acme", TeamID: "team:payments-api-maintainers",
-			Name: "payments-api-maintainers", Role: types.RoleDeveloper,
+			Name: "payments-api-maintainers", RoleID: "r-editor", RoleName: "editor",
+			Permissions: []string{"deployments.create"},
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -375,7 +376,7 @@ func TestRBACOutboxPayloadsFeedTupleWriter(t *testing.T) {
 	}
 	memberRaw, err := json.Marshal(types.MembershipPayload{
 		OrgID: "org:acme", TeamID: "team:payments-api-maintainers",
-		UserID: "user:dev-1", Role: types.RoleDeveloper,
+		UserID: "user:dev-1", RoleID: "r-editor",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -394,7 +395,7 @@ func TestRBACOutboxPayloadsFeedTupleWriter(t *testing.T) {
 	}
 
 	want := []authz.Tuple{
-		{User: authz.TeamMemberUserset("team:payments-api-maintainers"), Relation: authz.RelationDeveloper, Object: authz.OrgObject("org:acme")},
+		{User: authz.TeamMemberUserset("team:payments-api-maintainers"), Relation: authz.RelationDeploymentsCreate, Object: authz.OrgObject("org:acme")},
 		{User: authz.UserObject("user:dev-1"), Relation: authz.RelationMember, Object: authz.TeamObject("team:payments-api-maintainers")},
 		{User: authz.OrgObject("org:acme"), Relation: authz.RelationParent, Object: authz.CatalogItemObject("component:acme--payments-api")},
 	}

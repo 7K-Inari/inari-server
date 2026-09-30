@@ -448,10 +448,12 @@ func run() error {
 		platformSync.Run(lctx, cfg.PlatformGroupSyncInterval)
 	}, log)
 
-	// Org team group sync (M6.W7, ADR-0004): every tenant's team groups
-	// (tenant-<slug>/<team>) → team:<id>#member tuples, both directions.
-	// This is the convergence mechanism for IdP-brokered managed members,
-	// who never pass through the inline invite path.
+	// Org team group sync (M6.W7 + M1.W1, ADR-0004): every tenant's team
+	// groups (tenant-<slug>/<team>) → team:<id>#member tuples AND the DB
+	// users/memberships projection, both directions. This is the
+	// convergence mechanism for IdP-brokered managed members, who never
+	// pass through the inline invite path: reflected members appear in the
+	// console member list within one sync interval.
 	teamSync := authz.NewOrgTeamSync(fgaInvalidating, idp, authz.TeamGroupListerFunc(
 		func(ctx context.Context) ([]authz.TeamGroupRef, error) {
 			// Active orgs only (ADR-0006): teams of a deleting tenant are
@@ -463,10 +465,12 @@ func run() error {
 			}
 			refs := make([]authz.TeamGroupRef, 0, len(teams))
 			for _, t := range teams {
-				refs = append(refs, authz.TeamGroupRef{TeamID: t.ID, GroupPath: t.KeycloakGroupPath})
+				refs = append(refs, authz.TeamGroupRef{
+					TeamID: t.ID, OrgID: t.OrgID, Role: t.Role, GroupPath: t.KeycloakGroupPath,
+				})
 			}
 			return refs, nil
-		}))
+		}), svc)
 	go leaderlease.Run(ctx, leaser, "authz-org-team-sync", func(lctx context.Context) {
 		teamSync.Run(lctx, cfg.OrgGroupSyncInterval)
 	}, log)

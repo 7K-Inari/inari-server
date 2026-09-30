@@ -235,6 +235,110 @@ func TestAdminGuardrail(t *testing.T) {
 	}
 }
 
+// TestAdminGuardrailConcurrentStrip interleaves two transactions that each
+// strip tenant.admin from a different admin-bearing role, following
+// Service.UpdateRole's exact TX sequence (lock org, update role, check
+// guardrail). Without per-org serialization both guardrail checks pass
+// under READ COMMITTED and the tenant locks itself out (QA finding); with
+// the organizations-row lock the second transaction blocks until the first
+// commits and its guardrail check must fail.
+func TestAdminGuardrailConcurrentStrip(t *testing.T) {
+	database := setupDB(t)
+	ctx := context.Background()
+	svc := tenancy.NewService(database, newFakeIdP(), tenancy.NewStore(), audit.NewStore())
+	org, _, err := svc.CreateTenant(ctx, "user-1", "acme", "Acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, err := svc.GetRole(ctx, "acme", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin2, err := svc.CreateRole(ctx, "user-1", "acme", &types.Role{
+		Name: "admin2", Permissions: []string{"tenant.admin", "tenant.read"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CreateTeam(ctx, "user-1", "acme", "backup-admins", admin2.ID); err != nil {
+		t.Fatal(err)
+	}
+	strip := func(perms []string) []string {
+		out := slices.Clone(perms)
+		return slices.DeleteFunc(out, func(p string) bool { return p == "tenant.admin" })
+	}
+	store := tenancy.NewStore()
+
+	// TX1 (main goroutine): lock, strip admin, guardrail check, then pause
+	// before commit so TX2 starts its lock attempt while TX1 is open.
+	tx1, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx1.Rollback(ctx) }()
+	if err := store.LockOrgForGuardrail(ctx, tx1, org.ID); err != nil {
+		t.Fatal(err)
+	}
+	r1 := *admin
+	r1.Permissions = strip(admin.Permissions)
+	if _, err := store.UpdateRole(ctx, tx1, &r1); err != nil {
+		t.Fatal(err)
+	}
+	ok1, err := store.AdminGuardrailHolds(ctx, tx1, org.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok1 {
+		t.Fatal("tx1 guardrail should hold (admin2 still bears tenant.admin)")
+	}
+
+	// TX2 (goroutine): the same sequence. Its LockOrgForGuardrail must
+	// block until TX1 commits, then its guardrail check must fail.
+	tx2Guardrail := make(chan bool, 1)
+	tx2Err := make(chan error, 1)
+	tx2Started := make(chan struct{})
+	go func() {
+		tx2, err := database.Pool.Begin(ctx)
+		if err != nil {
+			tx2Err <- err
+			return
+		}
+		defer func() { _ = tx2.Rollback(ctx) }()
+		close(tx2Started)
+		if err := store.LockOrgForGuardrail(ctx, tx2, org.ID); err != nil {
+			tx2Err <- err
+			return
+		}
+		r2 := *admin2
+		r2.Permissions = strip(admin2.Permissions)
+		if _, err := store.UpdateRole(ctx, tx2, &r2); err != nil {
+			tx2Err <- err
+			return
+		}
+		ok, err := store.AdminGuardrailHolds(ctx, tx2, org.ID)
+		if err != nil {
+			tx2Err <- err
+			return
+		}
+		tx2Guardrail <- ok
+	}()
+	<-tx2Started
+	// Give TX2 a moment to reach its (blocking) lock attempt, then commit
+	// TX1 — releasing the org lock so TX2 can proceed.
+	time.Sleep(200 * time.Millisecond)
+	if err := tx1.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-tx2Err:
+		t.Fatalf("tx2: %v", err)
+	case ok2 := <-tx2Guardrail:
+		if ok2 {
+			t.Fatal("GUARDRAIL RACE: both transactions passed the guardrail check; tenant left with no tenant.admin team")
+		}
+	}
+}
+
 // TestRoleUpdateTupleRewrite dispatches a role.updated event and asserts the
 // bound teams' tuples are rewritten from the payload snapshots.
 func TestRoleUpdateTupleRewrite(t *testing.T) {

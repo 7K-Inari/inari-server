@@ -189,6 +189,18 @@ func (s *Store) ListTeamIDsForRole(ctx context.Context, q db.Querier, roleID str
 	return out, rows.Err()
 }
 
+// LockOrgForGuardrail serializes every guardrail-checked mutation of one
+// tenant (role edit/delete, RBAC mappings, team delete) by row-locking the
+// organizations row inside the mutation TX. Without it, two concurrent
+// transactions that each strip tenant.admin from a different role both pass
+// AdminGuardrailHolds under READ COMMITTED and lock the tenant out (QA
+// finding: TOCTOU proven with interleaved TXs).
+func (s *Store) LockOrgForGuardrail(ctx context.Context, q db.Querier, orgID string) error {
+	const sql = `SELECT 1 FROM organizations WHERE id = $1 FOR UPDATE`
+	var one int
+	return q.QueryRow(ctx, sql, orgID).Scan(&one)
+}
+
 // AdminGuardrailHolds reports whether at least one team in the org resolves
 // to a role containing tenant.admin. Evaluated inside mutation TXs so a
 // violating change rolls back.
@@ -376,6 +388,9 @@ func (s *Service) UpdateRole(ctx context.Context, actor, slug, name string, patc
 	}
 	var oldPerms []string
 	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		if err := s.store.LockOrgForGuardrail(ctx, tx, org.ID); err != nil {
+			return err
+		}
 		var err error
 		oldPerms, err = s.store.UpdateRole(ctx, tx, role)
 		if err != nil {
@@ -427,6 +442,9 @@ func (s *Service) DeleteRole(ctx context.Context, actor, slug, name string) erro
 		return ErrBuiltinRole
 	}
 	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		if err := s.store.LockOrgForGuardrail(ctx, tx, org.ID); err != nil {
+			return err
+		}
 		teamIDs, err := s.store.ListTeamIDsForRole(ctx, tx, role.ID)
 		if err != nil {
 			return err

@@ -949,6 +949,9 @@ func (s *Service) DeleteTeam(ctx context.Context, actor, slug, name string) erro
 	}
 	var deleted *types.Team
 	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		if err := s.store.LockOrgForGuardrail(ctx, tx, org.ID); err != nil {
+			return err
+		}
 		var err error
 		deleted, err = s.store.DeleteTeam(ctx, tx, org.ID, name)
 		if err != nil {

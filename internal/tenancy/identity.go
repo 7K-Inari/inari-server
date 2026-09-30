@@ -299,6 +299,9 @@ func (s *Service) SetRBACMappings(ctx context.Context, actor, slug string, mappi
 	}
 	var changes []types.TeamRoleChange
 	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		if err := s.store.LockOrgForGuardrail(ctx, tx, org.ID); err != nil {
+			return err
+		}
 		for _, m := range mappings {
 			team := teams[m.Team]
 			newRole := roles[m.Team]

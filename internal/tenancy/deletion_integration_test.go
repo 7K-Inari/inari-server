@@ -154,7 +154,7 @@ func TestTenantDeletionHappyPath(t *testing.T) {
 	deleter := tenancy.NewDeleter(database, idp, store, auditStore, rec, nil, slog.Default())
 	svc.WithDeleter(deleter)
 
-	org, teams, err := svc.CreateTenant(ctx, "user-1", "acme", "Acme Corp")
+	org, _, err := svc.CreateTenant(ctx, "user-1", "acme", "Acme Corp")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,10 +251,11 @@ func TestTenantDeletionHappyPath(t *testing.T) {
 		t.Errorf("published outbox rows = %d, want 0 (archived)", n)
 	}
 
-	// FGA tuples retracted: one org role tuple per default team + the
-	// creator's two membership tuples (org-admins + platform-team).
-	if len(rec.deleted) != len(teams)+2 {
-		t.Errorf("deleted tuples = %d, want %d: %+v", len(rec.deleted), len(teams)+2, rec.deleted)
+	// FGA tuples retracted: the org permission tuples of every default
+	// team (19+13+5+1 = 38 across the built-in bundles) + the creator's
+	// two membership tuples (org-admins + platform-team).
+	if want := 19+13+5+1+2; len(rec.deleted) != want {
+		t.Errorf("deleted tuples = %d, want %d: %+v", len(rec.deleted), want, rec.deleted)
 	}
 	for _, tup := range rec.deleted {
 		if !strings.Contains(tup.Object, "organization:kc-acme") && !strings.HasPrefix(tup.Object, "team:") {
@@ -600,7 +601,7 @@ func TestDeleteTenantHTTP(t *testing.T) {
 	member := &authn.Identity{Subject: "user-1", Organizations: []string{"acme"}}
 	stranger := &authn.Identity{Subject: "user-9", Organizations: []string{"other"}}
 	adminSrv := newServer(member, relationGate{relation: "admin"})
-	viewerSrv := newServer(member, relationGate{relation: "viewer"})
+	viewerSrv := newServer(member, relationGate{relation: authz.RelationTenantRead})
 	strangerSrv := newServer(stranger, relationGate{relation: "admin"})
 
 	// Coarse PEP: non-member rejected.

@@ -191,7 +191,10 @@ func (h *Handler) getPermissionCatalog(ctx context.Context, in *orgPathInput) (*
 // roleError maps role-service errors onto HTTP status codes; validation
 // errors (bad name/permission) are 400, guardrail violations 409.
 func roleError(err error) error {
+	var inputErr *RoleInputError
 	switch {
+	case errors.As(err, &inputErr):
+		return huma.Error400BadRequest(inputErr.Error())
 	case errors.Is(err, ErrRoleNotFound):
 		return huma.Error404NotFound("role not found")
 	case errors.Is(err, ErrOrgNotFound):

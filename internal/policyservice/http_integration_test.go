@@ -24,7 +24,7 @@ import (
 type qaPERelAuthz struct{ allow bool }
 
 func (a qaPERelAuthz) Check(_ context.Context, _, relation, _ string) (bool, error) {
-	return a.allow && relation == authz.RelationPlatformEngineer, nil
+	return a.allow && relation == authz.RelationPoliciesManage, nil
 }
 func (a qaPERelAuthz) ListObjects(context.Context, string, string, string) ([]string, error) {
 	return nil, nil

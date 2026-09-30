@@ -221,13 +221,13 @@ func TestCreateTenantEndToEnd(t *testing.T) {
 		t.Errorf("platform-team members = %v, want [user-1]", got)
 	}
 
-	// Creator membership rows: org-admin is the highest role (bootstrap).
-	role, ok, err := tenancy.NewStore().HighestRole(ctx, database.Pool, org.ID, "user-1")
+	// Creator membership rows grant tenant.admin (bootstrap).
+	isAdmin, err := tenancy.NewStore().HasPermission(ctx, database.Pool, org.ID, "user-1", "tenant.admin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ok || role != types.RoleOrgAdmin {
-		t.Errorf("creator role = %q, ok=%v", role, ok)
+	if !isAdmin {
+		t.Error("creator lacks tenant.admin")
 	}
 
 	// Audit rows exist.
@@ -245,7 +245,8 @@ func TestCreateTenantEndToEnd(t *testing.T) {
 	if err := eventbustest.DispatchOnce(ctx, disp); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
-	if len(rec.written) != 6 { // 4 team→org role tuples + 2 creator memberships
+	// 19+13+5+1 team→org permission tuples + 2 creator memberships.
+	if len(rec.written) != 19+13+5+1+2 {
 		t.Fatalf("tuples written = %v", rec.written)
 	}
 	if rec.written[0].Object != authz.OrgObject(org.ID) {
@@ -339,9 +340,9 @@ func TestMembershipLifecycle(t *testing.T) {
 	if got := idp.grpMembers["tenant-acme/developers"]; len(got) != 1 || got[0] != "user-2" {
 		t.Errorf("developers members = %v", got)
 	}
-	role, ok, err := tenancy.NewStore().HighestRole(ctx, database.Pool, org.ID, "user-2")
-	if err != nil || !ok || role != types.RoleDeveloper {
-		t.Errorf("user-2 role = %q ok=%v err=%v", role, ok, err)
+	hasRole, err := tenancy.NewStore().HasPermission(ctx, database.Pool, org.ID, "user-2", "deployments.create")
+	if err != nil || !hasRole {
+		t.Errorf("user-2 lacks deployments.create: err=%v", err)
 	}
 
 	// List for the console.
@@ -377,7 +378,7 @@ func TestMembershipLifecycle(t *testing.T) {
 	if got := idp.grpMembers["tenant-acme/developers"]; len(got) != 0 {
 		t.Errorf("developers members after remove = %v", got)
 	}
-	if _, ok, _ := tenancy.NewStore().HighestRole(ctx, database.Pool, org.ID, "user-2"); ok {
+	if has, _ := tenancy.NewStore().HasPermission(ctx, database.Pool, org.ID, "user-2", "tenant.read"); has {
 		t.Error("user-2 still has a role after remove")
 	}
 	if err := eventbustest.DispatchOnce(ctx, disp); err != nil {
@@ -635,15 +636,15 @@ func TestTeamLifecycle(t *testing.T) {
 	}
 
 	// Create a custom team granting developer.
-	team, err := svc.CreateTeam(ctx, "user-1", "acme", "data-science", types.RoleDeveloper)
+	team, err := svc.CreateTeam(ctx, "user-1", "acme", "data-science", "editor")
 	if err != nil {
 		t.Fatalf("CreateTeam: %v", err)
 	}
-	if team.Role != types.RoleDeveloper || team.KeycloakGroupPath != "tenant-acme/data-science" {
+	if team.RoleName != "editor" || team.KeycloakGroupPath != "tenant-acme/data-science" {
 		t.Errorf("team = %+v", team)
 	}
 	// Duplicate name conflicts.
-	if _, err := svc.CreateTeam(ctx, "user-1", "acme", "data-science", types.RoleViewer); !errors.Is(err, tenancy.ErrTeamNameTaken) {
+	if _, err := svc.CreateTeam(ctx, "user-1", "acme", "data-science", "viewer"); !errors.Is(err, tenancy.ErrTeamNameTaken) {
 		t.Fatalf("duplicate: %v, want ErrTeamNameTaken", err)
 	}
 
@@ -653,7 +654,7 @@ func TestTeamLifecycle(t *testing.T) {
 	if err := eventbustest.DispatchOnce(ctx, disp); err != nil {
 		t.Fatal(err)
 	}
-	want := authz.Tuple{User: "team:" + team.ID + "#member", Relation: "developer", Object: authz.OrgObject(org.ID)}
+	want := authz.Tuple{User: "team:" + team.ID + "#member", Relation: "deployments_create", Object: authz.OrgObject(org.ID)}
 	found := false
 	for _, tp := range rec.written {
 		if tp == want {
@@ -661,7 +662,7 @@ func TestTeamLifecycle(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("role tuple %v not written; got %v", want, rec.written)
+		t.Errorf("permission tuple %v not written; got %v", want, rec.written)
 	}
 
 	// Default teams are protected.
@@ -757,7 +758,7 @@ func TestTeamLifecycle(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("role tuple %v not deleted; got %v", want, rec.deleted)
+		t.Errorf("permission tuple %v not deleted; got %v", want, rec.deleted)
 	}
 
 	// Writes are audited.
@@ -791,12 +792,12 @@ func TestOrgMemberRoleLifecycle(t *testing.T) {
 	}
 
 	// Unknown user rejected.
-	if err := svc.SetMemberRole(ctx, "user-1", "acme", "ghost", types.RoleViewer); !errors.Is(err, tenancy.ErrUserNotFound) {
+	if err := svc.SetMemberRole(ctx, "user-1", "acme", "ghost", "viewer"); !errors.Is(err, tenancy.ErrUserNotFound) {
 		t.Fatalf("SetMemberRole ghost: %v, want ErrUserNotFound", err)
 	}
 
 	// New member via PUT.
-	if err := svc.SetMemberRole(ctx, "user-1", "acme", "user-2", types.RoleViewer); err != nil {
+	if err := svc.SetMemberRole(ctx, "user-1", "acme", "user-2", "viewer"); err != nil {
 		t.Fatalf("SetMemberRole: %v", err)
 	}
 	if got := idp.orgMembers[org.KeycloakOrgID]; len(got) != 2 {
@@ -820,7 +821,7 @@ func TestOrgMemberRoleLifecycle(t *testing.T) {
 			u2 = &members[i]
 		}
 	}
-	if u2 == nil || u2.Role != string(types.RoleViewer) || u2.Email != "user-2@example.com" {
+	if u2 == nil || len(u2.Roles) != 1 || u2.Roles[0] != "viewer" || u2.Email != "user-2@example.com" {
 		t.Errorf("user-2 view = %+v", u2)
 	}
 	if len(u2.Teams) != 1 || u2.Teams[0] != "viewers" {
@@ -828,7 +829,7 @@ func TestOrgMemberRoleLifecycle(t *testing.T) {
 	}
 
 	// Role change: viewer → org-admin (lazily materializes org-admins).
-	if err := svc.SetMemberRole(ctx, "user-1", "acme", "user-2", types.RoleOrgAdmin); err != nil {
+	if err := svc.SetMemberRole(ctx, "user-1", "acme", "user-2", "admin"); err != nil {
 		t.Fatalf("SetMemberRole org-admin: %v", err)
 	}
 	if got := idp.grpMembers["tenant-acme/viewers"]; len(got) != 0 {
@@ -837,9 +838,9 @@ func TestOrgMemberRoleLifecycle(t *testing.T) {
 	if got := idp.grpMembers["tenant-acme/org-admins"]; len(got) != 2 {
 		t.Errorf("org-admins members = %v, want creator + user-2", got)
 	}
-	role, ok, err := tenancy.NewStore().HighestRole(ctx, database.Pool, org.ID, "user-2")
-	if err != nil || !ok || role != types.RoleOrgAdmin {
-		t.Errorf("user-2 role = %q ok=%v err=%v", role, ok, err)
+	hasRole, err := tenancy.NewStore().HasPermission(ctx, database.Pool, org.ID, "user-2", "deployments.create")
+	if err != nil || !hasRole {
+		t.Errorf("user-2 lacks deployments.create: err=%v", err)
 	}
 
 	// The org-admins team now exists and grants admin via the outbox.
@@ -850,12 +851,12 @@ func TestOrgMemberRoleLifecycle(t *testing.T) {
 	}
 	adminTuple := false
 	for _, tp := range rec.written {
-		if tp.Relation == "admin" && tp.Object == authz.OrgObject(org.ID) {
+		if tp.Relation == "tenant_admin" && tp.Object == authz.OrgObject(org.ID) {
 			adminTuple = true
 		}
 	}
 	if !adminTuple {
-		t.Errorf("no admin tuple written; got %v", rec.written)
+		t.Errorf("no tenant_admin tuple written; got %v", rec.written)
 	}
 
 	// Audit: member.added then member.role_changed.
@@ -877,7 +878,7 @@ func TestOrgMemberRoleLifecycle(t *testing.T) {
 	}
 
 	// Idempotent re-PUT: no new audit rows.
-	if err := svc.SetMemberRole(ctx, "user-1", "acme", "user-2", types.RoleOrgAdmin); err != nil {
+	if err := svc.SetMemberRole(ctx, "user-1", "acme", "user-2", "admin"); err != nil {
 		t.Fatal(err)
 	}
 	events2, _ := audit.NewStore().List(ctx, database.Pool, org.ID, 30)
@@ -895,7 +896,7 @@ func TestOrgMemberRoleLifecycle(t *testing.T) {
 	if got := idp.grpMembers["tenant-acme/org-admins"]; len(got) != 1 || got[0] != "user-1" {
 		t.Errorf("org-admins members after remove = %v, want only creator", got)
 	}
-	if _, ok, _ := tenancy.NewStore().HighestRole(ctx, database.Pool, org.ID, "user-2"); ok {
+	if has, _ := tenancy.NewStore().HasPermission(ctx, database.Pool, org.ID, "user-2", "tenant.read"); has {
 		t.Error("user-2 still has a role after org removal")
 	}
 	events3, _ := audit.NewStore().List(ctx, database.Pool, org.ID, 30)
@@ -941,28 +942,38 @@ func TestSetMemberRoleSameRoleDifferentTeam(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.CreateTeam(ctx, "user-1", "acme", "ops", types.RoleViewer); err != nil {
+	if _, err := svc.CreateTeam(ctx, "user-1", "acme", "ops", "viewer"); err != nil {
 		t.Fatal(err)
 	}
 	if err := svc.AddMember(ctx, "user-1", "acme", "ops", "user-2"); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.SetMemberRole(ctx, "user-1", "acme", "user-2", types.RoleViewer); err != nil {
+	if err := svc.SetMemberRole(ctx, "user-1", "acme", "user-2", "viewer"); err != nil {
 		t.Fatal(err)
 	}
-	role, ok, err := tenancy.NewStore().HighestRole(ctx, database.Pool, org.ID, "user-2")
-	if err != nil || !ok || role != types.RoleViewer {
-		t.Errorf("user-2 lost viewer role after same-role PUT: role=%q ok=%v err=%v", role, ok, err)
+	hasRole, err := tenancy.NewStore().HasPermission(ctx, database.Pool, org.ID, "user-2", "tenant.read")
+	if err != nil || !hasRole {
+		t.Errorf("user-2 lost viewer role after same-role PUT: err=%v", err)
 	}
 }
 
 // relationGate grants a fixed relation on any org object (fine PEP stub).
 // Like the OpenFGA model, admin implies viewer.
+// relationGate grants a coarse persona's permission relations: "admin"
+// grants every tenant administration relation (mirroring the built-in
+// bundle), anything else is a single relation.
 type relationGate struct{ relation string }
 
 func (g relationGate) Check(_ context.Context, _, relation, _ string) (bool, error) {
-	if g.relation == "admin" && relation == "viewer" {
-		return true, nil
+	if g.relation == "admin" {
+		switch relation {
+		case authz.RelationTenantAdmin, authz.RelationTenantRead,
+			authz.RelationTenantSettingsWrite, authz.RelationTenantTeamsManage,
+			authz.RelationTenantMembersManage, authz.RelationTenantRBACManage,
+			authz.RelationTenantIdentityManage, authz.RelationTenantNotificationsManage:
+			return true, nil
+		}
+		return false, nil
 	}
 	return relation == g.relation, nil
 }
@@ -1023,7 +1034,7 @@ func TestTenantSettingsHTTP(t *testing.T) {
 	stranger := &authn.Identity{Subject: "user-9", Organizations: []string{"other"}}
 
 	adminSrv := newServer(member, relationGate{relation: "admin"})
-	viewerSrv := newServer(member, relationGate{relation: "viewer"})
+	viewerSrv := newServer(member, relationGate{relation: authz.RelationTenantRead})
 	strangerSrv := newServer(stranger, relationGate{relation: "admin"})
 
 	// Non-member of the org: coarse PEP rejects before any check.
@@ -1038,7 +1049,7 @@ func TestTenantSettingsHTTP(t *testing.T) {
 	if code, _ := do(viewerSrv, http.MethodPost, "/api/v1/tenants/acme/teams", `{"name":"x"}`); code != http.StatusForbidden {
 		t.Errorf("viewer POST team: got %d, want 403", code)
 	}
-	if code, _ := do(viewerSrv, http.MethodPut, "/api/v1/tenants/acme/members/user-2", `{"role":"viewer"}`); code != http.StatusForbidden {
+	if code, _ := do(viewerSrv, http.MethodPut, "/api/v1/tenants/acme/members/user-2", `{"roleId":"viewer"}`); code != http.StatusForbidden {
 		t.Errorf("viewer PUT member: got %d, want 403", code)
 	}
 
@@ -1053,7 +1064,7 @@ func TestTenantSettingsHTTP(t *testing.T) {
 	}
 
 	// Admin: team CRUD.
-	if code, body := do(adminSrv, http.MethodPost, "/api/v1/tenants/acme/teams", `{"name":"ops","role":"developer"}`); code != http.StatusOK {
+	if code, body := do(adminSrv, http.MethodPost, "/api/v1/tenants/acme/teams", `{"name":"ops","roleId":"editor"}`); code != http.StatusOK {
 		t.Fatalf("admin POST team: got %d %s, want 200", code, body)
 	}
 	if code, _ := do(adminSrv, http.MethodPost, "/api/v1/tenants/acme/teams", `{"name":"ops"}`); code != http.StatusConflict {
@@ -1067,10 +1078,10 @@ func TestTenantSettingsHTTP(t *testing.T) {
 	}
 
 	// Admin: member role PUT/DELETE.
-	if code, body := do(adminSrv, http.MethodPut, "/api/v1/tenants/acme/members/user-2", `{"role":"developer"}`); code != http.StatusOK && code != http.StatusNoContent {
+	if code, body := do(adminSrv, http.MethodPut, "/api/v1/tenants/acme/members/user-2", `{"roleId":"editor"}`); code != http.StatusOK && code != http.StatusNoContent {
 		t.Fatalf("admin PUT member: got %d %s", code, body)
 	}
-	if code, _ := do(adminSrv, http.MethodPut, "/api/v1/tenants/acme/members/user-2", `{"role":"bogus"}`); code != http.StatusBadRequest {
+	if code, _ := do(adminSrv, http.MethodPut, "/api/v1/tenants/acme/members/user-2", `{"roleId":"bogus"}`); code != http.StatusBadRequest {
 		t.Errorf("invalid role: got %d, want 400", code)
 	}
 	if code, body := do(adminSrv, http.MethodGet, "/api/v1/tenants/acme/members", ""); code != http.StatusOK {
@@ -1126,16 +1137,16 @@ func TestMemberEmailResolution(t *testing.T) {
 	if got := idp.grpMembers["tenant-acme/developers"]; len(got) != 1 || got[0] != "user-2" {
 		t.Errorf("developers members after email add = %v, want [user-2]", got)
 	}
-	role, ok, err := tenancy.NewStore().HighestRole(ctx, database.Pool, org.ID, "user-2")
-	if err != nil || !ok || role != types.RoleDeveloper {
-		t.Errorf("user-2 role = %q ok=%v err=%v", role, ok, err)
+	hasRole, err := tenancy.NewStore().HasPermission(ctx, database.Pool, org.ID, "user-2", "deployments.create")
+	if err != nil || !hasRole {
+		t.Errorf("user-2 lacks deployments.create: err=%v", err)
 	}
 	// SetMemberRole by email resolves too.
-	if err := svc.SetMemberRole(ctx, "user-1", "acme", "user-2@example.com", types.RoleViewer); err != nil {
+	if err := svc.SetMemberRole(ctx, "user-1", "acme", "user-2@example.com", "viewer"); err != nil {
 		t.Fatalf("SetMemberRole by email: %v", err)
 	}
-	role, _, err = tenancy.NewStore().HighestRole(ctx, database.Pool, org.ID, "user-2")
-	if err != nil || role != types.RoleViewer {
-		t.Errorf("user-2 role after email SetMemberRole = %q err=%v, want viewer", role, err)
+	isViewer, err := tenancy.NewStore().HasPermission(ctx, database.Pool, org.ID, "user-2", "tenant.read")
+	if err != nil || !isViewer {
+		t.Errorf("user-2 lost viewer role after email SetMemberRole: err=%v", err)
 	}
 }

@@ -249,8 +249,8 @@ func TestApprovalConfigRelations(t *testing.T) {
 	}
 
 	want := []string{
-		"viewer organization:1",
-		"platform_engineer organization:1",
+		"tenant_read organization:1",
+		"approvals_manage organization:1",
 	}
 	if len(seen) != len(want) {
 		t.Fatalf("checks = %v, want %v", seen, want)

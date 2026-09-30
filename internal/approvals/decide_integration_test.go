@@ -5,6 +5,7 @@ package approvals
 import (
 	"bytes"
 	"context"
+	"slices"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -19,11 +20,13 @@ import (
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
-// decideRoles resolves org roles per subject for the decide harness.
-type decideRoles map[string]types.Role
+// decideRoles resolves org permission sets per subject for the decide
+// harness (ADR-0013: the platform-admin floor is clusters.register, the
+// decide fallback floor is approvals.manage).
+type decideRoles map[string][]string
 
-func (r decideRoles) RoleOf(_ context.Context, _, userID string) (types.Role, error) {
-	return r[userID], nil
+func (r decideRoles) HasPermission(_ context.Context, _, userID, permission string) (bool, error) {
+	return slices.Contains(r[userID], permission), nil
 }
 
 type decideItems struct{ item *types.CatalogItem }
@@ -34,7 +37,7 @@ func (d decideItems) GetItemByID(context.Context, string) (*types.CatalogItem, e
 
 // itDecideServer wires the full decide authorization chain: FGA authorizer
 // (also the platform checker), DB-backed role resolver, and item resolver.
-func itDecideServer(t *testing.T, az itAuthorizer, roles RoleResolver, items ItemResolver) (*httptest.Server, *db.DB) {
+func itDecideServer(t *testing.T, az itAuthorizer, roles PermissionResolver, items ItemResolver) (*httptest.Server, *db.DB) {
 	t.Helper()
 	database := itDB(t)
 	if _, err := database.Pool.Exec(context.Background(),
@@ -117,7 +120,7 @@ func TestDecideLifecycleFrozenOrg(t *testing.T) {
 	platformOnly := itAuthorizer{allow: map[string]bool{authz.ObjectPlatform: true}}
 
 	t.Run("org-admin approves via DB role after the FGA sweep", func(t *testing.T) {
-		srv, database := itDecideServer(t, denyAll, decideRoles{"user-3": types.RoleOrgAdmin}, nil)
+		srv, database := itDecideServer(t, denyAll, decideRoles{"user-3": {authz.PermApprovalsManage, authz.PermClustersRegister}}, nil)
 		defer srv.Close()
 		id := itSeedRequest(t, database, "org:1", "", types.ApprovalActionTenantDecommission, "user:req-1")
 		code, body := itDecide(t, srv, "acme", id, "acme-only")
@@ -156,7 +159,7 @@ func TestDecideLifecycleFrozenOrg(t *testing.T) {
 	})
 
 	t.Run("developer role is denied even after the sweep", func(t *testing.T) {
-		srv, database := itDecideServer(t, denyAll, decideRoles{"user-3": types.RoleDeveloper}, nil)
+		srv, database := itDecideServer(t, denyAll, decideRoles{"user-3": {authz.PermApprovalsManage}}, nil)
 		defer srv.Close()
 		id := itSeedRequest(t, database, "org:1", "", types.ApprovalActionTenantDecommission, "user:req-1")
 		if code, body := itDecide(t, srv, "acme", id, "acme-only"); code != http.StatusForbidden {
@@ -183,7 +186,7 @@ func TestDecideLifecycleFrozenOrg(t *testing.T) {
 	})
 
 	t.Run("platform-engineer approves via DB role after the sweep", func(t *testing.T) {
-		srv, database := itDecideServer(t, denyAll, decideRoles{"user-3": types.RolePlatformEngineer}, nil)
+		srv, database := itDecideServer(t, denyAll, decideRoles{"user-3": {authz.PermApprovalsManage, authz.PermClustersRegister}}, nil)
 		defer srv.Close()
 		id := itSeedRequest(t, database, "org:1", "", types.ApprovalActionTenantDecommission, "user:req-1")
 		if code, body := itDecide(t, srv, "acme", id, "acme-only"); code != http.StatusOK {
@@ -192,7 +195,7 @@ func TestDecideLifecycleFrozenOrg(t *testing.T) {
 	})
 
 	t.Run("viewer is denied at the handler floor after the sweep", func(t *testing.T) {
-		srv, database := itDecideServer(t, denyAll, decideRoles{"user-3": types.RoleViewer}, nil)
+		srv, database := itDecideServer(t, denyAll, decideRoles{"user-3": {}}, nil)
 		defer srv.Close()
 		id := itSeedRequest(t, database, "org:1", "", types.ApprovalActionTenantDecommission, "user:req-1")
 		if code, body := itDecide(t, srv, "acme", id, "acme-only"); code != http.StatusForbidden {
@@ -201,7 +204,7 @@ func TestDecideLifecycleFrozenOrg(t *testing.T) {
 	})
 
 	t.Run("second decide on the same approval conflicts", func(t *testing.T) {
-		srv, database := itDecideServer(t, denyAll, decideRoles{"user-3": types.RoleOrgAdmin}, nil)
+		srv, database := itDecideServer(t, denyAll, decideRoles{"user-3": {authz.PermApprovalsManage, authz.PermClustersRegister}}, nil)
 		defer srv.Close()
 		id := itSeedRequest(t, database, "org:1", "", types.ApprovalActionTenantDecommission, "user:req-1")
 		if code, body := itDecide(t, srv, "acme", id, "acme-only"); code != http.StatusOK {
@@ -213,7 +216,7 @@ func TestDecideLifecycleFrozenOrg(t *testing.T) {
 	})
 
 	t.Run("unauthenticated decide is rejected", func(t *testing.T) {
-		srv, database := itDecideServer(t, denyAll, decideRoles{"user-3": types.RoleOrgAdmin}, nil)
+		srv, database := itDecideServer(t, denyAll, decideRoles{"user-3": {authz.PermApprovalsManage, authz.PermClustersRegister}}, nil)
 		defer srv.Close()
 		id := itSeedRequest(t, database, "org:1", "", types.ApprovalActionTenantDecommission, "user:req-1")
 		if code, _ := itDecide(t, srv, "acme", id, ""); code != http.StatusUnauthorized {
@@ -254,7 +257,7 @@ func TestCancelLifecycleFrozenOrg(t *testing.T) {
 	})
 
 	t.Run("org-admin requester cancels via DB role after the sweep", func(t *testing.T) {
-		srv, database := itDecideServer(t, denyAll, decideRoles{"user-3": types.RoleOrgAdmin}, nil)
+		srv, database := itDecideServer(t, denyAll, decideRoles{"user-3": {authz.PermApprovalsManage, authz.PermClustersRegister}}, nil)
 		defer srv.Close()
 		id := itSeedRequest(t, database, "org:1", "", types.ApprovalActionTenantDecommission, "user:user-3")
 		if code, body := itCancel(t, srv, "acme", id, "acme-only"); code != http.StatusOK {
@@ -263,7 +266,7 @@ func TestCancelLifecycleFrozenOrg(t *testing.T) {
 	})
 
 	t.Run("non-requester org-admin cannot cancel", func(t *testing.T) {
-		srv, database := itDecideServer(t, denyAll, decideRoles{"user-3": types.RoleOrgAdmin}, nil)
+		srv, database := itDecideServer(t, denyAll, decideRoles{"user-3": {authz.PermApprovalsManage, authz.PermClustersRegister}}, nil)
 		defer srv.Close()
 		id := itSeedRequest(t, database, "org:1", "", types.ApprovalActionTenantDecommission, "user:req-1")
 		if code, body := itCancel(t, srv, "acme", id, "acme-only"); code != http.StatusForbidden {
@@ -286,7 +289,7 @@ func TestCancelLifecycleFrozenOrg(t *testing.T) {
 func TestDecideCatalogPlatformAdminPolicy(t *testing.T) {
 	az := itAuthorizer{allow: map[string]bool{"organization:1": true}}
 	items := decideItems{item: &types.CatalogItem{ID: "curated:postgres-aws", ApprovalPolicy: types.ApprovalPolicyPlatformAdmin}}
-	srv, database := itDecideServer(t, az, decideRoles{"user-3": types.RoleOrgAdmin}, items)
+	srv, database := itDecideServer(t, az, decideRoles{"user-3": {authz.PermApprovalsManage, authz.PermClustersRegister}}, items)
 	defer srv.Close()
 	if _, err := database.Pool.Exec(context.Background(),
 		`INSERT INTO catalog_items (id, source, name) VALUES ('curated:postgres-aws', 'curated', 'postgres-aws')`); err != nil {

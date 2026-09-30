@@ -103,7 +103,9 @@ func (s *Store) GetRoleByName(ctx context.Context, q db.Querier, orgID, name str
 func (s *Store) GetRoleByID(ctx context.Context, q db.Querier, orgID, id string) (*types.Role, error) {
 	const sql = `SELECT ` + roleColumns + ` FROM roles WHERE org_id = $1 AND id = $2`
 	r, err := scanRole(q.QueryRow(ctx, sql, orgID, id))
-	if errors.Is(err, pgx.ErrNoRows) {
+	// Callers accept a role ID or name: a non-UUID input is simply "not an
+	// ID", so the name fallback can run (SQLSTATE 22P02 invalid uuid).
+	if errors.Is(err, pgx.ErrNoRows) || isSQLState(err, "22P02") {
 		return nil, ErrRoleNotFound
 	}
 	if err != nil {
@@ -266,19 +268,25 @@ func (s *Service) GetRole(ctx context.Context, slug, nameOrID string) (*types.Ro
 	return r, err
 }
 
+// RoleInputError marks role validation failures (bad name, unknown or
+// duplicate permission slug) so the HTTP layer can answer 400.
+type RoleInputError struct{ msg string }
+
+func (e *RoleInputError) Error() string { return e.msg }
+
 // validateRoleInput checks the name format and the permission set against
 // the static catalog.
 func validateRoleInput(name string, permissions []string) error {
 	if len(name) == 0 || len(name) > 63 || !roleNamePattern.MatchString(name) {
-		return fmt.Errorf("tenancy: role name %q must be a DNS-1123 label", name)
+		return &RoleInputError{fmt.Sprintf("role name %q must be a DNS-1123 label", name)}
 	}
 	seen := map[string]bool{}
 	for _, p := range permissions {
 		if !authz.ValidPermission(p) {
-			return fmt.Errorf("tenancy: unknown permission %q", p)
+			return &RoleInputError{fmt.Sprintf("unknown permission %q", p)}
 		}
 		if seen[p] {
-			return fmt.Errorf("tenancy: duplicate permission %q", p)
+			return &RoleInputError{fmt.Sprintf("duplicate permission %q", p)}
 		}
 		seen[p] = true
 	}

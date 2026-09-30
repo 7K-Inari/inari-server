@@ -437,7 +437,9 @@ type deletePackInput struct {
 }
 
 func (h *Handler) deletePack(ctx context.Context, in *deletePackInput) (*struct{}, error) {
-	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationPoliciesManage)
+	// Pack deletion stays admin-only (it was org-admin gated before the
+	// role engine; CRUD/assign is policies.manage, ADR-0013).
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantAdmin)
 	if err != nil {
 		return nil, err
 	}

@@ -15,21 +15,28 @@ import (
 	"testing"
 
 	"github.com/7K-Inari/inari-server/internal/authn"
+	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/policyservice"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
-// relationGate grants a fixed role on any org object (fine PEP stub),
-// modeling the OpenFGA hierarchy: admin ⇒ platform_engineer ⇒ viewer.
+// relationGate grants a coarse persona on any org object (fine PEP stub),
+// modeling the built-in role bundles (ADR-0013): "admin" grants every
+// relation, "platform_engineer" grants the operator bundle.
 type relationGate struct{ relation string }
 
 func (g relationGate) Check(_ context.Context, _, relation, _ string) (bool, error) {
 	switch g.relation {
 	case "admin":
-		return relation == "admin" || relation == "platform_engineer" || relation == "viewer", nil
+		return true, nil
 	case "platform_engineer":
-		return relation == "platform_engineer" || relation == "viewer", nil
+		return relation != authz.RelationTenantAdmin &&
+			relation != authz.RelationTenantSettingsWrite &&
+			relation != authz.RelationTenantTeamsManage &&
+			relation != authz.RelationTenantRBACManage &&
+			relation != authz.RelationTenantIdentityManage &&
+			relation != authz.RelationTenantNotificationsManage, nil
 	}
 	return relation == g.relation, nil
 }

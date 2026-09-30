@@ -9,21 +9,24 @@ package scaffold
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/7K-Inari/inari-server/internal/approvals"
 	"github.com/7K-Inari/inari-server/internal/audit"
+	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
-// itRoles resolves fixed org roles for the approvals policy checks.
-type itRoles map[string]types.Role
+// itRoles resolves fixed org permission sets for the approvals policy
+// checks (ADR-0013: platform-admin floor is clusters.register).
+type itRoles map[string][]string
 
-func (r itRoles) RoleOf(_ context.Context, _, userID string) (types.Role, error) {
-	return r[userID], nil
+func (r itRoles) HasPermission(_ context.Context, _, userID, permission string) (bool, error) {
+	return slices.Contains(r[userID], permission), nil
 }
 
 // approvalEnv wires a real approvals.Service (platform-admin policy lives
@@ -33,7 +36,7 @@ func approvalEnv(t *testing.T, f *itFixture) (*approvals.Service, *ResumeHandler
 	auditStore := audit.NewStore()
 	catSvc := catalog.NewService(f.db, catalog.NewStore(), nil, auditStore, nil)
 	ap := approvals.NewService(f.db, approvals.NewStore(f.db), auditStore,
-		itRoles{"admin-1": types.RoleOrgAdmin, "dev-1": types.RoleDeveloper}, catSvc)
+		itRoles{"admin-1": {authz.PermApprovalsManage, authz.PermClustersRegister}, "dev-1": {authz.PermApprovalsManage}}, catSvc)
 	return ap, NewResumeHandler(f.svc, ap, nil)
 }
 

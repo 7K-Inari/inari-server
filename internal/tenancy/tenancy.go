@@ -990,12 +990,16 @@ func (s *Service) HasPermission(ctx context.Context, orgID, userID, permission s
 }
 
 func isUniqueViolation(err error) bool {
+	return isSQLState(err, "23505")
+}
+
+func isSQLState(err error, state string) bool {
 	if err == nil {
 		return false
 	}
 	var pgErr interface{ SQLState() string }
 	if errors.As(err, &pgErr) {
-		return pgErr.SQLState() == "23505"
+		return pgErr.SQLState() == state
 	}
 	return false
 }

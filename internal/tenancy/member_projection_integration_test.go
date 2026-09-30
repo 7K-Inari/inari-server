@@ -83,6 +83,19 @@ func TestSyncTeamMembersUpsert(t *testing.T) {
 	if got := teamMembers(t, svc, org.ID, ref.TeamID); len(got) != 2 {
 		t.Errorf("members after 2nd pass = %+v, want unchanged 2", got)
 	}
+
+	// A later pass whose Keycloak payload lacks email/display name (IdP
+	// mapper gap) must not erase the profile fields stored earlier.
+	if err := svc.SyncTeamMembers(ctx, ref, []*types.User{{ID: "kc-u1"}, {ID: "kc-u2"}}); err != nil {
+		t.Fatalf("SyncTeamMembers (sparse): %v", err)
+	}
+	members = teamMembers(t, svc, org.ID, ref.TeamID)
+	if members[0].Email != "ada@example.com" || members[0].DisplayName != "Ada Lovelace" {
+		t.Errorf("members[0] after sparse pass = %+v, want profile preserved", members[0])
+	}
+	if members[1].Email != "bob@example.com" {
+		t.Errorf("members[1] after sparse pass = %+v, want email preserved", members[1])
+	}
 }
 
 func TestSyncTeamMembersDeletesStale(t *testing.T) {

@@ -254,8 +254,13 @@ func (s *Store) scanTeams(ctx context.Context, q db.Querier, sql string, args ..
 }
 
 func (s *Store) UpsertUser(ctx context.Context, q db.Querier, u *types.User) error {
+	// Empty fields in the incoming profile (e.g. a Keycloak group-member
+	// payload the IdP did not map an email onto) never erase values an
+	// earlier writer stored.
 	const sql = `INSERT INTO users (id, email, display_name) VALUES ($1,$2,$3)
-	             ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email, display_name = EXCLUDED.display_name`
+	             ON CONFLICT (id) DO UPDATE SET
+	               email = COALESCE(NULLIF(EXCLUDED.email, ''), users.email),
+	               display_name = COALESCE(NULLIF(EXCLUDED.display_name, ''), users.display_name)`
 	_, err := q.Exec(ctx, sql, u.ID, u.Email, u.DisplayName)
 	return err
 }

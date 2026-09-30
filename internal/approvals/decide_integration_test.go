@@ -5,11 +5,11 @@ package approvals
 import (
 	"bytes"
 	"context"
-	"slices"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 

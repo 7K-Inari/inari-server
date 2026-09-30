@@ -3,6 +3,7 @@ package tenancy
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -42,10 +43,20 @@ func (s *Service) ListPlatformAdmins(ctx context.Context, group string) ([]Platf
 // platform admin group and records the grant. It deliberately writes no
 // OpenFGA tuple: PlatformGroupSync (ADR-0003) is the single writer of
 // platform:inari org_creator tuples and converges within one sync interval.
+// Re-granting an existing member is a silent no-op (no duplicate audit
+// row); a concurrent double-grant can still race past the membership check
+// and audit twice — harmless and bounded by the group's tiny size.
 func (s *Service) GrantPlatformAdmin(ctx context.Context, actor, group, subject string) error {
 	user, err := s.resolveMemberSubject(ctx, subject)
 	if err != nil {
 		return err
+	}
+	members, err := s.idp.ListGroupMembers(ctx, group)
+	if err != nil {
+		return fmt.Errorf("tenancy: grant platform admin: %w", err)
+	}
+	if slices.Contains(members, user.ID) {
+		return nil
 	}
 	if err := s.idp.AddGroupMember(ctx, group, user.ID); err != nil {
 		return fmt.Errorf("tenancy: grant platform admin: %w", err)
@@ -57,12 +68,20 @@ func (s *Service) GrantPlatformAdmin(ctx context.Context, actor, group, subject 
 }
 
 // RevokePlatformAdmin removes the subject from the platform admin group.
-// Keycloak removal is idempotent, so revoking a non-member succeeds. FGA
-// org_creator tuples converge via PlatformGroupSync (see GrantPlatformAdmin).
+// Keycloak removal is idempotent, so revoking a non-member succeeds (and is
+// a silent no-op — see GrantPlatformAdmin). FGA org_creator tuples converge
+// via PlatformGroupSync.
 func (s *Service) RevokePlatformAdmin(ctx context.Context, actor, group, subject string) error {
 	user, err := s.resolveMemberSubject(ctx, subject)
 	if err != nil {
 		return err
+	}
+	members, err := s.idp.ListGroupMembers(ctx, group)
+	if err != nil {
+		return fmt.Errorf("tenancy: revoke platform admin: %w", err)
+	}
+	if !slices.Contains(members, user.ID) {
+		return nil
 	}
 	if err := s.idp.RemoveGroupMember(ctx, group, user.ID); err != nil {
 		return fmt.Errorf("tenancy: revoke platform admin: %w", err)

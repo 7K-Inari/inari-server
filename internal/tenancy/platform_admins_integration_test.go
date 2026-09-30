@@ -67,6 +67,10 @@ func TestPlatformAdminsLifecycle(t *testing.T) {
 	if resp, _ := call(http.MethodPut, "/api/v1/platform/admins/admin-1"); resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("grant admin-1: got %d", resp.StatusCode)
 	}
+	// Re-granting an existing member is a no-op: 204 but no second audit row.
+	if resp, _ := call(http.MethodPut, "/api/v1/platform/admins/admin-1"); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("re-grant admin-1: got %d", resp.StatusCode)
+	}
 	if resp, _ := call(http.MethodPut, "/api/v1/platform/admins/admin-2@example.com"); resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("grant admin-2 by email: got %d", resp.StatusCode)
 	}
@@ -103,7 +107,9 @@ func TestPlatformAdminsLifecycle(t *testing.T) {
 		t.Errorf("group members after revoke = %v, want [admin-2]", got)
 	}
 
-	// Audit rows: two grants + two revokes under the platform scope.
+	// Audit rows: one row per effective change only — the duplicate grant
+	// and the second (no-op) revoke above must not audit. Two grants +
+	// one revoke under the platform scope.
 	events, err := audit.NewStore().List(ctx, database.Pool, "platform", 10)
 	if err != nil {
 		t.Fatal(err)
@@ -117,8 +123,8 @@ func TestPlatformAdminsLifecycle(t *testing.T) {
 			revoked++
 		}
 	}
-	if granted != 2 || revoked != 2 {
-		t.Errorf("audit granted=%d revoked=%d, want 2/2", granted, revoked)
+	if granted != 2 || revoked != 1 {
+		t.Errorf("audit granted=%d revoked=%d, want 2/1 (no-op grant/revoke must not audit)", granted, revoked)
 	}
 }
 

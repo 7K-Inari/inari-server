@@ -158,8 +158,9 @@ func TestMyPermissionsRequiresToken(t *testing.T) {
 	}
 }
 
-// multiRoleAuthorizer grants u1 admin on org:o1 (acme) and developer on
-// org:o2 (beta), mirroring hierarchical FGA relations.
+// multiRoleAuthorizer grants u1 admin on org:o1 (acme), developer on
+// org:o2 (beta), platform-engineer on org:o3 (gamma), and viewer on
+// org:o4 (delta), mirroring hierarchical FGA relations.
 type multiRoleAuthorizer struct{}
 
 func (multiRoleAuthorizer) Check(_ context.Context, user, relation, object string) (bool, error) {
@@ -171,6 +172,10 @@ func (multiRoleAuthorizer) Check(_ context.Context, user, relation, object strin
 		return true, nil // admin implies every relation
 	case authz.OrgObject("org:o2"):
 		return relation == authz.RelationDeveloper || relation == authz.RelationViewer, nil
+	case authz.OrgObject("org:o3"):
+		return relation != authz.RelationAdmin, nil // platform-engineer implies developer + viewer
+	case authz.OrgObject("org:o4"):
+		return relation == authz.RelationViewer, nil
 	}
 	return false, nil
 }
@@ -192,10 +197,12 @@ func (s multiTenantResolver) GetTenant(_ context.Context, slug string) (*types.O
 
 func TestMyPermissionsTenantCapabilities(t *testing.T) {
 	router, api := httpserver.NewRouter(slog.New(slog.NewTextHandler(nil, nil)),
-		stubValidator{id: &authn.Identity{Subject: "u1", Organizations: []string{"acme", "beta"}}}, stubReady{})
+		stubValidator{id: &authn.Identity{Subject: "u1", Organizations: []string{"acme", "beta", "gamma", "delta"}}}, stubReady{})
 	NewMeHandler(multiRoleAuthorizer{}, multiTenantResolver{orgs: map[string]*types.Organization{
-		"acme": {ID: "org:o1", Slug: "acme"},
-		"beta": {ID: "org:o2", Slug: "beta"},
+		"acme":  {ID: "org:o1", Slug: "acme"},
+		"beta":  {ID: "org:o2", Slug: "beta"},
+		"gamma": {ID: "org:o3", Slug: "gamma"},
+		"delta": {ID: "org:o4", Slug: "delta"},
 	}}).RegisterRoutes(api)
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)
@@ -211,7 +218,8 @@ func TestMyPermissionsTenantCapabilities(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Existing fields unchanged.
-	if body.OrgRoles["acme"] != types.RoleOrgAdmin || body.OrgRoles["beta"] != types.RoleDeveloper {
+	if body.OrgRoles["acme"] != types.RoleOrgAdmin || body.OrgRoles["beta"] != types.RoleDeveloper ||
+		body.OrgRoles["gamma"] != types.RolePlatformEngineer || body.OrgRoles["delta"] != types.RoleViewer {
 		t.Fatalf("orgRoles = %v", body.OrgRoles)
 	}
 	// Admin gets every capability.
@@ -223,6 +231,48 @@ func TestMyPermissionsTenantCapabilities(t *testing.T) {
 	beta := body.Tenants["beta"]
 	if !beta.CanDeploy || beta.CanManageMembers || beta.CanManageTeams || beta.CanManageRbac {
 		t.Errorf("beta caps = %+v, want canDeploy only", beta)
+	}
+	// Platform-engineer deploys and manages members, but not teams/RBAC.
+	gamma := body.Tenants["gamma"]
+	if !gamma.CanDeploy || !gamma.CanManageMembers || gamma.CanManageTeams || gamma.CanManageRbac {
+		t.Errorf("gamma caps = %+v, want canDeploy+canManageMembers only", gamma)
+	}
+	// Viewer gets an entry with every capability false.
+	delta, ok := body.Tenants["delta"]
+	if !ok {
+		t.Fatal("tenants missing viewer org delta")
+	}
+	if delta.CanDeploy || delta.CanManageMembers || delta.CanManageTeams || delta.CanManageRbac {
+		t.Errorf("delta caps = %+v, want all false", delta)
+	}
+}
+
+// A stale org claim (e.g. a deleted tenant still in the token) is skipped
+// instead of failing the whole projection.
+func TestMyPermissionsSkipsStaleOrgClaim(t *testing.T) {
+	router, api := httpserver.NewRouter(slog.New(slog.NewTextHandler(nil, nil)),
+		stubValidator{id: &authn.Identity{Subject: "u1", Organizations: []string{"acme", "ghost"}}}, stubReady{})
+	NewMeHandler(multiRoleAuthorizer{}, multiTenantResolver{orgs: map[string]*types.Organization{
+		"acme": {ID: "org:o1", Slug: "acme"},
+	}}).RegisterRoutes(api)
+	srv := httptest.NewServer(router)
+	t.Cleanup(srv.Close)
+	resp := testTokenReq(t, http.MethodGet, srv.URL+"/api/v1/me/permissions", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200 (stale claim must not fail the request)", resp.StatusCode)
+	}
+	var body struct {
+		OrgRoles map[string]types.Role         `json:"orgRoles"`
+		Tenants  map[string]TenantCapabilities `json:"tenants"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.OrgRoles) != 1 || body.OrgRoles["acme"] != types.RoleOrgAdmin {
+		t.Errorf("orgRoles = %v, want only acme", body.OrgRoles)
+	}
+	if _, ok := body.Tenants["ghost"]; ok {
+		t.Errorf("tenants must not contain the stale org: %v", body.Tenants)
 	}
 }
 

@@ -2,6 +2,7 @@ package tenancy
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -85,6 +86,11 @@ func (h *MeHandler) getMyPermissions(ctx context.Context, _ *struct{}) (*myPermi
 		out.Body.Tenants = map[string]TenantCapabilities{}
 		for _, slug := range id.Organizations {
 			role, caps, err := h.effectiveAccess(ctx, id.Subject, slug)
+			if errors.Is(err, ErrOrgNotFound) {
+				// Stale claim (e.g. a deleted tenant still in the token):
+				// skip it instead of failing the whole projection.
+				continue
+			}
 			if err != nil {
 				return nil, err
 			}

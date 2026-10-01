@@ -49,16 +49,20 @@ func (s *Service) SyncTeamMembers(ctx context.Context, ref authz.TeamGroupRef, m
 			keep = append(keep, u.ID)
 		}
 		// Delete-stale, scoped to the reconciled team only: rows on other
-		// teams (including higher-role anchor teams) are untouched.
-		return s.store.RemoveMembershipsNotIn(ctx, tx, ref.TeamID, keep)
+		// teams (including higher-role anchor teams) are untouched. Also
+		// delete rows whose role_id no longer matches the team's current
+		// role_id, so a team role change revokes the old role instead of
+		// leaving a duplicate membership row (B8).
+		return s.store.RemoveStaleTeamMemberships(ctx, tx, ref.TeamID, ref.RoleID, keep)
 	})
 }
 
-// RemoveMembershipsNotIn deletes every membership row of the team whose
-// user is no longer in the Keycloak group (the keep set). Scoped to
+// RemoveStaleTeamMemberships deletes every membership row of the team that
+// should no longer exist: the user left the Keycloak group (not in keep) or
+// the team's role_id changed and the row reflects the old role. Scoped to
 // team_id, so rows granting other roles via other teams survive.
-func (s *Store) RemoveMembershipsNotIn(ctx context.Context, q db.Querier, teamID string, keep []string) error {
-	const sql = `DELETE FROM memberships WHERE team_id = $1 AND user_id <> ALL($2)`
-	_, err := q.Exec(ctx, sql, teamID, keep)
+func (s *Store) RemoveStaleTeamMemberships(ctx context.Context, q db.Querier, teamID, roleID string, keep []string) error {
+	const sql = `DELETE FROM memberships WHERE team_id = $1 AND (user_id <> ALL($2) OR role_id <> $3)`
+	_, err := q.Exec(ctx, sql, teamID, keep, roleID)
 	return err
 }

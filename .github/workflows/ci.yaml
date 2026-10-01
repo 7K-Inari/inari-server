@@ -8,6 +8,11 @@ on:
   pull_request:
     paths-ignore:
       - "**.md"
+  # Merge queue on main (H3): triggers for gh-readonly-queue/** staging
+  # branches. Check names are job-derived (not ref-derived), so the required
+  # checks configured for PRs apply unchanged to merge-queue runs. Enabling
+  # the queue itself is a repo-admin branch-protection toggle — see AGENTS.md.
+  merge_group:
 
 permissions:
   contents: read

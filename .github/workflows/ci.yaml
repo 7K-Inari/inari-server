@@ -17,9 +17,15 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Go build cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/go-build
+          key: go-build-lint-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-build-lint-${{ runner.os }}-
       - uses: golangci/golangci-lint-action@v7
         with:
-          version: latest
+          version: v2.14.0
 
   test:
     runs-on: ubuntu-latest
@@ -28,6 +34,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Go build cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/go-build
+          key: go-build-test-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-build-test-${{ runner.os }}-
       - run: go test ./...
       - name: integration tests
         run: go test -tags=integration -count=1 ./...
@@ -46,6 +58,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Go build cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/go-build
+          key: go-build-openapi-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-build-openapi-${{ runner.os }}-
       - name: export spec offline
         run: make export-openapi
       - name: spec is non-empty and complete

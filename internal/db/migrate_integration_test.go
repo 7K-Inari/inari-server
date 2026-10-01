@@ -13,33 +13,20 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/pressly/goose/v3/lock"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/7K-Inari/inari-server/internal/testutil"
 )
 
-// startPostgres launches a throwaway Postgres container and returns a DSN
-// builder for any database name inside it.
+// startPostgres returns the shared Postgres container's DSN builder for any
+// database name inside it.
 func startPostgres(t *testing.T) func(dbName string) string {
 	t.Helper()
 	ctx := context.Background()
-	pg, err := postgres.Run(ctx, "postgres:16-alpine",
-		postgres.WithDatabase("inari"),
-		postgres.WithUsername("inari"),
-		postgres.WithPassword("inari"),
-		testcontainers.WithWaitStrategy(wait.ForLog("database system is ready to accept connections").WithOccurrence(2)),
-	)
+	pg, err := testutil.SharedPostgres(ctx)
 	if err != nil {
 		t.Skipf("testcontainers unavailable: %v", err)
 	}
-	t.Cleanup(func() { _ = pg.Terminate(ctx) })
-	base, err := pg.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return func(dbName string) string {
-		return strings.Replace(base, "/inari?", "/"+dbName+"?", 1)
-	}
+	return pg.DSN
 }
 
 // createDatabase creates a fresh empty database inside the container reached

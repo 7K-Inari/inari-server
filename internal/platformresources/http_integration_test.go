@@ -12,15 +12,12 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
-
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/authn"
-	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
+	"github.com/7K-Inari/inari-server/internal/testutil"
+	"github.com/7K-Inari/inari-server/internal/testutil/testdb"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -82,27 +79,13 @@ func itServer(t *testing.T, az itAuthorizer) (*httptest.Server, *Service) {
 func itServerWithQueue(t *testing.T, az itAuthorizer, queue *itQueue) (*httptest.Server, *Service) {
 	t.Helper()
 	ctx := context.Background()
-	pg, err := postgres.Run(ctx, "postgres:16-alpine",
-		postgres.WithDatabase("inari"),
-		postgres.WithUsername("inari"),
-		postgres.WithPassword("inari"),
-		testcontainers.WithWaitStrategy(wait.ForLog("database system is ready to accept connections").WithOccurrence(2)),
-	)
+	pg, err := testutil.SharedPostgres(ctx)
 	if err != nil {
 		t.Skipf("testcontainers unavailable: %v", err)
 	}
-	t.Cleanup(func() { _ = pg.Terminate(ctx) })
-	url, err := pg.ConnectionString(ctx, "sslmode=disable")
+	database, err := testdb.NewDatabase(t, pg)
 	if err != nil {
 		t.Fatal(err)
-	}
-	database, err := db.Connect(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(database.Close)
-	if err := database.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
 	}
 	if _, err := database.Pool.Exec(ctx,
 		`INSERT INTO organizations (id, slug, display_name, keycloak_org_id) VALUES

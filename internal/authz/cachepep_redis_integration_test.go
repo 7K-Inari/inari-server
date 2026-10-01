@@ -7,10 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
-
 	"github.com/7K-Inari/inari-server/internal/cache"
+	"github.com/7K-Inari/inari-server/internal/testutil"
 )
 
 // End-to-end fail-open proof: CachedAuthorizer + InvalidatingStore over a
@@ -19,21 +17,9 @@ import (
 // direct FGA calls) — never fail because the cache is down.
 func TestCachedAuthorizerRedisOutageFailsOpen(t *testing.T) {
 	ctx := context.Background()
-	ctr, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        "redis:7-alpine",
-			ExposedPorts: []string{"6379/tcp"},
-			WaitingFor:   wait.ForLog("Ready to accept connections"),
-		},
-		Started: true,
-	})
+	endpoint, err := testutil.SharedRedis(ctx)
 	if err != nil {
 		t.Skipf("testcontainers unavailable: %v", err)
-	}
-
-	endpoint, err := ctr.Endpoint(ctx, "")
-	if err != nil {
-		t.Fatalf("endpoint: %v", err)
 	}
 	c, err := cache.NewRedis("redis://" + endpoint + "/0")
 	if err != nil {
@@ -68,7 +54,7 @@ func TestCachedAuthorizerRedisOutageFailsOpen(t *testing.T) {
 	}
 
 	// Kill Redis mid-traffic: every Check and write must still succeed.
-	if err := ctr.Terminate(ctx); err != nil {
+	if err := testutil.KillSharedRedis(ctx); err != nil {
 		t.Fatalf("terminate redis: %v", err)
 	}
 	store.setAllowed("user:u1", RelationViewer, "organization:o1", true)

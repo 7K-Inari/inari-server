@@ -233,7 +233,7 @@ func (s *Service) SetMemberRole(ctx context.Context, actor, slug, userID, roleID
 			}
 			if err := s.audit.Record(ctx, tx, &types.AuditEvent{
 				OrgID: org.ID, Actor: actor, Action: action, ObjectType: "user", ObjectID: userID,
-				Payload: []byte(fmt.Sprintf(`{"role":%q,"team":%q}`, role.Name, anchor.Name)),
+				Payload: []byte(fmt.Sprintf(`{"role":%q,"team":%q}`, anchor.RoleName, anchor.Name)),
 			}); err != nil {
 				return err
 			}

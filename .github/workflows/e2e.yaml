@@ -105,6 +105,28 @@ jobs:
       - name: Load prebuilt images
         run: docker load -i e2e-images.tar
 
+      # The golden path still helm-installs the agent from the inari-agent
+      # repo's chart (deployed separately from the prebuilt image), so each
+      # matrix leg needs its own checkout of that repo for the chart only.
+      - name: Resolve matching inari-agent ref
+        id: agent
+        env:
+          HEAD_REF: ${{ github.head_ref || github.ref_name }}
+        run: |
+          BRANCH="$HEAD_REF"
+          if git ls-remote --exit-code https://github.com/7K-Inari/inari-agent.git "refs/heads/$BRANCH" >/dev/null 2>&1; then
+            echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout inari-agent
+        uses: actions/checkout@v4
+        with:
+          repository: 7K-Inari/inari-agent
+          ref: ${{ steps.agent.outputs.ref }}
+          path: inari-agent
+
       - name: Resolve matching inari-release-bundle ref
         id: chart
         env:

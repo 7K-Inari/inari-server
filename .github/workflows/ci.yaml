@@ -80,7 +80,11 @@ jobs:
       - name: integration tests (${{ matrix.shard }})
         env:
           TESTCONTAINERS_RYUK_DISABLED: "true"
-        run: gotestsum --junitfile integration-${{ matrix.shard }}.xml --format-hide-empty-pkg -- -tags=integration -count=1 $RACE $(scripts/integration-shards.sh packages ${{ matrix.shard }})
+        run: |
+          race=()
+          if [ -n "$RACE" ]; then race=("$RACE"); fi
+          read -r -a pkgs <<<"$(scripts/integration-shards.sh packages ${{ matrix.shard }})"
+          gotestsum --junitfile integration-${{ matrix.shard }}.xml --format-hide-empty-pkg -- -tags=integration -count=1 "${race[@]}" "${pkgs[@]}"
       - name: upload JUnit report
         if: always()
         uses: actions/upload-artifact@v4

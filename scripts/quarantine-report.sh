@@ -49,7 +49,9 @@ fi
 
 while IFS= read -r test_id; do
   title="Flaky quarantine: $test_id"
-  existing=$(gh issue list --label flaky-quarantine --search "$test_id" \
+  # Quoted phrase + in:title so TestFoo does not match a TestFooBar issue.
+  existing=$(gh issue list --label flaky-quarantine \
+    --search "\"$test_id\" in:title" \
     --json number --jq '.[0].number' 2>/dev/null || true)
   body=$(cat <<EOF
 **Flaky quarantine failure detected.**

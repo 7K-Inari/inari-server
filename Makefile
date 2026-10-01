@@ -1,6 +1,6 @@
 BINARY := bin/inari-server
 
-.PHONY: build test test-integration lint run migrate docker export-openapi
+.PHONY: build test test-integration lint actionlint run migrate docker export-openapi
 
 export-openapi:
 	mkdir -p dist
@@ -17,6 +17,13 @@ test-integration:
 
 lint:
 	golangci-lint run ./...
+
+actionlint:
+	@if command -v actionlint >/dev/null 2>&1; then \
+		actionlint .github/workflows/*.y*ml; \
+	else \
+		docker run --rm -v "$(CURDIR):/repo" --workdir /repo rhysd/actionlint:1.7.12; \
+	fi
 
 run:
 	go run ./cmd/inari-server

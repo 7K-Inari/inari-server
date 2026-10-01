@@ -417,3 +417,133 @@ func TestSetMemberRoleConvergesWithRemappedAnchor(t *testing.T) {
 		t.Errorf("after sync roles = %v, want [operator]", names)
 	}
 }
+
+// TestSyncTeamMembersConvergesRoleChangeWithMultipleUsers verifies that a
+// team role change cleans stale rows for every member of the team, not just
+// one, and that simultaneous leavers are also removed.
+func TestSyncTeamMembersConvergesRoleChangeWithMultipleUsers(t *testing.T) {
+	ctx, _, svc, idp, org, _ := setupProjectionTenant(t)
+	idp.users["dev-1"] = true
+	idp.users["dev-2"] = true
+	idp.users["dev-3"] = true
+
+	teams, err := svc.ListTeams(ctx, org.ID)
+	if err != nil {
+		t.Fatalf("ListTeams: %v", err)
+	}
+	var devTeam *types.Team
+	for i := range teams {
+		if teams[i].Name == "developers" {
+			devTeam = &teams[i]
+			break
+		}
+	}
+	if devTeam == nil {
+		t.Fatal("developers team not found")
+	}
+
+	for _, u := range []string{"dev-1", "dev-2", "dev-3"} {
+		if err := svc.AddMember(ctx, "admin", "acme", "developers", u); err != nil {
+			t.Fatalf("AddMember %s: %v", u, err)
+		}
+	}
+
+	operator, err := svc.GetRole(ctx, "acme", "operator")
+	if err != nil {
+		t.Fatalf("GetRole operator: %v", err)
+	}
+	if _, err := svc.SetRBACMappings(ctx, "admin", "acme", []types.TeamRoleMapping{
+		{Team: "developers", RoleID: operator.ID},
+	}); err != nil {
+		t.Fatalf("SetRBACMappings operator: %v", err)
+	}
+
+	// dev-3 leaves the group at the same time the role changes.
+	if err := svc.SyncTeamMembers(ctx, authz.TeamGroupRef{
+		TeamID: devTeam.ID, OrgID: org.ID, RoleID: operator.ID, GroupPath: devTeam.KeycloakGroupPath,
+	}, []*types.User{
+		{ID: "dev-1", Email: "dev-1@example.com"},
+		{ID: "dev-2", Email: "dev-2@example.com"},
+	}); err != nil {
+		t.Fatalf("SyncTeamMembers operator: %v", err)
+	}
+
+	for _, u := range []string{"dev-1", "dev-2"} {
+		names, err := svc.ListMemberRoleNames(ctx, org.ID, u)
+		if err != nil {
+			t.Fatalf("ListMemberRoleNames %s: %v", u, err)
+		}
+		if len(names) != 1 || names[0] != "operator" {
+			t.Errorf("%s roles = %v, want [operator]", u, names)
+		}
+	}
+	// dev-3 should have no roles left from this team.
+	names, err := svc.ListMemberRoleNames(ctx, org.ID, "dev-3")
+	if err != nil {
+		t.Fatalf("ListMemberRoleNames dev-3: %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("dev-3 roles = %v, want []", names)
+	}
+
+	members := teamMembers(t, svc, org.ID, devTeam.ID)
+	if len(members) != 2 {
+		t.Errorf("team members = %+v, want 2", members)
+	}
+}
+
+// TestSyncTeamMembersEmptyGroupAfterRoleChange verifies that when a team's
+// role changes and the Keycloak group is simultaneously empty, every stale
+// membership row for that team is removed. This exercises the SQL semantic
+// that user_id <> ALL(ARRAY[]::text[]) is true for all rows.
+func TestSyncTeamMembersEmptyGroupAfterRoleChange(t *testing.T) {
+	ctx, _, svc, idp, org, _ := setupProjectionTenant(t)
+	idp.users["dev-user"] = true
+
+	teams, err := svc.ListTeams(ctx, org.ID)
+	if err != nil {
+		t.Fatalf("ListTeams: %v", err)
+	}
+	var devTeam *types.Team
+	for i := range teams {
+		if teams[i].Name == "developers" {
+			devTeam = &teams[i]
+			break
+		}
+	}
+	if devTeam == nil {
+		t.Fatal("developers team not found")
+	}
+
+	if err := svc.AddMember(ctx, "admin", "acme", "developers", "dev-user"); err != nil {
+		t.Fatalf("AddMember: %v", err)
+	}
+
+	operator, err := svc.GetRole(ctx, "acme", "operator")
+	if err != nil {
+		t.Fatalf("GetRole operator: %v", err)
+	}
+	if _, err := svc.SetRBACMappings(ctx, "admin", "acme", []types.TeamRoleMapping{
+		{Team: "developers", RoleID: operator.ID},
+	}); err != nil {
+		t.Fatalf("SetRBACMappings operator: %v", err)
+	}
+
+	// Empty Keycloak group after the role flip: the team should have no members.
+	if err := svc.SyncTeamMembers(ctx, authz.TeamGroupRef{
+		TeamID: devTeam.ID, OrgID: org.ID, RoleID: operator.ID, GroupPath: devTeam.KeycloakGroupPath,
+	}, nil); err != nil {
+		t.Fatalf("SyncTeamMembers empty: %v", err)
+	}
+
+	names, err := svc.ListMemberRoleNames(ctx, org.ID, "dev-user")
+	if err != nil {
+		t.Fatalf("ListMemberRoleNames: %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("dev-user roles = %v, want []", names)
+	}
+	if got := teamMembers(t, svc, org.ID, devTeam.ID); len(got) != 0 {
+		t.Errorf("team members = %+v, want empty", got)
+	}
+}

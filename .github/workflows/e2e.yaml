@@ -53,6 +53,7 @@ jobs:
           file: deploy/docker/Dockerfile
           tags: inari/server:e2e
           push: false
+          load: true
           cache-from: type=gha,scope=e2e-server
           cache-to: type=gha,mode=max,scope=e2e-server
 
@@ -63,6 +64,7 @@ jobs:
           file: inari-agent/Dockerfile
           tags: inari/agent:e2e
           push: false
+          load: true
           cache-from: type=gha,scope=e2e-agent
           cache-to: type=gha,mode=max,scope=e2e-agent
 

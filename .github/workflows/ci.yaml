@@ -45,7 +45,17 @@ jobs:
           path: ~/.cache/go-build
           key: go-build-test-${{ runner.os }}-${{ hashFiles('go.sum') }}
           restore-keys: go-build-test-${{ runner.os }}-
-      - run: go test ./...
+      - name: install gotestsum
+        run: go install gotest.tools/gotestsum@v1.13.0
+      - name: unit tests
+        run: gotestsum --junitfile unit-tests.xml --format-hide-empty-pkg -- -count=1 ./...
+      - name: upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-unit
+          path: unit-tests.xml
+          retention-days: 14
 
   integration:
     runs-on: ubuntu-latest
@@ -53,6 +63,10 @@ jobs:
       fail-fast: false
       matrix:
         shard: [critical, core-services, modules-a, modules-b]
+    env:
+      # Race-detect the critical shard only (db, leaderlease, eventbus, audit,
+      # authz, orchestrator, approvals) — empty for the other shards.
+      RACE: ${{ matrix.shard == 'critical' && '-race' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -64,12 +78,25 @@ jobs:
           path: ~/.cache/go-build
           key: go-build-integration-${{ matrix.shard }}-${{ runner.os }}-${{ hashFiles('go.sum') }}
           restore-keys: go-build-integration-${{ matrix.shard }}-${{ runner.os }}-
+      - name: install gotestsum
+        run: go install gotest.tools/gotestsum@v1.13.0
       - name: shard map covers all integration packages
         run: scripts/integration-shards.sh verify
       - name: integration tests (${{ matrix.shard }})
         env:
           TESTCONTAINERS_RYUK_DISABLED: "true"
-        run: go test -tags=integration -count=1 $(scripts/integration-shards.sh packages ${{ matrix.shard }})
+        run: |
+          race=()
+          if [ -n "$RACE" ]; then race=("$RACE"); fi
+          read -r -a pkgs <<<"$(scripts/integration-shards.sh packages ${{ matrix.shard }})"
+          gotestsum --junitfile integration-${{ matrix.shard }}.xml --format-hide-empty-pkg -- -tags=integration -count=1 "${race[@]}" "${pkgs[@]}"
+      - name: upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-integration-${{ matrix.shard }}
+          path: integration-${{ matrix.shard }}.xml
+          retention-days: 14
 
   image:
     runs-on: ubuntu-latest

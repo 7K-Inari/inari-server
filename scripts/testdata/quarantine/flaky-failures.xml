@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="github.com/7K-Inari/inari-server/internal/tenancy" tests="3" time="120.0">
+    <testcase name="TestFailingNew" time="30.0">
+      <failure message="timed out waiting for outbox">stack trace</failure>
+    </testcase>
+    <testcase name="TestFailingWithExistingIssue" time="25.0">
+      <failure message="container start flaked">stack trace</failure>
+    </testcase>
+    <testcase name="TestPassing" time="10.0"/>
+  </testsuite>
+  <testsuite name="github.com/7K-Inari/inari-server/internal/cache" tests="1" time="5.0">
+    <testcase name="TestCacheQuarantined" time="5.0"/>
+  </testsuite>
+</testsuites>

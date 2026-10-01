@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="github.com/7K-Inari/inari-server/internal/tenancy" tests="2" time="40.0">
+    <testcase name="TestFailingNew" time="30.0"/>
+    <testcase name="TestPassing" time="10.0"/>
+  </testsuite>
+</testsuites>

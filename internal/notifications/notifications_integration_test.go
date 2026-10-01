@@ -37,14 +37,19 @@ func itDB(t *testing.T) *db.DB {
 	return database
 }
 
-func newService(database *db.DB, slack *notifications.SlackSender, webhook *notifications.WebhookSender) *notifications.Service {
-	notifications.AllowPrivateEndpoints = true // httptest servers listen on loopback
+func newService(t *testing.T, database *db.DB, slack *notifications.SlackSender, webhook *notifications.WebhookSender) *notifications.Service {
+	t.Helper()
+	// httptest servers listen on loopback; restore the SSRF guard afterwards
+	// so shuffled unit tests (e.g. TestValidateEndpointRejectsPrivateTargets)
+	// don't observe the relaxed state.
+	notifications.AllowPrivateEndpoints = true
+	t.Cleanup(func() { notifications.AllowPrivateEndpoints = false })
 	return notifications.NewService(database, notifications.NewStore(), audit.NewStore(), slack, webhook)
 }
 
 func TestEndpointCRUD(t *testing.T) {
 	database := itDB(t)
-	svc := newService(database, nil, nil)
+	svc := newService(t, database, nil, nil)
 	ctx := context.Background()
 
 	ep, err := svc.CreateEndpoint(ctx, "user-1", "org:1", notifications.EndpointInput{
@@ -124,7 +129,7 @@ func TestHandleDeliversAndRecords(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	svc := newService(database, nil, nil)
+	svc := newService(t, database, nil, nil)
 	ctx := context.Background()
 
 	if _, err := svc.CreateEndpoint(ctx, "user-1", "org:1", notifications.EndpointInput{
@@ -217,7 +222,7 @@ func TestRetryFailed(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	svc := newService(database, nil, nil)
+	svc := newService(t, database, nil, nil)
 	ep, err := svc.CreateEndpoint(ctx, "user-1", "org:1", notifications.EndpointInput{
 		Name: "flaky", Kind: types.NotificationKindWebhook, URL: srv.URL,
 	})
@@ -274,7 +279,7 @@ func TestTestEndpoint(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	svc := newService(database, nil, nil)
+	svc := newService(t, database, nil, nil)
 	ctx := context.Background()
 	ep, err := svc.CreateEndpoint(ctx, "user-1", "org:1", notifications.EndpointInput{
 		Name: "t", Kind: types.NotificationKindSlack, URL: srv.URL,

@@ -35,7 +35,16 @@ check "balance falls back to static map (empty dir)" \
   "$("$SHARD_SCRIPT" balance core-services "$empty")"
 
 # --- timing-based packing ----------------------------------------------------
-module_prefix="github.com/7K-Inari/inari-server"
+
+# `gh run download` (no -n) unpacks each artifact into its own subdirectory;
+# balance must find JUnit files in nested dirs and produce the same packing.
+nested=$(mktemp -d)
+trap 'rm -rf "$empty" "$nested"' EXIT
+mkdir -p "$nested/junit-integration-core-services"
+cp "$FIXTURES"/*.xml "$nested/junit-integration-core-services/"
+check "balance finds JUnit files in gh-style nested artifact dirs" \
+  "$("$SHARD_SCRIPT" balance core-services "$FIXTURES")" \
+  "$("$SHARD_SCRIPT" balance core-services "$nested")"
 
 # Every non-critical package in the static map, with a synthetic duration.
 # critical shard must stay pinned to the static list.

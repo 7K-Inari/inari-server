@@ -122,7 +122,9 @@ all_pool = [p for pkgs in pools.values() for p in pkgs]
 
 # Per-package duration from every JUnit file; the latest value seen wins.
 durations = {}
-for path in sorted(glob.glob(os.path.join(os.environ["JUNIT_DIR"], "*.xml"))):
+# `gh run download` (no -n) unpacks each artifact into its own subdirectory,
+# so search recursively; flat dirs (fixtures, single-artifact downloads) work too.
+for path in sorted(glob.glob(os.path.join(os.environ["JUNIT_DIR"], "**", "*.xml"), recursive=True)):
     try:
         root = ET.parse(path).getroot()
     except ET.ParseError:

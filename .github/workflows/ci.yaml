@@ -93,6 +93,10 @@ jobs:
       - name: shard map covers all integration packages
         run: scripts/integration-shards.sh verify
       - name: download timing history from last successful ci run
+        # Downloads ALL junit-integration-* artifacts (not just this shard's):
+        # after a rebalance, a package new to this shard has no timing in this
+        # shard's own history, so per-shard downloads would leave rebalanced
+        # packages untimed (packed as 0s) until they cycled every shard.
         # Soft-fail by design: cold start / missing artifacts / fork PR all
         # fall back to the static shard map inside integration-shards.sh.
         continue-on-error: true
@@ -103,8 +107,7 @@ jobs:
           run_id=$(gh run list --workflow ci --branch "$base" --status success \
             --limit 1 --json databaseId --jq '.[0].databaseId')
           if [ -n "$run_id" ] && [ "$run_id" != "null" ]; then
-            gh run download "$run_id" \
-              -n "junit-integration-${{ matrix.shard }}" -D .ci-timing
+            gh run download "$run_id" -D .ci-timing
           fi
       - name: integration tests (${{ matrix.shard }})
         env:

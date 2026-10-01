@@ -38,15 +38,20 @@ jobs:
         continue-on-error: true
         run: go vet -tags flaky ./...
       - name: run flaky-tagged tests
-        # Always succeeds at the step level: the report step decides what to
-        # file. TESTCONTAINERS_RYUK_DISABLED is CI-only (containers die with
-        # the ephemeral runner); local runs keep Ryuk enabled.
+        # Only the `flaky` tag: a quarantined test file is `//go:build flaky`
+        # (PR CI uses -tags=integration, so it stays out of the PR gate), and
+        # adding `integration` here would run the whole suite and mislabel
+        # ordinary failures as quarantine issues. The vet step above surfaces
+        # any flaky test that fails to compile under -tags=flaky. Always
+        # succeeds at the step level: the report step decides what to file.
+        # TESTCONTAINERS_RYUK_DISABLED is CI-only (containers die with the
+        # ephemeral runner); local runs keep Ryuk enabled.
         continue-on-error: true
         env:
           TESTCONTAINERS_RYUK_DISABLED: "true"
         run: |
           gotestsum --junitfile flaky.xml --format-hide-empty-pkg -- \
-            -tags="integration,flaky" -shuffle=on -count=1 ./...
+            -tags=flaky -shuffle=on -count=1 ./...
       - name: upload JUnit report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

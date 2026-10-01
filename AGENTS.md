@@ -20,6 +20,8 @@ Stack: Go, PostgreSQL, chi/Huma (REST/OpenAPI codegen), gRPC (agent gateway), NA
 
 ## Conventions
 - Conventional Commits; SemVer releases; container images/artifacts cosign-signed.
+- **Merge queue on `main` (H3):** `ci.yaml` triggers on `merge_group`, so the full pipeline (including the sharded integration matrix) runs against merge-queue staging branches before anything lands on `main`. Check names are job-derived, so branch-protection required checks apply unchanged to queue runs. Enabling the queue itself is a repo-admin branch-protection toggle (Settings → Branches → require merge queue on `main`); keep required checks named stably when renaming jobs, or the queue gate breaks.
+- **Flaky quarantine policy (H7):** a test may be pulled out of the PR gate with a `//go:build flaky` tag (typically alongside `integration`). Rules: quarantine **requires an owner and an expiry date** recorded in the auto-filed `flaky-quarantine` issue (default expiry ≤ 30 days; expired quarantines are fixed or the test is deleted). The nightly, non-blocking `flaky-quarantine` workflow runs all flaky-tagged tests and opens/updates one issue per failing test. PR CI must stay green *without* flaky-tagged tests. Un-quarantine = remove the tag and reference the issue from the PR.
 - Release flow (release-please, PR-only mode):
   1. `fix:`/`feat:` merges to `main` → `.github/workflows/release-please.yml` opens/updates a Release PR (version bump + CHANGELOG.md). Nothing else happens — no tags, Releases, or publishes.
   2. A maintainer manually merges the Release PR (human gate). CI lint/test/image checks must pass on the PR.

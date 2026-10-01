@@ -1,0 +1,4 @@
+# Supply-chain / delivery-critical paths require platform team review.
+.github/workflows/ @7K-Inari/platform
+e2e/ @7K-Inari/platform
+deploy/ @7K-Inari/platform

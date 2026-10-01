@@ -270,6 +270,70 @@ func TestMyPermissionsTenantCapabilities(t *testing.T) {
 	}
 }
 
+// TestMyPermissionsContractShape pins the wire contract of GET
+// /me/permissions (run d701e2ba B4): the role projection is named "roles"
+// (the retired "orgRoles" must never come back — the access console reads
+// exactly one of them), and the capability projection carries exactly the
+// four camelCase flags the console gates on. Decode-based tests cannot
+// catch a stray duplicate field or a renamed key, so this decodes the raw
+// JSON into a generic map.
+func TestMyPermissionsContractShape(t *testing.T) {
+	router, api := httpserver.NewRouter(slog.New(slog.NewTextHandler(nil, nil)),
+		stubValidator{id: &authn.Identity{Subject: "u1", Organizations: []string{"acme"}}}, stubReady{})
+	NewMeHandler(roleAuthorizer{},
+		stubTenantResolver{org: &types.Organization{ID: "org:o1", Slug: "acme"}},
+		stubMemberResolver{roles: []string{"admin"}}).RegisterRoutes(api)
+	srv := httptest.NewServer(router)
+	t.Cleanup(srv.Close)
+	resp := testTokenReq(t, http.MethodGet, srv.URL+"/api/v1/me/permissions", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+	var raw map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := raw["orgRoles"]; ok {
+		t.Errorf("response must not contain the retired orgRoles field: %v", raw)
+	}
+	roles, ok := raw["roles"].(map[string]any)
+	if !ok {
+		t.Fatalf("roles missing or not an object: %v", raw)
+	}
+	if acme, _ := roles["acme"].([]any); len(acme) != 1 || acme[0] != "admin" {
+		t.Errorf("roles.acme = %v, want [admin]", roles["acme"])
+	}
+	if _, ok := raw["canCreateOrganizations"].(bool); !ok {
+		t.Errorf("canCreateOrganizations missing or not a bool: %v", raw)
+	}
+
+	tenants, ok := raw["tenants"].(map[string]any)
+	if !ok {
+		t.Fatalf("tenants missing or not an object: %v", raw)
+	}
+	caps, ok := tenants["acme"].(map[string]any)
+	if !ok {
+		t.Fatalf("tenants.acme missing or not an object: %v", tenants)
+	}
+	want := map[string]bool{
+		"canDeploy":        true,
+		"canManageMembers": true,
+		"canManageTeams":   true,
+		"canManageRbac":    true,
+	}
+	for key := range caps {
+		if _, ok := want[key]; !ok {
+			t.Errorf("unexpected capability key %q (console reads exactly four camelCase flags)", key)
+		}
+	}
+	for key := range want {
+		if _, ok := caps[key].(bool); !ok {
+			t.Errorf("capability %q missing or not a bool: %v", key, caps)
+		}
+	}
+}
+
 // A stale org claim (e.g. a deleted tenant still in the token) is skipped
 // instead of failing the whole projection.
 func TestMyPermissionsSkipsStaleOrgClaim(t *testing.T) {

@@ -16,6 +16,7 @@ import (
 
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/authn"
+	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
@@ -49,6 +50,17 @@ func (a itAuthorizer) ListObjects(context.Context, string, string, string) ([]st
 	return nil, nil
 }
 
+// itViewerAuthorizer grants tenant.read only: an org member whose role
+// bundle lacks clusters.register (e.g. built-in viewer/editor).
+type itViewerAuthorizer struct{}
+
+func (itViewerAuthorizer) Check(_ context.Context, _, relation, _ string) (bool, error) {
+	return relation == authz.RelationTenantRead, nil
+}
+func (itViewerAuthorizer) ListObjects(context.Context, string, string, string) ([]string, error) {
+	return nil, nil
+}
+
 type itTenants map[string]*types.Organization
 
 func (t itTenants) GetTenant(_ context.Context, slug string) (*types.Organization, error) {
@@ -66,13 +78,13 @@ func (itClients) CreateClusterClient(context.Context, string) (string, error) {
 func (itClients) ClusterClientSecret(context.Context, string) (string, error) { return "s", nil }
 func (itClients) DisableClient(context.Context, string) error                 { return nil }
 
-func itServer(t *testing.T, az itAuthorizer) (*httptest.Server, *Service) {
+func itServer(t *testing.T, az authz.Authorizer) (*httptest.Server, *Service) {
 	t.Helper()
 	srv, svc, _ := itServerDB(t, az)
 	return srv, svc
 }
 
-func itServerDB(t *testing.T, az itAuthorizer) (*httptest.Server, *Service, *db.DB) {
+func itServerDB(t *testing.T, az authz.Authorizer) (*httptest.Server, *Service, *db.DB) {
 	t.Helper()
 	ctx := context.Background()
 	pg, err := testutil.SharedPostgres(ctx)
@@ -266,6 +278,31 @@ func TestClusterAPIAuthzDenied(t *testing.T) {
 	defer srv.Close()
 	if code, _ := itReq(t, srv, "GET", "/api/v1/tenants/acme/clusters", "good", ""); code != http.StatusForbidden {
 		t.Errorf("authz denied: got %d, want 403", code)
+	}
+}
+
+// TestClusterWriteRoutesForbiddenWithoutClustersRegister is the coded form
+// of the live B7 check (run d701e2ba): a member whose role bundle lacks
+// clusters.register can read the fleet but cannot register, delete, or
+// decommission clusters.
+func TestClusterWriteRoutesForbiddenWithoutClustersRegister(t *testing.T) {
+	srv, _ := itServer(t, itViewerAuthorizer{})
+	defer srv.Close()
+
+	// Reads stay open with tenant.read.
+	if code, body := itReq(t, srv, "GET", "/api/v1/tenants/acme/clusters", "good", ""); code != http.StatusOK {
+		t.Fatalf("list clusters with tenant.read: got %d (%s), want 200", code, body)
+	}
+
+	forbidden := []struct{ method, path, body string }{
+		{"POST", "/api/v1/tenants/acme/clusters", `{"name":"c1"}`},
+		{"DELETE", "/api/v1/tenants/acme/clusters/00000000-0000-0000-0000-000000000000", ""},
+		{"POST", "/api/v1/tenants/acme/clusters/00000000-0000-0000-0000-000000000000/decommission", `{}`},
+	}
+	for _, tc := range forbidden {
+		if code, body := itReq(t, srv, tc.method, tc.path, "good", tc.body); code != http.StatusForbidden {
+			t.Errorf("%s %s: got %d (%s), want 403", tc.method, tc.path, code, body)
+		}
 	}
 }
 

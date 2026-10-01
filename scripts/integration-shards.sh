@@ -26,14 +26,20 @@ all_shards() {
   echo "critical core-services modules-a modules-b"
 }
 
+# Emit ./-prefixed paths: bare "internal/db" is resolved by the go tool as an
+# import path (module mode), not a directory, and fails with
+# "package internal/db is not in std". See CI integration job.
 packages() {
+  local pkgs
   case "$1" in
-    critical) echo $CRITICAL ;;
-    core-services) echo $CORE_SERVICES ;;
-    modules-a) echo $MODULES_A ;;
-    modules-b) echo $MODULES_B ;;
+    critical) pkgs=$CRITICAL ;;
+    core-services) pkgs=$CORE_SERVICES ;;
+    modules-a) pkgs=$MODULES_A ;;
+    modules-b) pkgs=$MODULES_B ;;
     *) echo "unknown shard: $1 (expected: $(all_shards))" >&2; exit 1 ;;
   esac
+  for p in $pkgs; do printf './%s ' "$p"; done
+  echo
 }
 
 verify() {
@@ -42,7 +48,7 @@ verify() {
   actual=$(grep -rl --include='*_test.go' -e '^//go:build integration' internal/ \
     | xargs -n1 dirname | sort -u)
   # Every directory claimed by the shard map.
-  expected=$(for s in $(all_shards); do for p in $(packages "$s"); do echo "$p"; done; done | sort)
+  expected=$(for s in $(all_shards); do for p in $(packages "$s"); do echo "${p#./}"; done; done | sort)
 
   covered=$(sort -u <<<"$expected")
   if [ "$(wc -l <<<"$expected")" != "$(wc -l <<<"$covered")" ]; then

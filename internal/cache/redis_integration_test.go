@@ -7,28 +7,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
+	"github.com/7K-Inari/inari-server/internal/testutil"
 )
 
 func TestRedisConformance(t *testing.T) {
 	ctx := context.Background()
-	req := testcontainers.ContainerRequest{
-		Image:        "redis:7-alpine",
-		ExposedPorts: []string{"6379/tcp"},
-		WaitingFor:   wait.ForLog("Ready to accept connections"),
-	}
-	ctr, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req, Started: true,
-	})
+	endpoint, err := testutil.SharedRedis(ctx)
 	if err != nil {
 		t.Skipf("testcontainers unavailable: %v", err)
-	}
-	t.Cleanup(func() { _ = ctr.Terminate(ctx) })
-
-	endpoint, err := ctr.Endpoint(ctx, "")
-	if err != nil {
-		t.Fatalf("endpoint: %v", err)
 	}
 	c, err := NewRedis("redis://" + endpoint + "/0")
 	if err != nil {

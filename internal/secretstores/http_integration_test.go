@@ -16,9 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/anypb"
 
@@ -32,6 +29,8 @@ import (
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/secretstores"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
+	"github.com/7K-Inari/inari-server/internal/testutil"
+	"github.com/7K-Inari/inari-server/internal/testutil/testdb"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -128,27 +127,13 @@ func (s *itSets) ResolveClusters(_ context.Context, orgID string, selector map[s
 func itServer(t *testing.T) (*httptest.Server, *db.DB) {
 	t.Helper()
 	ctx := context.Background()
-	pg, err := postgres.Run(ctx, "postgres:16-alpine",
-		postgres.WithDatabase("inari"),
-		postgres.WithUsername("inari"),
-		postgres.WithPassword("inari"),
-		testcontainers.WithWaitStrategy(wait.ForLog("database system is ready to accept connections").WithOccurrence(2)),
-	)
+	pg, err := testutil.SharedPostgres(ctx)
 	if err != nil {
 		t.Skipf("testcontainers unavailable: %v", err)
 	}
-	t.Cleanup(func() { _ = pg.Terminate(ctx) })
-	url, err := pg.ConnectionString(ctx, "sslmode=disable")
+	database, err := testdb.NewDatabase(t, pg)
 	if err != nil {
 		t.Fatal(err)
-	}
-	database, err := db.Connect(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(database.Close)
-	if err := database.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
 	}
 	if _, err := database.Pool.Exec(ctx,
 		`INSERT INTO organizations (id, slug, display_name, keycloak_org_id) VALUES

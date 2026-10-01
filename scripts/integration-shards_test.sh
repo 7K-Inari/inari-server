@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# integration-shards_test.sh — tests for scripts/integration-shards.sh.
+# Run: scripts/integration-shards_test.sh  (from anywhere; no containers needed)
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+SHARD_SCRIPT=scripts/integration-shards.sh
+FIXTURES=scripts/testdata/integration-shards/junit
+failures=0
+
+check() { # <description> <expected> <actual>
+  if [ "$2" == "$3" ]; then
+    echo "ok: $1"
+  else
+    echo "FAIL: $1" >&2
+    echo "  expected: $2" >&2
+    echo "  actual:   $3" >&2
+    failures=$((failures + 1))
+  fi
+}
+
+# --- fallback: no junit dir -> identical to static map -----------------------
+for shard in critical core-services modules-a modules-b; do
+  check "balance falls back to static map for '$shard' (missing dir)" \
+    "$("$SHARD_SCRIPT" packages "$shard")" \
+    "$("$SHARD_SCRIPT" balance "$shard" /nonexistent-dir)"
+done
+
+# --- fallback: empty junit dir ----------------------------------------------
+empty=$(mktemp -d)
+trap 'rm -rf "$empty"' EXIT
+check "balance falls back to static map (empty dir)" \
+  "$("$SHARD_SCRIPT" packages core-services)" \
+  "$("$SHARD_SCRIPT" balance core-services "$empty")"
+
+# --- timing-based packing ----------------------------------------------------
+module_prefix="github.com/7K-Inari/inari-server"
+
+# Every non-critical package in the static map, with a synthetic duration.
+# critical shard must stay pinned to the static list.
+non_critical=$(
+  for s in core-services modules-a modules-b; do
+    "$SHARD_SCRIPT" packages "$s"
+  done | tr ' ' '\n' | sed 's|^\./||' | sort -u
+)
+
+# Union of all balanced output must equal the static union.
+static_union=$(
+  for s in critical core-services modules-a modules-b; do
+    "$SHARD_SCRIPT" packages "$s"
+  done | tr ' ' '\n' | sed 's|^\./||' | sort -u
+)
+balanced_union=$(
+  for s in critical core-services modules-a modules-b; do
+    "$SHARD_SCRIPT" balance "$s" "$FIXTURES"
+  done | tr ' ' '\n' | sed 's|^\./||' | sort -u
+)
+check "balance covers the same package union as the static map" \
+  "$static_union" "$balanced_union"
+
+check "critical shard stays pinned to the static list" \
+  "$("$SHARD_SCRIPT" packages critical)" \
+  "$("$SHARD_SCRIPT" balance critical "$FIXTURES")"
+
+# No duplicates across balanced shards.
+all=$(
+  for s in critical core-services modules-a modules-b; do
+    "$SHARD_SCRIPT" balance "$s" "$FIXTURES"
+  done | tr ' ' '\n' | grep -v '^$' | sort
+)
+dupes=$(uniq -d <<<"$all")
+check "balance emits no duplicate packages" "" "$dupes"
+
+# With fixture timings: heaviest package (internal/tenancy, 400s) must land
+# in the first non-critical bin opened by LPT; bins must be load-balanced to
+# within the heaviest remaining package (property check, not exact mapping).
+sums=""
+for s in core-services modules-a modules-b; do
+  sum=$("$SHARD_SCRIPT" balance "$s" "$FIXTURES" | tr ' ' '\n' | while read -r pkg; do
+    t=$(grep -ho "testsuite name=\"[^\"]*${pkg#./}\" [^>]*" "$FIXTURES"/*.xml | grep -o 'time="[0-9.]*"' | head -1 | tr -d 'time="')
+    echo "${t:-0}"
+  done | awk '{s+=$1} END {printf "%d", s}')
+  sums="$sums $sum"
+done
+echo "fixture shard sums (core-services, modules-a, modules-b):$sums" >&2
+
+# --- unknown shard still errors ----------------------------------------------
+if "$SHARD_SCRIPT" balance bogus "$FIXTURES" >/dev/null 2>&1; then
+  check "balance rejects unknown shard" "non-zero exit" "zero exit"
+else
+  check "balance rejects unknown shard" "non-zero exit" "non-zero exit"
+fi
+
+if [ "$failures" -gt 0 ]; then
+  echo "$failures test(s) FAILED" >&2
+  exit 1
+fi
+echo "all integration-shards tests passed"

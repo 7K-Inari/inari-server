@@ -59,6 +59,11 @@ jobs:
 
   integration:
     runs-on: ubuntu-latest
+    # actions: read lets the timing step download JUnit artifacts from the
+    # last successful ci run on the base branch (H2 timing-based sharding).
+    permissions:
+      contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -82,13 +87,27 @@ jobs:
         run: go install gotest.tools/gotestsum@v1.13.0
       - name: shard map covers all integration packages
         run: scripts/integration-shards.sh verify
+      - name: download timing history from last successful ci run
+        # Soft-fail by design: cold start / missing artifacts / fork PR all
+        # fall back to the static shard map inside integration-shards.sh.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          base="${{ github.base_ref || github.ref_name }}"
+          run_id=$(gh run list --workflow ci --branch "$base" --status success \
+            --limit 1 --json databaseId --jq '.[0].databaseId')
+          if [ -n "$run_id" ] && [ "$run_id" != "null" ]; then
+            gh run download "$run_id" \
+              -n "junit-integration-${{ matrix.shard }}" -D .ci-timing
+          fi
       - name: integration tests (${{ matrix.shard }})
         env:
           TESTCONTAINERS_RYUK_DISABLED: "true"
         run: |
           race=()
           if [ -n "$RACE" ]; then race=("$RACE"); fi
-          read -r -a pkgs <<<"$(scripts/integration-shards.sh packages ${{ matrix.shard }})"
+          read -r -a pkgs <<<"$(scripts/integration-shards.sh balance ${{ matrix.shard }} .ci-timing)"
           gotestsum --junitfile integration-${{ matrix.shard }}.xml --format-hide-empty-pkg -- -tags=integration -count=1 "${race[@]}" "${pkgs[@]}"
       - name: upload JUnit report
         if: always()

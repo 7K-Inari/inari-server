@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="github.com/7K-Inari/inari-server/internal/tenancy" tests="10" time="400.0">
+    <testcase name="TestTenantDeletion" time="120.0"/>
+  </testsuite>
+  <testsuite name="github.com/7K-Inari/inari-server/internal/scaffold" tests="9" time="50.0">
+    <testcase name="TestScaffoldRuns" time="20.0"/>
+  </testsuite>
+  <testsuite name="github.com/7K-Inari/inari-server/internal/policyservice" tests="4" time="300.0">
+    <testcase name="TestPolicyEval" time="100.0"/>
+  </testsuite>
+  <testsuite name="github.com/7K-Inari/inari-server/internal/platformresources" tests="2" time="30.0">
+    <testcase name="TestInventory" time="10.0"/>
+  </testsuite>
+  <testsuite name="github.com/7K-Inari/inari-server/internal/extensionhost" tests="3" time="200.0">
+    <testcase name="TestExtensions" time="60.0"/>
+  </testsuite>
+  <testsuite name="github.com/7K-Inari/inari-server/internal/agentgateway" tests="3" time="100.0">
+    <testcase name="TestAgentConn" time="30.0"/>
+  </testsuite>
+  <testsuite name="github.com/7K-Inari/inari-server/internal/usergit" tests="1" time="20.0">
+    <testcase name="TestUserGit" time="5.0"/>
+  </testsuite>
+  <testsuite name="github.com/7K-Inari/inari-server/internal/cmd" tests="1" time="999.0">
+    <testcase name="TestNotInShardMap" time="999.0"/>
+  </testsuite>
+</testsuites>

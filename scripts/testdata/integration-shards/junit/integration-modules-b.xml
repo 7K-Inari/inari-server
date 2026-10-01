@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="github.com/7K-Inari/inari-server/internal/tenantzonefactory" tests="2" time="150.0">
+    <testcase name="TestTZF" time="50.0"/>
+  </testsuite>
+  <testsuite name="github.com/7K-Inari/inari-server/internal/secretstores" tests="2" time="40.0">
+    <testcase name="TestSecretStores" time="10.0"/>
+  </testsuite>
+  <testsuite name="github.com/7K-Inari/inari-server/internal/rbacmaterialize" tests="2" time="120.0">
+    <testcase name="TestRBAC" time="40.0"/>
+  </testsuite>
+  <testsuite name="github.com/7K-Inari/inari-server/internal/notifications" tests="2" time="80.0">
+    <testcase name="TestNotify" time="25.0"/>
+  </testsuite>
+  <testsuite name="github.com/7K-Inari/inari-server/internal/fleetmanager" tests="2" time="60.0">
+    <testcase name="TestFleet" time="20.0"/>
+  </testsuite>
+  <testsuite name="github.com/7K-Inari/inari-server/internal/clusterregistry" tests="2" time="90.0">
+    <testcase name="TestClusterRegistry" time="30.0"/>
+  </testsuite>
+  <testsuite name="github.com/7K-Inari/inari-server/internal/cloudaccounts" tests="2" time="30.0">
+    <testcase name="TestCloudAccounts" time="10.0"/>
+  </testsuite>
+  <testsuite name="github.com/7K-Inari/inari-server/internal/catalog" tests="2" time="110.0">
+    <testcase name="TestCatalog" time="35.0"/>
+  </testsuite>
+  <testsuite name="github.com/7K-Inari/inari-server/internal/cache" tests="2" time="10.0">
+    <testcase name="TestCache" time="3.0"/>
+  </testsuite>
+</testsuites>

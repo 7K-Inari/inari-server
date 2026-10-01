@@ -108,12 +108,17 @@ jobs:
           fi
       - name: integration tests (${{ matrix.shard }})
         env:
+          # CI-only: containers die with the ephemeral runner job, so Ryuk's
+          # per-container reaper latency is skipped. Keep Ryuk ENABLED for
+          # local runs (this var is intentionally not set anywhere else).
           TESTCONTAINERS_RYUK_DISABLED: "true"
         run: |
           race=()
           if [ -n "$RACE" ]; then race=("$RACE"); fi
           read -r -a pkgs <<<"$(scripts/integration-shards.sh balance ${{ matrix.shard }} .ci-timing)"
-          gotestsum --junitfile integration-${{ matrix.shard }}.xml --format-hide-empty-pkg -- -tags=integration -count=1 "${race[@]}" "${pkgs[@]}"
+          # -shuffle=on surfaces order-dependent tests in PR CI; go test logs
+          # the seed on failure so a repro is one flag away.
+          gotestsum --junitfile integration-${{ matrix.shard }}.xml --format-hide-empty-pkg -- -tags=integration -shuffle=on -count=1 "${race[@]}" "${pkgs[@]}"
       - name: upload JUnit report
         if: always()
         uses: actions/upload-artifact@v4

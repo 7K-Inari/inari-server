@@ -1,11 +1,11 @@
 name: e2e
 
-# Golden-path gate: full platform stack on kind, tenant → cluster
-# registration → agent stream → capabilities. This is the end-to-end check
-# that guards the hub-and-spoke flow (plan §9 M1/M2 exit criteria).
+# Debug/repair path only: the canonical golden-path e2e is now a
+# release-prep gate in inari-release-bundle. This workflow is retained
+# solely for manual runs (workflow_dispatch) to debug or repair the
+# kind-based platform stack when the bundle gate fails.
 
 on:
-  pull_request:
   workflow_dispatch:
 
 concurrency:

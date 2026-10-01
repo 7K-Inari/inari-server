@@ -147,26 +147,55 @@ helm upgrade --install platform-config "$PLATFORM_CHART_DIR" \
   --set keycloak.resources.requests.memory=256Mi \
   --wait --timeout 10m
 
-# helm --wait does not cover CR-only resources (CNPG Cluster, Keycloak CR);
-# wait until the operators have the database and Keycloak actually running,
-# otherwise the inari-server pods below can never become ready.
-log "waiting for PostgreSQL (CNPG) and Keycloak"
-kubectl -n "$NAMESPACE" wait --for=condition=Ready cluster.postgresql.cnpg.io/postgresql --timeout=600s
-kubectl -n "$NAMESPACE" rollout status statefulset/keycloak --timeout=420s
+# All helm repo setup serially up front: helm's local repo cache is shared
+# state, and the component installs below run concurrently in background
+# workers, where concurrent `helm repo` commands would race.
+log "adding helm repos (serial; component installs run concurrently below)"
+helm repo add openfga https://openfga.github.io/helm-charts >/dev/null
+helm repo add nats https://nats-io.github.io/k8s/helm/charts/ >/dev/null
+helm repo add hashicorp https://helm.releases.hashicorp.com >/dev/null
+helm repo add external-secrets https://charts.external-secrets.io >/dev/null
+# bitnami is vendored for the inari-server chart's optional redis subchart
+# (helm verifies Chart.yaml dependencies even when disabled).
+helm repo add bitnami https://charts.bitnami.com/bitnami >/dev/null
+helm repo update >/dev/null
 
-log "pinning Keycloak hostname to the in-cluster FQDN (issuer consistency)"
-# With a dynamic hostname, token issuers vary by request host and never match
-# the server's configured issuer. The FQDN resolves from every namespace
-# (server in $NAMESPACE, agent in inari-system). In production this is a real
-# DNS name reachable from both sides. This must happen BEFORE inari-server is
-# installed: the server derives its expected issuer from keycloak.baseUrl and
-# crashes on OIDC discovery if the provider still reports keycloak.local.
-kubectl -n "$NAMESPACE" wait --for=condition=complete job -l app.kubernetes.io/component=keycloak --timeout=300s 2>/dev/null || true
-kubectl -n "$NAMESPACE" patch keycloak keycloak --type merge \
-  -p "{\"spec\":{\"hostname\":{\"hostname\":\"http://$KC_FQDN\",\"strict\":true}}}"
-kubectl -n "$NAMESPACE" rollout status statefulset/keycloak --timeout=420s
+# wait_cnpg blocks until the CNPG cluster is Ready. Everything except NATS
+# and Vault/ESO derives from the platform database (Keycloak itself, and
+# OpenFGA's datastore via the inari-db secret), so workers needing it call
+# this first. Multiple workers may call it concurrently — kubectl wait is
+# idempotent and safe to run in parallel.
+wait_cnpg() {
+  kubectl -n "$NAMESPACE" wait --for=condition=Ready \
+    cluster.postgresql.cnpg.io/postgresql --timeout=600s
+}
 
-log "installing NATS (JetStream, 3-node cluster)"
+# ---------------------------------------------------------------------------
+# Concurrent component installs. Keycloak's StatefulSet rollout is the long
+# pole of the bring-up (two 420s rollout waits around the hostname patch),
+# so the independent components install in background workers while it
+# runs. Dependency order inside each worker is preserved.
+#
+# set -euo pipefail discipline: die() inside a background subshell would
+# only kill that worker, so workers log and exit 1; the main shell collects
+# PIDs and re-raises failures at the barrier below.
+# ---------------------------------------------------------------------------
+declare -a WORKER_PIDS=() WORKER_NAMES=()
+
+# --- Worker: Keycloak (long pole) -----------------------------------------
+# Wait for the database, roll the StatefulSet, pin the hostname (issuer
+# consistency — MUST complete before inari-server installs), roll again.
+(
+  wait_cnpg || exit 1
+  kubectl -n "$NAMESPACE" rollout status statefulset/keycloak --timeout=420s || exit 1
+  kubectl -n "$NAMESPACE" wait --for=condition=complete job -l app.kubernetes.io/component=keycloak --timeout=300s 2>/dev/null || true
+  kubectl -n "$NAMESPACE" patch keycloak keycloak --type merge \
+    -p "{\"spec\":{\"hostname\":{\"hostname\":\"http://$KC_FQDN\",\"strict\":true}}}" || exit 1
+  kubectl -n "$NAMESPACE" rollout status statefulset/keycloak --timeout=420s || exit 1
+) &
+WORKER_PIDS+=($!); WORKER_NAMES+=("keycloak")
+
+# --- Worker: NATS (JetStream, 3-node cluster) ------------------------------
 # NATS is the platform event bus (ADR-0014): the server refuses to boot
 # without it — the outbox relay publishes to the INARI_OUTBOX stream and
 # every handler is delivered via its own durable consumer group. It is
@@ -178,78 +207,96 @@ log "installing NATS (JetStream, 3-node cluster)"
 #     max_memory_store/max_file_store; keep per-stream consumer counts
 #     bounded (prefer few durable consumers over many ephemeral ones)
 # The full operations docs page is a separate task.
-helm repo add openfga https://openfga.github.io/helm-charts >/dev/null
-helm repo add nats https://nats-io.github.io/k8s/helm/charts/ >/dev/null
-helm repo update >/dev/null
-helm upgrade --install nats nats/nats --version 1.3.2 \
-  --namespace "$NAMESPACE" \
-  -f "$(dirname "$0")/nats-values.yaml" \
-  --wait --timeout 8m
+(
+  helm upgrade --install nats nats/nats --version 1.3.2 \
+    --namespace "$NAMESPACE" \
+    -f "$(dirname "$0")/nats-values.yaml" \
+    --wait --timeout 8m || exit 1
+  # Belt-and-braces on top of helm --wait (the StatefulSet readiness probe
+  # /healthz?js-server-only=true already gates on meta-group currency): assert
+  # the JetStream meta group actually formed with 3 members and a leader.
+  # The monitor port 8222 lives only on the nats-headless service (the nats
+  # ClusterIP service exposes just 4222), so jsz must be scraped there.
+  # Poll, don't sleep blindly: JetStream meta-group formation has no
+  # API-visible Kubernetes condition, so the bounded poll below IS the wait.
+  for i in $(seq 1 24); do
+    JSZ=$(kubectl -n "$NAMESPACE" exec deploy/nats-box -- \
+      sh -c 'curl -sf http://nats-headless:8222/jsz' 2>/dev/null || true)
+    if jq -e '.meta_cluster.cluster_size == 3 and (.meta_cluster.leader | type == "string" and length > 0)' \
+        <<<"$JSZ" >/dev/null 2>&1; then
+      exit 0
+    fi
+    sleep 5
+    [ "$i" = 24 ] && { log "nats: JetStream meta group never formed (jsz: ${JSZ:-empty}; logs: kubectl -n $NAMESPACE logs statefulset/nats)"; exit 1; }
+  done
+) &
+WORKER_PIDS+=($!); WORKER_NAMES+=("nats")
 
-# Belt-and-braces on top of helm --wait (the StatefulSet readiness probe
-# /healthz?js-server-only=true already gates on meta-group currency): assert
-# the JetStream meta group actually formed with 3 members and a leader.
-# The monitor port 8222 lives only on the nats-headless service (the nats
-# ClusterIP service exposes just 4222), so jsz must be scraped there.
-log "verifying the JetStream meta group (3 members + leader)"
-for i in $(seq 1 24); do
-  JSZ=$(kubectl -n "$NAMESPACE" exec deploy/nats-box -- \
-    sh -c 'curl -sf http://nats-headless:8222/jsz' 2>/dev/null || true)
-  if jq -e '.meta_cluster.cluster_size == 3 and (.meta_cluster.leader | type == "string" and length > 0)' \
-      <<<"$JSZ" >/dev/null 2>&1; then
-    break
-  fi
-  sleep 5
-  [ "$i" = 24 ] && die "JetStream meta group never formed (jsz: ${JSZ:-empty}; logs: kubectl -n $NAMESPACE logs statefulset/nats)"
-done
-
-log "installing OpenFGA (postgres datastore via the inari-db secret)"
+# --- Worker: OpenFGA (postgres datastore via the inari-db secret) ----------
 # Always installed single-replica first: OpenFGA runs its datastore
 # migrations in a per-pod initContainer with no cross-pod locking, so a
 # fresh 2-replica install would race goose migrations on an empty
 # database. HA mode scales out AFTER the first pod has applied them.
-helm upgrade --install openfga openfga/openfga --version 0.2.27 \
-  --namespace "$NAMESPACE" \
-  --set fullnameOverride=openfga \
-  --set replicaCount=1 \
-  --set datastore.engine=postgres \
-  --set datastore.existingSecret=inari-db \
-  --set datastore.secretKeys.uriKey=openfga-uri \
-  --set datastore.migrationType=initContainer \
-  --set playground.enabled=false \
-  --wait --timeout 5m
-if [ "$OPENFGA_REPLICAS" -gt 1 ]; then
-  log "HA: scaling OpenFGA to $OPENFGA_REPLICAS replicas (migrations already applied)"
-  kubectl -n "$NAMESPACE" scale deployment/openfga --replicas="$OPENFGA_REPLICAS"
-  kubectl -n "$NAMESPACE" rollout status deployment/openfga --timeout=240s
-fi
+(
+  wait_cnpg || exit 1
+  helm upgrade --install openfga openfga/openfga --version 0.2.27 \
+    --namespace "$NAMESPACE" \
+    --set fullnameOverride=openfga \
+    --set replicaCount=1 \
+    --set datastore.engine=postgres \
+    --set datastore.existingSecret=inari-db \
+    --set datastore.secretKeys.uriKey=openfga-uri \
+    --set datastore.migrationType=initContainer \
+    --set playground.enabled=false \
+    --wait --timeout 5m || exit 1
+  if [ "$OPENFGA_REPLICAS" -gt 1 ]; then
+    log "openfga: HA scaling to $OPENFGA_REPLICAS replicas (migrations already applied)"
+    kubectl -n "$NAMESPACE" scale deployment/openfga --replicas="$OPENFGA_REPLICAS" || exit 1
+    kubectl -n "$NAMESPACE" rollout status deployment/openfga --timeout=240s || exit 1
+  fi
+) &
+WORKER_PIDS+=($!); WORKER_NAMES+=("openfga")
 
-log "installing Vault (dev mode) + ESO for the OIDC client-secret delivery path"
-helm repo add hashicorp https://helm.releases.hashicorp.com >/dev/null
-helm repo add external-secrets https://charts.external-secrets.io >/dev/null
-helm repo update >/dev/null
-helm upgrade --install vault hashicorp/vault \
-  --namespace "$NAMESPACE" \
-  --set server.dev.enabled=true \
-  --set server.dev.devRootToken="$VAULT_DEV_TOKEN" \
-  --set injector.enabled=false \
-  --wait --timeout 5m
-helm upgrade --install external-secrets external-secrets/external-secrets \
-  --namespace external-secrets --create-namespace \
-  --set installCRDs=true \
-  --wait --timeout 5m
-# helm --wait covers the controller deployments, not CRD establishment;
-# applying a ClusterSecretStore before the API is established fails with
-# "no matches for kind".
-kubectl wait --for=condition=established crd/clustersecretstores.external-secrets.io --timeout=120s
-kubectl wait --for=condition=established crd/externalsecrets.external-secrets.io --timeout=120s
-kubectl -n "$NAMESPACE" create secret generic inari-vault \
-  --from-literal=token="$VAULT_DEV_TOKEN" --dry-run=client -o yaml | kubectl apply -f -
+# --- Worker: Vault (dev mode) + ESO ---------------------------------------
+# OIDC client-secret delivery path: Vault (dev mode) + ESO + the
+# manifest-rendered ExternalSecret.
+(
+  helm upgrade --install vault hashicorp/vault \
+    --namespace "$NAMESPACE" \
+    --set server.dev.enabled=true \
+    --set server.dev.devRootToken="$VAULT_DEV_TOKEN" \
+    --set injector.enabled=false \
+    --wait --timeout 5m || exit 1
+  helm upgrade --install external-secrets external-secrets/external-secrets \
+    --namespace external-secrets --create-namespace \
+    --set installCRDs=true \
+    --wait --timeout 5m || exit 1
+  # helm --wait covers the controller deployments, not CRD establishment;
+  # applying a ClusterSecretStore before the API is established fails with
+  # "no matches for kind".
+  kubectl wait --for=condition=established crd/clustersecretstores.external-secrets.io --timeout=120s || exit 1
+  kubectl wait --for=condition=established crd/externalsecrets.external-secrets.io --timeout=120s || exit 1
+  kubectl -n "$NAMESPACE" create secret generic inari-vault \
+    --from-literal=token="$VAULT_DEV_TOKEN" --dry-run=client -o yaml | kubectl apply -f - || exit 1
+) &
+WORKER_PIDS+=($!); WORKER_NAMES+=("vault-eso")
+
+# Barrier: every worker must succeed before inari-server installs — the
+# server requires the Keycloak issuer patch, NATS, OpenFGA, and Vault/ESO
+# all in place. `wait ... ||` is safe under set -e; failures are re-raised
+# here with the component name (die in the main shell, so cleanup runs).
+wait_cnpg
+FAILED_WORKERS=()
+for i in "${!WORKER_PIDS[@]}"; do
+  wait "${WORKER_PIDS[$i]}" || FAILED_WORKERS+=("${WORKER_NAMES[$i]}")
+done
+[ ${#FAILED_WORKERS[@]} -eq 0 ] \
+  || die "component install(s) failed: ${FAILED_WORKERS[*]} (logs: kubectl -n $NAMESPACE get pods)"
 
 log "installing inari-server chart (e2e image, cache backend: $CACHE_BACKEND)"
 # The optional redis subchart must be vendored even when disabled: helm
 # verifies all Chart.yaml dependencies are present in charts/ on install.
-helm repo add bitnami https://charts.bitnami.com/bitnami >/dev/null
+# (bitnami repo was added in the serial setup block above.)
 helm dependency build "$SERVER_CHART_DIR" >/dev/null
 CACHE_HELM_ARGS=()
 if [ "$CACHE_BACKEND" = "redis" ]; then
@@ -308,6 +355,8 @@ psql_inari() {
 log "verifying the INARI_OUTBOX stream formed (R=3) on the external cluster"
 # The server ensures the stream at boot (ADR-0014); the monitor CLI lives in
 # the nats-box pod deployed with the NATS chart.
+# Bounded poll: stream creation is app-level (server boot), with no k8s
+# condition to wait on.
 for i in $(seq 1 24); do
   STREAM=$(kubectl -n "$NAMESPACE" exec deploy/nats-box -- \
     nats stream info INARI_OUTBOX --server nats:4222 --json 2>/dev/null || true)
@@ -359,6 +408,8 @@ kubectl -n "$NAMESPACE" run "$TOOLS" --image=curlimages/curl:8.10.1 --restart=Ne
 kubectl -n "$NAMESPACE" wait --for=condition=ready "pod/$TOOLS" --timeout=120s >/dev/null
 
 log "waiting for the Keycloak issuer to converge on the FQDN"
+# Bounded poll: issuer convergence is observable only via the OIDC discovery
+# document — no k8s condition exists for it.
 for i in $(seq 1 24); do
   ISS=$(xcurl "http://keycloak-service:8080/realms/inari/.well-known/openid-configuration" | jq -r .issuer 2>/dev/null || true)
   [ "$ISS" = "http://$KC_FQDN/realms/inari" ] && break
@@ -467,6 +518,8 @@ if $INARI_HA; then
     || die "HA(c): $FGA_STORE_COUNT OpenFGA stores named 'inari' (store bootstrap race — replicas would split-brain)"
 fi
 FGA_STORE=$(xcurl "http://openfga:8080/stores" | jq -r '.stores[0].id')
+# Bounded poll: the org_creator tuple lands via the outbox → tuple-writer
+# path (app-level), not through any k8s condition.
 ORG_CREATOR=false
 for i in $(seq 1 18); do
   ORG_CREATOR=$(xcurl -X POST "http://openfga:8080/stores/$FGA_STORE/check" -H "Content-Type: application/json" \
@@ -482,6 +535,8 @@ jq -e '.canCreateOrganizations == true' <<<"$PERMS" >/dev/null \
   || die "me/permissions = $PERMS, want canCreateOrganizations=true"
 
 log "creating tenant '$TENANT'"
+# Bounded poll: retries cover transient token/Keycloak warm-up errors; the
+# outcome is an API response, not a k8s condition.
 TENANT_RESP=""
 for i in $(seq 1 12); do
   TOKEN="$(user_token || true)"
@@ -606,17 +661,21 @@ spec:
 EOF
 
 log "waiting for registration, then the ESO-projected client secret"
+# Bounded poll: cluster state advances via the agent gRPC stream (app-level),
+# with no k8s condition for it.
 for i in $(seq 1 24); do
   STATE=$(xcurl -H "Authorization: Bearer $(user_token)" "$API/tenants/$TENANT/clusters/$CLUSTER_ID" | jq -r '.cluster.state' 2>/dev/null || true)
   [ "$STATE" = "active" ] && break
   sleep 5
   [ "$i" = 24 ] && die "cluster never became active (agent logs: kubectl -n inari-system logs deploy/inari-agent)"
 done
-for i in $(seq 1 24); do
-  kubectl -n inari-system get secret inari-agent-oidc-client >/dev/null 2>&1 && break
-  sleep 5
-  [ "$i" = 24 ] && die "ESO never projected inari-agent-oidc-client (kubectl -n inari-system get externalsecret inari-agent-oidc-client -o yaml)"
-done
+# ESO sets Ready=True on the ExternalSecret once the Vault read+projection
+# succeeds, so this is an event-driven wait instead of a blind get+sleep poll.
+kubectl -n inari-system wait --for=condition=Ready \
+  externalsecret inari-agent-oidc-client --timeout=120s >/dev/null \
+  || die "ESO never projected inari-agent-oidc-client (kubectl -n inari-system get externalsecret inari-agent-oidc-client -o yaml)"
+kubectl -n inari-system get secret inari-agent-oidc-client >/dev/null \
+  || die "ExternalSecret Ready but inari-agent-oidc-client secret missing"
 ESO_SECRET=$(kubectl -n inari-system get secret inari-agent-oidc-client -o jsonpath='{.data.client-secret}' | base64 -d)
 KC_CLIENT_ID=$(xcurl -H "Authorization: Bearer $(user_token)" "$API/tenants/$TENANT/clusters/$CLUSTER_ID" | jq -r '.cluster.keycloakClientId')
 AT="$(admin_token)"
@@ -625,6 +684,8 @@ KC_SECRET=$(xcurl -H "Authorization: Bearer $AT" "http://keycloak-service:8080/a
 [ "$ESO_SECRET" = "$KC_SECRET" ] || die "ESO-projected secret does not match the Keycloak client secret"
 
 log "verifying capabilities stream"
+# Bounded poll: capabilities arrive over the agent stream (app-level SSE);
+# no k8s condition exists for them.
 CAPS=0
 for i in $(seq 1 36); do
   CAPS=$(xcurl -H "Authorization: Bearer $(user_token)" \
@@ -645,6 +706,8 @@ SEEN2=$(xcurl -H "Authorization: Bearer $(user_token)" "$API/tenants/$TENANT/clu
 # real bare repo with baseline/rbac/* committed.
 STATE_REPO="$GIT_HOST_DIR/$TENANT-inari-state.git"
 log "waiting for the materialized tenant state repo ($STATE_REPO)"
+# Bounded poll: the repo materializes on the host filesystem via the local
+# git provider (app-level); nothing in the k8s API observes it.
 for i in $(seq 1 36); do
   [ -d "$STATE_REPO" ] && git -C "$STATE_REPO" show main:baseline/rbac/clusterroles.yaml >/dev/null 2>&1 && break
   sleep 5
@@ -736,6 +799,8 @@ log "flipping the viewers team mapping to editor and expecting a binding update"
 xcurl -X PUT -H "Authorization: Bearer $(user_token)" -H "Content-Type: application/json" \
   -d "{\"mappings\":[{\"team\":\"viewers\",\"roleId\":\"editor\"}]}" \
   "$API/tenants/$TENANT/rbac/mappings" >/dev/null || die "PUT rbac/mappings failed"
+# Bounded poll: the mapping change flows outbox → rbacmaterialize → git push;
+# observable only in the state repo (app-level), not via a k8s condition.
 for i in $(seq 1 36); do
   if git -C "$STATE_REPO" show main:baseline/rbac/clusterrolebindings.yaml 2>/dev/null \
       | grep -qE "^  name: tenant-$TENANT-viewers-editor\$"; then

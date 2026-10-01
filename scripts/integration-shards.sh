@@ -125,6 +125,12 @@ durations = {}
 # `gh run download` (no -n) unpacks each artifact into its own subdirectory,
 # so search recursively; flat dirs (fixtures, single-artifact downloads) work too.
 for path in sorted(glob.glob(os.path.join(os.environ["JUNIT_DIR"], "**", "*.xml"), recursive=True)):
+    # `gh run download` (no -n) also fetches junit-unit and openapi artifacts.
+    # Unit tests run the SAME internal/... packages, and since files parse in
+    # path order with last-write-wins, unit timings would silently overwrite
+    # integration timings. Only integration JUnit files may feed the balancer.
+    if "integration" not in path:
+        continue
     try:
         root = ET.parse(path).getroot()
     except ET.ParseError:
@@ -138,11 +144,14 @@ for path in sorted(glob.glob(os.path.join(os.environ["JUNIT_DIR"], "**", "*.xml"
         pkg = "internal/" + m.group(1)
         if pkg in all_pool:
             try:
-                durations[pkg] = float(time)
+                durations[pkg] = max(0.0, float(time))
             except ValueError:
                 pass
 
-if not durations:
+# No usable history (empty, or all timings zero/garbage) -> static fallback.
+# Without this, an all-zero timing set degenerates: LPT loads never increase,
+# so ties send EVERY package to the first bin and one shard runs ~everything.
+if not durations or max(durations.values()) <= 0:
     sys.exit(3)
 
 # Greedy LPT bin-packing over the union pool into the non-critical shards.

@@ -30,15 +30,29 @@ for suite in root.iter("testsuite"):
         pkg = "internal/" + name.split("/internal/", 1)[1]
     else:
         pkg = name.rsplit("/", 1)[-1] if name else "unknown"
+    suite_failed = False
     for case in suite.iter("testcase"):
         if case.find("failure") is None and case.find("error") is None:
             continue
+        suite_failed = True
         test = case.get("name", "unknown")
         key = (pkg, test)
         if key in seen:
             continue
         seen.add(key)
         print(f"{pkg}/{test}")
+    # Suite-level failure with no failing testcase (test-binary panic, build
+    # failure of the test package): gotestsum records failures/errors on the
+    # suite itself. File it under (suite) so a broken run is not silently
+    # reported as "nothing to file".
+    if not suite_failed:
+        try:
+            n = int(suite.get("failures", "0") or 0) + int(suite.get("errors", "0") or 0)
+        except ValueError:
+            n = 0
+        if n > 0 and (pkg, "(suite)") not in seen:
+            seen.add((pkg, "(suite)"))
+            print(f"{pkg}/(suite)")
 PY
 )
 
@@ -73,9 +87,14 @@ EOF
 )
   if [ -n "$existing" ]; then
     echo "updating existing issue #$existing for $test_id"
-    gh issue comment "$existing" --body "$body"
+    gh issue comment "$existing" --body "$body" || gh_rc=1
   else
     echo "filing new issue for $test_id"
-    gh issue create --title "$title" --label flaky-quarantine --body "$body"
+    gh issue create --title "$title" --label flaky-quarantine --body "$body" || gh_rc=1
   fi
 done <<<"$failures"
+
+# A gh failure on one test must not starve the rest of the list (the loop
+# always runs to completion); the step still exits non-zero so the workflow
+# surfaces the partial failure.
+exit "${gh_rc:-0}"

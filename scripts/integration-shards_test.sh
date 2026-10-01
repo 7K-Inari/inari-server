@@ -38,6 +38,7 @@ check "balance falls back to static map (empty dir)" \
 
 # `gh run download` (no -n) unpacks each artifact into its own subdirectory;
 # balance must find JUnit files in nested dirs and produce the same packing.
+module_prefix="github.com/7K-Inari/inari-server"
 nested=$(mktemp -d)
 trap 'rm -rf "$empty" "$nested"' EXIT
 mkdir -p "$nested/junit-integration-core-services"
@@ -45,6 +46,43 @@ cp "$FIXTURES"/*.xml "$nested/junit-integration-core-services/"
 check "balance finds JUnit files in gh-style nested artifact dirs" \
   "$("$SHARD_SCRIPT" balance core-services "$FIXTURES")" \
   "$("$SHARD_SCRIPT" balance core-services "$nested")"
+
+# gh run download (no -n) also fetches the junit-unit artifact, whose suite
+# names are the same internal/... packages at unit-test scale. Unit timings
+# must NOT overwrite integration timings (last-write-wins parse order).
+mkdir -p "$nested/junit-unit"
+cat >"$nested/junit-unit/unit-tests.xml" <<XML
+<testsuites>
+  <testsuite name="$module_prefix/internal/tenancy" tests="1" time="0.01"/>
+  <testsuite name="$module_prefix/internal/scaffold" tests="1" time="0.01"/>
+</testsuites>
+XML
+check "balance ignores junit-unit timings for shared packages" \
+  "$("$SHARD_SCRIPT" balance core-services "$FIXTURES")" \
+  "$("$SHARD_SCRIPT" balance core-services "$nested")"
+for s in modules-a modules-b; do
+  check "balance ignores junit-unit timings for '$s'" \
+    "$("$SHARD_SCRIPT" balance "$s" "$FIXTURES")" \
+    "$("$SHARD_SCRIPT" balance "$s" "$nested")"
+done
+
+# All-zero/negative/missing timings are not usable history: LPT loads never
+# increase on ties, so every package would pile into the first bin. Must fall
+# back to the static map instead.
+zeros=$(mktemp -d)
+cat >"$zeros/integration-zeros.xml" <<XML
+<testsuites>
+  <testsuite name="$module_prefix/internal/tenancy"/>
+  <testsuite name="$module_prefix/internal/scaffold" time=""/>
+  <testsuite name="$module_prefix/internal/cache" time="-5"/>
+</testsuites>
+XML
+for s in core-services modules-a modules-b; do
+  check "balance falls back to static map when all timings are zero ($s)" \
+    "$("$SHARD_SCRIPT" packages "$s")" \
+    "$("$SHARD_SCRIPT" balance "$s" "$zeros")"
+done
+rm -rf "$zeros"
 
 # Every non-critical package in the static map, with a synthetic duration.
 # critical shard must stay pinned to the static list.

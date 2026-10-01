@@ -76,6 +76,18 @@ check "no gh calls when nothing failed" \
   "0" \
   "$(wc -l <"$GH_CALLS_LOG")"
 
+# Suite-level failure (test-binary panic / build failure: failures count on
+# the suite, no failing testcase) must still file an issue under (suite).
+: >"$GH_CALLS_LOG"
+scripts/quarantine-report.sh scripts/testdata/quarantine/flaky-suite-level.xml \
+  "https://example.com/run" >"$STUB/out3.log" 2>&1
+check "files (suite) issue for suite-level failure" \
+  "1" \
+  "$(grep -c 'issue create.*Flaky quarantine: internal/tenancy/(suite)' "$GH_CALLS_LOG")"
+check "passing suite alongside panicked suite files nothing" \
+  "0" \
+  "$(grep -c 'internal/scaffold' "$GH_CALLS_LOG")"
+
 if [ "$failures" -gt 0 ]; then
   echo "$failures test(s) FAILED" >&2
   exit 1

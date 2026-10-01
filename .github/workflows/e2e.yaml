@@ -13,6 +13,72 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  build:
+    # Build-once (O3): the server and agent images are built exactly once,
+    # with buildx GHA caching, and exported as a docker-save tar artifact the
+    # golden-path matrix legs download and `docker load`. The matrix no
+    # longer rebuilds the same images per HA leg.
+    name: build images
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve matching inari-agent ref
+        id: agent
+        env:
+          HEAD_REF: ${{ github.head_ref || github.ref_name }}
+        run: |
+          BRANCH="$HEAD_REF"
+          if git ls-remote --exit-code https://github.com/7K-Inari/inari-agent.git "refs/heads/$BRANCH" >/dev/null 2>&1; then
+            echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout inari-agent
+        uses: actions/checkout@v4
+        with:
+          repository: 7K-Inari/inari-agent
+          ref: ${{ steps.agent.outputs.ref }}
+          path: inari-agent
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build server image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          tags: inari/server:e2e
+          push: false
+          load: true
+          cache-from: type=gha,scope=e2e-server
+          cache-to: type=gha,mode=max,scope=e2e-server
+
+      - name: Build agent image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./inari-agent
+          file: inari-agent/Dockerfile
+          tags: inari/agent:e2e
+          push: false
+          load: true
+          cache-from: type=gha,scope=e2e-agent
+          cache-to: type=gha,mode=max,scope=e2e-agent
+
+      - name: Export images to tar
+        run: docker save -o e2e-images.tar inari/server:e2e inari/agent:e2e
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-images
+          path: e2e-images.tar
+          if-no-files-found: error
+          retention-days: 1
+
   golden-path:
     # Two legs: the default single-replica fast gate, and the HA gate
     # (INARI_HA=true — 2x server/OpenFGA replicas + disruption assertions:
@@ -20,6 +86,7 @@ jobs:
     # leader-lease single-execution, agent stream fencing). The HA leg
     # adds ~10 minutes (extra replica, redis subchart, bounded traffic
     # windows), so it gets a larger but still bounded timeout.
+    needs: build
     strategy:
       fail-fast: false
       matrix:
@@ -29,6 +96,36 @@ jobs:
     timeout-minutes: ${{ matrix.ha && 60 || 45 }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: e2e-images
+
+      - name: Load prebuilt images
+        run: docker load -i e2e-images.tar
+
+      # The golden path still helm-installs the agent from the inari-agent
+      # repo's chart (deployed separately from the prebuilt image), so each
+      # matrix leg needs its own checkout of that repo for the chart only.
+      - name: Resolve matching inari-agent ref
+        id: agent
+        env:
+          HEAD_REF: ${{ github.head_ref || github.ref_name }}
+        run: |
+          BRANCH="$HEAD_REF"
+          if git ls-remote --exit-code https://github.com/7K-Inari/inari-agent.git "refs/heads/$BRANCH" >/dev/null 2>&1; then
+            echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout inari-agent
+        uses: actions/checkout@v4
+        with:
+          repository: 7K-Inari/inari-agent
+          ref: ${{ steps.agent.outputs.ref }}
+          path: inari-agent
 
       - name: Resolve matching inari-release-bundle ref
         id: chart
@@ -56,36 +153,6 @@ jobs:
           repository: ${{ steps.chart.outputs.repo }}
           ref: ${{ steps.chart.outputs.ref }}
           path: ${{ steps.chart.outputs.path }}
-
-      - name: Resolve matching inari-agent ref
-        id: agent
-        env:
-          HEAD_REF: ${{ github.head_ref || github.ref_name }}
-        run: |
-          BRANCH="$HEAD_REF"
-          if git ls-remote --exit-code https://github.com/7K-Inari/inari-agent.git "refs/heads/$BRANCH" >/dev/null 2>&1; then
-            echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
-          else
-            echo "ref=main" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Checkout inari-agent
-        uses: actions/checkout@v4
-        with:
-          repository: 7K-Inari/inari-agent
-          ref: ${{ steps.agent.outputs.ref }}
-          path: inari-agent
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Build server image
-        run: docker build -f deploy/docker/Dockerfile -t inari/server:e2e .
-
-      - name: Build agent image
-        run: docker build -f inari-agent/Dockerfile -t inari/agent:e2e ./inari-agent
 
       - name: Create kind cluster
         uses: helm/kind-action@v1.12.0

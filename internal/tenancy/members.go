@@ -207,15 +207,21 @@ func (s *Service) SetMemberRole(ctx context.Context, actor, slug, userID, roleID
 				}
 			}
 		}
+		// Record the membership using the anchor team's actual role_id. If the
+		// anchor team has been remapped via PUT /rbac/mappings, the effective
+		// role is the team's current role, not the requested role name
+		// (ADR-0013). This prevents a membership row whose role_id disagrees
+		// with teams.role_id, which the projection would otherwise "correct"
+		// by adding a duplicate row (B8).
 		inserted, err := s.store.AddMembership(ctx, tx, &types.Membership{
-			UserID: userID, OrgID: org.ID, TeamID: anchor.ID, RoleID: role.ID,
+			UserID: userID, OrgID: org.ID, TeamID: anchor.ID, RoleID: anchor.RoleID,
 		})
 		if err != nil {
 			return err
 		}
 		if inserted {
 			if err := audit.AppendOutbox(ctx, tx, org.ID, types.EventMembershipAdded, types.MembershipPayload{
-				OrgID: org.ID, TeamID: anchor.ID, UserID: userID, RoleID: role.ID,
+				OrgID: org.ID, TeamID: anchor.ID, UserID: userID, RoleID: anchor.RoleID,
 			}); err != nil {
 				return err
 			}
@@ -227,7 +233,7 @@ func (s *Service) SetMemberRole(ctx context.Context, actor, slug, userID, roleID
 			}
 			if err := s.audit.Record(ctx, tx, &types.AuditEvent{
 				OrgID: org.ID, Actor: actor, Action: action, ObjectType: "user", ObjectID: userID,
-				Payload: []byte(fmt.Sprintf(`{"role":%q,"team":%q}`, role.Name, anchor.Name)),
+				Payload: []byte(fmt.Sprintf(`{"role":%q,"team":%q}`, anchor.RoleName, anchor.Name)),
 			}); err != nil {
 				return err
 			}

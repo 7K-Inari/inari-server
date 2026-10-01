@@ -41,8 +41,30 @@ jobs:
           key: go-build-test-${{ runner.os }}-${{ hashFiles('go.sum') }}
           restore-keys: go-build-test-${{ runner.os }}-
       - run: go test ./...
-      - name: integration tests
-        run: go test -tags=integration -count=1 ./...
+
+  integration:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [critical, core-services, modules-a, modules-b]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Go build cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/go-build
+          key: go-build-integration-${{ matrix.shard }}-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-build-integration-${{ matrix.shard }}-${{ runner.os }}-
+      - name: shard map covers all integration packages
+        run: scripts/integration-shards.sh verify
+      - name: integration tests (${{ matrix.shard }})
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: "true"
+        run: go test -tags=integration -count=1 $(scripts/integration-shards.sh packages ${{ matrix.shard }})
 
   image:
     runs-on: ubuntu-latest

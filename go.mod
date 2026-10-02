@@ -4,7 +4,7 @@ go 1.26.3
 
 require (
 	connectrpc.com/connect v1.21.0
-	github.com/7K-Inari/inari-api v0.6.1-0.20260929125831-bb8d0a69fd0e
+	github.com/7K-Inari/inari-api v0.6.1-0.20261002221315-be05a1dc050d
 	github.com/aws/aws-sdk-go-v2 v1.47.1
 	github.com/aws/aws-sdk-go-v2/config v1.33.6
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.6
@@ -230,7 +230,7 @@ require (
 	golang.org/x/time v0.16.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260819154853-08b0e4226688 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260831171406-18b4a7587f8a // indirect
-	google.golang.org/grpc v1.83.2 // indirect
+	google.golang.org/grpc v1.84.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )
 

@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
     environment:
       POSTGRES_USER: inari
       POSTGRES_PASSWORD: inari
@@ -8,7 +8,7 @@ services:
     ports: ["5432:5432"]
 
   keycloak:
-    image: quay.io/keycloak/keycloak:26.0
+    image: quay.io/keycloak/keycloak:26.0@sha256:09a381c715ab0b111835b70f2905955274843a219c6f27efb348e4d9f4086858
     command: ["start-dev", "--import-realm"]
     environment:
       KEYCLOAK_ADMIN: admin
@@ -18,14 +18,14 @@ services:
     ports: ["8081:8080"]
 
   openfga:
-    image: openfga/openfga:v1.8
+    image: openfga/openfga:v1.8@sha256:1e84deddc7c84de8344f3eb0d443c5439666198b68ac37c24fd76fd2e8c1f629
     command: run
     ports: ["8082:8080"]
 
   # NATS JetStream event bus (ADR-0014): obligatory — run the server with
   # INARI_NATS_URL=nats://localhost:4222.
   nats:
-    image: nats:2.11-alpine
+    image: nats:2.11-alpine@sha256:e4bf19f15fd3218814a4e3c9e0064e1334bd8aa20d5984b9f1a0afd084f8cc00
     command: ["-js", "-sd", "/data"]
     volumes:
       - nats-data:/data

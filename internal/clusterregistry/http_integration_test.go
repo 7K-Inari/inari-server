@@ -61,6 +61,30 @@ func (itViewerAuthorizer) ListObjects(context.Context, string, string, string) (
 	return nil, nil
 }
 
+// itRoleAuthorizer grants exactly the FGA relations of one built-in role's
+// seeded permission bundle (the cluster-surface companion of the tenancy
+// persona matrix in run d701e2ba's follow-up).
+type itRoleAuthorizer struct{ allowed map[string]bool }
+
+func itAuthorizerForBuiltinRole(role string) itRoleAuthorizer {
+	allowed := map[string]bool{}
+	for _, slug := range authz.BuiltinRolePermissions(role) {
+		rel, ok := authz.PermissionRelation(slug)
+		if !ok {
+			panic("catalog drift: unknown slug " + slug)
+		}
+		allowed[rel] = true
+	}
+	return itRoleAuthorizer{allowed: allowed}
+}
+
+func (a itRoleAuthorizer) Check(_ context.Context, _, relation, _ string) (bool, error) {
+	return a.allowed[relation], nil
+}
+func (a itRoleAuthorizer) ListObjects(context.Context, string, string, string) ([]string, error) {
+	return nil, nil
+}
+
 type itTenants map[string]*types.Organization
 
 func (t itTenants) GetTenant(_ context.Context, slug string) (*types.Organization, error) {
@@ -303,6 +327,41 @@ func TestClusterWriteRoutesForbiddenWithoutClustersRegister(t *testing.T) {
 		if code, body := itReq(t, srv, tc.method, tc.path, "good", tc.body); code != http.StatusForbidden {
 			t.Errorf("%s %s: got %d (%s), want 403", tc.method, tc.path, code, body)
 		}
+	}
+}
+
+// TestClusterAccessByBuiltinRole checks the cluster write surface per
+// built-in role persona: operator (clusters.register in its bundle) passes
+// the PEP on register/delete/decommission, editor and viewer are rejected
+// with 403. Allowed-persona probes assert "not 403" because the downstream
+// result depends on cluster state the probe does not control.
+func TestClusterAccessByBuiltinRole(t *testing.T) {
+	writes := []struct{ method, path, body string }{
+		{"POST", "/api/v1/tenants/acme/clusters", `{"name":"pc1"}`},
+		{"DELETE", "/api/v1/tenants/acme/clusters/00000000-0000-0000-0000-000000000000", ""},
+		{"POST", "/api/v1/tenants/acme/clusters/00000000-0000-0000-0000-000000000000/decommission", `{}`},
+	}
+
+	t.Run("operator allowed", func(t *testing.T) {
+		srv, _ := itServer(t, itAuthorizerForBuiltinRole(authz.BuiltinRoleOperator))
+		defer srv.Close()
+		for _, tc := range writes {
+			if code, body := itReq(t, srv, tc.method, tc.path, "good", tc.body); code == http.StatusForbidden {
+				t.Errorf("%s %s as operator: got 403 (%s), want the PEP to pass", tc.method, tc.path, body)
+			}
+		}
+	})
+
+	for _, role := range []string{authz.BuiltinRoleEditor, authz.BuiltinRoleViewer} {
+		t.Run(role+" forbidden", func(t *testing.T) {
+			srv, _ := itServer(t, itAuthorizerForBuiltinRole(role))
+			defer srv.Close()
+			for _, tc := range writes {
+				if code, body := itReq(t, srv, tc.method, tc.path, "good", tc.body); code != http.StatusForbidden {
+					t.Errorf("%s %s as %s: got %d (%s), want 403", tc.method, tc.path, role, code, body)
+				}
+			}
+		})
 	}
 }
 

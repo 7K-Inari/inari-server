@@ -240,6 +240,17 @@ type ClusterAccessInfo struct {
 	KubectlClientID string `json:"kubectlClientId"`
 	Audience        string `json:"audience"`
 	Organization    string `json:"organization"`
+	// KubectlAccessEnabled is the kubectl_access.enabled feature-flag state.
+	KubectlAccessEnabled bool `json:"kubectlAccessEnabled"`
+	// ProxyURL is the inari-kubeproxy gateway base URL for this cluster
+	// (empty when the gateway is not deployed).
+	ProxyURL string `json:"proxyUrl,omitempty"`
+	// TunnelAvailable reports a live tunnel-agent session (kubeproxy
+	// heartbeat row within the freshness window).
+	TunnelAvailable bool `json:"tunnelAvailable"`
+	// TunnelUnavailableReason explains a false TunnelAvailable (agent not
+	// upgraded, gateway not deployed, flag off).
+	TunnelUnavailableReason string `json:"tunnelUnavailableReason,omitempty"`
 }
 
 // RegistrationToken is a one-time, TTL'd bootstrap credential. Only the

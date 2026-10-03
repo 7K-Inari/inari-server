@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+    image: postgres:18-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
     environment:
       POSTGRES_USER: inari
       POSTGRES_PASSWORD: inari
@@ -8,7 +8,7 @@ services:
     ports: ["5432:5432"]
 
   keycloak:
-    image: quay.io/keycloak/keycloak:26.0@sha256:09a381c715ab0b111835b70f2905955274843a219c6f27efb348e4d9f4086858
+    image: quay.io/keycloak/keycloak:26.8@sha256:b0f60d489d51c5d113390bdf5461d4c06e6051be026c05549f2e1e10ec352bcc
     command: ["start-dev", "--import-realm"]
     environment:
       KEYCLOAK_ADMIN: admin
@@ -18,7 +18,7 @@ services:
     ports: ["8081:8080"]
 
   openfga:
-    image: openfga/openfga:v1.8@sha256:1e84deddc7c84de8344f3eb0d443c5439666198b68ac37c24fd76fd2e8c1f629
+    image: openfga/openfga:v1.21@sha256:2113c664a486b5da8d7a2cdab479e0d4e30639c80fd2c000540f645c1dbc1e55
     command: run
     ports: ["8082:8080"]
 

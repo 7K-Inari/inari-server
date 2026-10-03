@@ -5,6 +5,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/inari-server ./cmd/inari-server
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/inari-kubeproxy ./cmd/inari-kubeproxy
 
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 COPY --from=build /out/inari-server /inari-server
@@ -12,3 +13,13 @@ COPY --from=build /src/templates /templates
 USER nonroot:nonroot
 EXPOSE 8080
 ENTRYPOINT ["/inari-server"]
+
+# Kubectl gateway data plane (plan §7.2). Build with:
+#   docker build --target kubeproxy -t ghcr.io/7k-inari/inari-kubeproxy .
+# Published by the inari-release-bundle chart workflow (follow-up); the
+# release pipeline in this repo ships only the inari-server image today.
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS kubeproxy
+COPY --from=build /out/inari-kubeproxy /inari-kubeproxy
+USER nonroot:nonroot
+EXPOSE 8090
+ENTRYPOINT ["/inari-kubeproxy"]

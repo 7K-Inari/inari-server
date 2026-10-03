@@ -49,17 +49,17 @@ const (
 	RelationClustersKubectl           = "clusters_kubectl"
 	// RelationKubectl is the cluster-object relation the kubeproxy PEP
 	// checks per proxied request (derived from clusters_kubectl via parent).
-	RelationKubectl = "kubectl"
-	RelationCloudAccountsManage       = "cloudaccounts_manage"
-	RelationZonesManage               = "zones_manage"
-	RelationFleetManage               = "fleet_manage"
-	RelationPoliciesManage            = "policies_manage"
-	RelationSecretStoresManage        = "secretstores_manage"
-	RelationExtensionsManage          = "extensions_manage"
-	RelationExtensionsInvoke          = "extensions_invoke"
-	RelationCatalogManage             = "catalog_manage"
-	RelationDeploymentsCreate         = "deployments_create"
-	RelationApprovalsManage           = "approvals_manage"
+	RelationKubectl             = "kubectl"
+	RelationCloudAccountsManage = "cloudaccounts_manage"
+	RelationZonesManage         = "zones_manage"
+	RelationFleetManage         = "fleet_manage"
+	RelationPoliciesManage      = "policies_manage"
+	RelationSecretStoresManage  = "secretstores_manage"
+	RelationExtensionsManage    = "extensions_manage"
+	RelationExtensionsInvoke    = "extensions_invoke"
+	RelationCatalogManage       = "catalog_manage"
+	RelationDeploymentsCreate   = "deployments_create"
+	RelationApprovalsManage     = "approvals_manage"
 )
 
 // Permission is one catalog entry served to the role editor UI.

@@ -186,13 +186,13 @@ func RecordEphemeralError(ctx context.Context, domain string) {
 
 // Kubeproxy connection result label values (plan §7.2).
 const (
-	KubeproxyOpen             = "open"
-	KubeproxyClose            = "close"
-	KubeproxyByteCapExceeded  = "byte_cap_exceeded"
-	KubeproxyNoTunnel         = "no_tunnel"
-	KubeproxySessionRegister  = "register"
+	KubeproxyOpen              = "open"
+	KubeproxyClose             = "close"
+	KubeproxyByteCapExceeded   = "byte_cap_exceeded"
+	KubeproxyNoTunnel          = "no_tunnel"
+	KubeproxySessionRegister   = "register"
 	KubeproxySessionUnregister = "unregister"
-	KubeproxySessionEvicted   = "evicted"
+	KubeproxySessionEvicted    = "evicted"
 )
 
 // RecordKubeproxyConn counts one proxied kubectl connection event.

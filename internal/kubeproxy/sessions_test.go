@@ -1,6 +1,7 @@
 package kubeproxy
 
 import (
+	"context"
 	"testing"
 
 	tunnelv1 "github.com/7K-Inari/inari-api/gen/go/inari/tunnel/v1"
@@ -8,11 +9,11 @@ import (
 
 func TestSessionRegistryLastWriterWins(t *testing.T) {
 	r := NewSessionRegistry()
-	s1 := newSession("c1", func(*tunnelv1.TunnelMessage) error { return nil }, 0)
+	s1 := newSession(context.Background(), "c1", func(*tunnelv1.TunnelMessage) error { return nil }, 0)
 	if ev := r.Register(s1); ev != nil {
 		t.Fatalf("first register evicted %v", ev)
 	}
-	s2 := newSession("c1", func(*tunnelv1.TunnelMessage) error { return nil }, 0)
+	s2 := newSession(context.Background(), "c1", func(*tunnelv1.TunnelMessage) error { return nil }, 0)
 	if ev := r.Register(s2); ev != s1 {
 		t.Fatalf("second register evicted %v, want s1", ev)
 	}
@@ -37,8 +38,8 @@ func TestSessionRegistryLastWriterWins(t *testing.T) {
 
 func TestSessionRegistryCloseAll(t *testing.T) {
 	r := NewSessionRegistry()
-	s1 := newSession("c1", func(*tunnelv1.TunnelMessage) error { return nil }, 0)
-	s2 := newSession("c2", func(*tunnelv1.TunnelMessage) error { return nil }, 0)
+	s1 := newSession(context.Background(), "c1", func(*tunnelv1.TunnelMessage) error { return nil }, 0)
+	s2 := newSession(context.Background(), "c2", func(*tunnelv1.TunnelMessage) error { return nil }, 0)
 	r.Register(s1)
 	r.Register(s2)
 	r.CloseAll("shutdown")
@@ -55,7 +56,7 @@ func TestSessionRegistryCloseAll(t *testing.T) {
 }
 
 func TestSessionSendAfterClose(t *testing.T) {
-	s := newSession("c1", func(*tunnelv1.TunnelMessage) error { return nil }, 0)
+	s := newSession(context.Background(), "c1", func(*tunnelv1.TunnelMessage) error { return nil }, 0)
 	s.close("test")
 	if err := s.Send(&tunnelv1.TunnelMessage{}); err == nil {
 		t.Fatal("send on closed session succeeded")
@@ -63,7 +64,7 @@ func TestSessionSendAfterClose(t *testing.T) {
 }
 
 func TestSessionCloseClosesConns(t *testing.T) {
-	s := newSession("c1", func(*tunnelv1.TunnelMessage) error { return nil }, 0)
+	s := newSession(context.Background(), "c1", func(*tunnelv1.TunnelMessage) error { return nil }, 0)
 	c := s.mux.alloc("conn1")
 	s.close("test")
 	select {

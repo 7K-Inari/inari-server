@@ -256,6 +256,84 @@ type Config struct {
 	// IdentityScopes is the read-only catalog of per-service audiences/scopes
 	// served at GET /tenants/{org}/identity/scopes (Settings design §3.1).
 	IdentityScopes []ServiceScopes
+
+	// Kubectl gateway (plan §7.2). KubeproxyPublicURL is the external base
+	// URL of inari-kubeproxy advertised in access-info and used to render
+	// gateway kubeconfigs; empty means the gateway is not deployed and
+	// access-info reports proxyUrl empty. KubectlAccessEnabled is the
+	// static kubectl_access.enabled flag (FlagEvaluator seam; task f368d08b
+	// delivers the real flag system).
+	KubeproxyPublicURL       string
+	KubectlAccessEnabled     bool
+	TunnelHeartbeatFreshness time.Duration
+}
+
+// KubeproxyConfig is the inari-kubeproxy data-plane binary's configuration
+// (separate from Config: kubeproxy shares Postgres/OpenFGA/OIDC but has no
+// NATS, Keycloak-admin, or module wiring of its own).
+type KubeproxyConfig struct {
+	ListenAddr    string
+	LogLevel      string
+	LogFormat     string
+	DatabaseURL   string
+	OIDCIssuerURL string
+	// UserAudience is the audience pinned on user kubectl tokens
+	// (kubelogin, per-tenant org-<slug>-kubectl clients).
+	UserAudience     string
+	OpenFGAAPIURL    string
+	OpenFGAStoreName string
+
+	CacheBackend          string
+	RedisURL              string
+	CachePEPTTL           time.Duration
+	CacheMemoryMaxEntries int
+
+	// KubectlAccessEnabled is the static kubectl_access.enabled flag; off →
+	// 410 on proxy requests and tunnel-stream rejection.
+	KubectlAccessEnabled bool
+	// MaxTunnelLifetime bounds a proxied connection before forced re-auth.
+	MaxTunnelLifetime time.Duration
+	// ConnByteCap is the per-connection proxied-byte cap (0 = unlimited).
+	ConnByteCap       int64
+	OpenResultTimeout time.Duration
+	ShutdownTimeout   time.Duration
+}
+
+// LoadKubeproxy reads the kubeproxy configuration from INARI_* envs (shared
+// names mirror Load so one env file can serve both binaries).
+func LoadKubeproxy() (*KubeproxyConfig, error) {
+	c := &KubeproxyConfig{
+		ListenAddr:            env("INARI_KUBEPROXY_LISTEN_ADDR", ":8090"),
+		LogLevel:              env("INARI_LOG_LEVEL", "info"),
+		LogFormat:             env("INARI_LOG_FORMAT", "json"),
+		DatabaseURL:           env("INARI_DATABASE_URL", "postgres://inari:inari@localhost:5432/inari?sslmode=disable"),
+		OIDCIssuerURL:         env("INARI_OIDC_ISSUER_URL", "http://localhost:8081/realms/inari"),
+		UserAudience:          env("INARI_KUBECTL_AUDIENCE", "kubernetes"),
+		OpenFGAAPIURL:         env("INARI_OPENFGA_API_URL", "http://localhost:8082"),
+		OpenFGAStoreName:      env("INARI_OPENFGA_STORE_NAME", "inari"),
+		CacheBackend:          env("INARI_CACHE_BACKEND", "memory"),
+		RedisURL:              env("INARI_REDIS_URL", "redis://localhost:6379/0"),
+		CachePEPTTL:           durEnv("INARI_CACHE_PEP_TTL", 2*time.Second),
+		CacheMemoryMaxEntries: int(intEnv("INARI_CACHE_MEMORY_MAX_ENTRIES", 10000)),
+		KubectlAccessEnabled:  boolEnv("INARI_KUBECTL_ACCESS_ENABLED", true),
+		MaxTunnelLifetime:     durEnv("INARI_KUBEPROXY_MAX_TUNNEL_LIFETIME", 60*time.Minute),
+		ConnByteCap:           intEnv("INARI_KUBEPROXY_CONN_BYTE_CAP", 1<<32),
+		OpenResultTimeout:     durEnv("INARI_KUBEPROXY_OPEN_RESULT_TIMEOUT", 30*time.Second),
+		ShutdownTimeout:       durEnv("INARI_SHUTDOWN_TIMEOUT", 10*time.Second),
+	}
+	if c.DatabaseURL == "" {
+		return nil, fmt.Errorf("config: INARI_DATABASE_URL must not be empty")
+	}
+	if c.OIDCIssuerURL == "" {
+		return nil, fmt.Errorf("config: INARI_OIDC_ISSUER_URL must not be empty")
+	}
+	if c.CacheBackend != "memory" && c.CacheBackend != "redis" {
+		return nil, fmt.Errorf("config: INARI_CACHE_BACKEND must be \"memory\" or \"redis\", got %q", c.CacheBackend)
+	}
+	if c.CachePEPTTL <= 0 {
+		return nil, fmt.Errorf("config: INARI_CACHE_PEP_TTL must be positive, got %s", c.CachePEPTTL)
+	}
+	return c, nil
 }
 
 func Load() (*Config, error) {
@@ -368,6 +446,10 @@ func Load() (*Config, error) {
 		DriftSweepInterval:      durEnv("INARI_DRIFT_SWEEP_INTERVAL", time.Minute),
 
 		IdentityScopes: identityScopesEnv("INARI_IDENTITY_SCOPES", DefaultIdentityScopes),
+
+		KubeproxyPublicURL:       env("INARI_KUBEPROXY_PUBLIC_URL", ""),
+		KubectlAccessEnabled:     boolEnv("INARI_KUBECTL_ACCESS_ENABLED", true),
+		TunnelHeartbeatFreshness: durEnv("INARI_KUBEPROXY_HEARTBEAT_FRESHNESS", 45*time.Second),
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("config: INARI_DATABASE_URL must not be empty")

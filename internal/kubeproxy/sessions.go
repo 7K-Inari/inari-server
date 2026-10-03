@@ -28,8 +28,10 @@ type Session struct {
 	mux *connMux
 }
 
-func newSession(clusterID string, sendFn func(*tunnelv1.TunnelMessage) error, byteCap int64) *Session {
-	ctx, cancel := context.WithCancel(context.Background())
+// newSession derives the session context from parent (the stream handler's
+// context): eviction via close() cancels it, unblocking stream.Receive.
+func newSession(parent context.Context, clusterID string, sendFn func(*tunnelv1.TunnelMessage) error, byteCap int64) *Session {
+	ctx, cancel := context.WithCancel(parent)
 	return &Session{
 		id:        uuid.NewString(),
 		clusterID: clusterID,

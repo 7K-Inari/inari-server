@@ -105,7 +105,7 @@ type kubeconfig struct {
 }
 
 type namedCluster struct {
-	Name    string      `yaml:"name"`
+	Name    string       `yaml:"name"`
 	Cluster clusterEntry `yaml:"cluster"`
 }
 

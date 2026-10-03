@@ -18,7 +18,7 @@ services:
     ports: ["8081:8080"]
 
   openfga:
-    image: openfga/openfga:v1.8@sha256:1e84deddc7c84de8344f3eb0d443c5439666198b68ac37c24fd76fd2e8c1f629
+    image: openfga/openfga:v1.21@sha256:2113c664a486b5da8d7a2cdab479e0d4e30639c80fd2c000540f645c1dbc1e55
     command: run
     ports: ["8082:8080"]
 

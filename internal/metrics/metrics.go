@@ -85,7 +85,7 @@ var (
 	kubeproxyConns, _ = meter.Int64Counter("inari.kubeproxy.connections",
 		metric.WithDescription("Proxied kubectl connections by result (open, close, byte_cap_exceeded, no_tunnel)."))
 	kubeproxySessions, _ = meter.Int64UpDownCounter("inari.kubeproxy.tunnel_sessions",
-		metric.WithDescription("Live tunnel-agent sessions by event (register, unregister, evicted)."))
+		metric.WithDescription("Live tunnel-agent sessions by event (register, unregister)."))
 )
 
 // New builds a Prometheus exporter on its own registry and installs the
@@ -192,7 +192,6 @@ const (
 	KubeproxyNoTunnel          = "no_tunnel"
 	KubeproxySessionRegister   = "register"
 	KubeproxySessionUnregister = "unregister"
-	KubeproxySessionEvicted    = "evicted"
 )
 
 // RecordKubeproxyConn counts one proxied kubectl connection event.

@@ -110,7 +110,11 @@ func (h *TunnelHandler) Connect(ctx context.Context, stream *connect.BidiStream[
 		h.sessions.Unregister(sess)
 		sess.close(CloseReasonTunnelClosed)
 		metrics.RecordKubeproxySession(context.Background(), metrics.KubeproxySessionUnregister)
-		if h.heartbeat != nil {
+		// Only delete the heartbeat row when no replacement session has
+		// taken over: on last-writer-wins eviction the new session already
+		// upserted its row, and deleting it would report a live tunnel as
+		// unavailable until the next reconnect.
+		if h.heartbeat != nil && h.sessions.Get(clusterID) == nil {
 			if err := h.heartbeat.Disconnected(context.Background(), clusterID); err != nil {
 				slog.Warn("kubeproxy: heartbeat disconnect write failed", "cluster", clusterID, "error", err)
 			}

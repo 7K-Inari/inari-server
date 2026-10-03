@@ -24,7 +24,7 @@ cd "$(dirname "$0")/.."
 # test file count.
 CRITICAL="internal/db internal/leaderlease internal/eventbus internal/audit internal/authz internal/orchestrator internal/approvals"
 CORE_SERVICES="internal/tenancy internal/scaffold"
-MODULES_A="internal/policyservice internal/platformresources internal/extensionhost internal/agentgateway internal/usergit"
+MODULES_A="internal/policyservice internal/platformresources internal/extensionhost internal/agentgateway internal/kubeproxy internal/usergit"
 MODULES_B="internal/tenantzonefactory internal/secretstores internal/rbacmaterialize internal/notifications internal/fleetmanager internal/clusterregistry internal/cloudaccounts internal/catalog internal/cache"
 
 all_shards() {

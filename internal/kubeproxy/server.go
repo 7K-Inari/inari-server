@@ -109,6 +109,15 @@ func (h *TunnelHandler) Connect(ctx context.Context, stream *connect.BidiStream[
 	defer func() {
 		h.sessions.Unregister(sess)
 		sess.close(CloseReasonTunnelClosed)
+		// Quiesce in-flight Sends before returning: after the handler
+		// returns, connect writes the end-stream envelope to the same
+		// response writer that Session.Send uses, so an in-flight proxied
+		// send (closeMsg, open, frames) would race it (found by -race).
+		// close() already cancelled the session context, so Sends that
+		// acquire sendMu after this drain bail at the ctx check instead
+		// of touching the stream.
+		sess.sendMu.Lock()
+		sess.sendMu.Unlock()
 		metrics.RecordKubeproxySession(context.Background(), metrics.KubeproxySessionUnregister)
 		// Only delete the heartbeat row when no replacement session has
 		// taken over: on last-writer-wins eviction the new session already

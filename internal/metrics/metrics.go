@@ -81,6 +81,11 @@ var (
 		metric.WithDescription("NATS reconnect events."))
 	ephemeralErrors, _ = meter.Int64Counter("inari.eventbus.ephemeral.errors",
 		metric.WithDescription("Ephemeral core-NATS publish failures by subject domain (lossy by design)."))
+
+	kubeproxyConns, _ = meter.Int64Counter("inari.kubeproxy.connections",
+		metric.WithDescription("Proxied kubectl connections by result (open, close, byte_cap_exceeded, no_tunnel)."))
+	kubeproxySessions, _ = meter.Int64UpDownCounter("inari.kubeproxy.tunnel_sessions",
+		metric.WithDescription("Live tunnel-agent sessions by event (register, unregister, evicted)."))
 )
 
 // New builds a Prometheus exporter on its own registry and installs the
@@ -177,4 +182,29 @@ func RecordNATSReconnect(ctx context.Context) {
 // fatal.
 func RecordEphemeralError(ctx context.Context, domain string) {
 	ephemeralErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("domain", domain)))
+}
+
+// Kubeproxy connection result label values (plan §7.2).
+const (
+	KubeproxyOpen             = "open"
+	KubeproxyClose            = "close"
+	KubeproxyByteCapExceeded  = "byte_cap_exceeded"
+	KubeproxyNoTunnel         = "no_tunnel"
+	KubeproxySessionRegister  = "register"
+	KubeproxySessionUnregister = "unregister"
+	KubeproxySessionEvicted   = "evicted"
+)
+
+// RecordKubeproxyConn counts one proxied kubectl connection event.
+func RecordKubeproxyConn(ctx context.Context, result string) {
+	kubeproxyConns.Add(ctx, 1, metric.WithAttributes(attribute.String("result", result)))
+}
+
+// RecordKubeproxySession tracks the live tunnel-session count.
+func RecordKubeproxySession(ctx context.Context, event string) {
+	var v int64 = 1
+	if event != KubeproxySessionRegister {
+		v = -1
+	}
+	kubeproxySessions.Add(ctx, v, metric.WithAttributes(attribute.String("event", event)))
 }

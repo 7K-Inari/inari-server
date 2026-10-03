@@ -523,6 +523,9 @@ type Service struct {
 	db       *db.DB
 	idp      IdentityProvider
 	clients  ClientManager
+	// tunnelClients manages the per-cluster kubectl-tunnel Keycloak clients
+	// (plan §7.2); nil disables tunnel-client provisioning/kill switches.
+	tunnelClients TunnelClientManager
 	brokers  IdentityProviderManager
 	platform PlatformResourceEnsurer
 	gate     DeletionApprovalGate

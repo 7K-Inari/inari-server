@@ -7,8 +7,8 @@ import (
 
 func TestPermissionCatalog(t *testing.T) {
 	cat := PermissionCatalog()
-	if len(cat) != 19 {
-		t.Fatalf("catalog size = %d, want 19", len(cat))
+	if len(cat) != 20 {
+		t.Fatalf("catalog size = %d, want 20", len(cat))
 	}
 	seen := map[string]bool{}
 	for _, p := range cat {

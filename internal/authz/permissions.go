@@ -20,6 +20,7 @@ const (
 	PermTenantNotificationsManage = "tenant.notifications.manage"
 	PermTenantAdmin               = "tenant.admin"
 	PermClustersRegister          = "clusters.register"
+	PermClustersKubectl           = "clusters.kubectl"
 	PermCloudAccountsManage       = "cloudaccounts.manage"
 	PermZonesManage               = "zones.manage"
 	PermFleetManage               = "fleet.manage"
@@ -45,6 +46,10 @@ const (
 	RelationTenantNotificationsManage = "tenant_notifications_manage"
 	RelationTenantAdmin               = "tenant_admin"
 	RelationClustersRegister          = "clusters_register"
+	RelationClustersKubectl           = "clusters_kubectl"
+	// RelationKubectl is the cluster-object relation the kubeproxy PEP
+	// checks per proxied request (derived from clusters_kubectl via parent).
+	RelationKubectl = "kubectl"
 	RelationCloudAccountsManage       = "cloudaccounts_manage"
 	RelationZonesManage               = "zones_manage"
 	RelationFleetManage               = "fleet_manage"
@@ -83,6 +88,7 @@ func PermissionCatalog() []Permission {
 		{PermTenantNotificationsManage, "Manage notifications", "Configure notification channels and rules", "tenant", ""},
 		{PermTenantAdmin, "Tenant administrator", "Delete the tenant and other irreversible administration", "tenant", "admin"},
 		{PermClustersRegister, "Operate clusters", "Register, cordon, and decommission clusters", "infrastructure", "operator"},
+		{PermClustersKubectl, "Access clusters with kubectl", "Open proxied kubectl sessions through the inari-kubeproxy gateway", "infrastructure", ""},
 		{PermCloudAccountsManage, "Manage cloud accounts", "Register and deregister cloud accounts", "infrastructure", "operator"},
 		{PermZonesManage, "Manage tenant zones", "Provision and close tenant zones", "infrastructure", "operator"},
 		{PermFleetManage, "Manage fleet", "Operate the cluster fleet (cluster sets, rollouts, drift)", "infrastructure", "operator"},
@@ -98,7 +104,7 @@ func PermissionCatalog() []Permission {
 
 // catalogIndex maps slug → catalog entry (built once).
 var catalogIndex = func() map[string]Permission {
-	m := make(map[string]Permission, 19)
+	m := make(map[string]Permission, 20)
 	for _, p := range PermissionCatalog() {
 		m[p.Slug] = p
 	}
@@ -172,13 +178,13 @@ const (
 // bundles mirroring the retired hierarchy
 // (org-admin ⊇ platform-engineer ⊇ developer ⊇ viewer).
 func BuiltinRoles() []BuiltinRole {
-	all := make([]string, 0, 19)
+	all := make([]string, 0, 20)
 	for _, p := range PermissionCatalog() {
 		all = append(all, p.Slug)
 	}
 	operator := []string{
 		PermTenantRead, PermTenantMembersManage,
-		PermClustersRegister, PermCloudAccountsManage, PermZonesManage,
+		PermClustersRegister, PermClustersKubectl, PermCloudAccountsManage, PermZonesManage,
 		PermFleetManage, PermPoliciesManage, PermSecretStoresManage,
 		PermExtensionsManage, PermExtensionsInvoke,
 		PermCatalogManage, PermDeploymentsCreate, PermApprovalsManage,

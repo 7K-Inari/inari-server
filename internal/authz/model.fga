@@ -26,6 +26,7 @@ type organization
     define tenant_notifications_manage: [team#member]
     define tenant_admin: [team#member]
     define clusters_register: [team#member]
+    define clusters_kubectl: [team#member]
     define cloudaccounts_manage: [team#member]
     define zones_manage: [team#member]
     define fleet_manage: [team#member]
@@ -42,6 +43,7 @@ type cluster
     define parent: [organization]
     define operator: clusters_register from parent
     define viewer: tenant_read from parent
+    define kubectl: clusters_kubectl from parent
 
 type catalog_item
   relations

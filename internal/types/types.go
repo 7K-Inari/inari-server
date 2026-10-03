@@ -113,6 +113,11 @@ const (
 	EventClusterDeleted        = "cluster.deleted"
 	EventCapabilitiesIngested  = "capabilities.ingested"
 
+	// Kubectl gateway audit events (inari-kubeproxy data plane, plan §7.2):
+	// appended to the outbox by kubeproxy on proxied-session open/close.
+	EventClusterKubectlProxyOpen  = "cluster.kubectl_proxy_open"
+	EventClusterKubectlProxyClose = "cluster.kubectl_proxy_close"
+
 	EventCatalogItemUpserted      = "catalog.item_upserted"
 	EventCatalogVisibilityChanged = "catalog.visibility.changed"
 	EventApprovalRequested        = "approval.requested"
@@ -344,6 +349,22 @@ type ClusterPayload struct {
 	OrgID     string `json:"orgId"`
 	ClusterID string `json:"clusterId"`
 	Name      string `json:"name,omitempty"`
+}
+
+// KubectlProxyPayload is the outbox payload for cluster.kubectl_proxy_open/
+// close events written by inari-kubeproxy.
+type KubectlProxyPayload struct {
+	OrgID        string `json:"orgId"`
+	ClusterID    string `json:"clusterId"`
+	ConnectionID string `json:"connectionId"`
+	UserID       string `json:"userId"`
+	Method       string `json:"method,omitempty"`
+	Path         string `json:"path,omitempty"`
+	// Close-only fields.
+	DurationMs int64  `json:"durationMs,omitempty"`
+	BytesIn    int64  `json:"bytesIn,omitempty"`
+	BytesOut   int64  `json:"bytesOut,omitempty"`
+	Reason     string `json:"reason,omitempty"`
 }
 
 // CapabilitiesIngestedPayload summarizes one persisted capability update.

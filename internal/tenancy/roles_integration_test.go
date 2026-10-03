@@ -455,8 +455,8 @@ func TestRoleHTTPRoutes(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("catalog: %d %v", code, body)
 	}
-	if perms, _ := body["permissions"].([]any); len(perms) != 19 {
-		t.Errorf("catalog entries = %d, want 19", len(perms))
+	if perms, _ := body["permissions"].([]any); len(perms) != 20 {
+		t.Errorf("catalog entries = %d, want 20", len(perms))
 	}
 
 	// Built-ins are listed; create + get a custom role.

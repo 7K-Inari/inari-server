@@ -79,6 +79,13 @@ type Deps struct {
 	AgentSupportedRange     string
 	AgentCurrentVersion     string
 	AgentRecommendedVersion string
+
+	// Kubectl gateway (plan §7.2): kubeproxy public base URL (empty =
+	// not deployed), the kubectl_access.enabled flag evaluator, and the
+	// tunnel-agent liveness reader. Nil-safe (export-openapi passes zero).
+	KubeproxyPublicURL string
+	AccessFlags        clusterregistry.AccessFlagEvaluator
+	TunnelLiveness     clusterregistry.TunnelLiveness
 }
 
 // Register mounts every module's REST routes on the huma API. The call order
@@ -90,7 +97,8 @@ func Register(api huma.API, d Deps) {
 	tenancy.NewPlatformHandler(d.Tenancy, d.Authz, d.PlatformAdminGroup).RegisterRoutes(api)
 	clusterregistry.NewHandler(d.Clusters, d.Tenancy, d.Authz, d.CapabilitiesLister).
 		WithAccessInfo(d.OIDCIssuerURL).
-		WithAgentCompat(d.AgentSupportedRange, d.AgentCurrentVersion, d.AgentRecommendedVersion).RegisterRoutes(api)
+		WithAgentCompat(d.AgentSupportedRange, d.AgentCurrentVersion, d.AgentRecommendedVersion).
+		WithKubectlGateway(d.KubeproxyPublicURL, d.AccessFlags, d.TunnelLiveness).RegisterRoutes(api)
 	catalog.NewHandler(d.Catalog, d.Tenancy, d.Authz).RegisterRoutes(api)
 	approvals.NewHandler(d.Approvals, d.Tenancy, d.Authz, d.Tenancy).RegisterRoutes(api)
 	inventory.NewHandler(d.Inventory, d.Tenancy, d.Authz).RegisterRoutes(api)

@@ -44,6 +44,9 @@ func (f *fakeClients) DisableClient(_ context.Context, clientID string) error {
 	f.disabled = append(f.disabled, clientID)
 	return nil
 }
+func (f *fakeClients) CreateTunnelClient(_ context.Context, clusterID string) (string, error) {
+	return "tunnel-" + clusterID, nil
+}
 
 // fakeSecrets captures delivered secrets; fail makes Put error (delivery
 // outage simulation).
@@ -173,6 +176,19 @@ func TestRegistrationExchangeEndToEnd(t *testing.T) {
 	wantPath := secrets.ClusterOIDCPath(cluster.ID) + "#client-secret"
 	if got := r.secrets.puts[wantPath]; got != "secret-for-cluster-"+cluster.ID {
 		t.Errorf("delivered secret at %q = %q", wantPath, got)
+	}
+
+	// Kubectl tunnel (plan §7.2): the additive tunnel client credential
+	// pair rides the same ESO secret under a second key.
+	if res.Msg.TunnelClientId != "tunnel-"+cluster.ID {
+		t.Errorf("tunnel_client_id = %q", res.Msg.TunnelClientId)
+	}
+	if res.Msg.TunnelClientSecretDelivery.GetSecretKey() != TunnelSecretKey {
+		t.Errorf("tunnel secret key = %q", res.Msg.TunnelClientSecretDelivery.GetSecretKey())
+	}
+	tunnelPath := secrets.ClusterOIDCPath(cluster.ID) + "#" + TunnelSecretKey
+	if got := r.secrets.puts[tunnelPath]; got != "secret-for-tunnel-"+cluster.ID {
+		t.Errorf("delivered tunnel secret at %q = %q", tunnelPath, got)
 	}
 
 	got, err := r.registry.GetCluster(ctx, cluster.ID)

@@ -520,16 +520,19 @@ type PlatformResourceEnsurer interface {
 // Service orchestrates tenant creation across Keycloak and PostgreSQL,
 // emitting audit + outbox events in the same DB transaction.
 type Service struct {
-	db       *db.DB
-	idp      IdentityProvider
-	clients  ClientManager
-	brokers  IdentityProviderManager
-	platform PlatformResourceEnsurer
-	gate     DeletionApprovalGate
-	deleter  *Deleter
-	store    *Store
-	audit    *audit.Store
-	orgCache *OrgCache
+	db      *db.DB
+	idp     IdentityProvider
+	clients ClientManager
+	// tunnelClients manages the per-cluster kubectl-tunnel Keycloak clients
+	// (plan §7.2); nil disables tunnel-client provisioning/kill switches.
+	tunnelClients TunnelClientManager
+	brokers       IdentityProviderManager
+	platform      PlatformResourceEnsurer
+	gate          DeletionApprovalGate
+	deleter       *Deleter
+	store         *Store
+	audit         *audit.Store
+	orgCache      *OrgCache
 }
 
 func NewService(d *db.DB, idp IdentityProvider, store *Store, auditStore *audit.Store) *Service {

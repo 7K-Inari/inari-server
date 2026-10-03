@@ -279,6 +279,7 @@ func ModelV1() client.ClientWriteAuthorizationModelRequest {
 		RelationParent:   direct(),
 		RelationOperator: fromParent(RelationClustersRegister),
 		RelationViewer:   fromParent(RelationTenantRead),
+		RelationKubectl:  fromParent(RelationClustersKubectl),
 	}
 	clusterMeta := map[string]openfga.RelationMetadata{
 		RelationParent: {DirectlyRelatedUserTypes: &orgRef},

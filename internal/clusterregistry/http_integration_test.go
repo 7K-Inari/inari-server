@@ -19,6 +19,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
+	"github.com/7K-Inari/inari-server/internal/kubeproxy"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/testutil"
 	"github.com/7K-Inari/inari-server/internal/testutil/testdb"
@@ -101,6 +102,9 @@ func (itClients) CreateClusterClient(context.Context, string) (string, error) {
 }
 func (itClients) ClusterClientSecret(context.Context, string) (string, error) { return "s", nil }
 func (itClients) DisableClient(context.Context, string) error                 { return nil }
+func (itClients) CreateTunnelClient(_ context.Context, id string) (string, error) {
+	return "tunnel-" + id, nil
+}
 
 func itServer(t *testing.T, az authz.Authorizer) (*httptest.Server, *Service) {
 	t.Helper()
@@ -572,5 +576,170 @@ func TestClusterAPITokenListAndRevoke(t *testing.T) {
 	}
 	if revocations != 1 {
 		t.Errorf("token.revoked audit rows = %d, want 1", revocations)
+	}
+}
+
+// itGatewayServer builds the handler with the kubectl-gateway wiring
+// (kubeproxy public URL, static flag, DB-backed tunnel liveness).
+func itGatewayServer(t *testing.T, az authz.Authorizer, flags kubeproxy.FlagEvaluator, publicURL string) (*httptest.Server, *db.DB) {
+	t.Helper()
+	ctx := context.Background()
+	pg, err := testutil.SharedPostgres(ctx)
+	if err != nil {
+		t.Skipf("testcontainers unavailable: %v", err)
+	}
+	database, err := testdb.NewDatabase(t, pg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Pool.Exec(ctx,
+		`INSERT INTO organizations (id, slug, display_name, keycloak_org_id) VALUES
+		 ('org:1','acme','Acme','kc-1'), ('org:2','acme2','Acme2','kc-2')`); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(database, itClients{}, NewStore(), audit.NewStore(), time.Hour, false)
+	h := NewHandler(svc, itTenants{
+		"acme":  {ID: "org:1", Slug: "acme"},
+		"acme2": {ID: "org:2", Slug: "acme2"},
+	}, az, nil).
+		WithAccessInfo("https://keycloak.example.com/realms/inari").
+		WithKubectlGateway(publicURL, flags, kubeproxy.NewLivenessReader(database.Pool, 0))
+	router, api := httpserver.NewRouter(slog.Default(), itValidator{}, database)
+	h.RegisterRoutes(api)
+	return httptest.NewServer(router), database
+}
+
+func TestClusterAccessInfoGatewayFields(t *testing.T) {
+	srv, database := itGatewayServer(t, itAuthorizer{allow: true},
+		kubeproxy.StaticFlagEvaluator{Enabled: true}, "https://proxy.example.com")
+	id := itCreate(t, srv, "acme", "prod-1")
+
+	get := func() types.ClusterAccessInfo {
+		t.Helper()
+		code, body := itReq(t, srv, "GET", "/api/v1/tenants/acme/clusters/"+id+"/access-info", "good", "")
+		if code != 200 {
+			t.Fatalf("access-info: %d %s", code, body)
+		}
+		var out struct {
+			AccessInfo types.ClusterAccessInfo `json:"accessInfo"`
+		}
+		if err := json.Unmarshal([]byte(body), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.AccessInfo
+	}
+
+	ai := get()
+	if !ai.KubectlAccessEnabled {
+		t.Error("kubectlAccessEnabled = false with the flag on")
+	}
+	wantProxy := "https://proxy.example.com/api/v1/tenants/acme/clusters/" + id + "/proxy"
+	if ai.ProxyURL != wantProxy {
+		t.Errorf("proxyUrl = %q, want %q", ai.ProxyURL, wantProxy)
+	}
+	if ai.TunnelAvailable {
+		t.Error("tunnelAvailable = true with no heartbeat row")
+	}
+	if !strings.Contains(ai.TunnelUnavailableReason, "tunnel agent") {
+		t.Errorf("tunnelUnavailableReason = %q", ai.TunnelUnavailableReason)
+	}
+
+	// A fresh heartbeat row flips tunnelAvailable (kubeproxy writes it).
+	if _, err := database.Pool.Exec(context.Background(),
+		`INSERT INTO cluster_tunnel_heartbeats (cluster_id) VALUES ($1)`, id); err != nil {
+		t.Fatal(err)
+	}
+	ai = get()
+	if !ai.TunnelAvailable {
+		t.Error("tunnelAvailable = false with a fresh heartbeat row")
+	}
+	if ai.TunnelUnavailableReason != "" {
+		t.Errorf("tunnelUnavailableReason = %q, want empty", ai.TunnelUnavailableReason)
+	}
+}
+
+func TestClusterAccessInfoFlagOff(t *testing.T) {
+	srv, _ := itGatewayServer(t, itAuthorizer{allow: true},
+		kubeproxy.StaticFlagEvaluator{Enabled: false}, "https://proxy.example.com")
+	id := itCreate(t, srv, "acme", "prod-1")
+	code, body := itReq(t, srv, "GET", "/api/v1/tenants/acme/clusters/"+id+"/access-info", "good", "")
+	if code != 200 {
+		t.Fatalf("access-info: %d %s", code, body)
+	}
+	var out struct {
+		AccessInfo types.ClusterAccessInfo `json:"accessInfo"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.AccessInfo.KubectlAccessEnabled {
+		t.Error("kubectlAccessEnabled = true with the flag off")
+	}
+	if !strings.Contains(out.AccessInfo.TunnelUnavailableReason, "disabled by platform policy") {
+		t.Errorf("tunnelUnavailableReason = %q", out.AccessInfo.TunnelUnavailableReason)
+	}
+}
+
+func TestClusterKubeconfig(t *testing.T) {
+	srv, _ := itGatewayServer(t, itAuthorizer{allow: true},
+		kubeproxy.StaticFlagEvaluator{Enabled: true}, "https://proxy.example.com")
+	id := itCreate(t, srv, "acme", "prod-1")
+
+	// Gateway mode (default): proxy URL, secret-free exec credential.
+	code, body := itReq(t, srv, "GET", "/api/v1/tenants/acme/clusters/"+id+"/kubeconfig", "good", "")
+	if code != 200 {
+		t.Fatalf("kubeconfig: %d %s", code, body)
+	}
+	for _, want := range []string{
+		"current-context: acme-" + id,
+		"server: https://proxy.example.com/api/v1/tenants/acme/clusters/" + id + "/proxy",
+		"command: kubelogin",
+		"org-acme-kubectl",
+		"device-code",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("kubeconfig missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "token:") {
+		t.Error("kubeconfig must be secret-free")
+	}
+
+	// Direct mode requires --server.
+	if code, _ := itReq(t, srv, "GET", "/api/v1/tenants/acme/clusters/"+id+"/kubeconfig?mode=direct", "good", ""); code != 422 {
+		t.Errorf("direct without server = %d, want 422", code)
+	}
+	code, body = itReq(t, srv, "GET", "/api/v1/tenants/acme/clusters/"+id+"/kubeconfig?mode=direct&server=https://k8s.example.com:6443&grantType=authcode", "good", "")
+	if code != 200 {
+		t.Fatalf("direct kubeconfig: %d %s", code, body)
+	}
+	if !strings.Contains(body, "server: https://k8s.example.com:6443") || !strings.Contains(body, "authcode") {
+		t.Errorf("direct kubeconfig wrong:\n%s", body)
+	}
+
+	// Cross-tenant and unauthenticated denied.
+	if code, _ := itReq(t, srv, "GET", "/api/v1/tenants/acme2/clusters/"+id+"/kubeconfig", "good", ""); code != 404 {
+		t.Errorf("cross-tenant = %d, want 404", code)
+	}
+	if code, _ := itReq(t, srv, "GET", "/api/v1/tenants/acme/clusters/"+id+"/kubeconfig", "", ""); code != 401 {
+		t.Errorf("unauthenticated = %d, want 401", code)
+	}
+}
+
+func TestClusterKubeconfigGatewayUndeployed(t *testing.T) {
+	srv, _ := itGatewayServer(t, itAuthorizer{allow: true},
+		kubeproxy.StaticFlagEvaluator{Enabled: true}, "")
+	id := itCreate(t, srv, "acme", "prod-1")
+	if code, _ := itReq(t, srv, "GET", "/api/v1/tenants/acme/clusters/"+id+"/kubeconfig", "good", ""); code != 503 {
+		t.Errorf("gateway kubeconfig with no public URL = %d, want 503", code)
+	}
+}
+
+func TestClusterKubeconfigFlagOff410(t *testing.T) {
+	srv, _ := itGatewayServer(t, itAuthorizer{allow: true},
+		kubeproxy.StaticFlagEvaluator{Enabled: false}, "https://proxy.example.com")
+	id := itCreate(t, srv, "acme", "prod-1")
+	if code, _ := itReq(t, srv, "GET", "/api/v1/tenants/acme/clusters/"+id+"/kubeconfig", "good", ""); code != 410 {
+		t.Errorf("kubeconfig with flag off = %d, want 410", code)
 	}
 }

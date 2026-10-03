@@ -36,6 +36,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/fleetmanager"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/inventory"
+	"github.com/7K-Inari/inari-server/internal/kubeproxy"
 	"github.com/7K-Inari/inari-server/internal/leaderlease"
 	"github.com/7K-Inari/inari-server/internal/logging"
 	"github.com/7K-Inari/inari-server/internal/metrics"
@@ -907,6 +908,12 @@ func run() error {
 		AgentSupportedRange:     cfg.AgentSupportedRange,
 		AgentCurrentVersion:     cfg.CurrentAgentVersion,
 		AgentRecommendedVersion: cfg.AgentRecommendedVersion,
+
+		// Kubectl gateway (plan §7.2): access-info/kubeconfig surface; the
+		// liveness reader consumes the kubeproxy-written heartbeat rows.
+		KubeproxyPublicURL: cfg.KubeproxyPublicURL,
+		AccessFlags:        kubeproxy.StaticFlagEvaluator{Enabled: cfg.KubectlAccessEnabled},
+		TunnelLiveness:     kubeproxy.NewLivenessReader(database.Pool, cfg.TunnelHeartbeatFreshness),
 	})
 
 	// Agent-facing Connect-RPC services mount on chi directly, outside the

@@ -12,6 +12,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/fleetmanager"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
+	"github.com/7K-Inari/inari-server/internal/kubeproxy"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -34,6 +35,10 @@ type Handler struct {
 	agentSupportedRange string
 	agentCurrent        string
 	agentRecommended    string
+	// Kubectl gateway (plan §7.2), wired via WithKubectlGateway.
+	kubeproxyPublicURL string
+	accessFlags        AccessFlagEvaluator
+	tunnelLiveness     TunnelLiveness
 }
 
 // CapabilitiesLister reads the live capabilities of a cluster (implemented
@@ -59,6 +64,38 @@ func NewHandler(svc *Service, tenants TenantResolver, az authz.Authorizer, caps 
 func (h *Handler) WithAccessInfo(issuerURL string) *Handler {
 	h.issuerURL = issuerURL
 	return h
+}
+
+// AccessFlagEvaluator is the kubectl_access.enabled flag seam (static
+// evaluator today; task f368d08b delivers the flag system).
+type AccessFlagEvaluator interface {
+	KubectlAccessEnabled(ctx context.Context) bool
+}
+
+// TunnelLiveness reports tunnel-agent session availability (implemented by
+// kubeproxy.LivenessReader over the heartbeat table).
+type TunnelLiveness interface {
+	Available(ctx context.Context, clusterID string) (bool, error)
+}
+
+// WithKubectlGateway wires the kubectl-gateway fields of access-info and
+// the kubeconfig render endpoint (plan §7.2): the kubeproxy public base
+// URL (empty = gateway not deployed), the feature flag, and the
+// tunnel-agent liveness reader. All nil/empty-safe.
+func (h *Handler) WithKubectlGateway(publicURL string, flags AccessFlagEvaluator, liveness TunnelLiveness) *Handler {
+	h.kubeproxyPublicURL = publicURL
+	h.accessFlags = flags
+	h.tunnelLiveness = liveness
+	return h
+}
+
+// kubectlAccessEnabled evaluates the flag, defaulting to enabled when no
+// evaluator is wired (pre-gateway deployments).
+func (h *Handler) kubectlAccessEnabled(ctx context.Context) bool {
+	if h.accessFlags == nil {
+		return true
+	}
+	return h.accessFlags.KubectlAccessEnabled(ctx)
 }
 
 // WithAgentCompat wires the platform-declared agent compatibility policy
@@ -118,6 +155,14 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Summary:     "OIDC access info for building a kubelogin kubeconfig (no secrets, no API URL)",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.getAccessInfo)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "getClusterKubeconfig",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/tenants/{org}/clusters/{id}/kubeconfig",
+		Summary:     "Render a secret-free kubeconfig (gateway or direct mode) for download",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.getKubeconfig)
 
 	huma.Register(api, huma.Operation{
 		OperationID: "issueRegistrationToken",
@@ -306,13 +351,96 @@ func (h *Handler) getAccessInfo(ctx context.Context, in *clusterPathInput) (*acc
 		return nil, huma.Error500InternalServerError("OIDC issuer URL is not configured on the control plane")
 	}
 	out := &accessInfoOutput{}
-	out.Body.AccessInfo = types.ClusterAccessInfo{
-		IssuerURL:       h.issuerURL,
-		KubectlClientID: tenancy.KubectlClientID(org.Slug),
-		Audience:        "kubernetes",
-		Organization:    org.Slug,
+	info := types.ClusterAccessInfo{
+		IssuerURL:            h.issuerURL,
+		KubectlClientID:      tenancy.KubectlClientID(org.Slug),
+		Audience:             "kubernetes",
+		Organization:         org.Slug,
+		KubectlAccessEnabled: h.kubectlAccessEnabled(ctx),
 	}
+	if h.kubeproxyPublicURL != "" {
+		info.ProxyURL = kubeproxy.ProxyURL(h.kubeproxyPublicURL, org.Slug, in.ID)
+	}
+	if h.tunnelLiveness != nil {
+		avail, err := h.tunnelLiveness.Available(ctx, in.ID)
+		if err != nil {
+			// Liveness is advisory — never fail the endpoint on it.
+			avail = false
+		}
+		info.TunnelAvailable = avail
+	}
+	info.TunnelUnavailableReason = h.tunnelUnavailableReason(ctx, info)
+	out.Body.AccessInfo = info
 	return out, nil
+}
+
+// tunnelUnavailableReason explains a false TunnelAvailable (empty when the
+// tunnel is usable).
+func (h *Handler) tunnelUnavailableReason(ctx context.Context, info types.ClusterAccessInfo) string {
+	switch {
+	case !info.KubectlAccessEnabled:
+		return "kubectl access is disabled by platform policy"
+	case info.TunnelAvailable:
+		return ""
+	case h.kubeproxyPublicURL == "":
+		return "kubectl gateway is not deployed on this platform"
+	default:
+		return "no tunnel agent is connected for this cluster — upgrade the inari-agent chart to a version with kubectl tunnel support"
+	}
+}
+
+type kubeconfigInput struct {
+	Org       string `path:"org"`
+	ID        string `path:"id"`
+	Mode      string `query:"mode" enum:"gateway,direct" default:"gateway" doc:"gateway points at inari-kubeproxy; direct needs a server URL"`
+	GrantType string `query:"grantType" enum:"authcode,device-code" default:"device-code" doc:"kubelogin login flow"`
+	Server    string `query:"server" doc:"Apiserver URL for direct mode"`
+}
+
+type kubeconfigOutput struct {
+	ContentType string `header:"Content-Type"`
+	Body        []byte
+}
+
+// getKubeconfig renders the canonical secret-free exec-credential
+// kubeconfig (plan §7.2) for download — the same renderer the CLI mirrors.
+func (h *Handler) getKubeconfig(ctx context.Context, in *kubeconfigInput) (*kubeconfigOutput, error) {
+	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantRead)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.requireOrgCluster(ctx, org.ID, in.ID); err != nil {
+		return nil, err
+	}
+	if !h.kubectlAccessEnabled(ctx) {
+		return nil, huma.NewError(http.StatusGone, "kubectl access is disabled by platform policy")
+	}
+	if h.issuerURL == "" {
+		return nil, huma.Error500InternalServerError("OIDC issuer URL is not configured on the control plane")
+	}
+	var serverURL string
+	if in.Mode == "direct" {
+		if in.Server == "" {
+			return nil, huma.Error422UnprocessableEntity("direct mode requires the server query parameter")
+		}
+		serverURL = in.Server
+	} else {
+		if h.kubeproxyPublicURL == "" {
+			return nil, huma.NewError(http.StatusServiceUnavailable, "kubectl gateway is not deployed on this platform")
+		}
+		serverURL = kubeproxy.ProxyURL(h.kubeproxyPublicURL, org.Slug, in.ID)
+	}
+	doc, err := kubeproxy.RenderKubeconfig(kubeproxy.KubeconfigOptions{
+		Name:      org.Slug + "-" + in.ID,
+		ServerURL: serverURL,
+		IssuerURL: h.issuerURL,
+		ClientID:  tenancy.KubectlClientID(org.Slug),
+		GrantType: in.GrantType,
+	})
+	if err != nil {
+		return nil, huma.Error422UnprocessableEntity(err.Error())
+	}
+	return &kubeconfigOutput{ContentType: "application/yaml", Body: []byte(doc)}, nil
 }
 
 type tokenOutput struct {

@@ -316,6 +316,100 @@ func (k *KeycloakAdmin) CreateClusterClient(ctx context.Context, clusterID strin
 	return clientID, nil
 }
 
+// TunnelAudience is the audience pinned on tunnel-<id> client-credentials
+// tokens and enforced by inari-kubeproxy's stream interceptor (plan §7.2).
+const TunnelAudience = "inari-kubeproxy"
+
+// TunnelClientID renders the per-cluster kubectl-tunnel clientId
+// (tunnel-<id>).
+func TunnelClientID(clusterID string) string {
+	return "tunnel-" + clusterID
+}
+
+// CreateTunnelClient provisions the per-cluster kubectl-tunnel client
+// tunnel-<id>: confidential, client-credentials grant only, hardcoded
+// cluster_id claim, audience inari-kubeproxy — mirrors CreateClusterClient
+// for the dedicated tunnel data plane (plan §7.2). Idempotent: an existing
+// client for the cluster is accepted (409).
+func (k *KeycloakAdmin) CreateTunnelClient(ctx context.Context, clusterID string) (string, error) {
+	clientID := TunnelClientID(clusterID)
+	resp, err := k.do(ctx, http.MethodPost, "/clients", map[string]any{
+		"clientId":                  clientID,
+		"enabled":                   true,
+		"publicClient":              false,
+		"standardFlowEnabled":       false,
+		"serviceAccountsEnabled":    true,
+		"directAccessGrantsEnabled": false,
+		"protocolMappers": []map[string]any{{
+			"name":           "cluster_id",
+			"protocol":       "openid-connect",
+			"protocolMapper": "oidc-hardcoded-claim-mapper",
+			"config": map[string]string{
+				"claim.name":                 "cluster_id",
+				"claim.value":                clusterID,
+				"jsonType.label":             "String",
+				"access.token.claim":         "true",
+				"id.token.claim":             "true",
+				"userinfo.token.claim":       "false",
+				"access.tokenResponse.claim": "false",
+			},
+		}, {
+			// kubeproxy's JWT verifier requires aud=inari-kubeproxy.
+			"name":           "audience-inari-kubeproxy",
+			"protocol":       "openid-connect",
+			"protocolMapper": "oidc-audience-mapper",
+			"config": map[string]string{
+				"included.client.audience": TunnelAudience,
+				"id.token.claim":           "false",
+				"access.token.claim":       "true",
+				"userinfo.token.claim":     "false",
+			},
+		}},
+	})
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusConflict {
+		return clientID, nil // idempotent
+	}
+	if resp.StatusCode != http.StatusCreated {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("keycloak: create tunnel client: status %d: %s", resp.StatusCode, b)
+	}
+	return clientID, nil
+}
+
+// DisableTunnelClient disables the cluster's tunnel client — the per-cluster
+// kubectl-tunnel kill switch (in-flight tokens expire on their short TTL).
+func (k *KeycloakAdmin) DisableTunnelClient(ctx context.Context, clusterID string) error {
+	return k.DisableClient(ctx, TunnelClientID(clusterID))
+}
+
+// RevokeTunnelClient deletes the cluster's tunnel client outright — the
+// terminal kill switch (the tunnel agent can never mint a token again).
+// Idempotent: an absent client is a no-op.
+func (k *KeycloakAdmin) RevokeTunnelClient(ctx context.Context, clusterID string) error {
+	clientID := TunnelClientID(clusterID)
+	uuid, err := k.findClientUUID(ctx, clientID)
+	if err != nil {
+		return err
+	}
+	if uuid == "" {
+		return nil
+	}
+	resp, err := k.do(ctx, http.MethodDelete, "/clients/"+uuid, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("keycloak: revoke tunnel client: status %d: %s", resp.StatusCode, b)
+	}
+	return nil
+}
+
 // ClusterClientSecret reads the generated secret of a confidential client
 // via the admin API so the registration exchange can hand it to the platform
 // secret store (ESO delivery, plan §5.3). The value never transits the

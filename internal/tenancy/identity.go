@@ -247,6 +247,70 @@ func (s *Service) EnsureKubectlClient(ctx context.Context, actor, slug string) e
 	return nil
 }
 
+// TunnelClientManager abstracts the per-cluster kubectl-tunnel client
+// lifecycle (implemented by KeycloakAdmin; faked in tests). Kept separate
+// from ClientManager: the tunnel client is per-cluster, not per-tenant, and
+// is provisioned from the cluster-registration flow (plan §7.2).
+type TunnelClientManager interface {
+	CreateTunnelClient(ctx context.Context, clusterID string) (string, error)
+	DisableTunnelClient(ctx context.Context, clusterID string) error
+	RevokeTunnelClient(ctx context.Context, clusterID string) error
+}
+
+// WithTunnelClientManager wires the tunnel-client lifecycle backend.
+func (s *Service) WithTunnelClientManager(m TunnelClientManager) *Service {
+	s.tunnelClients = m
+	return s
+}
+
+// EnsureTunnelClient idempotently provisions the per-cluster tunnel client
+// tunnel-<cluster-id> (client-credentials only, hardcoded cluster_id claim,
+// audience inari-kubeproxy). The audit event is recorded on every call —
+// registration is the only caller and it runs once per cluster.
+func (s *Service) EnsureTunnelClient(ctx context.Context, actor, orgID, clusterID string) (string, error) {
+	if s.tunnelClients == nil {
+		return "", errors.New("tenancy: tunnel client manager not configured")
+	}
+	clientID, err := s.tunnelClients.CreateTunnelClient(ctx, clusterID)
+	if err != nil {
+		return "", fmt.Errorf("tenancy: create tunnel keycloak client: %w", err)
+	}
+	if err := s.audit.Record(ctx, s.db.Pool, &types.AuditEvent{
+		OrgID: orgID, Actor: actor, Action: "identity.client.tunnel_ensured", ObjectType: "identity_client", ObjectID: clientID,
+	}); err != nil {
+		return "", err
+	}
+	return clientID, nil
+}
+
+// DisableTunnelClient disables the cluster's tunnel client (kubectl-tunnel
+// kill switch; in-flight tokens expire on their short TTL).
+func (s *Service) DisableTunnelClient(ctx context.Context, actor, orgID, clusterID string) error {
+	if s.tunnelClients == nil {
+		return errors.New("tenancy: tunnel client manager not configured")
+	}
+	if err := s.tunnelClients.DisableTunnelClient(ctx, clusterID); err != nil {
+		return fmt.Errorf("tenancy: disable tunnel keycloak client: %w", err)
+	}
+	return s.audit.Record(ctx, s.db.Pool, &types.AuditEvent{
+		OrgID: orgID, Actor: actor, Action: "identity.client.tunnel_disabled", ObjectType: "identity_client", ObjectID: TunnelClientID(clusterID),
+	})
+}
+
+// RevokeTunnelClient deletes the cluster's tunnel client outright (terminal
+// kill switch, e.g. on cluster revocation).
+func (s *Service) RevokeTunnelClient(ctx context.Context, actor, orgID, clusterID string) error {
+	if s.tunnelClients == nil {
+		return errors.New("tenancy: tunnel client manager not configured")
+	}
+	if err := s.tunnelClients.RevokeTunnelClient(ctx, clusterID); err != nil {
+		return fmt.Errorf("tenancy: revoke tunnel keycloak client: %w", err)
+	}
+	return s.audit.Record(ctx, s.db.Pool, &types.AuditEvent{
+		OrgID: orgID, Actor: actor, Action: "identity.client.tunnel_revoked", ObjectType: "identity_client", ObjectID: TunnelClientID(clusterID),
+	})
+}
+
 // GroupMemberCount returns the number of Keycloak users in a group path,
 // best-effort for the RBAC matrix view.
 func (s *Service) GroupMemberCount(ctx context.Context, groupPath string) (int, error) {

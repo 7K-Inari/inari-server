@@ -101,6 +101,9 @@ func (itClients) CreateClusterClient(context.Context, string) (string, error) {
 }
 func (itClients) ClusterClientSecret(context.Context, string) (string, error) { return "s", nil }
 func (itClients) DisableClient(context.Context, string) error                 { return nil }
+func (itClients) CreateTunnelClient(_ context.Context, id string) (string, error) {
+	return "tunnel-" + id, nil
+}
 
 func itServer(t *testing.T, az authz.Authorizer) (*httptest.Server, *Service) {
 	t.Helper()

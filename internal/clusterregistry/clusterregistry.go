@@ -49,6 +49,11 @@ type ClientManager interface {
 	ClusterClientSecret(ctx context.Context, clientID string) (secret string, err error)
 	// DisableClient revokes a cluster's identity (plan §5.3 revocation path).
 	DisableClient(ctx context.Context, clientID string) error
+	// CreateTunnelClient creates the tunnel-<id> client (client-credentials
+	// grant, hardcoded cluster_id claim, audience inari-kubeproxy) for the
+	// kubectl tunnel agent (plan §7.2) and returns its clientID. Its secret
+	// is read via ClusterClientSecret like the agent client's.
+	CreateTunnelClient(ctx context.Context, clusterID string) (clientID string, err error)
 }
 
 // TokenGenerator issues the plaintext bootstrap token (seam for tests).

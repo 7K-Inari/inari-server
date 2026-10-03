@@ -17,6 +17,11 @@ import (
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
+// TunnelSecretKey is the key under which the tunnel-<id> client secret is
+// stored next to the agent client secret in the cluster's ESO secret (plan
+// §7.2 — same delivery mechanism, second key).
+const TunnelSecretKey = "tunnel-client-secret"
+
 // RegistrationService implements inari.agent.v1.RegistrationService: the
 // one-time bootstrap exchange (plan §5.3 step 1). Unauthenticated except for
 // the registration token itself.
@@ -54,6 +59,21 @@ func (g *Gateway) RegisterCluster(ctx context.Context, req *connect.Request[agen
 	}
 	if err := g.secrets.Put(ctx, secrets.ClusterOIDCPath(cluster.ID), g.cfg.ESOSecretKey, secret); err != nil {
 		return nil, connect.NewError(connect.CodeUnavailable, fmt.Errorf("pending_secret_delivery: write secret store: %w", err))
+	}
+	// Kubectl tunnel (plan §7.2): provision the dedicated tunnel-<id> client
+	// and deliver its secret alongside the agent's (same ESO secret, second
+	// key). Additive: old agents ignore the extra response fields; old
+	// servers never send them.
+	tunnelClientID, err := g.clients.CreateTunnelClient(ctx, cluster.ID)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("provision tunnel identity: %w", err))
+	}
+	tunnelSecret, err := g.clients.ClusterClientSecret(ctx, tunnelClientID)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeUnavailable, fmt.Errorf("pending_secret_delivery: read tunnel client secret: %w", err))
+	}
+	if err := g.secrets.Put(ctx, secrets.ClusterOIDCPath(cluster.ID), TunnelSecretKey, tunnelSecret); err != nil {
+		return nil, connect.NewError(connect.CodeUnavailable, fmt.Errorf("pending_secret_delivery: write tunnel secret: %w", err))
 	}
 	// The client is provisioned + its secret delivered: the control plane is
 	// the source of truth for this resource (no operator CR is rendered for
@@ -95,6 +115,13 @@ func (g *Gateway) RegisterCluster(ctx context.Context, req *connect.Request[agen
 			SecretName:      g.cfg.ESOSecretName,
 			SecretNamespace: g.cfg.ESOSecretNamespace,
 			SecretKey:       g.cfg.ESOSecretKey,
+		},
+		TunnelClientId: tunnelClientID,
+		TunnelClientSecretDelivery: &agentv1.SecretDeliveryReference{
+			EsoSecretStore:  esoStore,
+			SecretName:      g.cfg.ESOSecretName,
+			SecretNamespace: g.cfg.ESOSecretNamespace,
+			SecretKey:       TunnelSecretKey,
 		},
 		CredentialsExpireHint: timestamppb.Now(),
 	})

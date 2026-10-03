@@ -1,6 +1,7 @@
 package kubeproxy
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -76,10 +77,10 @@ func TestProxyURL(t *testing.T) {
 }
 
 func TestStaticFlagEvaluator(t *testing.T) {
-	if !(StaticFlagEvaluator{Enabled: true}).KubectlAccessEnabled(nil) {
+	if !(StaticFlagEvaluator{Enabled: true}).KubectlAccessEnabled(context.Background()) {
 		t.Fatal("enabled evaluator reports disabled")
 	}
-	if (StaticFlagEvaluator{}).KubectlAccessEnabled(nil) {
+	if (StaticFlagEvaluator{}).KubectlAccessEnabled(context.Background()) {
 		t.Fatal("zero-value evaluator should default to disabled unless configured on")
 	}
 }

@@ -68,6 +68,16 @@ func (s *Session) close(reason string) {
 	}
 }
 
+// drain blocks until in-flight Sends complete. Call it after close(): the
+// cancelled context makes any later Send bail at the ctx check, so once
+// drain returns no goroutine will enter sendFn again — the stream's
+// end-of-stream write (connect handler Close) cannot race a proxied send.
+func (s *Session) drain() {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	_ = s.ctx.Err() // non-empty critical section; close() ran first
+}
+
 // SessionRegistry fences tunnel sessions per cluster_id, last-writer-wins
 // (mirrors agentgateway/session_registry.go): a reconnecting tunnel agent
 // deterministically evicts its stale predecessor.

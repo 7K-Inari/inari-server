@@ -332,11 +332,17 @@ func (h *ProxyHandler) spliceUpgrade(ctx context.Context, w http.ResponseWriter,
 	}
 	defer func() { _ = raw.Close() }()
 
-	fmt.Fprintf(buf, "HTTP/1.1 101 Switching Protocols\r\n")
-	for k, v := range result.GetHeaders() {
-		fmt.Fprintf(buf, "%s: %s\r\n", k, v)
+	if _, err := fmt.Fprintf(buf, "HTTP/1.1 101 Switching Protocols\r\n"); err != nil {
+		return
 	}
-	fmt.Fprintf(buf, "Connection: Upgrade\r\nUpgrade: %s\r\n\r\n", r.Header.Get("Upgrade"))
+	for k, v := range result.GetHeaders() {
+		if _, err := fmt.Fprintf(buf, "%s: %s\r\n", k, v); err != nil {
+			return
+		}
+	}
+	if _, err := fmt.Fprintf(buf, "Connection: Upgrade\r\nUpgrade: %s\r\n\r\n", r.Header.Get("Upgrade")); err != nil {
+		return
+	}
 	if err := buf.Flush(); err != nil {
 		return
 	}

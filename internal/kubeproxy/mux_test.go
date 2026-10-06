@@ -122,3 +122,37 @@ func TestMuxCloseAll(t *testing.T) {
 		}
 	}
 }
+
+// Regression for the CI flake where a TunnelClose racing a buffered data
+// frame produced a 200 with an empty body: route() closes the conn without
+// queueing behind buffered frames, so the proxy loops must drain before
+// returning. This pins the drain's completeness at the unit level.
+func TestDrainPendingFramesAfterClose(t *testing.T) {
+	m := newConnMux("c1", 0)
+	c := m.alloc("conn1")
+	m.route(&tunnelv1.TunnelMessage{
+		ConnectionId: "conn1",
+		Payload: &tunnelv1.TunnelMessage_Frame{Frame: &tunnelv1.TunnelFrame{
+			Data: []byte("payload"),
+		}},
+	})
+	m.route(&tunnelv1.TunnelMessage{
+		ConnectionId: "conn1",
+		Payload:      &tunnelv1.TunnelMessage_Close{Close: &tunnelv1.TunnelClose{Reason: "done"}},
+	})
+	select {
+	case <-c.closed:
+	default:
+		t.Fatal("close not routed")
+	}
+	var got []byte
+	if err := drainPendingFrames(c, func(b []byte) error {
+		got = append(got, b...)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "payload" {
+		t.Fatalf("drained %q, want %q", got, "payload")
+	}
+}

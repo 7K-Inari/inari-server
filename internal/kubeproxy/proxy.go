@@ -222,6 +222,15 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_ = sess.Send(closeMsg(connID, CloseReasonMaxLifetime))
 			return
 		case <-conn.closed:
+			// route() closes the conn on TunnelClose without queueing behind
+			// buffered frames — flush any data already delivered first, or a
+			// close racing a buffered frame drops the tail of the response.
+			if err := drainPendingFrames(conn, func(b []byte) error {
+				_, err := w.Write(b)
+				return err
+			}); err == nil && flusher != nil {
+				flusher.Flush()
+			}
 			return
 		case msg := <-conn.fromAgent:
 			f := msg.GetFrame()
@@ -241,6 +250,29 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if f.GetHalfClose() {
 				return
 			}
+		}
+	}
+}
+
+// drainPendingFrames writes any agent data frames already buffered in
+// conn.fromAgent when the conn closed. connMux.route closes the conn
+// immediately on TunnelClose without queueing behind buffered frames, so a
+// close racing a buffered data frame would otherwise drop the tail of the
+// response. Frames after the close are impossible (the agent sends close
+// last and route delivers in order), so the non-blocking drain is complete.
+func drainPendingFrames(conn *proxyConn, write func([]byte) error) error {
+	for {
+		select {
+		case msg := <-conn.fromAgent:
+			f := msg.GetFrame()
+			if f == nil || len(f.GetData()) == 0 {
+				continue
+			}
+			if err := write(f.GetData()); err != nil {
+				return err
+			}
+		default:
+			return nil
 		}
 	}
 }
@@ -357,6 +389,11 @@ func (h *ProxyHandler) spliceUpgrade(ctx context.Context, w http.ResponseWriter,
 			_ = sess.Send(closeMsg(conn.id, CloseReasonMaxLifetime))
 			return
 		case <-conn.closed:
+			// Same drain as the non-upgrade loop: don't drop buffered frames.
+			_ = drainPendingFrames(conn, func(b []byte) error {
+				_, err := raw.Write(b)
+				return err
+			})
 			return
 		case msg := <-conn.fromAgent:
 			f := msg.GetFrame()

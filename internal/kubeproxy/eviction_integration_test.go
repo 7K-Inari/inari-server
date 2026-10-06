@@ -57,22 +57,25 @@ func TestTunnelEvictionKeepsHeartbeat(t *testing.T) {
 		t.Fatalf("liveness after eviction = %v, %v — evicted session deleted the replacement's heartbeat row", ok, err)
 	}
 
-	// Clean disconnect of the replacement (no successor) removes the row.
+	// Clean disconnect of the replacement (no successor) keeps the row
+	// fresh: agents rotate sessions seconds apart, and deleting the row
+	// flapped access-info tunnelAvailable=false in the reconnect gap. The
+	// row must instead expire via the reader's freshness window.
 	agent1.close()
 	agent2.close()
-	deadline = time.Now().Add(5 * time.Second)
-	for {
-		ok, err = NewLivenessReader(database.Pool, 0).Available(context.Background(), "c1")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !ok {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("heartbeat row survived a clean disconnect with no replacement session")
-		}
-		time.Sleep(25 * time.Millisecond)
+	time.Sleep(500 * time.Millisecond) // let teardown settle
+	ok, err = NewLivenessReader(database.Pool, 0).Available(context.Background(), "c1")
+	if err != nil || !ok {
+		t.Fatalf("liveness right after clean disconnect = %v, %v — rotation gaps must stay available", ok, err)
+	}
+	// With a near-zero freshness window the same row reads as unavailable:
+	// true teardown is detected by expiry, not deletion.
+	stale, err := NewLivenessReader(database.Pool, 50*time.Millisecond).Available(context.Background(), "c1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stale {
+		t.Fatal("stale read: clean-disconnect row must expire via the freshness window")
 	}
 }
 

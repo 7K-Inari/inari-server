@@ -42,10 +42,13 @@ func (w *HeartbeatWriter) Seen(ctx context.Context, clusterID string) error {
 	return err
 }
 
-// Disconnected removes the row on clean stream teardown. A crashed
-// kubeproxy leaves a stale row that the reader's freshness window expires.
+// Disconnected refreshes last_seen_at on clean stream teardown rather than
+// deleting the row: agents rotate sessions seconds apart (token-expiry
+// rotation), and deleting made access-info flap tunnelAvailable=false in the
+// reconnect gap. True teardown is indistinguishable from a crash anyway —
+// the reader's freshness window expires the row either way.
 func (w *HeartbeatWriter) Disconnected(ctx context.Context, clusterID string) error {
-	const sql = `DELETE FROM cluster_tunnel_heartbeats WHERE cluster_id = $1`
+	const sql = `UPDATE cluster_tunnel_heartbeats SET last_seen_at = now() WHERE cluster_id = $1`
 	_, err := w.q.Exec(ctx, sql, clusterID)
 	return err
 }

@@ -14,10 +14,12 @@ USER nonroot:nonroot
 EXPOSE 8080
 ENTRYPOINT ["/inari-server"]
 
-# Kubectl gateway data plane (plan §7.2). Build with:
+# Kubectl gateway data plane (plan §7.2, ADR-0014). Published by this repo's
+# release pipeline (publish.yml build-kubeproxy job, same version tags as the
+# server image):
 #   docker build --target kubeproxy -t ghcr.io/7k-inari/inari-kubeproxy .
-# Published by the inari-release-bundle chart workflow (follow-up); the
-# release pipeline in this repo ships only the inari-server image today.
+# The matching chart block (values kubeproxy.*, replicaCount pinned to 1)
+# lives in the inari-release-bundle chart.
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS kubeproxy
 COPY --from=build /out/inari-kubeproxy /inari-kubeproxy
 USER nonroot:nonroot

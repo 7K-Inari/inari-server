@@ -76,6 +76,7 @@ jobs:
         with:
           context: .
           file: deploy/docker/Dockerfile
+          target: server
           push: true
           tags: |
             ${{ env.IMAGE }}:edge

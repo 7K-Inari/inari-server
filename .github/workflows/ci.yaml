@@ -135,7 +135,18 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
-      - run: docker build -f deploy/docker/Dockerfile -t inari/server:ci .
+      - name: build both image targets
+        run: |
+          docker build --target server -f deploy/docker/Dockerfile -t inari/server:ci .
+          docker build --target kubeproxy -f deploy/docker/Dockerfile -t inari/kubeproxy:ci .
+      - name: assert entrypoints
+        run: |
+          srv=$(docker inspect -f '{{.Config.Entrypoint}}' inari/server:ci)
+          kp=$(docker inspect -f '{{.Config.Entrypoint}}' inari/kubeproxy:ci)
+          echo "server entrypoint:    $srv"
+          echo "kubeproxy entrypoint: $kp"
+          [ "$srv" = "[/inari-server]" ] || { echo "server image has wrong entrypoint"; exit 1; }
+          [ "$kp" = "[/inari-kubeproxy]" ] || { echo "kubeproxy image has wrong entrypoint"; exit 1; }
 
   openapi-export:
     runs-on: ubuntu-latest

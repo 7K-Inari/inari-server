@@ -5,7 +5,7 @@ go 1.26.3
 require (
 	connectrpc.com/connect v1.21.0
 	connectrpc.com/connect/v2 v2.0.0
-	github.com/7K-Inari/inari-api v0.6.1-0.20261007164457-ecc36cc4c666
+	github.com/7K-Inari/inari-api v0.6.1-0.20261007193122-88af36a67ccf
 	github.com/aws/aws-sdk-go-v2 v1.47.1
 	github.com/aws/aws-sdk-go-v2/config v1.33.7
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.7

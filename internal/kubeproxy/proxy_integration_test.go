@@ -270,11 +270,22 @@ func (a *fakeAgent) relayUpgrade(connID string, open *tunnelv1.TunnelOpen, tap *
 		return
 	}
 	defer raw.Close()
+	// Forward the headers the proxy actually sent (mirroring the real
+	// tunnelagent's applyHeaders) so a proxy that drops Upgrade/websocket
+	// headers fails the strict fake apiserver instead of passing silently.
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n",
-		open.GetMethod(), open.GetPath(), addr)
+	fmt.Fprintf(&sb, "%s %s HTTP/1.1\r\nHost: %s\r\n", open.GetMethod(), open.GetPath(), addr)
+	wroteConnection := false
 	for k, v := range open.GetHeaders() {
+		if strings.EqualFold(k, "Connection") {
+			wroteConnection = true
+		}
 		fmt.Fprintf(&sb, "%s: %s\r\n", k, v)
+	}
+	if !wroteConnection {
+		// Transport fallback: the proxy strips hop-by-hop Connection; the
+		// upgrade intent itself rides the Upgrade header.
+		sb.WriteString("Connection: Upgrade\r\n")
 	}
 	sb.WriteString("\r\n")
 	if _, err := raw.Write([]byte(sb.String())); err != nil {
@@ -451,6 +462,19 @@ func outboxEvents(t *testing.T, database *db.DB) []types.OutboxEvent {
 		out = append(out, ev)
 	}
 	return out
+}
+
+// headerHasToken reports whether a comma-separated header (e.g.
+// Connection) carries a token, case-insensitively.
+func headerHasToken(h http.Header, name, token string) bool {
+	for _, v := range h.Values(name) {
+		for _, tok := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(tok), token) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // --- tests -----------------------------------------------------------------
@@ -704,6 +728,15 @@ func TestProxyUpgradeSplice(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Impersonate-User") != "dev@acme.example" {
 			t.Errorf("upgrade request missing impersonation: %v", r.Header)
+		}
+		// STRICT: a real apiserver only upgrades when BOTH headers are
+		// present; tolerate neither a missing Upgrade nor a missing
+		// Connection: Upgrade token.
+		if r.Header.Get("Upgrade") == "" || !headerHasToken(r.Header, "Connection", "upgrade") {
+			t.Errorf("upgrade request missing upgrade headers: Upgrade=%q Connection=%q",
+				r.Header.Get("Upgrade"), r.Header.Get("Connection"))
+			http.Error(w, "upgrade headers required", http.StatusUpgradeRequired)
+			return
 		}
 		hj, ok := w.(http.Hijacker)
 		if !ok {

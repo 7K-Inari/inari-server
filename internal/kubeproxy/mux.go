@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	tunnelv1 "github.com/7K-Inari/inari-api/gen/go/inari/tunnel/v1"
+	tunnelv2 "github.com/7K-Inari/inari-api/gen/go/inari/tunnel/v2"
 
 	"github.com/7K-Inari/inari-server/internal/metrics"
 )
@@ -34,7 +34,7 @@ type proxyConn struct {
 	// fromAgent carries TunnelOpenResult / TunnelFrame / TunnelClose
 	// payloads addressed to this connID. Bounded; a full channel closes the
 	// conn (backpressure) rather than stalling the whole session.
-	fromAgent chan *tunnelv1.TunnelMessage
+	fromAgent chan *tunnelv2.TunnelMessage
 
 	bytesIn  atomic.Int64 // user → agent
 	bytesOut atomic.Int64 // agent → user
@@ -75,7 +75,7 @@ func (m *connMux) alloc(id string) *proxyConn {
 	c := &proxyConn{
 		id:        id,
 		createdAt: time.Now(),
-		fromAgent: make(chan *tunnelv1.TunnelMessage, connChanBounds),
+		fromAgent: make(chan *tunnelv2.TunnelMessage, connChanBounds),
 		closed:    make(chan struct{}),
 	}
 	m.conns.Store(id, c)
@@ -104,7 +104,7 @@ func (m *connMux) countIn(c *proxyConn, n int) bool {
 // route delivers one agent→proxy message to its conn. Called from the
 // session's single stream-receive loop — never blocks (a full per-conn
 // channel closes that conn instead of stalling siblings).
-func (m *connMux) route(msg *tunnelv1.TunnelMessage) {
+func (m *connMux) route(msg *tunnelv2.TunnelMessage) {
 	c := m.get(msg.GetConnectionId())
 	if c == nil {
 		return // conn already finished; late frames are dropped

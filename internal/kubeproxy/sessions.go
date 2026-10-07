@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"sync"
 
-	tunnelv1 "github.com/7K-Inari/inari-api/gen/go/inari/tunnel/v1"
+	tunnelv2 "github.com/7K-Inari/inari-api/gen/go/inari/tunnel/v2"
 	"github.com/google/uuid"
 )
 
@@ -23,14 +23,14 @@ type Session struct {
 	done chan struct{}
 
 	sendMu sync.Mutex
-	sendFn func(*tunnelv1.TunnelMessage) error
+	sendFn func(*tunnelv2.TunnelMessage) error
 
 	mux *connMux
 }
 
 // newSession derives the session context from parent (the stream handler's
 // context): eviction via close() cancels it, unblocking stream.Receive.
-func newSession(parent context.Context, clusterID string, sendFn func(*tunnelv1.TunnelMessage) error, byteCap int64) *Session {
+func newSession(parent context.Context, clusterID string, sendFn func(*tunnelv2.TunnelMessage) error, byteCap int64) *Session {
 	ctx, cancel := context.WithCancel(parent)
 	return &Session{
 		id:        uuid.NewString(),
@@ -45,7 +45,7 @@ func newSession(parent context.Context, clusterID string, sendFn func(*tunnelv1.
 
 // Send serializes stream writes (proxy handlers on many conns plus the
 // stream loop may all send). Sends on a dead session fail fast.
-func (s *Session) Send(msg *tunnelv1.TunnelMessage) error {
+func (s *Session) Send(msg *tunnelv2.TunnelMessage) error {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 	select {

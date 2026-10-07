@@ -4,13 +4,13 @@ import (
 	"fmt"
 	"testing"
 
-	tunnelv1 "github.com/7K-Inari/inari-api/gen/go/inari/tunnel/v1"
+	tunnelv2 "github.com/7K-Inari/inari-api/gen/go/inari/tunnel/v2"
 )
 
-func frameMsg(connID string, n int) *tunnelv1.TunnelMessage {
-	return &tunnelv1.TunnelMessage{
+func frameMsg(connID string, n int) *tunnelv2.TunnelMessage {
+	return &tunnelv2.TunnelMessage{
 		ConnectionId: connID,
-		Payload: &tunnelv1.TunnelMessage_Frame{Frame: &tunnelv1.TunnelFrame{
+		Payload: &tunnelv2.TunnelMessage_Frame{Frame: &tunnelv2.TunnelFrame{
 			Data: make([]byte, n),
 		}},
 	}
@@ -88,9 +88,9 @@ func TestMuxBackpressureClosesConn(t *testing.T) {
 func TestMuxRouteClose(t *testing.T) {
 	m := newConnMux("c1", 0)
 	c := m.alloc("conn1")
-	m.route(&tunnelv1.TunnelMessage{
+	m.route(&tunnelv2.TunnelMessage{
 		ConnectionId: "conn1",
-		Payload:      &tunnelv1.TunnelMessage_Close{Close: &tunnelv1.TunnelClose{Reason: "remote"}},
+		Payload:      &tunnelv2.TunnelMessage_Close{Close: &tunnelv2.TunnelClose{Reason: "remote"}},
 	})
 	select {
 	case <-c.closed:
@@ -130,15 +130,15 @@ func TestMuxCloseAll(t *testing.T) {
 func TestDrainPendingFramesAfterClose(t *testing.T) {
 	m := newConnMux("c1", 0)
 	c := m.alloc("conn1")
-	m.route(&tunnelv1.TunnelMessage{
+	m.route(&tunnelv2.TunnelMessage{
 		ConnectionId: "conn1",
-		Payload: &tunnelv1.TunnelMessage_Frame{Frame: &tunnelv1.TunnelFrame{
+		Payload: &tunnelv2.TunnelMessage_Frame{Frame: &tunnelv2.TunnelFrame{
 			Data: []byte("payload"),
 		}},
 	})
-	m.route(&tunnelv1.TunnelMessage{
+	m.route(&tunnelv2.TunnelMessage{
 		ConnectionId: "conn1",
-		Payload:      &tunnelv1.TunnelMessage_Close{Close: &tunnelv1.TunnelClose{Reason: "done"}},
+		Payload:      &tunnelv2.TunnelMessage_Close{Close: &tunnelv2.TunnelClose{Reason: "done"}},
 	})
 	select {
 	case <-c.closed:

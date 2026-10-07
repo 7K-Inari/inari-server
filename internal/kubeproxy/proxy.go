@@ -367,14 +367,28 @@ func (h *ProxyHandler) spliceUpgrade(ctx context.Context, w http.ResponseWriter,
 	if _, err := fmt.Fprintf(buf, "HTTP/1.1 101 Switching Protocols\r\n"); err != nil {
 		return
 	}
+	// The agent relays the apiserver's 101 headers verbatim, including
+	// Connection/Upgrade — skip those here and emit exactly one pair, or
+	// the spliced head carries duplicates. The apiserver's Upgrade token
+	// (the negotiated protocol) wins over the client's request value.
+	upgradeProto := r.Header.Get("Upgrade")
 	for k, vs := range result.GetHeaders() {
+		switch strings.ToLower(k) {
+		case "connection":
+			continue
+		case "upgrade":
+			if len(vs.GetValues()) > 0 {
+				upgradeProto = vs.GetValues()[0]
+			}
+			continue
+		}
 		for _, v := range vs.GetValues() {
 			if _, err := fmt.Fprintf(buf, "%s: %s\r\n", k, v); err != nil {
 				return
 			}
 		}
 	}
-	if _, err := fmt.Fprintf(buf, "Connection: Upgrade\r\nUpgrade: %s\r\n\r\n", r.Header.Get("Upgrade")); err != nil {
+	if _, err := fmt.Fprintf(buf, "Connection: Upgrade\r\nUpgrade: %s\r\n\r\n", upgradeProto); err != nil {
 		return
 	}
 	if err := buf.Flush(); err != nil {

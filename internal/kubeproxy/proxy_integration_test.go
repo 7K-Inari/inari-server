@@ -215,7 +215,7 @@ func (a *fakeAgent) relay(connID string, open *tunnelv2.TunnelOpen, tap *tapPipe
 		return
 	}
 	for k, vs := range open.GetHeaders() {
-		req.Header[k] = vs.GetValues()
+		req.Header[http.CanonicalHeaderKey(k)] = vs.GetValues()
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -793,11 +793,21 @@ func TestProxyUpgradeSplice(t *testing.T) {
 	if err != nil || !strings.Contains(status, "101") {
 		t.Fatalf("status line = %q, %v", status, err)
 	}
+	connLines, upgradeLines := 0, 0
 	for {
 		line, err := br.ReadString('\n')
 		if err != nil || line == "\r\n" {
 			break
 		}
+		if strings.HasPrefix(strings.ToLower(line), "connection:") {
+			connLines++
+		}
+		if strings.HasPrefix(strings.ToLower(line), "upgrade:") {
+			upgradeLines++
+		}
+	}
+	if connLines != 1 || upgradeLines != 1 {
+		t.Fatalf("spliced 101 head carries %d Connection and %d Upgrade lines (want exactly one each — the apiserver's relayed headers must not duplicate the proxy's own)", connLines, upgradeLines)
 	}
 	if _, err := raw.Write([]byte("hello")); err != nil {
 		t.Fatal(err)

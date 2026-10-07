@@ -11,8 +11,8 @@ import (
 	"connectrpc.com/connect"
 	"github.com/go-chi/chi/v5"
 
-	tunnelv1 "github.com/7K-Inari/inari-api/gen/go/inari/tunnel/v1"
-	"github.com/7K-Inari/inari-api/gen/go/inari/tunnel/v1/tunnelv1connect"
+	tunnelv2 "github.com/7K-Inari/inari-api/gen/go/inari/tunnel/v2"
+	"github.com/7K-Inari/inari-api/gen/go/inari/tunnel/v2/tunnelv2connect"
 
 	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/metrics"
@@ -35,10 +35,10 @@ type ServerConfig struct {
 	MetricsHandler http.Handler
 }
 
-// TunnelHandler implements tunnelv1connect.TunnelServiceHandler: the
+// TunnelHandler implements tunnelv2connect.TunnelServiceHandler: the
 // tunnel-agent bidi stream endpoint.
 type TunnelHandler struct {
-	tunnelv1connect.UnimplementedTunnelServiceHandler
+	tunnelv2connect.UnimplementedTunnelServiceHandler
 	flags     FlagEvaluator
 	sessions  *SessionRegistry
 	heartbeat *HeartbeatWriter
@@ -54,7 +54,7 @@ func NewServer(cfg ServerConfig) (http.Handler, error) {
 	tunnel := &TunnelHandler{
 		flags: cfg.Flags, sessions: cfg.Sessions, heartbeat: cfg.Heartbeat, byteCap: cfg.ByteCap,
 	}
-	path, handler := tunnelv1connect.NewTunnelServiceHandler(tunnel,
+	path, handler := tunnelv2connect.NewTunnelServiceHandler(tunnel,
 		connect.WithInterceptors(AgentAuthInterceptor(cfg.AgentAuth)))
 	r.Handle(path+"*", handler)
 
@@ -83,7 +83,7 @@ func NewServer(cfg ServerConfig) (http.Handler, error) {
 // Connect admits one tunnel-agent stream per cluster (fenced
 // last-writer-wins), records the heartbeat, and routes agent→proxy messages
 // into the session mux until the stream ends.
-func (h *TunnelHandler) Connect(ctx context.Context, stream *connect.BidiStream[tunnelv1.TunnelMessage, tunnelv1.TunnelMessage]) error {
+func (h *TunnelHandler) Connect(ctx context.Context, stream *connect.BidiStream[tunnelv2.TunnelMessage, tunnelv2.TunnelMessage]) error {
 	id := AgentIdentityFromContext(ctx)
 	if id == nil {
 		return connect.NewError(connect.CodeUnauthenticated, errors.New("unauthenticated"))
@@ -96,7 +96,7 @@ func (h *TunnelHandler) Connect(ctx context.Context, stream *connect.BidiStream[
 		return connect.NewError(connect.CodeUnavailable, errors.New("kubectl access is disabled by platform policy"))
 	}
 
-	sess := newSession(ctx, clusterID, func(msg *tunnelv1.TunnelMessage) error {
+	sess := newSession(ctx, clusterID, func(msg *tunnelv2.TunnelMessage) error {
 		return stream.Send(msg)
 	}, h.byteCap)
 	h.sessions.Register(sess)

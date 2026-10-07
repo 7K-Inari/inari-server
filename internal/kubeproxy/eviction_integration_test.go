@@ -13,8 +13,8 @@ import (
 	"connectrpc.com/connect"
 	"golang.org/x/net/http2"
 
-	tunnelv1 "github.com/7K-Inari/inari-api/gen/go/inari/tunnel/v1"
-	"github.com/7K-Inari/inari-api/gen/go/inari/tunnel/v1/tunnelv1connect"
+	tunnelv2 "github.com/7K-Inari/inari-api/gen/go/inari/tunnel/v2"
+	"github.com/7K-Inari/inari-api/gen/go/inari/tunnel/v2/tunnelv2connect"
 )
 
 // TestTunnelEvictionKeepsHeartbeat pins the last-writer-wins reconnect
@@ -88,13 +88,13 @@ func TestTunnelConnectFlagOffRejected(t *testing.T) {
 			return (&net.Dialer{}).DialContext(ctx, network, addr)
 		},
 	}}
-	client := tunnelv1connect.NewTunnelServiceClient(h2cClient, srv.URL)
+	client := tunnelv2connect.NewTunnelServiceClient(h2cClient, srv.URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	stream := client.Connect(ctx)
 	stream.RequestHeader().Set("Authorization", "Bearer agent-c1")
-	if err := stream.Send(&tunnelv1.TunnelMessage{
-		Payload: &tunnelv1.TunnelMessage_Ping{Ping: &tunnelv1.TunnelPing{}},
+	if err := stream.Send(&tunnelv2.TunnelMessage{
+		Payload: &tunnelv2.TunnelMessage_Ping{Ping: &tunnelv2.TunnelPing{}},
 	}); err != nil {
 		t.Fatalf("ping: %v", err)
 	}

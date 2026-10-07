@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	tunnelv1 "github.com/7K-Inari/inari-api/gen/go/inari/tunnel/v1"
+	tunnelv2 "github.com/7K-Inari/inari-api/gen/go/inari/tunnel/v2"
 	"github.com/google/uuid"
 
 	"github.com/7K-Inari/inari-server/internal/audit"
@@ -182,9 +182,9 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		metrics.RecordKubeproxyConn(context.Background(), metrics.KubeproxyClose)
 	}()
 
-	open := &tunnelv1.TunnelMessage{
+	open := &tunnelv2.TunnelMessage{
 		ConnectionId: connID,
-		Payload: &tunnelv1.TunnelMessage_Open{Open: &tunnelv1.TunnelOpen{
+		Payload: &tunnelv2.TunnelMessage_Open{Open: &tunnelv2.TunnelOpen{
 			Method: r.Method, Path: path, Headers: flattenHeader(hdr), UpgradeExpected: upgrade,
 		}},
 	}
@@ -290,9 +290,9 @@ func (h *ProxyHandler) pumpToAgent(ctx context.Context, sess *Session, conn *pro
 				_ = sess.Send(closeMsg(conn.id, CloseReasonByteCapExceeded))
 				return
 			}
-			msg := &tunnelv1.TunnelMessage{
+			msg := &tunnelv2.TunnelMessage{
 				ConnectionId: conn.id,
-				Payload: &tunnelv1.TunnelMessage_Frame{Frame: &tunnelv1.TunnelFrame{
+				Payload: &tunnelv2.TunnelMessage_Frame{Frame: &tunnelv2.TunnelFrame{
 					Data: buf[:n],
 				}},
 			}
@@ -302,9 +302,9 @@ func (h *ProxyHandler) pumpToAgent(ctx context.Context, sess *Session, conn *pro
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				_ = sess.Send(&tunnelv1.TunnelMessage{
+				_ = sess.Send(&tunnelv2.TunnelMessage{
 					ConnectionId: conn.id,
-					Payload:      &tunnelv1.TunnelMessage_Frame{Frame: &tunnelv1.TunnelFrame{HalfClose: true}},
+					Payload:      &tunnelv2.TunnelMessage_Frame{Frame: &tunnelv2.TunnelFrame{HalfClose: true}},
 				})
 			} else if !errors.Is(err, context.Canceled) {
 				_ = sess.Send(closeMsg(conn.id, "client_read_failed"))
@@ -321,7 +321,7 @@ func (h *ProxyHandler) pumpToAgent(ctx context.Context, sess *Session, conn *pro
 
 // awaitOpenResult waits for the agent's TunnelOpenResult (or a terminal
 // conn state) with the open timeout.
-func (h *ProxyHandler) awaitOpenResult(ctx context.Context, conn *proxyConn) (*tunnelv1.TunnelOpenResult, error) {
+func (h *ProxyHandler) awaitOpenResult(ctx context.Context, conn *proxyConn) (*tunnelv2.TunnelOpenResult, error) {
 	timer := time.NewTimer(h.cfg.OpenTimeout)
 	defer timer.Stop()
 	for {
@@ -351,7 +351,7 @@ func (h *ProxyHandler) awaitOpenResult(ctx context.Context, conn *proxyConn) (*t
 
 // spliceUpgrade handles 101 responses (SPDY/websocket exec, port-forward):
 // hijack the client conn, write the raw head, then splice bytes both ways.
-func (h *ProxyHandler) spliceUpgrade(ctx context.Context, w http.ResponseWriter, r *http.Request, sess *Session, conn *proxyConn, result *tunnelv1.TunnelOpenResult) {
+func (h *ProxyHandler) spliceUpgrade(ctx context.Context, w http.ResponseWriter, r *http.Request, sess *Session, conn *proxyConn, result *tunnelv2.TunnelOpenResult) {
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, `{"error":"upgrade unsupported"}`, http.StatusInternalServerError)
@@ -367,9 +367,11 @@ func (h *ProxyHandler) spliceUpgrade(ctx context.Context, w http.ResponseWriter,
 	if _, err := fmt.Fprintf(buf, "HTTP/1.1 101 Switching Protocols\r\n"); err != nil {
 		return
 	}
-	for k, v := range result.GetHeaders() {
-		if _, err := fmt.Fprintf(buf, "%s: %s\r\n", k, v); err != nil {
-			return
+	for k, vs := range result.GetHeaders() {
+		for _, v := range vs.GetValues() {
+			if _, err := fmt.Fprintf(buf, "%s: %s\r\n", k, v); err != nil {
+				return
+			}
 		}
 	}
 	if _, err := fmt.Fprintf(buf, "Connection: Upgrade\r\nUpgrade: %s\r\n\r\n", r.Header.Get("Upgrade")); err != nil {
@@ -437,10 +439,10 @@ func (h *ProxyHandler) appendOutbox(ctx context.Context, orgID, eventType string
 	return audit.AppendOutbox(ctx, h.cfg.DB.Pool, orgID, eventType, payload)
 }
 
-func closeMsg(connID, reason string) *tunnelv1.TunnelMessage {
-	return &tunnelv1.TunnelMessage{
+func closeMsg(connID, reason string) *tunnelv2.TunnelMessage {
+	return &tunnelv2.TunnelMessage{
 		ConnectionId: connID,
-		Payload:      &tunnelv1.TunnelMessage_Close{Close: &tunnelv1.TunnelClose{Reason: reason}},
+		Payload:      &tunnelv2.TunnelMessage_Close{Close: &tunnelv2.TunnelClose{Reason: reason}},
 	}
 }
 
@@ -449,21 +451,21 @@ func isUpgrade(r *http.Request) bool {
 		r.Header.Get("Upgrade") != ""
 }
 
-func flattenHeader(h http.Header) map[string]string {
-	out := make(map[string]string, len(h))
+func flattenHeader(h http.Header) map[string]*tunnelv2.StringList {
+	out := make(map[string]*tunnelv2.StringList, len(h))
 	for k, vs := range h {
-		out[k] = strings.Join(vs, ", ")
+		out[k] = &tunnelv2.StringList{Values: vs}
 	}
 	return out
 }
 
-func writeHead(w http.ResponseWriter, result *tunnelv1.TunnelOpenResult) {
+func writeHead(w http.ResponseWriter, result *tunnelv2.TunnelOpenResult) {
 	hop := map[string]bool{"Connection": true, "Keep-Alive": true, "Te": true, "Trailer": true, "Transfer-Encoding": true}
 	for k, v := range result.GetHeaders() {
 		if hop[http.CanonicalHeaderKey(k)] {
 			continue
 		}
-		w.Header().Set(k, v)
+		w.Header()[http.CanonicalHeaderKey(k)] = v.GetValues()
 	}
 	status := int(result.GetStatus())
 	if status == 0 {

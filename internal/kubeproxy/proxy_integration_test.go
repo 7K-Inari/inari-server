@@ -24,8 +24,8 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 
-	tunnelv1 "github.com/7K-Inari/inari-api/gen/go/inari/tunnel/v1"
-	"github.com/7K-Inari/inari-api/gen/go/inari/tunnel/v1/tunnelv1connect"
+	tunnelv2 "github.com/7K-Inari/inari-api/gen/go/inari/tunnel/v2"
+	"github.com/7K-Inari/inari-api/gen/go/inari/tunnel/v2/tunnelv2connect"
 
 	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/db"
@@ -71,13 +71,13 @@ func (itAgentValidator) Validate(_ context.Context, raw string) (*authn.Identity
 // signals conn teardown (TunnelClose) on a separate channel so relays can
 // unwind without send-on-closed races.
 type tapPipe struct {
-	frames chan *tunnelv1.TunnelFrame
+	frames chan *tunnelv2.TunnelFrame
 	closed chan struct{}
 	once   sync.Once
 }
 
 func newTapPipe() *tapPipe {
-	return &tapPipe{frames: make(chan *tunnelv1.TunnelFrame, 64), closed: make(chan struct{})}
+	return &tapPipe{frames: make(chan *tunnelv2.TunnelFrame, 64), closed: make(chan struct{})}
 }
 
 func (p *tapPipe) close() { p.once.Do(func() { close(p.closed) }) }
@@ -87,7 +87,7 @@ func (p *tapPipe) close() { p.once.Do(func() { close(p.closed) }) }
 // apiserver, streaming frames in both directions.
 type fakeAgent struct {
 	upstream *httptest.Server
-	stream   *connect.BidiStreamForClient[tunnelv1.TunnelMessage, tunnelv1.TunnelMessage]
+	stream   *connect.BidiStreamForClient[tunnelv2.TunnelMessage, tunnelv2.TunnelMessage]
 
 	mu      sync.Mutex
 	sendMu  sync.Mutex // Connect streams are not safe for concurrent Send
@@ -106,7 +106,7 @@ func startFakeAgent(t *testing.T, proxyURL string, upstream *httptest.Server) *f
 			return (&net.Dialer{}).DialContext(ctx, network, addr)
 		},
 	}}
-	client := tunnelv1connect.NewTunnelServiceClient(h2cClient, proxyURL)
+	client := tunnelv2connect.NewTunnelServiceClient(h2cClient, proxyURL)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	t.Cleanup(cancel)
 	stream := client.Connect(ctx)
@@ -114,8 +114,8 @@ func startFakeAgent(t *testing.T, proxyURL string, upstream *httptest.Server) *f
 	a := &fakeAgent{upstream: upstream, stream: stream, taps: map[string]*tapPipe{}}
 	// Connect bidi streams initiate the HTTP request lazily on first Send —
 	// kick it off with a ping (the real agent heartbeats anyway).
-	if err := stream.Send(&tunnelv1.TunnelMessage{
-		Payload: &tunnelv1.TunnelMessage_Ping{Ping: &tunnelv1.TunnelPing{}},
+	if err := stream.Send(&tunnelv2.TunnelMessage{
+		Payload: &tunnelv2.TunnelMessage_Ping{Ping: &tunnelv2.TunnelPing{}},
 	}); err != nil {
 		t.Fatalf("agent ping: %v", err)
 	}
@@ -174,7 +174,7 @@ func (a *fakeAgent) serve() {
 	}
 }
 
-func (a *fakeAgent) send(msg *tunnelv1.TunnelMessage) {
+func (a *fakeAgent) send(msg *tunnelv2.TunnelMessage) {
 	a.sendMu.Lock()
 	defer a.sendMu.Unlock()
 	_ = a.stream.Send(msg)
@@ -196,11 +196,11 @@ func (b bodyReader) Read(p []byte) (int, error) {
 	}
 }
 
-func (a *fakeAgent) relay(connID string, open *tunnelv1.TunnelOpen, tap *tapPipe) {
+func (a *fakeAgent) relay(connID string, open *tunnelv2.TunnelOpen, tap *tapPipe) {
 	// Mirror the real agent: the conn's terminal message comes from the
 	// side that talks to the apiserver.
-	defer a.send(&tunnelv1.TunnelMessage{ConnectionId: connID, Payload: &tunnelv1.TunnelMessage_Close{
-		Close: &tunnelv1.TunnelClose{Reason: "done"},
+	defer a.send(&tunnelv2.TunnelMessage{ConnectionId: connID, Payload: &tunnelv2.TunnelMessage_Close{
+		Close: &tunnelv2.TunnelClose{Reason: "done"},
 	}})
 	if open.GetUpgradeExpected() {
 		a.relayUpgrade(connID, open, tap)
@@ -209,28 +209,28 @@ func (a *fakeAgent) relay(connID string, open *tunnelv1.TunnelOpen, tap *tapPipe
 	url := a.upstream.URL + open.GetPath()
 	req, err := http.NewRequest(open.GetMethod(), url, bodyReader{tap})
 	if err != nil {
-		a.send(&tunnelv1.TunnelMessage{ConnectionId: connID, Payload: &tunnelv1.TunnelMessage_OpenResult{
-			OpenResult: &tunnelv1.TunnelOpenResult{Error: err.Error()},
+		a.send(&tunnelv2.TunnelMessage{ConnectionId: connID, Payload: &tunnelv2.TunnelMessage_OpenResult{
+			OpenResult: &tunnelv2.TunnelOpenResult{Error: err.Error()},
 		}})
 		return
 	}
-	for k, v := range open.GetHeaders() {
-		req.Header.Set(k, v)
+	for k, vs := range open.GetHeaders() {
+		req.Header[k] = vs.GetValues()
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		a.send(&tunnelv1.TunnelMessage{ConnectionId: connID, Payload: &tunnelv1.TunnelMessage_OpenResult{
-			OpenResult: &tunnelv1.TunnelOpenResult{Error: err.Error()},
+		a.send(&tunnelv2.TunnelMessage{ConnectionId: connID, Payload: &tunnelv2.TunnelMessage_OpenResult{
+			OpenResult: &tunnelv2.TunnelOpenResult{Error: err.Error()},
 		}})
 		return
 	}
 	defer resp.Body.Close()
-	hdr := map[string]string{}
+	hdr := map[string]*tunnelv2.StringList{}
 	for k, vs := range resp.Header {
-		hdr[k] = strings.Join(vs, ", ")
+		hdr[k] = &tunnelv2.StringList{Values: vs}
 	}
-	a.send(&tunnelv1.TunnelMessage{ConnectionId: connID, Payload: &tunnelv1.TunnelMessage_OpenResult{
-		OpenResult: &tunnelv1.TunnelOpenResult{Status: int32(resp.StatusCode), Headers: hdr},
+	a.send(&tunnelv2.TunnelMessage{ConnectionId: connID, Payload: &tunnelv2.TunnelMessage_OpenResult{
+		OpenResult: &tunnelv2.TunnelOpenResult{Status: int32(resp.StatusCode), Headers: hdr},
 	}})
 	pumpDone := make(chan struct{})
 	go func() {
@@ -239,13 +239,13 @@ func (a *fakeAgent) relay(connID string, open *tunnelv1.TunnelOpen, tap *tapPipe
 		for {
 			n, err := resp.Body.Read(buf)
 			if n > 0 {
-				a.send(&tunnelv1.TunnelMessage{ConnectionId: connID, Payload: &tunnelv1.TunnelMessage_Frame{
-					Frame: &tunnelv1.TunnelFrame{Data: buf[:n]},
+				a.send(&tunnelv2.TunnelMessage{ConnectionId: connID, Payload: &tunnelv2.TunnelMessage_Frame{
+					Frame: &tunnelv2.TunnelFrame{Data: buf[:n]},
 				}})
 			}
 			if err != nil {
-				a.send(&tunnelv1.TunnelMessage{ConnectionId: connID, Payload: &tunnelv1.TunnelMessage_Frame{
-					Frame: &tunnelv1.TunnelFrame{HalfClose: true},
+				a.send(&tunnelv2.TunnelMessage{ConnectionId: connID, Payload: &tunnelv2.TunnelMessage_Frame{
+					Frame: &tunnelv2.TunnelFrame{HalfClose: true},
 				}})
 				return
 			}
@@ -260,12 +260,12 @@ func (a *fakeAgent) relay(connID string, open *tunnelv1.TunnelOpen, tap *tapPipe
 }
 
 // relayUpgrade splices a 101-upgraded raw conn (SPDY/websocket shape).
-func (a *fakeAgent) relayUpgrade(connID string, open *tunnelv1.TunnelOpen, tap *tapPipe) {
+func (a *fakeAgent) relayUpgrade(connID string, open *tunnelv2.TunnelOpen, tap *tapPipe) {
 	addr := strings.TrimPrefix(a.upstream.URL, "http://")
 	raw, err := net.Dial("tcp", addr)
 	if err != nil {
-		a.send(&tunnelv1.TunnelMessage{ConnectionId: connID, Payload: &tunnelv1.TunnelMessage_OpenResult{
-			OpenResult: &tunnelv1.TunnelOpenResult{Error: err.Error()},
+		a.send(&tunnelv2.TunnelMessage{ConnectionId: connID, Payload: &tunnelv2.TunnelMessage_OpenResult{
+			OpenResult: &tunnelv2.TunnelOpenResult{Error: err.Error()},
 		}})
 		return
 	}
@@ -276,11 +276,13 @@ func (a *fakeAgent) relayUpgrade(connID string, open *tunnelv1.TunnelOpen, tap *
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%s %s HTTP/1.1\r\nHost: %s\r\n", open.GetMethod(), open.GetPath(), addr)
 	wroteConnection := false
-	for k, v := range open.GetHeaders() {
+	for k, vs := range open.GetHeaders() {
 		if strings.EqualFold(k, "Connection") {
 			wroteConnection = true
 		}
-		fmt.Fprintf(&sb, "%s: %s\r\n", k, v)
+		for _, v := range vs.GetValues() {
+			fmt.Fprintf(&sb, "%s: %s\r\n", k, v)
+		}
 	}
 	if !wroteConnection {
 		// Transport fallback: the proxy strips hop-by-hop Connection; the
@@ -294,22 +296,26 @@ func (a *fakeAgent) relayUpgrade(connID string, open *tunnelv1.TunnelOpen, tap *
 	br := bufio.NewReader(raw)
 	status, err := br.ReadString('\n')
 	if err != nil || !strings.Contains(status, "101") {
-		a.send(&tunnelv1.TunnelMessage{ConnectionId: connID, Payload: &tunnelv1.TunnelMessage_OpenResult{
-			OpenResult: &tunnelv1.TunnelOpenResult{Error: "upstream refused upgrade: " + strings.TrimSpace(status)},
+		a.send(&tunnelv2.TunnelMessage{ConnectionId: connID, Payload: &tunnelv2.TunnelMessage_OpenResult{
+			OpenResult: &tunnelv2.TunnelOpenResult{Error: "upstream refused upgrade: " + strings.TrimSpace(status)},
 		}})
 		return
 	}
-	hdr := map[string]string{}
+	hdr := map[string]*tunnelv2.StringList{}
 	for {
 		line, err := br.ReadString('\n')
 		if err != nil || line == "\r\n" {
 			break
 		}
 		k, v, _ := strings.Cut(line, ":")
-		hdr[textproto.TrimString(k)] = textproto.TrimString(v)
+		key := textproto.TrimString(k)
+		if hdr[key] == nil {
+			hdr[key] = &tunnelv2.StringList{}
+		}
+		hdr[key].Values = append(hdr[key].Values, textproto.TrimString(v))
 	}
-	a.send(&tunnelv1.TunnelMessage{ConnectionId: connID, Payload: &tunnelv1.TunnelMessage_OpenResult{
-		OpenResult: &tunnelv1.TunnelOpenResult{Status: 101, Headers: hdr},
+	a.send(&tunnelv2.TunnelMessage{ConnectionId: connID, Payload: &tunnelv2.TunnelMessage_OpenResult{
+		OpenResult: &tunnelv2.TunnelOpenResult{Status: 101, Headers: hdr},
 	}})
 	// upstream → frames
 	done := make(chan struct{})
@@ -319,13 +325,13 @@ func (a *fakeAgent) relayUpgrade(connID string, open *tunnelv1.TunnelOpen, tap *
 		for {
 			n, err := br.Read(buf)
 			if n > 0 {
-				a.send(&tunnelv1.TunnelMessage{ConnectionId: connID, Payload: &tunnelv1.TunnelMessage_Frame{
-					Frame: &tunnelv1.TunnelFrame{Data: buf[:n]},
+				a.send(&tunnelv2.TunnelMessage{ConnectionId: connID, Payload: &tunnelv2.TunnelMessage_Frame{
+					Frame: &tunnelv2.TunnelFrame{Data: buf[:n]},
 				}})
 			}
 			if err != nil {
-				a.send(&tunnelv1.TunnelMessage{ConnectionId: connID, Payload: &tunnelv1.TunnelMessage_Frame{
-					Frame: &tunnelv1.TunnelFrame{HalfClose: true},
+				a.send(&tunnelv2.TunnelMessage{ConnectionId: connID, Payload: &tunnelv2.TunnelMessage_Frame{
+					Frame: &tunnelv2.TunnelFrame{HalfClose: true},
 				}})
 				return
 			}
@@ -487,6 +493,10 @@ func fakeAPIServer(t *testing.T, sawHeaders chan<- http.Header) *httptest.Server
 			sawHeaders <- r.Header.Clone()
 		}
 		w.Header().Set("Content-Type", "application/json")
+		// Multi-valued response header: the tunnel contract must carry
+		// both values un-joined (StringList semantics).
+		w.Header().Add("Set-Cookie", "a=1; Path=/")
+		w.Header().Add("Set-Cookie", "b=2; Path=/api")
 		_, _ = w.Write([]byte(`{"kind":"NamespaceList"}`))
 	}))
 }
@@ -516,6 +526,9 @@ func TestProxyEndToEnd(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "NamespaceList") {
 		t.Fatalf("body = %s", body)
+	}
+	if cookies := resp.Header.Values("Set-Cookie"); len(cookies) != 2 {
+		t.Fatalf("Set-Cookie values = %v (multi-valued headers must survive the tunnel un-joined)", cookies)
 	}
 
 	select {

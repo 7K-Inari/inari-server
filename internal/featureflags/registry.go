@@ -27,6 +27,23 @@ type FlagType string
 // FlagTypeBoolean is a true/false flag.
 const FlagTypeBoolean FlagType = "boolean"
 
+// FlagAuthority declares which backend is authoritative for a flag
+// (ADR-0016 authority rule).
+type FlagAuthority string
+
+const (
+	// AuthorityDB marks a flag DB-authoritative: kill-switches and every
+	// cluster-scoped flag always resolve through the DB provider, even when
+	// an external provider is configured — an external outage must never
+	// flip them.
+	AuthorityDB FlagAuthority = "db"
+	// AuthorityExternalAllowed marks a platform-scoped product/rollout flag
+	// that MAY be served by the external provider (OFREP, e.g. Flipt) when
+	// INARI_FLAGS_PROVIDER is configured; the DB provider serves it
+	// otherwise. Cluster-scoped evaluation always stays on the DB provider.
+	AuthorityExternalAllowed FlagAuthority = "external-allowed"
+)
+
 // Definition is the in-code registry entry for one flag.
 type Definition struct {
 	Key         string
@@ -34,6 +51,27 @@ type Definition struct {
 	Scopes      []Scope
 	Default     bool
 	Description string
+	// Authority defaults to AuthorityDB when empty.
+	Authority FlagAuthority
+}
+
+// authority normalizes the zero value to AuthorityDB.
+func (d Definition) authority() FlagAuthority {
+	if d.Authority == "" {
+		return AuthorityDB
+	}
+	return d.Authority
+}
+
+// validateRegistry panics on an inconsistent registry entry (authority rule:
+// cluster-scoped flags are always DB-authoritative). Called by tests and by
+// Lookup's callers implicitly relying on a sane registry.
+func validateRegistry() {
+	for _, d := range registry {
+		if d.AllowsScope(ScopeCluster) && d.authority() != AuthorityDB {
+			panic("featureflags: flag " + d.Key + " allows cluster scope but is not DB-authoritative")
+		}
+	}
 }
 
 // AllowsScope reports whether the flag may be written at scope.
@@ -61,8 +99,12 @@ var registry = []Definition{
 		// defaulted to true).
 		Default:     true,
 		Description: "kubectl access via inari-kubeproxy (410 proxy/kubeconfig + tunnel rejection when off)",
+		// Kill-switch: DB-authoritative even with an external provider.
+		Authority: AuthorityDB,
 	},
 }
+
+func init() { validateRegistry() }
 
 // Catalog returns every registered flag definition.
 func Catalog() []Definition {

@@ -18,6 +18,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/open-feature/go-sdk/openfeature"
+	"github.com/open-feature/go-sdk-contrib/providers/ofrep"
 
 	"github.com/7K-Inari/inari-server/internal/agentgateway"
 	"github.com/7K-Inari/inari-server/internal/approvals"
@@ -421,6 +422,19 @@ func run() error {
 		flagEnvOverrides[featureflags.KeyKubectlAccessEnabled] = *cfg.KubectlAccessEnabled
 	}
 	flagResolver := featureflags.NewResolver(openfeature.NewClient(featureflags.ProviderDomain), flagEnvOverrides)
+	// Optional external provider (ADR-0016 follow-up, OFREP e.g. Flipt): may
+	// serve AuthorityExternalAllowed flags at platform scope only; the
+	// resolver keeps kill-switches and cluster-scoped evaluation on the DB
+	// provider. The data plane never wires this.
+	if cfg.FlagsProvider == "ofrep" {
+		if err := openfeature.SetNamedProviderAndWait(featureflags.ExternalProviderDomain,
+			ofrep.NewProvider(cfg.FlagsProviderURL)); err != nil {
+			return err
+		}
+		log.Info("external feature-flag provider configured (external-allowed platform flags only)",
+			"provider", "ofrep", "url", cfg.FlagsProviderURL)
+		flagResolver = flagResolver.WithExternal(openfeature.NewClient(featureflags.ExternalProviderDomain))
+	}
 	orgCache := tenancy.NewOrgCache(cacheBackend, cfg.CacheBackend, cfg.CacheTenantTTL)
 
 	auditStore := audit.NewStore()

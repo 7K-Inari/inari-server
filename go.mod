@@ -4,7 +4,6 @@ go 1.26.3
 
 require (
 	connectrpc.com/connect v1.21.0
-	connectrpc.com/connect/v2 v2.0.0
 	github.com/7K-Inari/inari-api v0.6.1-0.20261008052711-490fc94aa5c7
 	github.com/aws/aws-sdk-go-v2 v1.47.1
 	github.com/aws/aws-sdk-go-v2/config v1.33.7
@@ -23,6 +22,8 @@ require (
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/nats-io/nats-server/v2 v2.15.0
 	github.com/nats-io/nats.go v1.54.0
+	github.com/open-feature/go-sdk v1.19.0
+	github.com/open-feature/go-sdk-contrib/providers/ofrep v0.1.7
 	github.com/open-policy-agent/opa v1.21.1
 	github.com/openfga/go-sdk v0.8.3
 	github.com/pressly/goose/v3 v3.28.0
@@ -162,7 +163,6 @@ require (
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/nozzle/throttler v0.0.0-20180817012639-2ea982251481 // indirect
 	github.com/oklog/ulid/v2 v2.1.1 // indirect
-	github.com/open-feature/go-sdk v1.19.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/pjbgf/sha1cd v0.7.0 // indirect
@@ -217,6 +217,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.47.0 // indirect
 	go.step.sm/crypto v0.81.0 // indirect
 	go.uber.org/atomic v1.12.0 // indirect
+	go.uber.org/mock v0.6.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.28.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect

@@ -86,6 +86,36 @@ security model.
 
 ## Security model summary
 
+### Public edge requirements (validated M1W9/N3c re-run, 2026-10-08)
+
+The user-facing kubeproxy endpoint (`INARI_KUBEPROXY_PUBLIC_URL`) must
+preserve HTTP/1.1 upgrade semantics end to end:
+
+- **DNS-only at the CDN edge.** A Cloudflare-proxied record 403s HTTP/1.1
+  `Upgrade` requests outright (empty body, `server: cloudflare`) — SPDY
+  port-forward/exec cannot traverse it. The route therefore carries
+  `external-dns.kubernetes.io/cloudflare-proxied: "false"`. Two caveats:
+  external-dns only honors the annotation for records it owns (registry
+  TXT present; manually created zone records are never flipped by it),
+  and a DNS-only CNAME chain is only as clean as its target — the apex
+  A/AAAA records must be DNS-only too, or traffic still lands on the
+  Cloudflare edge. (The legacy `external-dns.alpha...` annotation prefix
+  was being rolled back by external-dns; use the non-legacy prefix.)
+- **SPDY does not traverse the public gateway at all.** Even DNS-only,
+  a stock istio-envoy gateway 403s `Upgrade: SPDY/3.1` (no upgrade config
+  exists for SPDY; websocket upgrades pass). kubectl ≥ 1.31 defaults to
+  websocket (`v4.channel.k8s.io`) and SPDY is deprecated upstream, so the
+  public gateway supports websocket only; clients forced onto SPDY
+  (`KUBECTL_PORT_FORWARD_WEBSOCKETS=false`) must use an in-cluster path
+  (TLS shim in front of the h2c service) instead.
+- **Upgrade splices must own their bytes.** Two byte-integrity bugs were
+  found and fixed here: the hub splice must drain the hijacked
+  `bufio.Reader` (pipelined post-request bytes, PR #162), and the agent's
+  outbound pump must copy frame bytes before queueing on its asynchronous
+  send channel or the next read overwrites the queued frame (inari-agent
+  PR #59). Any proxy in front of kubeproxy must likewise be a pure byte
+  splice — buffering or reframing breaks the upgraded streams.
+
 Stateless JWKS validation on both legs (user aud `kubernetes`, agent aud
 `inari-kubeproxy` + `azp`/`cluster_id` pinning); impersonation is minted
 only at the hub; the tunnel agent holds no API permissions of its own, so

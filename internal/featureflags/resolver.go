@@ -6,15 +6,23 @@ import (
 	"github.com/open-feature/go-sdk/openfeature"
 )
 
+// ExternalProviderDomain is the OpenFeature named-provider domain the
+// optional external provider (OFREP, e.g. Flipt) registers under when
+// INARI_FLAGS_PROVIDER is configured.
+const ExternalProviderDomain = "inari-external"
+
 // Resolver is the read path every consumer uses: explicitly SET env
-// overrides win over runtime state, everything else evaluates through the
-// OpenFeature client (DB provider by default; external providers plug into
-// the same client later — kill-switches stay DB-authoritative regardless).
+// overrides win over runtime state, everything else evaluates through an
+// OpenFeature client. Routing follows the ADR-0016 authority rule: flags
+// registered AuthorityExternalAllowed resolve through the external client
+// (when wired) at platform scope, everything else — kill-switches and all
+// cluster-scoped evaluation — stays on the DB provider.
 //
 // Resolver satisfies both flag seams: kubeproxy.FlagEvaluator and
 // clusterregistry.AccessFlagEvaluator.
 type Resolver struct {
 	client       *openfeature.Client
+	extClient    *openfeature.Client
 	envOverrides map[string]bool
 }
 
@@ -26,6 +34,13 @@ func NewResolver(client *openfeature.Client, envOverrides map[string]bool) *Reso
 		envOverrides = map[string]bool{}
 	}
 	return &Resolver{client: client, envOverrides: envOverrides}
+}
+
+// WithExternal wires the external-provider client (nil = DB provider for all
+// flags). Returns the resolver for chaining.
+func (r *Resolver) WithExternal(ext *openfeature.Client) *Resolver {
+	r.extClient = ext
+	return r
 }
 
 // EnvOverride reports whether key is pinned by an explicitly set env
@@ -46,7 +61,8 @@ func (r *Resolver) Bool(ctx context.Context, key, clusterID string) bool {
 	if !ok || def.Type != FlagTypeBoolean {
 		return false
 	}
-	if r.client == nil {
+	client := r.clientFor(def, clusterID)
+	if client == nil {
 		return def.Default
 	}
 	evalCtx := openfeature.NewEvaluationContext("", map[string]any{})
@@ -56,7 +72,17 @@ func (r *Resolver) Bool(ctx context.Context, key, clusterID string) bool {
 			AttrClusterID: clusterID,
 		})
 	}
-	return r.client.Boolean(ctx, key, def.Default, evalCtx)
+	return client.Boolean(ctx, key, def.Default, evalCtx)
+}
+
+// clientFor routes evaluation per the authority rule: external-allowed flags
+// use the external client at platform scope when one is wired; cluster-scoped
+// evaluation and DB-authoritative flags always use the DB client.
+func (r *Resolver) clientFor(def Definition, clusterID string) *openfeature.Client {
+	if clusterID == "" && def.authority() == AuthorityExternalAllowed && r.extClient != nil {
+		return r.extClient
+	}
+	return r.client
 }
 
 // KubectlAccessEnabled resolves the kubectl_access.enabled flag for a

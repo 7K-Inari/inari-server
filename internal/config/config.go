@@ -271,6 +271,17 @@ type Config struct {
 	// CacheFlagsTTL bounds staleness of cached runtime feature-flag reads
 	// (INARI_CACHE_FLAGS_TTL).
 	CacheFlagsTTL time.Duration
+
+	// FlagsProvider selects the optional external OpenFeature backend
+	// (INARI_FLAGS_PROVIDER): empty = DB provider only (default); "ofrep" =
+	// an OFREP service such as Flipt at FlagsProviderURL
+	// (INARI_FLAGS_PROVIDER_URL). Per the ADR-0016 authority rule the
+	// external backend may only serve flags registered
+	// AuthorityExternalAllowed at platform scope; kill-switches and
+	// cluster-scoped evaluation always stay on the DB provider. The data
+	// plane (kubeproxy) never uses an external provider.
+	FlagsProvider    string
+	FlagsProviderURL string
 }
 
 // KubeproxyConfig is the inari-kubeproxy data-plane binary's configuration
@@ -465,6 +476,8 @@ func Load() (*Config, error) {
 		KubectlAccessEnabled:     optionalBoolEnv("INARI_KUBECTL_ACCESS_ENABLED"),
 		TunnelHeartbeatFreshness: durEnv("INARI_KUBEPROXY_HEARTBEAT_FRESHNESS", 45*time.Second),
 		CacheFlagsTTL:            durEnv("INARI_CACHE_FLAGS_TTL", 10*time.Second),
+		FlagsProvider:            env("INARI_FLAGS_PROVIDER", ""),
+		FlagsProviderURL:         env("INARI_FLAGS_PROVIDER_URL", ""),
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("config: INARI_DATABASE_URL must not be empty")
@@ -496,6 +509,18 @@ func Load() (*Config, error) {
 	}
 	if c.CacheFlagsTTL <= 0 {
 		return nil, fmt.Errorf("config: INARI_CACHE_FLAGS_TTL must be positive, got %s", c.CacheFlagsTTL)
+	}
+	switch c.FlagsProvider {
+	case "":
+		if c.FlagsProviderURL != "" {
+			return nil, fmt.Errorf("config: INARI_FLAGS_PROVIDER_URL requires INARI_FLAGS_PROVIDER")
+		}
+	case "ofrep":
+		if c.FlagsProviderURL == "" {
+			return nil, fmt.Errorf("config: INARI_FLAGS_PROVIDER=ofrep requires INARI_FLAGS_PROVIDER_URL")
+		}
+	default:
+		return nil, fmt.Errorf("config: INARI_FLAGS_PROVIDER must be empty or \"ofrep\", got %q", c.FlagsProvider)
 	}
 	if c.UserGitKEKBackend != "static" && c.UserGitKEKBackend != "transit" {
 		return nil, fmt.Errorf("config: INARI_USERGIT_KEK_BACKEND must be \"static\" or \"transit\", got %q", c.UserGitKEKBackend)

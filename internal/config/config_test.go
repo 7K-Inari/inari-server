@@ -386,6 +386,48 @@ func TestOptionalBoolEnvThreeState(t *testing.T) {
 	}
 }
 
+func TestFlagsProviderEnv(t *testing.T) {
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.FlagsProvider != "" || c.FlagsProviderURL != "" {
+		t.Errorf("default: provider=%q url=%q, want both empty", c.FlagsProvider, c.FlagsProviderURL)
+	}
+
+	t.Setenv("INARI_FLAGS_PROVIDER", "ofrep")
+	t.Setenv("INARI_FLAGS_PROVIDER_URL", "http://flipt:8080")
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.FlagsProvider != "ofrep" || c.FlagsProviderURL != "http://flipt:8080" {
+		t.Errorf("provider=%q url=%q", c.FlagsProvider, c.FlagsProviderURL)
+	}
+}
+
+func TestFlagsProviderValidation(t *testing.T) {
+	t.Run("ofrep without URL fails", func(t *testing.T) {
+		t.Setenv("INARI_FLAGS_PROVIDER", "ofrep")
+		if _, err := Load(); err == nil {
+			t.Fatal("want error for ofrep without INARI_FLAGS_PROVIDER_URL")
+		}
+	})
+	t.Run("URL without provider fails", func(t *testing.T) {
+		t.Setenv("INARI_FLAGS_PROVIDER_URL", "http://flipt:8080")
+		if _, err := Load(); err == nil {
+			t.Fatal("want error for INARI_FLAGS_PROVIDER_URL without provider")
+		}
+	})
+	t.Run("unknown provider fails", func(t *testing.T) {
+		t.Setenv("INARI_FLAGS_PROVIDER", "flipt-grpc")
+		t.Setenv("INARI_FLAGS_PROVIDER_URL", "http://flipt:9000")
+		if _, err := Load(); err == nil {
+			t.Fatal("want error for unknown provider")
+		}
+	})
+}
+
 func TestKubectlAccessEnabledDefaultsUnset(t *testing.T) {
 	c, err := Load()
 	if err != nil {

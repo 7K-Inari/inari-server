@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/open-feature/go-sdk/openfeature"
 
 	"github.com/7K-Inari/inari-server/internal/agentgateway"
 	"github.com/7K-Inari/inari-server/internal/approvals"
@@ -33,6 +34,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/eventbus"
 	"github.com/7K-Inari/inari-server/internal/extensionhost"
+	"github.com/7K-Inari/inari-server/internal/featureflags"
 	"github.com/7K-Inari/inari-server/internal/fleetmanager"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/inventory"
@@ -405,6 +407,20 @@ func run() error {
 	// grants/revocations are never served (fail-open to FGA on cache error).
 	authorizer := authz.NewCachedAuthorizer(authz.NewAuthorizer(fgaStore), cacheBackend, cfg.CacheBackend, cfg.CachePEPTTL)
 	fgaInvalidating := authz.NewInvalidatingStore(fgaStore, cacheBackend, cfg.CacheBackend)
+
+	// Runtime feature flags (kill-switch v2): DB-backed OpenFeature provider
+	// is the built-in default; an explicitly SET INARI_KUBECTL_ACCESS_ENABLED
+	// overrides runtime state (optionalBoolEnv three-state semantics).
+	flagStore := featureflags.NewStore()
+	if err := openfeature.SetNamedProviderAndWait(featureflags.ProviderDomain,
+		featureflags.NewDBProvider(database.Pool, flagStore, cacheBackend, cfg.CacheBackend, cfg.CacheFlagsTTL)); err != nil {
+		return err
+	}
+	flagEnvOverrides := map[string]bool{}
+	if cfg.KubectlAccessEnabled != nil {
+		flagEnvOverrides[featureflags.KeyKubectlAccessEnabled] = *cfg.KubectlAccessEnabled
+	}
+	flagResolver := featureflags.NewResolver(openfeature.NewClient(featureflags.ProviderDomain), flagEnvOverrides)
 	orgCache := tenancy.NewOrgCache(cacheBackend, cfg.CacheBackend, cfg.CacheTenantTTL)
 
 	auditStore := audit.NewStore()
@@ -867,6 +883,8 @@ func run() error {
 	}
 	go dispatcher.Run(ctx)
 
+	flagSvc := featureflags.NewService(database, flagStore, auditStore, cacheBackend, cfg.CacheBackend)
+
 	router, api := httpserver.NewRouter(log, validator, database)
 	// /metrics is a plain chi route (like /healthz): outside huma, so the
 	// published OpenAPI surface is unchanged (export parity preserved).
@@ -912,8 +930,12 @@ func run() error {
 		// Kubectl gateway (plan §7.2): access-info/kubeconfig surface; the
 		// liveness reader consumes the kubeproxy-written heartbeat rows.
 		KubeproxyPublicURL: cfg.KubeproxyPublicURL,
-		AccessFlags:        kubeproxy.StaticFlagEvaluator{Enabled: cfg.KubectlAccessEnabled},
+		AccessFlags:        flagResolver,
 		TunnelLiveness:     kubeproxy.NewLivenessReader(database.Pool, cfg.TunnelHeartbeatFreshness),
+
+		FeatureFlags:            flagSvc,
+		FeatureFlagsResolver:    flagResolver,
+		FeatureFlagEnvOverrides: flagEnvOverrides,
 	})
 
 	// Agent-facing Connect-RPC services mount on chi directly, outside the

@@ -127,7 +127,7 @@ func (r *SessionRegistry) Unregister(sess *Session) {
 	}
 }
 
-// CloseAll terminates every session (shutdown, or a future dynamic flag
+// CloseAll terminates every session (shutdown, or a platform-scoped flag
 // flip to off).
 func (r *SessionRegistry) CloseAll(reason string) {
 	r.mu.Lock()
@@ -139,5 +139,30 @@ func (r *SessionRegistry) CloseAll(reason string) {
 	r.mu.Unlock()
 	for _, s := range sessions {
 		s.close(reason)
+	}
+}
+
+// Clusters returns the cluster IDs with a live session (FlagWatcher polls
+// the per-cluster flag for each).
+func (r *SessionRegistry) Clusters() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, 0, len(r.sessions))
+	for id := range r.sessions {
+		out = append(out, id)
+	}
+	return out
+}
+
+// CloseCluster terminates the live session of one cluster (cluster-scoped
+// flag flip to off). The Connect handler's deferred cleanup unregisters and
+// writes the heartbeat disconnect.
+func (r *SessionRegistry) CloseCluster(clusterID, reason string) {
+	r.mu.Lock()
+	sess := r.sessions[clusterID]
+	delete(r.sessions, clusterID)
+	r.mu.Unlock()
+	if sess != nil {
+		sess.close(reason)
 	}
 }

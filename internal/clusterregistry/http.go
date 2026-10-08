@@ -66,10 +66,11 @@ func (h *Handler) WithAccessInfo(issuerURL string) *Handler {
 	return h
 }
 
-// AccessFlagEvaluator is the kubectl_access.enabled flag seam (static
-// evaluator today; task f368d08b delivers the flag system).
+// AccessFlagEvaluator is the kubectl_access.enabled flag seam (kill-switch
+// v2): the standard implementation is featureflags.Resolver over the
+// OpenFeature DB provider.
 type AccessFlagEvaluator interface {
-	KubectlAccessEnabled(ctx context.Context) bool
+	KubectlAccessEnabled(ctx context.Context, clusterID string) bool
 }
 
 // TunnelLiveness reports tunnel-agent session availability (implemented by
@@ -89,13 +90,13 @@ func (h *Handler) WithKubectlGateway(publicURL string, flags AccessFlagEvaluator
 	return h
 }
 
-// kubectlAccessEnabled evaluates the flag, defaulting to enabled when no
-// evaluator is wired (pre-gateway deployments).
-func (h *Handler) kubectlAccessEnabled(ctx context.Context) bool {
+// kubectlAccessEnabled evaluates the flag for the cluster, defaulting to
+// enabled when no evaluator is wired (pre-gateway deployments).
+func (h *Handler) kubectlAccessEnabled(ctx context.Context, clusterID string) bool {
 	if h.accessFlags == nil {
 		return true
 	}
-	return h.accessFlags.KubectlAccessEnabled(ctx)
+	return h.accessFlags.KubectlAccessEnabled(ctx, clusterID)
 }
 
 // WithAgentCompat wires the platform-declared agent compatibility policy
@@ -356,7 +357,7 @@ func (h *Handler) getAccessInfo(ctx context.Context, in *clusterPathInput) (*acc
 		KubectlClientID:      tenancy.KubectlClientID(org.Slug),
 		Audience:             "kubernetes",
 		Organization:         org.Slug,
-		KubectlAccessEnabled: h.kubectlAccessEnabled(ctx),
+		KubectlAccessEnabled: h.kubectlAccessEnabled(ctx, in.ID),
 	}
 	if h.kubeproxyPublicURL != "" {
 		info.ProxyURL = kubeproxy.ProxyURL(h.kubeproxyPublicURL, org.Slug, in.ID)
@@ -412,7 +413,7 @@ func (h *Handler) getKubeconfig(ctx context.Context, in *kubeconfigInput) (*kube
 	if err := h.requireOrgCluster(ctx, org.ID, in.ID); err != nil {
 		return nil, err
 	}
-	if !h.kubectlAccessEnabled(ctx) {
+	if !h.kubectlAccessEnabled(ctx, in.ID) {
 		return nil, huma.NewError(http.StatusGone, "kubectl access is disabled by platform policy")
 	}
 	if h.issuerURL == "" {

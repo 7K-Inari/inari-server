@@ -82,7 +82,7 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	org := r.PathValue("org")
 	clusterID := r.PathValue("id")
 
-	if !h.cfg.Flags.KubectlAccessEnabled(ctx) {
+	if !h.cfg.Flags.KubectlAccessEnabled(ctx, clusterID) {
 		http.Error(w, `{"error":"kubectl access is disabled by platform policy"}`, http.StatusGone)
 		return
 	}

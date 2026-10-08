@@ -77,10 +77,10 @@ func TestProxyURL(t *testing.T) {
 }
 
 func TestStaticFlagEvaluator(t *testing.T) {
-	if !(StaticFlagEvaluator{Enabled: true}).KubectlAccessEnabled(context.Background()) {
+	if !(StaticFlagEvaluator{Enabled: true}).KubectlAccessEnabled(context.Background(), "clu-1") {
 		t.Fatal("enabled evaluator reports disabled")
 	}
-	if (StaticFlagEvaluator{}).KubectlAccessEnabled(context.Background()) {
+	if (StaticFlagEvaluator{}).KubectlAccessEnabled(context.Background(), "clu-1") {
 		t.Fatal("zero-value evaluator should default to disabled unless configured on")
 	}
 }

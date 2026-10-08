@@ -25,6 +25,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/config"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/extensionhost"
+	"github.com/7K-Inari/inari-server/internal/featureflags"
 	"github.com/7K-Inari/inari-server/internal/fleetmanager"
 	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/notifications"
@@ -86,6 +87,13 @@ type Deps struct {
 	KubeproxyPublicURL string
 	AccessFlags        clusterregistry.AccessFlagEvaluator
 	TunnelLiveness     clusterregistry.TunnelLiveness
+
+	// Runtime feature flags (kill-switch v2): the write service, the read
+	// resolver (effective values incl. env precedence), and the explicitly
+	// set env overrides (surfaced as envPinned in responses). Nil-safe.
+	FeatureFlags            *featureflags.Service
+	FeatureFlagsResolver    *featureflags.Resolver
+	FeatureFlagEnvOverrides map[string]bool
 }
 
 // Register mounts every module's REST routes on the huma API. The call order
@@ -116,5 +124,6 @@ func Register(api huma.API, d Deps) {
 		WithRemoteEntryFetcher(d.RemoteEntries).
 		WithSessionStore(d.ExtensionSessions).RegisterRoutes(api)
 	usergit.NewHandler(d.UserGit, d.Tenancy, d.Authz).RegisterRoutes(api)
+	featureflags.NewHandler(d.FeatureFlags, d.FeatureFlagsResolver, d.Tenancy, d.Clusters, d.Authz, d.FeatureFlagEnvOverrides).RegisterRoutes(api)
 	auditapi.NewHandler(d.DB, d.AuditStore, d.Tenancy, d.Authz).RegisterRoutes(api)
 }

@@ -395,8 +395,11 @@ func (h *ProxyHandler) spliceUpgrade(ctx context.Context, w http.ResponseWriter,
 		return
 	}
 
-	// Client → agent (stdin).
-	go h.pumpToAgent(ctx, sess, conn, raw)
+	// Client → agent (stdin). Read from the hijacked bufio.Reader, not the
+	// raw conn: the server read-aheads pipelined bytes (kubectl port-forward
+	// sends protocol frames immediately post-request) into buf, and reading
+	// raw directly would silently drop them (M1W9 N3c).
+	go h.pumpToAgent(ctx, sess, conn, buf)
 	// Agent → client (stdout/stderr channel frames).
 	for {
 		select {

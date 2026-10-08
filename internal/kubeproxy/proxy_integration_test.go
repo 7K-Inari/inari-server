@@ -820,3 +820,77 @@ func TestProxyUpgradeSplice(t *testing.T) {
 		t.Fatalf("echo = %q", got)
 	}
 }
+
+// TestProxyUpgradeSplicePipelinedBytes reproduces the M1W9 port-forward
+// failure (N3c): kubectl pipelines protocol bytes immediately after the
+// upgrade request, and Go's http server read-aheads them into the hijacked
+// bufio.Reader. spliceUpgrade must drain that buffer, not just the raw conn,
+// or the apiserver receives a corrupt mid-stream fragment and resets.
+func TestProxyUpgradeSplicePipelinedBytes(t *testing.T) {
+	database := setupInfra(t)
+	srv, sessions := startProxy(t, database)
+	// Fake apiserver: upgrade, then assert the pipelined bytes arrive intact
+	// and in order.
+	received := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Upgrade") == "" || !headerHasToken(r.Header, "Connection", "upgrade") {
+			http.Error(w, "upgrade headers required", http.StatusUpgradeRequired)
+			return
+		}
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("upstream not hijackable")
+			return
+		}
+		conn, buf, err := hj.Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		fmt.Fprintf(buf, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: SPDY/3.1\r\n\r\n")
+		buf.Flush()
+		got := make([]byte, len(pipelinedPayload))
+		if _, err := io.ReadFull(conn, got); err != nil {
+			received <- "read error: " + err.Error()
+			return
+		}
+		received <- string(got)
+	}))
+	defer upstream.Close()
+	agent := startFakeAgent(t, srv.URL, upstream)
+	waitForSession(t, sessions, "c1")
+	defer agent.close()
+
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	raw, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	// Port-forward style: the request head and the first protocol bytes go
+	// out in a single write, so the hub's server read-ahead buffers the
+	// payload before the hijack.
+	fmt.Fprintf(raw, "GET /api/v1/tenants/acme/clusters/c1/proxy/api/v1/namespaces/default/pods/x/portforward HTTP/1.1\r\n"+
+		"Host: %s\r\nAuthorization: Bearer good\r\nConnection: Upgrade\r\nUpgrade: SPDY/3.1\r\n\r\n%s", addr, pipelinedPayload)
+	br := bufio.NewReader(raw)
+	status, err := br.ReadString('\n')
+	if err != nil || !strings.Contains(status, "101") {
+		t.Fatalf("status line = %q, %v", status, err)
+	}
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil || line == "\r\n" {
+			break
+		}
+	}
+	select {
+	case got := <-received:
+		if got != pipelinedPayload {
+			t.Fatalf("upstream received %q, want %q (client bytes pipelined with the upgrade request must survive the hub splice)", got, pipelinedPayload)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("upstream never received the pipelined payload — bytes buffered in the hijacked bufio.Reader were dropped")
+	}
+}
+
+const pipelinedPayload = "\x00\x00\x00\x00\x0aport-pipe-1\x00\x00\x00\x00\x0aport-pipe-2"

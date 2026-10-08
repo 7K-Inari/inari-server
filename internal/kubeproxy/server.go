@@ -90,9 +90,9 @@ func (h *TunnelHandler) Connect(ctx context.Context, stream *connect.BidiStream[
 	}
 	clusterID := id.ClusterID
 
-	// Flag off: reject new tunnels (static evaluator — a dynamic flip also
-	// calls SessionRegistry.CloseAll).
-	if !h.flags.KubectlAccessEnabled(ctx) {
+	// Flag off: reject new tunnels. A runtime flip to off also closes live
+	// sessions via FlagWatcher (flagwatcher.go).
+	if !h.flags.KubectlAccessEnabled(ctx, clusterID) {
 		return connect.NewError(connect.CodeUnavailable, errors.New("kubectl access is disabled by platform policy"))
 	}
 

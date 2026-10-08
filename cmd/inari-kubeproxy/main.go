@@ -15,12 +15,15 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/open-feature/go-sdk/openfeature"
+
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/cache"
 	"github.com/7K-Inari/inari-server/internal/config"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/featureflags"
 	"github.com/7K-Inari/inari-server/internal/kubeproxy"
 	"github.com/7K-Inari/inari-server/internal/logging"
 	"github.com/7K-Inari/inari-server/internal/metrics"
@@ -86,7 +89,20 @@ func run() error {
 	}
 	defer func() { _ = metricsShutdown(context.Background()) }()
 
-	flags := kubeproxy.StaticFlagEvaluator{Enabled: cfg.KubectlAccessEnabled}
+	// Runtime feature flags (kill-switch v2): DB-backed OpenFeature provider
+	// (direct Postgres read — kubeproxy has no NATS); an explicitly SET
+	// INARI_KUBECTL_ACCESS_ENABLED overrides runtime state.
+	var flags kubeproxy.FlagEvaluator
+	if cfg.KubectlAccessEnabled != nil {
+		flags = kubeproxy.StaticFlagEvaluator{Enabled: *cfg.KubectlAccessEnabled}
+	} else {
+		flagStore := featureflags.NewStore()
+		if err := openfeature.SetNamedProviderAndWait(featureflags.ProviderDomain,
+			featureflags.NewDBProvider(database.Pool, flagStore, cacheBackend, cfg.CacheBackend, cfg.CacheFlagsTTL)); err != nil {
+			return err
+		}
+		flags = featureflags.NewResolver(openfeature.NewClient(featureflags.ProviderDomain), nil)
+	}
 	sessions := kubeproxy.NewSessionRegistry()
 	hostname, _ := os.Hostname()
 
@@ -129,6 +145,11 @@ func run() error {
 		// belong at the LB/Ingress layer.
 		Protocols: protocols,
 	}
+	// Runtime flag flips close live tunnel sessions (kill-switch v2): new
+	// connects are rejected in TunnelHandler.Connect; the watcher handles
+	// sessions that were live before the flip.
+	go kubeproxy.NewFlagWatcher(flags, sessions).Run(ctx)
+
 	errCh := make(chan error, 1)
 	go func() {
 		log.Info("listening", "addr", cfg.ListenAddr)

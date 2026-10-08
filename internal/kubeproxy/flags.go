@@ -9,19 +9,19 @@ package kubeproxy
 
 import "context"
 
-// FlagEvaluator is the feature-flag seam (task f368d08b will deliver the
-// env/file/provider-backed implementation). The static evaluator below is
-// the interim default: kubectl_access.enabled defaults to true.
+// FlagEvaluator is the feature-flag seam (kill-switch v2). The standard
+// implementation is featureflags.Resolver (OpenFeature client over the DB
+// provider); StaticFlagEvaluator below serves tests and env-only wiring.
 type FlagEvaluator interface {
 	// KubectlAccessEnabled reports whether the kubectl_access.enabled flag
-	// is on. When off, the proxy answers 410 and tunnel streams are
-	// rejected/closed.
-	KubectlAccessEnabled(ctx context.Context) bool
+	// is on for the cluster ("" = platform scope). When off, the proxy
+	// answers 410 and tunnel streams are rejected/closed.
+	KubectlAccessEnabled(ctx context.Context, clusterID string) bool
 }
 
-// StaticFlagEvaluator is the interim evaluator: one process-wide value from
-// configuration (INARI_KUBECTL_ACCESS_ENABLED, default true).
+// StaticFlagEvaluator is the env-only evaluator: one process-wide value
+// (explicit INARI_KUBECTL_ACCESS_ENABLED override).
 type StaticFlagEvaluator struct{ Enabled bool }
 
 // KubectlAccessEnabled implements FlagEvaluator.
-func (s StaticFlagEvaluator) KubectlAccessEnabled(context.Context) bool { return s.Enabled }
+func (s StaticFlagEvaluator) KubectlAccessEnabled(context.Context, string) bool { return s.Enabled }

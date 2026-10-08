@@ -261,11 +261,16 @@ type Config struct {
 	// URL of inari-kubeproxy advertised in access-info and used to render
 	// gateway kubeconfigs; empty means the gateway is not deployed and
 	// access-info reports proxyUrl empty. KubectlAccessEnabled is the
-	// static kubectl_access.enabled flag (FlagEvaluator seam; task f368d08b
-	// delivers the real flag system).
+	// kubectl_access.enabled env kill-switch (kill-switch v2): nil = env
+	// unset → runtime feature flag wins; non-nil = explicit override that
+	// beats any runtime value.
 	KubeproxyPublicURL       string
-	KubectlAccessEnabled     bool
+	KubectlAccessEnabled     *bool
 	TunnelHeartbeatFreshness time.Duration
+
+	// CacheFlagsTTL bounds staleness of cached runtime feature-flag reads
+	// (INARI_CACHE_FLAGS_TTL).
+	CacheFlagsTTL time.Duration
 }
 
 // KubeproxyConfig is the inari-kubeproxy data-plane binary's configuration
@@ -288,9 +293,14 @@ type KubeproxyConfig struct {
 	CachePEPTTL           time.Duration
 	CacheMemoryMaxEntries int
 
-	// KubectlAccessEnabled is the static kubectl_access.enabled flag; off →
+	// KubectlAccessEnabled is the kubectl_access.enabled env kill-switch
+	// (kill-switch v2): nil = env unset → runtime feature flag (DB provider)
+	// wins; non-nil = explicit override beating any runtime value. Off →
 	// 410 on proxy requests and tunnel-stream rejection.
-	KubectlAccessEnabled bool
+	KubectlAccessEnabled *bool
+	// CacheFlagsTTL bounds staleness of cached runtime feature-flag reads
+	// (INARI_CACHE_FLAGS_TTL).
+	CacheFlagsTTL time.Duration
 	// MaxTunnelLifetime bounds a proxied connection before forced re-auth.
 	MaxTunnelLifetime time.Duration
 	// ConnByteCap is the per-connection proxied-byte cap (0 = unlimited).
@@ -315,7 +325,8 @@ func LoadKubeproxy() (*KubeproxyConfig, error) {
 		RedisURL:              env("INARI_REDIS_URL", "redis://localhost:6379/0"),
 		CachePEPTTL:           durEnv("INARI_CACHE_PEP_TTL", 2*time.Second),
 		CacheMemoryMaxEntries: int(intEnv("INARI_CACHE_MEMORY_MAX_ENTRIES", 10000)),
-		KubectlAccessEnabled:  boolEnv("INARI_KUBECTL_ACCESS_ENABLED", true),
+		KubectlAccessEnabled:  optionalBoolEnv("INARI_KUBECTL_ACCESS_ENABLED"),
+		CacheFlagsTTL:         durEnv("INARI_CACHE_FLAGS_TTL", 10*time.Second),
 		MaxTunnelLifetime:     durEnv("INARI_KUBEPROXY_MAX_TUNNEL_LIFETIME", 60*time.Minute),
 		ConnByteCap:           intEnv("INARI_KUBEPROXY_CONN_BYTE_CAP", 1<<32),
 		OpenResultTimeout:     durEnv("INARI_KUBEPROXY_OPEN_RESULT_TIMEOUT", 30*time.Second),
@@ -332,6 +343,9 @@ func LoadKubeproxy() (*KubeproxyConfig, error) {
 	}
 	if c.CachePEPTTL <= 0 {
 		return nil, fmt.Errorf("config: INARI_CACHE_PEP_TTL must be positive, got %s", c.CachePEPTTL)
+	}
+	if c.CacheFlagsTTL <= 0 {
+		return nil, fmt.Errorf("config: INARI_CACHE_FLAGS_TTL must be positive, got %s", c.CacheFlagsTTL)
 	}
 	return c, nil
 }
@@ -448,8 +462,9 @@ func Load() (*Config, error) {
 		IdentityScopes: identityScopesEnv("INARI_IDENTITY_SCOPES", DefaultIdentityScopes),
 
 		KubeproxyPublicURL:       env("INARI_KUBEPROXY_PUBLIC_URL", ""),
-		KubectlAccessEnabled:     boolEnv("INARI_KUBECTL_ACCESS_ENABLED", true),
+		KubectlAccessEnabled:     optionalBoolEnv("INARI_KUBECTL_ACCESS_ENABLED"),
 		TunnelHeartbeatFreshness: durEnv("INARI_KUBEPROXY_HEARTBEAT_FRESHNESS", 45*time.Second),
+		CacheFlagsTTL:            durEnv("INARI_CACHE_FLAGS_TTL", 10*time.Second),
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("config: INARI_DATABASE_URL must not be empty")
@@ -478,6 +493,9 @@ func Load() (*Config, error) {
 	}
 	if c.CacheTenantTTL <= 0 {
 		return nil, fmt.Errorf("config: INARI_CACHE_TENANT_TTL must be positive, got %s", c.CacheTenantTTL)
+	}
+	if c.CacheFlagsTTL <= 0 {
+		return nil, fmt.Errorf("config: INARI_CACHE_FLAGS_TTL must be positive, got %s", c.CacheFlagsTTL)
 	}
 	if c.UserGitKEKBackend != "static" && c.UserGitKEKBackend != "transit" {
 		return nil, fmt.Errorf("config: INARI_USERGIT_KEK_BACKEND must be \"static\" or \"transit\", got %q", c.UserGitKEKBackend)
@@ -529,6 +547,24 @@ func boolEnv(key string, def bool) bool {
 		return def
 	}
 	return b
+}
+
+// optionalBoolEnv is the three-state variant of boolEnv (kill-switch v2
+// precedence): nil when the env is unset or empty (runtime flag wins); a
+// non-nil pointer when explicitly set (env wins). An unparseable value is
+// treated as set to the flag's safe default true — a typoed kill-switch must
+// never silently hand control to runtime state.
+func optionalBoolEnv(key string) *bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		t := true
+		return &t
+	}
+	return &b
 }
 
 func intEnv(key string, def int64) int64 {

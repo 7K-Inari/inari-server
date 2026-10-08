@@ -24,6 +24,7 @@ import (
 const (
 	CachePEP    = "pep"
 	CacheTenant = "tenant"
+	CacheFlags  = "flags"
 )
 
 // Operation label values.

@@ -354,3 +354,54 @@ func TestGitHubResolverEnvDefaults(t *testing.T) {
 		t.Errorf("TenantGitKeyMountRoot default = %q", c.TenantGitKeyMountRoot)
 	}
 }
+
+func TestOptionalBoolEnvThreeState(t *testing.T) {
+	const key = "INARI_KUBECTL_ACCESS_ENABLED"
+
+	// Unset: nil — runtime flag wins (kill-switch v2 precedence).
+	if v := optionalBoolEnv(key); v != nil {
+		t.Errorf("unset: got %v, want nil", *v)
+	}
+
+	t.Setenv(key, "")
+	if v := optionalBoolEnv(key); v != nil {
+		t.Errorf("empty: got %v, want nil", *v)
+	}
+
+	t.Setenv(key, "false")
+	if v := optionalBoolEnv(key); v == nil || *v {
+		t.Errorf("false: got %v, want pointer to false", v)
+	}
+
+	t.Setenv(key, "true")
+	if v := optionalBoolEnv(key); v == nil || !*v {
+		t.Errorf("true: got %v, want pointer to true", v)
+	}
+
+	// Unparseable: treated as explicitly set to the safe default (true) — a
+	// typoed kill-switch never silently hands control to runtime state.
+	t.Setenv(key, "banana")
+	if v := optionalBoolEnv(key); v == nil || !*v {
+		t.Errorf("invalid: got %v, want pointer to true", v)
+	}
+}
+
+func TestKubectlAccessEnabledDefaultsUnset(t *testing.T) {
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.KubectlAccessEnabled != nil {
+		t.Errorf("server KubectlAccessEnabled = %v, want nil (unset)", *c.KubectlAccessEnabled)
+	}
+	kc, err := LoadKubeproxy()
+	if err != nil {
+		t.Fatalf("LoadKubeproxy: %v", err)
+	}
+	if kc.KubectlAccessEnabled != nil {
+		t.Errorf("kubeproxy KubectlAccessEnabled = %v, want nil (unset)", *kc.KubectlAccessEnabled)
+	}
+	if c.CacheFlagsTTL.Seconds() != 10 {
+		t.Errorf("CacheFlagsTTL = %v, want 10s", c.CacheFlagsTTL)
+	}
+}

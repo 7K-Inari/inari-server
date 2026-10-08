@@ -108,7 +108,7 @@ func (v *VaultWriter) Put(ctx context.Context, path, key, value string) error {
 	if err != nil {
 		return err
 	}
-	status, body, err := v.put(ctx, path, key, value, token)
+	status, body, err := v.putMerged(ctx, path, key, value, token)
 	if err != nil {
 		return err
 	}
@@ -122,7 +122,7 @@ func (v *VaultWriter) Put(ctx context.Context, path, key, value string) error {
 		if lerr != nil {
 			return fmt.Errorf("vault: put %s: status %d and re-login failed: %v", path, status, lerr)
 		}
-		status, body, err = v.put(ctx, path, key, value, token)
+		status, body, err = v.putMerged(ctx, path, key, value, token)
 		if err != nil {
 			return err
 		}
@@ -195,8 +195,26 @@ func (v *VaultWriter) loginLocked(ctx context.Context) (string, error) {
 	return v.leaseTok, nil
 }
 
-func (v *VaultWriter) put(ctx context.Context, path, key, value, token string) (int, string, error) {
-	body, err := json.Marshal(map[string]any{"data": map[string]string{key: value}})
+// putMerged writes key=value WITHOUT dropping sibling keys already stored
+// at path. A bare kv-v2 POST replaces the whole versioned document — which
+// is exactly what broke cluster registration when the tunnel client secret
+// landed at the same path (23d7a0c): the second Put erased "client-secret",
+// so the agent's ExternalSecret never synced. Read-modify-write instead
+// (registration is the only writer at these paths, so the lost-update race
+// is theoretical; Vault's PATCH would avoid it but requires Vault ≥1.9
+// server-side support we do not want to gate on).
+func (v *VaultWriter) putMerged(ctx context.Context, path, key, value, token string) (int, string, error) {
+	existing, err := v.get(ctx, path, token)
+	if err != nil {
+		return 0, "", err
+	}
+	merged := map[string]string{key: value}
+	for k, val := range existing {
+		if k != key {
+			merged[k] = val
+		}
+	}
+	body, err := json.Marshal(map[string]any{"data": merged})
 	if err != nil {
 		return 0, "", err
 	}
@@ -214,4 +232,36 @@ func (v *VaultWriter) put(ctx context.Context, path, key, value, token string) (
 	defer func() { _ = resp.Body.Close() }()
 	b, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(b), nil
+}
+
+// get reads the current kv-v2 document at path (for putMerged's
+// read-modify-write). A missing path is an empty document, not an error.
+func (v *VaultWriter) get(ctx context.Context, path, token string) (map[string]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		v.addr+"/v1/"+v.mount+"/data/"+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Vault-Token", token)
+	resp, err := v.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("vault: get %s: %w", path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("vault: get %s: status %d: %s", path, resp.StatusCode, b)
+	}
+	var doc struct {
+		Data struct {
+			Data map[string]string `json:"data"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
+		return nil, fmt.Errorf("vault: get %s: decode: %w", path, err)
+	}
+	return doc.Data.Data, nil
 }

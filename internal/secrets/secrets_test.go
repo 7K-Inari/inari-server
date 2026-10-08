@@ -24,6 +24,10 @@ func TestVaultWriterPut(t *testing.T) {
 	var gotAuth, gotPath string
 	var gotBody map[string]map[string]string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusNotFound) // new path: empty document
+			return
+		}
 		gotAuth = r.Header.Get("X-Vault-Token")
 		gotPath = r.URL.Path
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
@@ -46,6 +50,56 @@ func TestVaultWriterPut(t *testing.T) {
 	}
 	if gotBody["data"]["client-secret"] != "s3cr3t" {
 		t.Errorf("body = %+v", gotBody)
+	}
+}
+
+func TestVaultWriterPutMergesSiblings(t *testing.T) {
+	// Regression: cluster registration writes client-secret AND
+	// tunnel-client-secret to the same kv-v2 path. A replacing write
+	// erases the sibling key, the agent's ExternalSecret never syncs, and
+	// the agent never becomes ready (golden-path deadlock, Oct 2026).
+	store := map[string]string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			if len(store) == 0 {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"data": store},
+			})
+		case http.MethodPost:
+			var body map[string]map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode: %v", err)
+			}
+			store = body["data"]
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer srv.Close()
+
+	w := NewVaultWriter(srv.URL, "tok-1", "secret")
+	ctx := context.Background()
+	if err := w.Put(ctx, "inari/clusters/abc/oidc-client-secret", "client-secret", "agent-secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Put(ctx, "inari/clusters/abc/oidc-client-secret", "tunnel-client-secret", "tunnel-secret"); err != nil {
+		t.Fatal(err)
+	}
+	if store["client-secret"] != "agent-secret" {
+		t.Fatalf("sibling key lost on second put: store = %+v", store)
+	}
+	if store["tunnel-client-secret"] != "tunnel-secret" {
+		t.Fatalf("second key missing: store = %+v", store)
+	}
+	// Overwriting one key must keep the other and update the value.
+	if err := w.Put(ctx, "inari/clusters/abc/oidc-client-secret", "client-secret", "rotated"); err != nil {
+		t.Fatal(err)
+	}
+	if store["client-secret"] != "rotated" || store["tunnel-client-secret"] != "tunnel-secret" {
+		t.Fatalf("overwrite lost data: store = %+v", store)
 	}
 }
 
@@ -91,6 +145,10 @@ func TestVaultWriterKubernetesLoginAndPut(t *testing.T) {
 				"auth": map[string]any{"client_token": "vault-tok-1", "lease_duration": 3600},
 			})
 		case "/v1/secret/data/inari/clusters/abc/oidc-client-secret":
+			if r.Method == http.MethodGet {
+				w.WriteHeader(http.StatusNotFound) // new path: empty document
+				return
+			}
 			gotPutToken = r.Header.Get("X-Vault-Token")
 			gotPath = r.URL.Path
 			w.WriteHeader(http.StatusOK)
@@ -136,6 +194,10 @@ func TestVaultWriterKubernetesReloginOn401(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"auth": map[string]any{"client_token": fmt.Sprintf("vault-tok-%d", logins), "lease_duration": 3600},
 			})
+			return
+		}
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusNotFound) // new path: empty document
 			return
 		}
 		puts++

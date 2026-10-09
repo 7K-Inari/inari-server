@@ -25,6 +25,8 @@ github.com/7K-Inari/inari-api v0.6.1-0.20261008052711-490fc94aa5c7 h1:DM/OgZ9sG2
 github.com/7K-Inari/inari-api v0.6.1-0.20261008052711-490fc94aa5c7/go.mod h1:XwZvLY88W2AK+nKzgH36+WRRwlkGShZMi6lBUfnFJF0=
 github.com/7K-Inari/inari-api v0.6.1-0.20261008193724-f311c232c21e h1:XTzgEUM0Db2UWf3QXj0gSFw7zRa5l4fHL3QmIl0Bwv4=
 github.com/7K-Inari/inari-api v0.6.1-0.20261008193724-f311c232c21e/go.mod h1:qJpxTYSfjIoHOWi1umIOqfs8DAx9aoY5tonicHrKSj0=
+github.com/7K-Inari/inari-api v0.6.1-0.20261009102856-23396effdec3 h1:VwleDOrQsTo2b3Il3gpYsYD1sY4yVhEz0KmMRWPuljM=
+github.com/7K-Inari/inari-api v0.6.1-0.20261009102856-23396effdec3/go.mod h1:qJpxTYSfjIoHOWi1umIOqfs8DAx9aoY5tonicHrKSj0=
 github.com/AdaLogics/go-fuzz-headers v0.0.0-20240806141605-e8a1dd7889d6 h1:He8afgbRMd7mFxO99hRNu+6tazq8nFF9lIwo9JFroBk=
 github.com/AdaLogics/go-fuzz-headers v0.0.0-20240806141605-e8a1dd7889d6/go.mod h1:8o94RPi1/7XTJvwPpRSzSUedZrtlirdB3r9Z20bi2f8=
 github.com/AdamKorcz/go-fuzz-headers-1 v0.0.0-20230919221257-8b5d3ce2d11d h1:zjqpY4C7H15HjRPEenkS4SAn3Jy2eRRjkjZbGR30TOg=

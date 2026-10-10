@@ -1,5 +1,55 @@
 # Changelog
 
+## [3.1.0](https://github.com/7K-Inari/inari-server/compare/v3.0.0...v3.1.0) (2026-10-10)
+
+
+### Features
+
+* **agent:** consume platform agent compat (range skew check, cluster API, install pinning) ([#108](https://github.com/7K-Inari/inari-server/issues/108)) ([40e9437](https://github.com/7K-Inari/inari-server/commit/40e943716ad5f340f355ee4fe52b8567a15854af))
+* **agentgateway:** W3 envelope-encrypted user credential vault and redemption RPC ([#98](https://github.com/7K-Inari/inari-server/issues/98)) ([72e214d](https://github.com/7K-Inari/inari-server/commit/72e214d20354641610c96a19865c26893dd8e395))
+* **authz:** project Keycloak team-group membership into the DB via OrgTeamSync ([#111](https://github.com/7K-Inari/inari-server/issues/111)) ([a56bb85](https://github.com/7K-Inari/inari-server/commit/a56bb85cf02b994e545ee7bd21278794bdd26f69))
+* cache layer with optional Redis backend (PEP + tenant resolution) ([#87](https://github.com/7K-Inari/inari-server/issues/87)) ([ee3dd61](https://github.com/7K-Inari/inari-server/commit/ee3dd613fce072498ed6d5553f57b4c8afd1359a))
+* **catalog:** server-side filtering, sorting, and pagination for browse API ([#85](https://github.com/7K-Inari/inari-server/issues/85)) ([3d59fcc](https://github.com/7K-Inari/inari-server/commit/3d59fcc49a2bbc35d9e429be7e0058829961c882))
+* **chart:** add opt-in HA knobs (probes, PDB, anti-affinity, strategy, resources) ([#88](https://github.com/7K-Inari/inari-server/issues/88)) ([addc1d2](https://github.com/7K-Inari/inari-server/commit/addc1d289c1287f973b46165e44b586baee405c0))
+* **e2e:** run NATS JetStream as a 3-node cluster in the golden path ([#91](https://github.com/7K-Inari/inari-server/issues/91)) ([bce083d](https://github.com/7K-Inari/inari-server/commit/bce083d6ada1428a1dfd1d4904fc87703d910638))
+* **featureflags:** optional external OpenFeature provider via OFREP (ADR-0016) ([#167](https://github.com/7K-Inari/inari-server/issues/167)) ([3ec017d](https://github.com/7K-Inari/inari-server/commit/3ec017df7178a5344be94114a66d674574cea9c5))
+* **featureflags:** runtime kubectl-access kill switch (OpenFeature + DB provider) ([#165](https://github.com/7K-Inari/inari-server/issues/165)) ([3be7a3d](https://github.com/7K-Inari/inari-server/commit/3be7a3d20e3bf134572fa44095aa0e99dc9a3f52))
+* **gitprovider:** W5 per-user git resolver model C (user OAuth attribution) ([#100](https://github.com/7K-Inari/inari-server/issues/100)) ([c7920d4](https://github.com/7K-Inari/inari-server/commit/c7920d4d5b644a1ab859a99f50e985488309144e))
+* **kubeproxy:** kubectl gateway data plane + control-plane integrations ([#143](https://github.com/7K-Inari/inari-server/issues/143)) ([23d7a0c](https://github.com/7K-Inari/inari-server/commit/23d7a0c304ce72df67fc4a6b97a821f4e0d0fedf))
+* **kubeproxy:** migrate to inari.tunnel.v2 multi-valued headers ([77ae303](https://github.com/7K-Inari/inari-server/commit/77ae303c1afbdcbef3de715221aa93c613dbb4d5))
+* multi-replica safety — DB leader leases for singleton loops, agent-gateway session fencing ([#90](https://github.com/7K-Inari/inari-server/issues/90)) ([da5f78e](https://github.com/7K-Inari/inari-server/commit/da5f78e9960bebf42a321bade52a53ce1f095fb7))
+* NATS JetStream event bus — outbox relay + per-handler consumer groups (ADR-0014) ([#103](https://github.com/7K-Inari/inari-server/issues/103)) ([98c9618](https://github.com/7K-Inari/inari-server/commit/98c96187e8617f591b02aa2eb2a970e63a6df639))
+* **orchestrator:** instance update-spec, rollback, and undeploy endpoints ([#109](https://github.com/7K-Inari/inari-server/issues/109)) ([b55a2c2](https://github.com/7K-Inari/inari-server/commit/b55a2c27c81e4bd86fc15a1d5444c4d0f47f0abd))
+* **release:** move the inari-server chart to inari-release-bundle; semver edge releases ([#105](https://github.com/7K-Inari/inari-server/issues/105)) ([82ed278](https://github.com/7K-Inari/inari-server/commit/82ed278ca9a2d3499ba37461e24cbec5bd201fae))
+* **scaffold:** W6 template scope classification, user-git routing, fallback policy ([#101](https://github.com/7K-Inari/inari-server/issues/101)) ([88b6aab](https://github.com/7K-Inari/inari-server/commit/88b6aabb9caa0d799c6238e419e82098b989db5c))
+* **tenancy:** RBAC Phase A server APIs — platform admins, capability projection, member search ([#110](https://github.com/7K-Inari/inari-server/issues/110)) ([726e9a7](https://github.com/7K-Inari/inari-server/commit/726e9a7c35162bbf02551b5711cf79cc8d8b3d3a))
+* **tenancy:** role engine — customizable roles, FGA permission-relation swap (ADR-0013) ([#112](https://github.com/7K-Inari/inari-server/issues/112)) ([436ce1b](https://github.com/7K-Inari/inari-server/commit/436ce1b93fcfd069e83bee350842b9bcdab1332c))
+* **usergit:** advertise only configured providers via Configured() API ([#102](https://github.com/7K-Inari/inari-server/issues/102)) ([3966223](https://github.com/7K-Inari/inari-server/commit/3966223641aa6c6d7efc27474e82392359e7a1d3))
+* **usergit:** W4 per-user git connection core ([#99](https://github.com/7K-Inari/inari-server/issues/99)) ([d953148](https://github.com/7K-Inari/inari-server/commit/d953148684ee3f89bc8796bcc27d08113b0f71b4))
+* Wave 2 extension auth model (OIDC pass-through & per-user credential refs) ([#97](https://github.com/7K-Inari/inari-server/issues/97)) ([7479297](https://github.com/7K-Inari/inari-server/commit/74792978d276ea3ccaebadf21def8b0d08b49d03))
+
+
+### Bug Fixes
+
+* **agentgateway:** merge Vault kv-v2 writes instead of replacing the document ([#171](https://github.com/7K-Inari/inari-server/issues/171)) ([e4c96f9](https://github.com/7K-Inari/inari-server/commit/e4c96f988be7fe071d0b6c1b842099691688ab7a))
+* **ci:** pin server image builds to explicit server target and gate entrypoints ([#157](https://github.com/7K-Inari/inari-server/issues/157)) ([0af5125](https://github.com/7K-Inari/inari-server/commit/0af51251f0fb588d182a8af42fcdb7ad385a596e))
+* **db:** serialize goose migrations across replicas with Postgres advisory lock ([#89](https://github.com/7K-Inari/inari-server/issues/89)) ([9c5974e](https://github.com/7K-Inari/inari-server/commit/9c5974ee61f0a61aab5cf860fc50e637c7098b8a))
+* **kubeproxy:** dedupe Connection/Upgrade in spliced 101 head (qa) ([05d77e7](https://github.com/7K-Inari/inari-server/commit/05d77e78940dc7cf83f2738edb3103dfeeb48497))
+* **kubeproxy:** drain hijacked bufio reader in upgrade splice (port-forward data loss) ([#162](https://github.com/7K-Inari/inari-server/issues/162)) ([f25926c](https://github.com/7K-Inari/inari-server/commit/f25926ce80db60ba06ae995194263e3c3fdc7e54))
+* **kubeproxy:** keep heartbeat row on clean disconnect (stop access-info flapping) ([#152](https://github.com/7K-Inari/inari-server/issues/152)) ([bf74bea](https://github.com/7K-Inari/inari-server/commit/bf74bea30ce11acb6faef2c886ddc1a4ed7ba772))
+* **rbacmaterialize:** owner-qualify fallback tenant state repo ([#93](https://github.com/7K-Inari/inari-server/issues/93)) ([bdbb1c3](https://github.com/7K-Inari/inari-server/commit/bdbb1c3a9766f037fc2621beb0fc993e141918ca))
+* **tenancy:** converge membership projection after team role change (B8) ([#125](https://github.com/7K-Inari/inari-server/issues/125)) ([48287f0](https://github.com/7K-Inari/inari-server/commit/48287f09b3827ae9366057cc58308ab1d955a9d2))
+* **tenancy:** gate tenant deletion resume on the approval decision ([ecd73d0](https://github.com/7K-Inari/inari-server/commit/ecd73d0dd258e042763b56e036488b22364ff14a))
+* **tenancy:** gate tenant deletion resume on the approval decision ([e2f38f9](https://github.com/7K-Inari/inari-server/commit/e2f38f97662eb1a7982f4e0646a68d3938bd3bc2))
+* **tenancy:** resolve member subject by email when UUID lookup misses ([#104](https://github.com/7K-Inari/inari-server/issues/104)) ([06bf40a](https://github.com/7K-Inari/inari-server/commit/06bf40a63f140374b35857dbe17f23b32a2808da))
+* **usergit:** drop bearer requirement on the OAuth callback ([#106](https://github.com/7K-Inari/inari-server/issues/106)) ([acb5ae7](https://github.com/7K-Inari/inari-server/commit/acb5ae7cb84aa42c0836a8e0f89e686125f3cab9))
+* **usergit:** tenant-prefixed callback return URL + requested-scopes fallback ([#107](https://github.com/7K-Inari/inari-server/issues/107)) ([903cd7a](https://github.com/7K-Inari/inari-server/commit/903cd7aa101fc880127af7d9a2557a1f41acf509))
+
+
+### Performance Improvements
+
+* **e2e:** overlap NATS/OpenFGA/Vault/ESO installs with the Keycloak rollout wait ([#114](https://github.com/7K-Inari/inari-server/issues/114)) ([f096e85](https://github.com/7K-Inari/inari-server/commit/f096e85be8dba30d7d74571d52b030ef261e9758))
+
 ## [3.0.0](https://github.com/7K-Inari/inari-server/compare/v2.0.0...v3.0.0) (2026-09-24)
 
 

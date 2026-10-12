@@ -25,7 +25,7 @@ services:
   # NATS JetStream event bus (ADR-0014): obligatory — run the server with
   # INARI_NATS_URL=nats://localhost:4222.
   nats:
-    image: nats:2.15-alpine@sha256:ac8f88a6494bffc2c2a5289a0ca61cb28a9145c11ba5677cf24265d07f46d8d4
+    image: nats:2.15-alpine@sha256:2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6
     command: ["-js", "-sd", "/data"]
     volumes:
       - nats-data:/data

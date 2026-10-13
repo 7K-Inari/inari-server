@@ -95,6 +95,15 @@ func (f *fakeIdP) RemoveOrganizationMember(_ context.Context, kcOrgID, userID st
 	f.orgMembers[kcOrgID] = removeStr(f.orgMembers[kcOrgID], userID)
 	return nil
 }
+func (f *fakeIdP) ListOrganizationMembers(_ context.Context, kcOrgID string) ([]*types.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]*types.User, 0, len(f.orgMembers[kcOrgID]))
+	for _, id := range f.orgMembers[kcOrgID] {
+		out = append(out, &types.User{ID: id, Email: id + "@example.com"})
+	}
+	return out, nil
+}
 func (f *fakeIdP) AddGroupMember(_ context.Context, groupPath, userID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

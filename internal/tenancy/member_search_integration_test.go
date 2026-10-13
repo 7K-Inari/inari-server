@@ -105,6 +105,36 @@ func TestMemberEmailSearch(t *testing.T) {
 		t.Errorf("org members q= = %+v, want 3", orgMembers)
 	}
 
+	// A Keycloak org member with no team/role assignment (no row in the
+	// memberships projection) must still be listed — the console's user
+	// picker searches org members, not just members with assignments.
+	idp.users["dave"] = true
+	if err := idp.AddOrganizationMember(ctx, org.KeycloakOrgID, "dave"); err != nil {
+		t.Fatal(err)
+	}
+	orgMembers, err = svc.ListOrgMembers(ctx, org.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orgMembers) != 4 { // + dave, role-less
+		t.Errorf("org members after teamless join = %+v, want 4", orgMembers)
+	}
+	orgMembers, err = svc.ListOrgMembers(ctx, org.ID, "dave@")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orgMembers) != 1 || orgMembers[0].UserID != "dave" {
+		t.Errorf("org members q=dave@ = %+v, want [dave]", orgMembers)
+	}
+	// Re-listing must not duplicate members who already have assignments.
+	orgMembers, err = svc.ListOrgMembers(ctx, org.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orgMembers) != 4 {
+		t.Errorf("org members re-list = %+v, want 4 (no duplicates)", orgMembers)
+	}
+
 	// HTTP level: the query param reaches the store.
 	router, api := httpserver.NewRouter(slog.New(slog.NewTextHandler(io.Discard, nil)),
 		fixedValidator{id: &authn.Identity{Subject: "user-1", Organizations: []string{"acme"}}}, readyOK{})

@@ -998,6 +998,46 @@ func (k *KeycloakAdmin) AddOrganizationMember(ctx context.Context, kcOrgID, user
 	return nil
 }
 
+// ListOrganizationMembers returns the full user profiles (id, email,
+// display name) of every member of the Keycloak Organization, paging
+// through the membership like ListGroupMemberUsers.
+func (k *KeycloakAdmin) ListOrganizationMembers(ctx context.Context, kcOrgID string) ([]*types.User, error) {
+	const pageSize = 500
+	var out []*types.User
+	for first := 0; ; first += pageSize {
+		resp, err := k.do(ctx, http.MethodGet,
+			fmt.Sprintf("/organizations/%s/members?first=%d&max=%d", kcOrgID, first, pageSize), nil)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("keycloak: list org members: status %d", resp.StatusCode)
+		}
+		var users []struct {
+			ID        string `json:"id"`
+			Email     string `json:"email"`
+			FirstName string `json:"firstName"`
+			LastName  string `json:"lastName"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&users)
+		_ = resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		for _, u := range users {
+			out = append(out, &types.User{
+				ID:          u.ID,
+				Email:       u.Email,
+				DisplayName: strings.TrimSpace(u.FirstName + " " + u.LastName),
+			})
+		}
+		if len(users) < pageSize {
+			return out, nil
+		}
+	}
+}
+
 func (k *KeycloakAdmin) RemoveOrganizationMember(ctx context.Context, kcOrgID, userID string) error {
 	resp, err := k.do(ctx, http.MethodDelete, "/organizations/"+kcOrgID+"/members/"+userID, nil)
 	if err != nil {

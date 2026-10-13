@@ -130,8 +130,47 @@ func (s *Service) ListMembers(ctx context.Context, orgID, teamID, query string) 
 
 // ListOrgMembers returns the org-wide member view (highest role + teams). A
 // non-empty query filters by case-insensitive email substring.
+//
+// The memberships projection only carries users with a team/role
+// assignment; the Keycloak organization is the source of truth for org
+// membership itself. Union both so a member with no role/team yet (e.g. a
+// freshly invited user) is still discoverable by the console's user picker.
 func (s *Service) ListOrgMembers(ctx context.Context, orgID, query string) ([]OrgMemberView, error) {
-	return s.store.ListOrgMembers(ctx, s.db.Pool, orgID, query)
+	members, err := s.store.ListOrgMembers(ctx, s.db.Pool, orgID, query)
+	if err != nil {
+		return nil, err
+	}
+	org, err := s.store.GetOrganizationByID(ctx, s.db.Pool, orgID)
+	if err != nil {
+		return nil, err
+	}
+	kcMembers, err := s.idp.ListOrganizationMembers(ctx, org.KeycloakOrgID)
+	if err != nil {
+		return nil, fmt.Errorf("tenancy: list org members: %w", err)
+	}
+	seen := make(map[string]bool, len(members))
+	for _, m := range members {
+		seen[m.UserID] = true
+	}
+	q := strings.ToLower(query)
+	for _, u := range kcMembers {
+		if seen[u.ID] {
+			continue
+		}
+		seen[u.ID] = true
+		if q != "" && !strings.Contains(strings.ToLower(u.Email), q) {
+			continue
+		}
+		// Persist the profile so the member renders with email/display name
+		// on subsequent reads even if the idp listing degrades.
+		_ = s.store.UpsertUser(ctx, s.db.Pool, u)
+		members = append(members, OrgMemberView{
+			UserID:      u.ID,
+			Email:       u.Email,
+			DisplayName: u.DisplayName,
+		})
+	}
+	return members, nil
 }
 
 // SetMemberRole sets a user's org role by placing them in the role's anchor

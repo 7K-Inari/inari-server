@@ -30,6 +30,10 @@ type IdentityProvider interface {
 	ListOrganizations(ctx context.Context, userID string) ([]string, error)
 	AddOrganizationMember(ctx context.Context, kcOrgID, userID string) error
 	RemoveOrganizationMember(ctx context.Context, kcOrgID, userID string) error
+	// ListOrganizationMembers returns the full user profiles of every member
+	// of the Keycloak Organization — including members with no team/role
+	// assignment, who have no row in the memberships projection.
+	ListOrganizationMembers(ctx context.Context, kcOrgID string) ([]*types.User, error)
 	AddGroupMember(ctx context.Context, groupPath, userID string) error
 	RemoveGroupMember(ctx context.Context, groupPath, userID string) error
 	// ListGroupMembers returns the Keycloak user ids in the group at the path.

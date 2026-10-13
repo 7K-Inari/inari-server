@@ -52,6 +52,9 @@ func (f *fakeIdP) DeleteGroup(context.Context, string) error                    
 func (f *fakeIdP) ListOrganizations(context.Context, string) ([]string, error)    { return nil, nil }
 func (f *fakeIdP) AddOrganizationMember(context.Context, string, string) error    { return nil }
 func (f *fakeIdP) RemoveOrganizationMember(context.Context, string, string) error { return nil }
+func (f *fakeIdP) ListOrganizationMembers(context.Context, string) ([]*types.User, error) {
+	return nil, nil
+}
 func (f *fakeIdP) AddGroupMember(context.Context, string, string) error           { return nil }
 func (f *fakeIdP) RemoveGroupMember(context.Context, string, string) error        { return nil }
 func (f *fakeIdP) ListGroupMembers(context.Context, string) ([]string, error)     { return nil, nil }

@@ -15,7 +15,10 @@ cloud.google.com/go/longrunning v1.0.0 h1:lwzWEYD8+NkYV7dhexOz6kmlvajZA70+bW/xMh
 cloud.google.com/go/longrunning v1.0.0/go.mod h1:8nqFBPOO1U/XkhWl0I19AMZEphrHi73VNABIpKYaTwM=
 connectrpc.com/connect v1.21.0 h1:LhqSJt7jHf5NJBo9Jq/t/9FjcYAideif0mg+qe2jCUs=
 connectrpc.com/connect v1.21.0/go.mod h1:A2ygJrukXwWy32vkCAAHNVguZrqZ+jeZ9rGRnGR4dN4=
+connectrpc.com/connect v1.21.1 h1:h2kacdlzXpZU2OQFSv98xkjYXNUSr/ptxmGVbS/+CRM=
+connectrpc.com/connect v1.21.1/go.mod h1:fhMcVJ5w6r/yTYhnkEbW6+sIF7OZ5Ay7KYgmfebh2ek=
 connectrpc.com/connect/v2 v2.0.0/go.mod h1:N32OLrstcPUzkykFynnefFro3+xzSdOrZlK2jHmS/xo=
+connectrpc.com/connect/v2 v2.0.1/go.mod h1:N32OLrstcPUzkykFynnefFro3+xzSdOrZlK2jHmS/xo=
 dario.cat/mergo v1.0.2 h1:85+piFYR1tMbRrLcDwR18y4UKJ3aH1Tbzi24VRW1TK8=
 dario.cat/mergo v1.0.2/go.mod h1:E/hbnu0NxMFBjpMIE34DRGLWqDy0g5FuKDhCb31ngxA=
 filippo.io/edwards25519 v1.2.0 h1:crnVqOiS4jqYleHd9vaKZ+HKtHfllngJIiOpNpoJsjo=
@@ -38,6 +41,8 @@ github.com/7K-Inari/inari-api v0.6.1-0.20261013152824-c9b6ad51eb69 h1:eJju8vd0WD
 github.com/7K-Inari/inari-api v0.6.1-0.20261013152824-c9b6ad51eb69/go.mod h1:mJzP8LWdR2y8ZiHUmUXFahtiuJulLhzhbnvYHWanWrI=
 github.com/7K-Inari/inari-api v0.6.1-0.20261013192734-30a4787880ba h1:SwM0f2brX5YdVfLeyVWLept0BSJyssVZbh1KgKlMlNg=
 github.com/7K-Inari/inari-api v0.6.1-0.20261013192734-30a4787880ba/go.mod h1:aiBp/CRETJt9sGHNDd9Pkyqmt69nn6w1oC/p8eEBEeY=
+github.com/7K-Inari/inari-api v0.6.1-0.20261014151742-d8e982764426 h1:tyJy3mUkBGAesb2PfE05a5pmMWhfT+F5426XA61VndU=
+github.com/7K-Inari/inari-api v0.6.1-0.20261014151742-d8e982764426/go.mod h1:+cyP3+flr2pCH5bkGtev+sOw1NSY1OjsQc0Br5etcJE=
 github.com/AdaLogics/go-fuzz-headers v0.0.0-20240806141605-e8a1dd7889d6 h1:He8afgbRMd7mFxO99hRNu+6tazq8nFF9lIwo9JFroBk=
 github.com/AdaLogics/go-fuzz-headers v0.0.0-20240806141605-e8a1dd7889d6/go.mod h1:8o94RPi1/7XTJvwPpRSzSUedZrtlirdB3r9Z20bi2f8=
 github.com/AdamKorcz/go-fuzz-headers-1 v0.0.0-20230919221257-8b5d3ce2d11d h1:zjqpY4C7H15HjRPEenkS4SAn3Jy2eRRjkjZbGR30TOg=

@@ -7,7 +7,8 @@ import (
 	"regexp"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -90,6 +91,10 @@ type ExtensionAuthenticator interface {
 // tunnel, or nil when no authenticator is wired (feature off). queue
 // receives the command and the handler polls it until the agent's
 // CommandAck lands (the stream's dispatch/ack loop does the transport).
+//
+// connect v2 has no ad-hoc NewUnaryHandler: the synthetic procedure is
+// registered as a connect.Method on a throwaway Server and mounted through
+// connecthttp like any generated service.
 func (g *Gateway) ExtensionInvokeHandler(auth ExtensionAuthenticator, wait time.Duration) (string, http.Handler) {
 	if auth == nil {
 		return "", nil
@@ -97,80 +102,113 @@ func (g *Gateway) ExtensionInvokeHandler(auth ExtensionAuthenticator, wait time.
 	if wait <= 0 {
 		wait = defaultInvokeWait
 	}
-	fn := func(ctx context.Context, req *connect.Request[agentv1.InvokeAction]) (*connect.Response[agentv1.CommandAck], error) {
-		return g.invokeExtension(ctx, req, auth, wait)
+	server := connect.NewServer()
+	server.Register(connect.Method{
+		Spec: connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Procedure:  ExtensionInvokeProcedure,
+		},
+		Handler: func(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+			var req agentv1.InvokeAction
+			if err := stream.Receive(&req); err != nil {
+				return err
+			}
+			info, ok := connect.CallInfoForServerContext(ctx)
+			if !ok {
+				return connect.NewError(connect.CodeInternal, "missing RPC call info")
+			}
+			res, err := g.invokeExtension(ctx, &req, httpHeader(info.RequestHeader()), auth, wait)
+			if err != nil {
+				return err
+			}
+			return stream.Send(res)
+		},
+	})
+	mux := http.NewServeMux()
+	connecthttp.Mount(mux, server)
+	return ExtensionInvokeProcedure, mux
+}
+
+// httpHeader copies a connect.Header into an http.Header for the
+// ExtensionAuthenticator contract (which predates connect v2).
+func httpHeader(h *connect.Header) http.Header {
+	out := make(http.Header, h.Len())
+	for k, vs := range h.All() {
+		out[k] = append(out[k], vs...)
 	}
-	return ExtensionInvokeProcedure, connect.NewUnaryHandler(ExtensionInvokeProcedure, fn)
+	return out
 }
 
 // invokeExtension authenticates the extension, routes the command to the
-// cluster, and waits for the agent's ack.
-func (g *Gateway) invokeExtension(ctx context.Context, req *connect.Request[agentv1.InvokeAction], auth ExtensionAuthenticator, wait time.Duration) (*connect.Response[agentv1.CommandAck], error) {
-	ext, err := auth.AuthenticateExtension(ctx, req.Header())
+// cluster, and waits for the agent's ack. The RPC metadata headers arrive
+// explicitly because connect v2 offers no test seam for injecting a
+// server-side CallInfo into a context.
+func (g *Gateway) invokeExtension(ctx context.Context, req *agentv1.InvokeAction, header http.Header, auth ExtensionAuthenticator, wait time.Duration) (*agentv1.CommandAck, error) {
+	ext, err := auth.AuthenticateExtension(ctx, header)
 	if err != nil {
 		return nil, err
 	}
-	orgID := req.Header().Get(MetadataTenant)
-	clusterID := req.Header().Get(MetadataCluster)
+	orgID := header.Get(MetadataTenant)
+	clusterID := header.Get(MetadataCluster)
 	// Org binding: an org-scoped extension may only invoke within its own
 	// tenant; platform-global extensions are unbound (ADR-0008).
 	if ext.OrgID != "" && ext.OrgID != orgID {
-		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("extension may not invoke in this tenant"))
+		return nil, connect.Errorf(connect.CodePermissionDenied, "extension may not invoke in this tenant")
 	}
 	if orgID == "" || clusterID == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("%s and %s metadata required", MetadataTenant, MetadataCluster))
+		return nil, connect.Errorf(connect.CodeInvalidArgument, "%s and %s metadata required", MetadataTenant, MetadataCluster)
 	}
 	cluster, err := g.registry.GetCluster(ctx, clusterID)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("cluster not found"))
+		return nil, connect.Errorf(connect.CodeNotFound, "cluster not found")
 	}
 	if cluster.OrgID != orgID {
-		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("cluster does not belong to tenant"))
+		return nil, connect.Errorf(connect.CodePermissionDenied, "cluster does not belong to tenant")
 	}
 	if cluster.State != types.ClusterStateActive {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("cluster is %s, not active", cluster.State))
+		return nil, connect.Errorf(connect.CodeFailedPrecondition, "cluster is %s, not active", cluster.State)
 	}
 	// Per-user credential reference (W2 auth model): the control plane owns
 	// InvokeAction.user_credential_ref — the extension hop supplies it via
 	// metadata; any value self-asserted in the payload is discarded. Raw
 	// user tokens are rejected outright in the ref header.
-	credRef := req.Header().Get(MetadataUserCredentialRef)
-	req.Msg.UserCredentialRef = ""
+	credRef := header.Get(MetadataUserCredentialRef)
+	req.UserCredentialRef = ""
 	if credRef != "" {
 		if err := validateUserCredentialRef(credRef); err != nil {
-			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+			return nil, connect.NewError(connect.CodeInvalidArgument, err.Error()).WithCause(err)
 		}
 	}
 	// The control plane owns the command journal id: stamp it into the
 	// payload — the agent's dispatcher dedupes/acks on
 	// InvokeAction.CommandId, and its ack must match our journal row.
-	req.Msg.CommandId = uuid.NewString()
+	req.CommandId = uuid.NewString()
 	// Raw user token over the hop (W3): the vault mints a credential bound
 	// to this command and cluster with a TTL equal to the invoke wait; the
 	// persisted payload carries only the minted ref. The credential and the
 	// command row commit atomically (command_id FK).
-	rawToken := req.Header().Get(MetadataUserCredential)
+	rawToken := header.Get(MetadataUserCredential)
 	if rawToken != "" {
 		if credRef != "" {
-			return nil, connect.NewError(connect.CodeInvalidArgument,
-				fmt.Errorf("%s and %s are mutually exclusive", MetadataUserCredential, MetadataUserCredentialRef))
+			return nil, connect.Errorf(connect.CodeInvalidArgument,
+				"%s and %s are mutually exclusive", MetadataUserCredential, MetadataUserCredentialRef)
 		}
 		if g.vault == nil {
-			return nil, connect.NewError(connect.CodeFailedPrecondition,
-				fmt.Errorf("user credential vault not configured"))
+			return nil, connect.Errorf(connect.CodeFailedPrecondition,
+				"user credential vault not configured")
 		}
 		credRef = g.vault.NewRef()
 	}
 	if credRef != "" {
-		req.Msg.UserCredentialRef = credRef
+		req.UserCredentialRef = credRef
 	}
-	anyPayload, err := anypb.New(req.Msg)
+	anyPayload, err := anypb.New(req)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
 	}
 	raw, err := protojson.Marshal(anyPayload)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
 	}
 	// Audit attribution (ADR-0008): every tunneled action is attributable to
 	// the extension's own identity before it is queued.
@@ -178,12 +216,12 @@ func (g *Gateway) invokeExtension(ctx context.Context, req *connect.Request[agen
 		OrgID: orgID, Actor: ext.ClientID, Action: "extension.action_invoked",
 		ObjectType: "cluster", ObjectID: clusterID,
 		Payload: []byte(fmt.Sprintf(`{"extension":%q,"action":%q,"commandId":%q,"userCredential":%t}`,
-			ext.Name, req.Msg.Action, req.Msg.CommandId, req.Msg.UserCredentialRef != "")),
+			ext.Name, req.Action, req.CommandId, req.UserCredentialRef != "")),
 	}); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("audit: %w", err))
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("audit: %w", err).Error())
 	}
 	cmd := &types.AgentCommand{
-		ID:        req.Msg.CommandId,
+		ID:        req.CommandId,
 		ClusterID: clusterID,
 		Type:      agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_INVOKE_ACTION),
 		Payload:   raw,
@@ -192,28 +230,28 @@ func (g *Gateway) invokeExtension(ctx context.Context, req *connect.Request[agen
 		// Atomic: command row first (command_id FK), then the credential.
 		tx, err := g.db.Pool.Begin(ctx)
 		if err != nil {
-			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("enqueue: %w", err))
+			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("enqueue: %w", err).Error())
 		}
 		defer func() { _ = tx.Rollback(ctx) }()
 		if _, err := tx.Exec(ctx, `INSERT INTO agent_commands (id, cluster_id, type, payload)
 			VALUES ($1,$2,$3,$4) ON CONFLICT (id) DO NOTHING`,
 			cmd.ID, cmd.ClusterID, cmd.Type, cmd.Payload); err != nil {
-			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("enqueue: %w", err))
+			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("enqueue: %w", err).Error())
 		}
 		if err := g.vault.MintWithRefTx(ctx, tx, credRef, clusterID, cmd.ID, []byte(rawToken), wait); err != nil {
-			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("mint user credential"))
+			return nil, connect.Errorf(connect.CodeInternal, "mint user credential")
 		}
 		if err := tx.Commit(ctx); err != nil {
-			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("enqueue: %w", err))
+			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("enqueue: %w", err).Error())
 		}
 	} else if err := g.queue.Enqueue(ctx, cmd); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("enqueue: %w", err))
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("enqueue: %w", err).Error())
 	}
 	ack, err := g.awaitAck(ctx, cmd.ID, wait)
 	if err != nil {
 		return nil, err
 	}
-	return connect.NewResponse(ack), nil
+	return ack, nil
 }
 
 // awaitAck polls the command journal until the agent acks (or the wait
@@ -232,11 +270,11 @@ func (g *Gateway) awaitAck(ctx context.Context, commandID string, wait time.Dura
 			}
 		}
 		if time.Now().After(deadline) {
-			return nil, connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("agent did not ack within %s (offline?)", wait))
+			return nil, connect.Errorf(connect.CodeDeadlineExceeded, "agent did not ack within %s (offline?)", wait)
 		}
 		select {
 		case <-ctx.Done():
-			return nil, connect.NewError(connect.CodeCanceled, ctx.Err())
+			return nil, connect.NewError(connect.CodeCanceled, ctx.Err().Error())
 		case <-time.After(500 * time.Millisecond):
 		}
 	}

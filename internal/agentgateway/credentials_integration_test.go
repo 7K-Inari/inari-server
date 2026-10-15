@@ -10,9 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"connectrpc.com/connect"
+	connect "connectrpc.com/connect/v2"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/anypb"
+	"net/http"
 
 	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
 
@@ -288,28 +289,28 @@ func TestRedeemUserCredentialRPC(t *testing.T) {
 
 	// Unauthenticated: no cluster identity in context (interceptor would
 	// have rejected already; the handler fails closed regardless).
-	if _, err := h.RedeemUserCredential(ctx, connect.NewRequest(&agentv1.RedeemUserCredentialRequest{CredentialRef: ref})); connect.CodeOf(err) != connect.CodeUnauthenticated {
+	if _, err := h.RedeemUserCredential(ctx, &agentv1.RedeemUserCredentialRequest{CredentialRef: ref}); connect.CodeOf(err) != connect.CodeUnauthenticated {
 		t.Fatalf("no identity: code = %v, want Unauthenticated", connect.CodeOf(err))
 	}
 
 	// Cluster binding comes from the token claim, never the request.
-	if _, err := h.RedeemUserCredential(asCluster(other.ID), connect.NewRequest(&agentv1.RedeemUserCredentialRequest{CredentialRef: ref})); connect.CodeOf(err) != connect.CodePermissionDenied {
+	if _, err := h.RedeemUserCredential(asCluster(other.ID), &agentv1.RedeemUserCredentialRequest{CredentialRef: ref}); connect.CodeOf(err) != connect.CodePermissionDenied {
 		t.Fatalf("wrong cluster: code = %v, want PermissionDenied", connect.CodeOf(err))
 	}
 
-	res, err := h.RedeemUserCredential(asCluster(cluster.ID), connect.NewRequest(&agentv1.RedeemUserCredentialRequest{CredentialRef: ref}))
+	res, err := h.RedeemUserCredential(asCluster(cluster.ID), &agentv1.RedeemUserCredentialRequest{CredentialRef: ref})
 	if err != nil {
 		t.Fatalf("redeem: %v", err)
 	}
-	if res.Msg.GetBearerToken() != "user-token-xyz" {
-		t.Fatalf("bearer = %q", res.Msg.GetBearerToken())
+	if res.GetBearerToken() != "user-token-xyz" {
+		t.Fatalf("bearer = %q", res.GetBearerToken())
 	}
-	if res.Msg.GetExpiresAt() == nil {
+	if res.GetExpiresAt() == nil {
 		t.Error("expires_at not set")
 	}
 
 	// Single-use through the RPC surface too.
-	if _, err := h.RedeemUserCredential(asCluster(cluster.ID), connect.NewRequest(&agentv1.RedeemUserCredentialRequest{CredentialRef: ref})); connect.CodeOf(err) != connect.CodeNotFound {
+	if _, err := h.RedeemUserCredential(asCluster(cluster.ID), &agentv1.RedeemUserCredentialRequest{CredentialRef: ref}); connect.CodeOf(err) != connect.CodeNotFound {
 		t.Fatalf("re-redeem: code = %v, want NotFound", connect.CodeOf(err))
 	}
 }
@@ -338,16 +339,16 @@ func TestCredentialVaultNoTokenLeakage(t *testing.T) {
 	errs = append(errs, err)
 	_, _, err = v.Redeem(ctx, "cred:00000000-0000-0000-0000-000000000000", cluster.ID)
 	errs = append(errs, err)
-	_, err = h.RedeemUserCredential(asCluster(other.ID), connect.NewRequest(&agentv1.RedeemUserCredentialRequest{CredentialRef: ref}))
+	_, err = h.RedeemUserCredential(asCluster(other.ID), &agentv1.RedeemUserCredentialRequest{CredentialRef: ref})
 	errs = append(errs, err)
-	res, err := h.RedeemUserCredential(asCluster(cluster.ID), connect.NewRequest(&agentv1.RedeemUserCredentialRequest{CredentialRef: ref}))
+	res, err := h.RedeemUserCredential(asCluster(cluster.ID), &agentv1.RedeemUserCredentialRequest{CredentialRef: ref})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Msg.GetBearerToken() != secret {
+	if res.GetBearerToken() != secret {
 		t.Fatal("redeem returned wrong token")
 	}
-	_, err = h.RedeemUserCredential(asCluster(cluster.ID), connect.NewRequest(&agentv1.RedeemUserCredentialRequest{CredentialRef: ref}))
+	_, err = h.RedeemUserCredential(asCluster(cluster.ID), &agentv1.RedeemUserCredentialRequest{CredentialRef: ref})
 	errs = append(errs, err)
 	for _, e := range errs {
 		if e == nil {
@@ -384,27 +385,27 @@ func TestExtensionInvokeMintsCredentialRef(t *testing.T) {
 	}
 	auth := &fakeExtAuth{byToken: map[string]*types.Extension{"ext-jwt": ext}}
 
-	mkReq := func() *connect.Request[agentv1.InvokeAction] {
-		req := connect.NewRequest(&agentv1.InvokeAction{Action: "sync"})
-		req.Header().Set(MetadataCluster, cluster.ID)
-		req.Header().Set(MetadataTenant, "org:1")
-		req.Header().Set("Authorization", "Bearer ext-jwt")
-		return req
+	mkReq := func() (*agentv1.InvokeAction, http.Header) {
+		header := http.Header{}
+		header.Set(MetadataCluster, cluster.ID)
+		header.Set(MetadataTenant, "org:1")
+		header.Set("Authorization", "Bearer ext-jwt")
+		return &agentv1.InvokeAction{Action: "sync"}, header
 	}
 
 	// Raw token + ref header together is ambiguous: rejected.
-	both := mkReq()
-	both.Header().Set(MetadataUserCredential, "user-token-hop")
-	both.Header().Set(MetadataUserCredentialRef, "ucr_01JABCXYZ")
-	if _, err := r.gw.invokeExtension(ctx, both, auth, time.Second); connect.CodeOf(err) != connect.CodeInvalidArgument {
+	bothReq, bothHdr := mkReq()
+	bothHdr.Set(MetadataUserCredential, "user-token-hop")
+	bothHdr.Set(MetadataUserCredentialRef, "ucr_01JABCXYZ")
+	if _, err := r.gw.invokeExtension(ctx, bothReq, bothHdr, auth, time.Second); connect.CodeOf(err) != connect.CodeInvalidArgument {
 		t.Fatalf("token+ref: code = %v, want InvalidArgument (%v)", connect.CodeOf(err), err)
 	}
 
 	done := make(chan error, 1)
 	go func() {
-		req := mkReq()
-		req.Header().Set(MetadataUserCredential, "user-token-hop")
-		_, err := r.gw.invokeExtension(ctx, req, auth, 10*time.Second)
+		req, reqHdr := mkReq()
+		reqHdr.Set(MetadataUserCredential, "user-token-hop")
+		_, err := r.gw.invokeExtension(ctx, req, reqHdr, auth, 10*time.Second)
 		done <- err
 	}()
 
@@ -476,12 +477,13 @@ func TestExtensionInvokeRawTokenWithoutVaultFailsClosed(t *testing.T) {
 	}
 	auth := &fakeExtAuth{byToken: map[string]*types.Extension{"ext-jwt": ext}}
 
-	req := connect.NewRequest(&agentv1.InvokeAction{Action: "sync"})
-	req.Header().Set(MetadataCluster, cluster.ID)
-	req.Header().Set(MetadataTenant, "org:1")
-	req.Header().Set("Authorization", "Bearer ext-jwt")
-	req.Header().Set(MetadataUserCredential, "user-token-hop")
-	if _, err := r.gw.invokeExtension(ctx, req, auth, time.Second); connect.CodeOf(err) != connect.CodeFailedPrecondition {
+	req := &agentv1.InvokeAction{Action: "sync"}
+	reqHdr := http.Header{}
+	reqHdr.Set(MetadataCluster, cluster.ID)
+	reqHdr.Set(MetadataTenant, "org:1")
+	reqHdr.Set("Authorization", "Bearer ext-jwt")
+	reqHdr.Set(MetadataUserCredential, "user-token-hop")
+	if _, err := r.gw.invokeExtension(ctx, req, reqHdr, auth, time.Second); connect.CodeOf(err) != connect.CodeFailedPrecondition {
 		t.Fatalf("code = %v, want FailedPrecondition (%v)", connect.CodeOf(err), err)
 	}
 	due, err := r.gw.Queue().Due(ctx, cluster.ID, 10)

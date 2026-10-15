@@ -13,9 +13,10 @@ import (
 	"strings"
 	"testing"
 
-	"connectrpc.com/connect"
 	"github.com/go-chi/chi/v5"
 
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	pluginv1 "github.com/7K-Inari/inari-api/gen/go/inari/plugin/v1"
 	"github.com/7K-Inari/inari-api/gen/go/inari/plugin/v1/pluginv1connect"
 
@@ -28,23 +29,26 @@ type fakePlugin struct {
 	info *pluginv1.PluginInfo
 }
 
-func (f *fakePlugin) GetInfo(context.Context, *connect.Request[pluginv1.GetInfoRequest]) (*connect.Response[pluginv1.GetInfoResponse], error) {
-	return connect.NewResponse(&pluginv1.GetInfoResponse{Info: f.info}), nil
+func (f *fakePlugin) GetInfo(context.Context, *pluginv1.GetInfoRequest) (*pluginv1.GetInfoResponse, error) {
+	return &pluginv1.GetInfoResponse{Info: f.info}, nil
 }
-func (f *fakePlugin) GetCapabilities(context.Context, *connect.Request[pluginv1.GetCapabilitiesRequest]) (*connect.Response[pluginv1.GetCapabilitiesResponse], error) {
-	return connect.NewResponse(&pluginv1.GetCapabilitiesResponse{}), nil
+func (f *fakePlugin) GetCapabilities(context.Context, *pluginv1.GetCapabilitiesRequest) (*pluginv1.GetCapabilitiesResponse, error) {
+	return &pluginv1.GetCapabilitiesResponse{}, nil
 }
-func (f *fakePlugin) Invoke(context.Context, *connect.Request[pluginv1.InvokeRequest]) (*connect.Response[pluginv1.InvokeResponse], error) {
-	return connect.NewResponse(&pluginv1.InvokeResponse{}), nil
+func (f *fakePlugin) Invoke(context.Context, *pluginv1.InvokeRequest) (*pluginv1.InvokeResponse, error) {
+	return &pluginv1.InvokeResponse{}, nil
 }
-func (f *fakePlugin) HealthCheck(context.Context, *connect.Request[pluginv1.HealthCheckRequest]) (*connect.Response[pluginv1.HealthCheckResponse], error) {
-	return connect.NewResponse(&pluginv1.HealthCheckResponse{Status: pluginv1.HealthCheckResponse_SERVING_STATUS_SERVING}), nil
+func (f *fakePlugin) HealthCheck(context.Context, *pluginv1.HealthCheckRequest) (*pluginv1.HealthCheckResponse, error) {
+	return &pluginv1.HealthCheckResponse{Status: pluginv1.HealthCheckResponse_SERVING_STATUS_SERVING}, nil
 }
 
 func pluginServer(t *testing.T, info *pluginv1.PluginInfo) *httptest.Server {
 	t.Helper()
-	_, h := pluginv1connect.NewPluginContractServiceHandler(&fakePlugin{info: info})
-	srv := httptest.NewServer(h)
+	server := connect.NewServer()
+	pluginv1connect.RegisterPluginContractServiceHandler(server, &fakePlugin{info: info})
+	mux := http.NewServeMux()
+	connecthttp.Mount(mux, server)
+	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
 }

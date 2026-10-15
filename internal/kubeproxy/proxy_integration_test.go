@@ -20,7 +20,8 @@ import (
 	"testing"
 	"time"
 
-	"connectrpc.com/connect"
+	connect "connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 
@@ -87,7 +88,7 @@ func (p *tapPipe) close() { p.once.Do(func() { close(p.closed) }) }
 // apiserver, streaming frames in both directions.
 type fakeAgent struct {
 	upstream *httptest.Server
-	stream   *connect.BidiStreamForClient[tunnelv2.TunnelMessage, tunnelv2.TunnelMessage]
+	stream   tunnelv2connect.TunnelServiceConnectClientStream
 
 	mu      sync.Mutex
 	sendMu  sync.Mutex // Connect streams are not safe for concurrent Send
@@ -106,11 +107,15 @@ func startFakeAgent(t *testing.T, proxyURL string, upstream *httptest.Server) *f
 			return (&net.Dialer{}).DialContext(ctx, network, addr)
 		},
 	}}
-	client := tunnelv2connect.NewTunnelServiceClient(h2cClient, proxyURL)
+	client := tunnelv2connect.NewTunnelServiceClient(connect.NewClient(connecthttp.NewTransport(h2cClient, proxyURL)))
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	t.Cleanup(cancel)
-	stream := client.Connect(ctx)
-	stream.RequestHeader().Set("Authorization", "Bearer agent-c1")
+	ctx, callInfo := connect.NewClientContext(ctx)
+	callInfo.RequestHeader().Set("Authorization", "Bearer agent-c1")
+	stream, err := client.Connect(ctx)
+	if err != nil {
+		t.Fatalf("connect stream: %v", err)
+	}
 	a := &fakeAgent{upstream: upstream, stream: stream, taps: map[string]*tapPipe{}}
 	// Connect bidi streams initiate the HTTP request lazily on first Send —
 	// kick it off with a ping (the real agent heartbeats anyway).
@@ -368,8 +373,8 @@ func (a *fakeAgent) close() {
 		tap.close()
 	}
 	a.mu.Unlock()
-	_ = a.stream.CloseRequest()
-	_ = a.stream.CloseResponse()
+	_ = a.stream.CloseSend()
+	_ = a.stream.Close()
 	a.wg.Wait()
 }
 

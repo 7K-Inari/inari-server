@@ -8,12 +8,11 @@ package agentgateway
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/authn"
@@ -210,48 +209,38 @@ func AgentIdentityFromContext(ctx context.Context) *authn.Identity {
 
 // AuthInterceptor authenticates agent calls (unary + streaming): bearer JWT
 // validated against the platform IdP, and the hardcoded cluster_id claim is
-// the agent identity (plan §5.2 — never self-asserted).
-func AuthInterceptor(v authn.Validator) connect.Interceptor {
-	return &streamAuthInterceptor{v: v}
+// the agent identity (plan §5.2 — never self-asserted). In connect v2 the
+// interceptor wraps the whole call before unmarshaling.
+func AuthInterceptor(v authn.Validator) connect.ServerInterceptor {
+	i := &streamAuthInterceptor{v: v}
+	return func(next connect.ServerFunc) connect.ServerFunc {
+		return func(ctx context.Context, spec connect.Spec, stream connect.ServerStream) error {
+			var header string
+			if info, ok := connect.CallInfoForServerContext(ctx); ok {
+				header = info.RequestHeader().Get("Authorization")
+			}
+			id, err := authenticate(i.v, ctx, header)
+			if err != nil {
+				return err
+			}
+			return next(context.WithValue(ctx, agentIdentityKey{}, id), spec, stream)
+		}
+	}
 }
 
 type streamAuthInterceptor struct{ v authn.Validator }
 
-func (i *streamAuthInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
-	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-		id, err := authenticate(i.v, ctx, req.Header().Get("Authorization"))
-		if err != nil {
-			return nil, err
-		}
-		return next(context.WithValue(ctx, agentIdentityKey{}, id), req)
-	}
-}
-
-func (i *streamAuthInterceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
-	return next
-}
-
-func (i *streamAuthInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
-	return func(ctx context.Context, conn connect.StreamingHandlerConn) error {
-		id, err := authenticate(i.v, ctx, conn.RequestHeader().Get("Authorization"))
-		if err != nil {
-			return err
-		}
-		return next(context.WithValue(ctx, agentIdentityKey{}, id), conn)
-	}
-}
-
 func authenticate(v authn.Validator, ctx context.Context, header string) (*authn.Identity, error) {
 	const prefix = "Bearer "
 	if len(header) <= len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
-		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("missing bearer token"))
+		return nil, connect.Errorf(connect.CodeUnauthenticated, "missing bearer token")
 	}
 	id, err := v.Validate(ctx, header[len(prefix):])
 	if err != nil {
-		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("invalid token"))
+		return nil, connect.Errorf(connect.CodeUnauthenticated, "invalid token")
 	}
 	if id.ClusterID == "" {
-		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("token has no cluster_id claim"))
+		return nil, connect.Errorf(connect.CodeUnauthenticated, "token has no cluster_id claim")
 	}
 	return id, nil
 }

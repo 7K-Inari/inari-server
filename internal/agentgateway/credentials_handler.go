@@ -3,9 +3,8 @@ package agentgateway
 import (
 	"context"
 	"errors"
-	"fmt"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
@@ -28,14 +27,14 @@ func NewCredentialsHandler(v *CredentialVault) *CredentialsHandler {
 // token, enforcing cluster binding and single use. Fail closed: missing,
 // expired, or cross-cluster refs are typed connect errors; token material
 // never appears in errors or logs.
-func (h *CredentialsHandler) RedeemUserCredential(ctx context.Context, req *connect.Request[agentv1.RedeemUserCredentialRequest]) (*connect.Response[agentv1.RedeemUserCredentialResponse], error) {
+func (h *CredentialsHandler) RedeemUserCredential(ctx context.Context, req *agentv1.RedeemUserCredentialRequest) (*agentv1.RedeemUserCredentialResponse, error) {
 	id := AgentIdentityFromContext(ctx)
 	if id == nil || id.ClusterID == "" {
-		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("missing cluster identity"))
+		return nil, connect.Errorf(connect.CodeUnauthenticated, "missing cluster identity")
 	}
-	ref := req.Msg.GetCredentialRef()
+	ref := req.GetCredentialRef()
 	if ref == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("credential_ref required"))
+		return nil, connect.Errorf(connect.CodeInvalidArgument, "credential_ref required")
 	}
 	token, expiresAt, err := h.vault.Redeem(ctx, ref, id.ClusterID)
 	defer func() {
@@ -49,16 +48,16 @@ func (h *CredentialsHandler) RedeemUserCredential(ctx context.Context, req *conn
 	}()
 	switch {
 	case errors.Is(err, ErrCredentialNotFound), errors.Is(err, ErrCredentialRedeemed):
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("credential not found"))
+		return nil, connect.Errorf(connect.CodeNotFound, "credential not found")
 	case errors.Is(err, ErrCredentialExpired):
-		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("credential expired"))
+		return nil, connect.Errorf(connect.CodeFailedPrecondition, "credential expired")
 	case errors.Is(err, ErrCredentialClusterMismatch):
-		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("credential not bound to this cluster"))
+		return nil, connect.Errorf(connect.CodePermissionDenied, "credential not bound to this cluster")
 	case err != nil:
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("redeem credential"))
+		return nil, connect.Errorf(connect.CodeInternal, "redeem credential")
 	}
-	return connect.NewResponse(&agentv1.RedeemUserCredentialResponse{
+	return &agentv1.RedeemUserCredentialResponse{
 		BearerToken: string(token),
 		ExpiresAt:   timestamppb.New(expiresAt),
-	}), nil
+	}, nil
 }

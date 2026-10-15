@@ -3,10 +3,12 @@ package kubeproxy
 import (
 	"context"
 	"errors"
-	"net/http"
 	"testing"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connectinprocess"
+
+	tunnelv2 "github.com/7K-Inari/inari-api/gen/go/inari/tunnel/v2"
 
 	"github.com/7K-Inari/inari-server/internal/authn"
 )
@@ -20,17 +22,40 @@ func (s stubValidator) Validate(context.Context, string) (*authn.Identity, error
 	return s.id, s.err
 }
 
-// fakeStreamConn is the minimal connect.StreamingHandlerConn the
-// interceptor touches (RequestHeader only).
-type fakeStreamConn struct{ hdr http.Header }
+// authPingSpec is a synthetic unary procedure used to exercise the auth
+// interceptor end to end through an in-process transport (connect v2 has no
+// exported constructor for a server-side CallInfo, so the interceptor cannot
+// be invoked directly with headers).
+var authPingSpec = connect.Spec{StreamType: connect.StreamTypeUnary, Procedure: "/kubeproxy.test.Auth/Ping"}
 
-func (fakeStreamConn) Spec() connect.Spec           { return connect.Spec{} }
-func (fakeStreamConn) Peer() connect.Peer           { return connect.Peer{} }
-func (c fakeStreamConn) RequestHeader() http.Header { return c.hdr }
-func (fakeStreamConn) ResponseHeader() http.Header  { return http.Header{} }
-func (fakeStreamConn) ResponseTrailer() http.Header { return http.Header{} }
-func (fakeStreamConn) Receive(any) error            { return errors.New("not implemented") }
-func (fakeStreamConn) Send(any) error               { return errors.New("not implemented") }
+func newAuthTestClient(t *testing.T, v authn.Validator) (*connect.Client, *bool) {
+	t.Helper()
+	called := new(bool)
+	server := connect.NewServer(AgentAuthInterceptor(v))
+	server.Register(connect.Method{
+		Spec: authPingSpec,
+		Handler: func(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+			*called = true
+			if AgentIdentityFromContext(ctx) == nil {
+				t.Error("handler context lacks agent identity")
+			}
+			var req tunnelv2.TunnelPing
+			if err := stream.Receive(&req); err != nil {
+				return err
+			}
+			return stream.Send(&req)
+		},
+	})
+	return connect.NewClient(connectinprocess.New(server)), called
+}
+
+func callAuthPing(ctx context.Context, client *connect.Client, authHeader string) error {
+	ctx, info := connect.NewClientContext(ctx)
+	if authHeader != "" {
+		info.RequestHeader().Set("Authorization", authHeader)
+	}
+	return client.CallUnary(ctx, authPingSpec, &tunnelv2.TunnelPing{}, &tunnelv2.TunnelPing{})
+}
 
 func TestAgentAuthInterceptor(t *testing.T) {
 	cases := []struct {
@@ -67,21 +92,13 @@ func TestAgentAuthInterceptor(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			interceptor := AgentAuthInterceptor(stubValidator{id: tc.id, err: tc.vErr})
-			conn := fakeStreamConn{hdr: http.Header{"Authorization": []string{"Bearer tok"}}}
-			called := false
-			err := interceptor.WrapStreamingHandler(func(ctx context.Context, _ connect.StreamingHandlerConn) error {
-				called = true
-				if AgentIdentityFromContext(ctx) == nil {
-					t.Error("handler context lacks agent identity")
-				}
-				return nil
-			})(context.Background(), conn)
+			client, called := newAuthTestClient(t, stubValidator{id: tc.id, err: tc.vErr})
+			err := callAuthPing(context.Background(), client, "Bearer tok")
 			if tc.code == connect.CodeUnknown {
 				if err != nil {
 					t.Fatalf("err = %v, want success", err)
 				}
-				if !called {
+				if !*called {
 					t.Fatal("handler not called for valid token")
 				}
 				return
@@ -92,18 +109,26 @@ func TestAgentAuthInterceptor(t *testing.T) {
 			if got := connect.CodeOf(err); got != tc.code {
 				t.Errorf("code = %v, want %v (%v)", got, tc.code, err)
 			}
-			if called {
+			if *called {
 				t.Error("handler called for rejected token")
 			}
 		})
 	}
+}
 
-	// Missing header entirely.
-	interceptor := AgentAuthInterceptor(stubValidator{id: &authn.Identity{ClusterID: "c1", AuthorizedParty: "tunnel-c1"}})
-	err := interceptor.WrapStreamingHandler(func(context.Context, connect.StreamingHandlerConn) error {
-		t.Error("handler called without credentials")
-		return nil
-	})(context.Background(), fakeStreamConn{hdr: http.Header{}})
+func TestAgentAuthInterceptorNoHeader(t *testing.T) {
+	server := connect.NewServer(AgentAuthInterceptor(stubValidator{
+		id: &authn.Identity{ClusterID: "c1", AuthorizedParty: "tunnel-c1"},
+	}))
+	server.Register(connect.Method{
+		Spec: authPingSpec,
+		Handler: func(context.Context, connect.Spec, connect.ServerStream) error {
+			t.Error("handler called without credentials")
+			return nil
+		},
+	})
+	client := connect.NewClient(connectinprocess.New(server))
+	err := callAuthPing(context.Background(), client, "")
 	if connect.CodeOf(err) != connect.CodeUnauthenticated {
 		t.Errorf("no-header code = %v, want unauthenticated", connect.CodeOf(err))
 	}

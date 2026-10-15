@@ -10,7 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"connectrpc.com/connect"
+	connect "connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	"golang.org/x/net/http2"
 
 	tunnelv2 "github.com/7K-Inari/inari-api/gen/go/inari/tunnel/v2"
@@ -91,17 +92,21 @@ func TestTunnelConnectFlagOffRejected(t *testing.T) {
 			return (&net.Dialer{}).DialContext(ctx, network, addr)
 		},
 	}}
-	client := tunnelv2connect.NewTunnelServiceClient(h2cClient, srv.URL)
+	client := tunnelv2connect.NewTunnelServiceClient(connect.NewClient(connecthttp.NewTransport(h2cClient, srv.URL)))
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	stream := client.Connect(ctx)
-	stream.RequestHeader().Set("Authorization", "Bearer agent-c1")
+	ctx, callInfo := connect.NewClientContext(ctx)
+	callInfo.RequestHeader().Set("Authorization", "Bearer agent-c1")
+	stream, err := client.Connect(ctx)
+	if err != nil {
+		t.Fatalf("connect stream: %v", err)
+	}
 	if err := stream.Send(&tunnelv2.TunnelMessage{
 		Payload: &tunnelv2.TunnelMessage_Ping{Ping: &tunnelv2.TunnelPing{}},
 	}); err != nil {
 		t.Fatalf("ping: %v", err)
 	}
-	_, err := stream.Receive()
+	_, err = stream.Receive()
 	if err == nil {
 		t.Fatal("tunnel stream accepted with the flag off")
 	}

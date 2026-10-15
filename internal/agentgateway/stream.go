@@ -9,13 +9,14 @@ import (
 	"strings"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
+	"github.com/7K-Inari/inari-api/gen/go/inari/agent/v1/agentv1connect"
 	"github.com/google/uuid"
 
 	"github.com/7K-Inari/inari-server/internal/fleetmanager"
@@ -35,10 +36,10 @@ type streamConn interface {
 // connected agent (plan §5.3 step 2). Duplicate streams for an
 // already-connected cluster identity are fenced: the new stream wins and
 // the stale session is evicted (closed) deterministically.
-func (g *Gateway) Connect(ctx context.Context, stream *connect.BidiStream[agentv1.ConnectRequest, agentv1.ConnectResponse]) error {
+func (g *Gateway) Connect(ctx context.Context, stream agentv1connect.EventStreamServiceConnectServerStream) error {
 	id := AgentIdentityFromContext(ctx)
 	if id == nil {
-		return connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("unauthenticated"))
+		return connect.Errorf(connect.CodeUnauthenticated, "unauthenticated")
 	}
 	cluster, err := g.AuthorizeCluster(ctx, id.ClusterID)
 	if err != nil {
@@ -58,15 +59,15 @@ func (g *Gateway) Connect(ctx context.Context, stream *connect.BidiStream[agentv
 func (g *Gateway) AuthorizeCluster(ctx context.Context, clusterID string) (*types.Cluster, error) {
 	cluster, err := g.registry.GetCluster(ctx, clusterID)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("unknown cluster"))
+		return nil, connect.Errorf(connect.CodeUnauthenticated, "unknown cluster")
 	}
 	switch cluster.State {
 	case types.ClusterStateActive, types.ClusterStateDegraded:
 		return cluster, nil
 	case types.ClusterStateRevoked:
-		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("cluster is revoked"))
+		return nil, connect.Errorf(connect.CodePermissionDenied, "cluster is revoked")
 	default:
-		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("cluster not registered"))
+		return nil, connect.Errorf(connect.CodeFailedPrecondition, "cluster not registered")
 	}
 }
 

@@ -1,3 +1,4 @@
+//nolint:staticcheck // SA1019: x/net/http2 h2c mirrors production stream serving; net/http Protocols h2c hangs connect bidi streams (see internal/stream)
 package main
 
 import (
@@ -139,7 +140,7 @@ func TestQARoutingUnknownMethodIsUnimplementedNotChi404(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	body, _ := io.ReadAll(res.Body)
 	if strings.Contains(string(body), "404 page not found") {
 		t.Fatalf("chi 404 leaked for unknown procedure: %s", body)
@@ -157,7 +158,7 @@ func TestQARoutingUnrelatedPathStillChi404(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404 for unrelated path, got %d", res.StatusCode)
 	}
@@ -178,7 +179,7 @@ func TestQAWireCompatRawJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	body, _ := io.ReadAll(res.Body)
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("raw JSON unary call failed: %d %s", res.StatusCode, body)

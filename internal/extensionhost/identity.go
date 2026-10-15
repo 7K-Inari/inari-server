@@ -15,7 +15,7 @@ import (
 	"net/http"
 	"strings"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/7K-Inari/inari-server/internal/authn"
@@ -223,7 +223,7 @@ func NewTunnelAuthenticator(exts ExtensionByClientID, v authn.Validator) *Tunnel
 // Bearer token. Errors are connect-coded for the agentgateway handler.
 func (a *TunnelAuthenticator) AuthenticateExtension(ctx context.Context, header http.Header) (*types.Extension, error) {
 	unauthenticated := func(msg string) (*types.Extension, error) {
-		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New(msg))
+		return nil, connect.NewError(connect.CodeUnauthenticated, msg)
 	}
 	const prefix = "Bearer "
 	raw := header.Get("Authorization")
@@ -242,8 +242,8 @@ func (a *TunnelAuthenticator) AuthenticateExtension(ctx context.Context, header 
 		return unauthenticated("unknown extension identity")
 	}
 	if ext.State != types.ExtensionStateReady {
-		return nil, connect.NewError(connect.CodeFailedPrecondition,
-			fmt.Errorf("extension %s is %s, not ready", ext.Name, ext.State))
+		return nil, connect.Errorf(connect.CodeFailedPrecondition,
+			"extension %s is %s, not ready", ext.Name, ext.State)
 	}
 	return ext, nil
 }

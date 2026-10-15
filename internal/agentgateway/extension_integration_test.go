@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"connectrpc.com/connect"
+	connect "connectrpc.com/connect/v2"
 
 	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
 
@@ -26,11 +26,11 @@ func (f *fakeExtAuth) AuthenticateExtension(_ context.Context, header http.Heade
 	const prefix = "Bearer "
 	raw := header.Get("Authorization")
 	if len(raw) <= len(prefix) {
-		return nil, connect.NewError(connect.CodeUnauthenticated, nil)
+		return nil, connect.NewError(connect.CodeUnauthenticated, "unauthenticated")
 	}
 	ext, ok := f.byToken[raw[len(prefix):]]
 	if !ok {
-		return nil, connect.NewError(connect.CodeUnauthenticated, nil)
+		return nil, connect.NewError(connect.CodeUnauthenticated, "unauthenticated")
 	}
 	return ext, nil
 }
@@ -60,33 +60,36 @@ func TestExtensionInvokeTunnel(t *testing.T) {
 		t.Errorf("path = %q", path)
 	}
 
-	mkReq := func(tenantHdr, bearerTok string) *connect.Request[agentv1.InvokeAction] {
-		req := connect.NewRequest(&agentv1.InvokeAction{Action: "refresh"})
-		req.Header().Set(MetadataCluster, cluster.ID)
-		req.Header().Set(MetadataTenant, tenantHdr)
+	mkReq := func(tenantHdr, bearerTok string) (*agentv1.InvokeAction, http.Header) {
+		header := http.Header{}
+		header.Set(MetadataCluster, cluster.ID)
+		header.Set(MetadataTenant, tenantHdr)
 		if bearerTok != "" {
-			req.Header().Set("Authorization", "Bearer "+bearerTok)
+			header.Set("Authorization", "Bearer "+bearerTok)
 		}
-		return req
+		return &agentv1.InvokeAction{Action: "refresh"}, header
 	}
 
 	// Unknown token -> unauthenticated.
-	if _, err := r.gw.invokeExtension(ctx, mkReq("org:1", "wrong"), auth, time.Second); connect.CodeOf(err) != connect.CodeUnauthenticated {
+	reqBad, hdrBad := mkReq("org:1", "wrong")
+	if _, err := r.gw.invokeExtension(ctx, reqBad, hdrBad, auth, time.Second); connect.CodeOf(err) != connect.CodeUnauthenticated {
 		t.Fatalf("unknown token: err = %v, want unauthenticated", err)
 	}
 	// Extension invoking in a foreign tenant -> permission denied (org binding).
-	if _, err := r.gw.invokeExtension(ctx, mkReq("org:2", "ext-jwt"), auth, time.Second); connect.CodeOf(err) != connect.CodePermissionDenied {
+	reqForeign, hdrForeign := mkReq("org:2", "ext-jwt")
+	if _, err := r.gw.invokeExtension(ctx, reqForeign, hdrForeign, auth, time.Second); connect.CodeOf(err) != connect.CodePermissionDenied {
 		t.Fatalf("foreign tenant: err = %v, want permission denied", err)
 	}
 
 	// Happy path: invoke blocks until the agent acks.
 	type result struct {
-		resp *connect.Response[agentv1.CommandAck]
+		resp *agentv1.CommandAck
 		err  error
 	}
 	done := make(chan result, 1)
 	go func() {
-		resp, err := r.gw.invokeExtension(ctx, mkReq("org:1", "ext-jwt"), auth, 10*time.Second)
+		reqOK, hdrOK := mkReq("org:1", "ext-jwt")
+		resp, err := r.gw.invokeExtension(ctx, reqOK, hdrOK, auth, 10*time.Second)
 		done <- result{resp, err}
 	}()
 
@@ -138,11 +141,11 @@ func TestExtensionInvokeTunnel(t *testing.T) {
 		if res.err != nil {
 			t.Fatalf("invoke: %v", res.err)
 		}
-		if res.resp.Msg.GetResult() != agentv1.CommandResult_COMMAND_RESULT_APPLIED {
-			t.Errorf("result = %v", res.resp.Msg.GetResult())
+		if res.resp.GetResult() != agentv1.CommandResult_COMMAND_RESULT_APPLIED {
+			t.Errorf("result = %v", res.resp.GetResult())
 		}
-		if res.resp.Msg.GetMessage() != "refresh dispatched" {
-			t.Errorf("message = %q", res.resp.Msg.GetMessage())
+		if res.resp.GetMessage() != "refresh dispatched" {
+			t.Errorf("message = %q", res.resp.GetMessage())
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("invoke did not return after ack")
@@ -174,25 +177,26 @@ func TestExtensionInvokeUserCredentialRef(t *testing.T) {
 	}
 	auth := &fakeExtAuth{byToken: map[string]*types.Extension{"ext-jwt": ext}}
 
-	mkReq := func(ref string) *connect.Request[agentv1.InvokeAction] {
-		req := connect.NewRequest(&agentv1.InvokeAction{Action: "sync"})
-		req.Header().Set(MetadataCluster, cluster.ID)
-		req.Header().Set(MetadataTenant, "org:1")
-		req.Header().Set("Authorization", "Bearer ext-jwt")
+	mkReq := func(ref string) (*agentv1.InvokeAction, http.Header) {
+		header := http.Header{}
+		header.Set(MetadataCluster, cluster.ID)
+		header.Set(MetadataTenant, "org:1")
+		header.Set("Authorization", "Bearer ext-jwt")
 		if ref != "" {
-			req.Header().Set(MetadataUserCredentialRef, ref)
+			header.Set(MetadataUserCredentialRef, ref)
 		}
-		return req
+		return &agentv1.InvokeAction{Action: "sync"}, header
 	}
 
 	// JWT-shaped metadata is rejected as a raw-token smuggling attempt.
-	if _, err := r.gw.invokeExtension(ctx, mkReq("eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyLTEifQ.c2ln"), auth, time.Second); connect.CodeOf(err) != connect.CodeInvalidArgument {
+	reqRaw, hdrRaw := mkReq("eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyLTEifQ.c2ln")
+	if _, err := r.gw.invokeExtension(ctx, reqRaw, hdrRaw, auth, time.Second); connect.CodeOf(err) != connect.CodeInvalidArgument {
 		t.Fatalf("raw token: err = %v, want invalid argument", err)
 	}
 	// Self-asserted payload refs are discarded when metadata is absent.
-	req := mkReq("")
-	req.Msg.UserCredentialRef = "self-asserted"
-	if _, err := r.gw.invokeExtension(ctx, req, auth, 500*time.Millisecond); connect.CodeOf(err) != connect.CodeDeadlineExceeded {
+	req, hdr := mkReq("")
+	req.UserCredentialRef = "self-asserted"
+	if _, err := r.gw.invokeExtension(ctx, req, hdr, auth, 500*time.Millisecond); connect.CodeOf(err) != connect.CodeDeadlineExceeded {
 		t.Fatalf("self-asserted: err = %v, want deadline exceeded (queued without ref)", err)
 	}
 	// Drain the pending self-asserted command so it cannot shadow the next
@@ -211,7 +215,8 @@ func TestExtensionInvokeUserCredentialRef(t *testing.T) {
 	// Happy path: metadata ref lands in the persisted payload, token-free.
 	done := make(chan error, 1)
 	go func() {
-		_, err := r.gw.invokeExtension(ctx, mkReq("ucr_01JABCXYZ"), auth, 10*time.Second)
+		reqOK, hdrOK := mkReq("ucr_01JABCXYZ")
+		_, err := r.gw.invokeExtension(ctx, reqOK, hdrOK, auth, 10*time.Second)
 		done <- err
 	}()
 	var payload string

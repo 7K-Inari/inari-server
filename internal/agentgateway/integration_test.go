@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"connectrpc.com/connect"
+	connect "connectrpc.com/connect/v2"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -130,14 +130,14 @@ func newRig(t *testing.T, approvalRequired bool) *rig {
 	return &rig{gw: gw, registry: registry, caps: caps, clients: clients, secrets: secretsW, db: database}
 }
 
-func registerReq(token string) *connect.Request[agentv1.RegisterClusterRequest] {
-	return connect.NewRequest(&agentv1.RegisterClusterRequest{
+func registerReq(token string) *agentv1.RegisterClusterRequest {
+	return &agentv1.RegisterClusterRequest{
 		RegistrationToken: token,
 		AgentVersion:      "0.1.0",
 		ContractVersion:   "inari.agent.v1",
 		ClusterLabels:     map[string]string{"env": "dev"},
 		KubernetesVersion: "v1.31.0",
-	})
+	}
 }
 
 func TestRegistrationExchangeEndToEnd(t *testing.T) {
@@ -161,11 +161,11 @@ func TestRegistrationExchangeEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterCluster: %v", err)
 	}
-	if res.Msg.ClientId != "cluster-"+cluster.ID {
-		t.Errorf("client_id = %q", res.Msg.ClientId)
+	if res.ClientId != "cluster-"+cluster.ID {
+		t.Errorf("client_id = %q", res.ClientId)
 	}
-	if res.Msg.ClientSecretDelivery.GetEsoSecretStore() != "inari-platform" {
-		t.Errorf("eso store = %q", res.Msg.ClientSecretDelivery.GetEsoSecretStore())
+	if res.ClientSecretDelivery.GetEsoSecretStore() != "inari-platform" {
+		t.Errorf("eso store = %q", res.ClientSecretDelivery.GetEsoSecretStore())
 	}
 	if len(r.clients.created) != 1 {
 		t.Errorf("keycloak clients created = %v", r.clients.created)
@@ -180,11 +180,11 @@ func TestRegistrationExchangeEndToEnd(t *testing.T) {
 
 	// Kubectl tunnel (plan §7.2): the additive tunnel client credential
 	// pair rides the same ESO secret under a second key.
-	if res.Msg.TunnelClientId != "tunnel-"+cluster.ID {
-		t.Errorf("tunnel_client_id = %q", res.Msg.TunnelClientId)
+	if res.TunnelClientId != "tunnel-"+cluster.ID {
+		t.Errorf("tunnel_client_id = %q", res.TunnelClientId)
 	}
-	if res.Msg.TunnelClientSecretDelivery.GetSecretKey() != TunnelSecretKey {
-		t.Errorf("tunnel secret key = %q", res.Msg.TunnelClientSecretDelivery.GetSecretKey())
+	if res.TunnelClientSecretDelivery.GetSecretKey() != TunnelSecretKey {
+		t.Errorf("tunnel secret key = %q", res.TunnelClientSecretDelivery.GetSecretKey())
 	}
 	tunnelPath := secrets.ClusterOIDCPath(cluster.ID) + "#" + TunnelSecretKey
 	if got := r.secrets.puts[tunnelPath]; got != "secret-for-tunnel-"+cluster.ID {
@@ -250,8 +250,8 @@ func TestSecretDeliveryFailureDoesNotBurnToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("retry after delivery recovery: %v", err)
 	}
-	if res.Msg.ClientSecretDelivery.GetEsoSecretStore() != "inari-platform" {
-		t.Errorf("eso store = %q", res.Msg.ClientSecretDelivery.GetEsoSecretStore())
+	if res.ClientSecretDelivery.GetEsoSecretStore() != "inari-platform" {
+		t.Errorf("eso store = %q", res.ClientSecretDelivery.GetEsoSecretStore())
 	}
 }
 

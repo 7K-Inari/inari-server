@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
@@ -25,11 +25,11 @@ const TunnelSecretKey = "tunnel-client-secret"
 // RegistrationService implements inari.agent.v1.RegistrationService: the
 // one-time bootstrap exchange (plan §5.3 step 1). Unauthenticated except for
 // the registration token itself.
-func (g *Gateway) RegisterCluster(ctx context.Context, req *connect.Request[agentv1.RegisterClusterRequest]) (*connect.Response[agentv1.RegisterClusterResponse], error) {
-	if req.Msg.RegistrationToken == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("registration_token required"))
+func (g *Gateway) RegisterCluster(ctx context.Context, req *agentv1.RegisterClusterRequest) (*agentv1.RegisterClusterResponse, error) {
+	if req.RegistrationToken == "" {
+		return nil, connect.Errorf(connect.CodeInvalidArgument, "registration_token required")
 	}
-	cluster, err := g.peekToken(ctx, req.Msg.RegistrationToken)
+	cluster, err := g.peekToken(ctx, req.RegistrationToken)
 	if err != nil {
 		return nil, err
 	}
@@ -39,26 +39,26 @@ func (g *Gateway) RegisterCluster(ctx context.Context, req *connect.Request[agen
 	// waiting for a secret that never arrives (the old ~2min deadline).
 	clientID, err := g.clients.CreateClusterClient(ctx, cluster.ID)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("provision identity: %w", err))
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("provision identity: %w", err).Error())
 	}
 	// Track the client's desired state as a platform resource. Pre-token-burn
 	// so a failure keeps the token consumable and the agent retries.
 	if g.platform != nil {
 		desired, _ := json.Marshal(map[string]string{"clientId": clientID, "clusterId": cluster.ID})
 		if _, err := g.platform.EnsureDesired(ctx, cluster.OrgID, types.PlatformKindKeycloakClient, clientID, desired); err != nil {
-			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("track client platform resource: %w", err))
+			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("track client platform resource: %w", err).Error())
 		}
 	}
 	if g.secrets == nil {
-		return nil, connect.NewError(connect.CodeUnavailable,
-			fmt.Errorf("pending_secret_delivery: platform secret store not configured"))
+		return nil, connect.Errorf(connect.CodeUnavailable,
+			"pending_secret_delivery: platform secret store not configured")
 	}
 	secret, err := g.clients.ClusterClientSecret(ctx, clientID)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeUnavailable, fmt.Errorf("pending_secret_delivery: read client secret: %w", err))
+		return nil, connect.NewError(connect.CodeUnavailable, fmt.Errorf("pending_secret_delivery: read client secret: %w", err).Error())
 	}
 	if err := g.secrets.Put(ctx, secrets.ClusterOIDCPath(cluster.ID), g.cfg.ESOSecretKey, secret); err != nil {
-		return nil, connect.NewError(connect.CodeUnavailable, fmt.Errorf("pending_secret_delivery: write secret store: %w", err))
+		return nil, connect.NewError(connect.CodeUnavailable, fmt.Errorf("pending_secret_delivery: write secret store: %w", err).Error())
 	}
 	// Kubectl tunnel (plan §7.2): provision the dedicated tunnel-<id> client
 	// and deliver its secret alongside the agent's (same ESO secret, second
@@ -66,14 +66,14 @@ func (g *Gateway) RegisterCluster(ctx context.Context, req *connect.Request[agen
 	// servers never send them.
 	tunnelClientID, err := g.clients.CreateTunnelClient(ctx, cluster.ID)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("provision tunnel identity: %w", err))
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("provision tunnel identity: %w", err).Error())
 	}
 	tunnelSecret, err := g.clients.ClusterClientSecret(ctx, tunnelClientID)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeUnavailable, fmt.Errorf("pending_secret_delivery: read tunnel client secret: %w", err))
+		return nil, connect.NewError(connect.CodeUnavailable, fmt.Errorf("pending_secret_delivery: read tunnel client secret: %w", err).Error())
 	}
 	if err := g.secrets.Put(ctx, secrets.ClusterOIDCPath(cluster.ID), TunnelSecretKey, tunnelSecret); err != nil {
-		return nil, connect.NewError(connect.CodeUnavailable, fmt.Errorf("pending_secret_delivery: write tunnel secret: %w", err))
+		return nil, connect.NewError(connect.CodeUnavailable, fmt.Errorf("pending_secret_delivery: write tunnel secret: %w", err).Error())
 	}
 	// The client is provisioned + its secret delivered: the control plane is
 	// the source of truth for this resource (no operator CR is rendered for
@@ -85,17 +85,17 @@ func (g *Gateway) RegisterCluster(ctx context.Context, req *connect.Request[agen
 		}
 	}
 
-	cluster, err = g.consumeToken(ctx, req.Msg.RegistrationToken)
+	cluster, err = g.consumeToken(ctx, req.RegistrationToken)
 	if err != nil {
 		return nil, err
 	}
 	labels := cluster.Labels
-	if len(req.Msg.ClusterLabels) > 0 {
-		labels = req.Msg.ClusterLabels
+	if len(req.ClusterLabels) > 0 {
+		labels = req.ClusterLabels
 	}
 	if err := g.registry.MarkRegistered(ctx, "agent:"+cluster.ID, cluster.ID, clientID,
-		req.Msg.KubernetesVersion, req.Msg.AgentVersion, labels); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("mark registered: %w", err))
+		req.KubernetesVersion, req.AgentVersion, labels); err != nil {
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("mark registered: %w", err).Error())
 	}
 
 	// The ESO store name comes from the secret-stores registry when wired,
@@ -106,7 +106,7 @@ func (g *Gateway) RegisterCluster(ctx context.Context, req *connect.Request[agen
 			esoStore = name
 		}
 	}
-	res := connect.NewResponse(&agentv1.RegisterClusterResponse{
+	res := &agentv1.RegisterClusterResponse{
 		ClusterId:     cluster.ID,
 		OidcIssuerUrl: g.cfg.OIDCIssuerURL,
 		ClientId:      clientID,
@@ -124,7 +124,7 @@ func (g *Gateway) RegisterCluster(ctx context.Context, req *connect.Request[agen
 			SecretKey:       TunnelSecretKey,
 		},
 		CredentialsExpireHint: timestamppb.Now(),
-	})
+	}
 	return res, nil
 }
 
@@ -143,16 +143,16 @@ func (g *Gateway) tokenErr(err error) error {
 	case err == nil:
 		return nil
 	case errors.Is(err, clusterregistry.ErrTokenInvalid):
-		return connect.NewError(connect.CodeUnauthenticated, err)
+		return connect.NewError(connect.CodeUnauthenticated, err.Error()).WithCause(err)
 	case errors.Is(err, clusterregistry.ErrTokenUsed):
-		return connect.NewError(connect.CodeFailedPrecondition, err)
+		return connect.NewError(connect.CodeFailedPrecondition, err.Error()).WithCause(err)
 	case errors.Is(err, clusterregistry.ErrTokenExpired):
-		return connect.NewError(connect.CodeFailedPrecondition, err)
+		return connect.NewError(connect.CodeFailedPrecondition, err.Error()).WithCause(err)
 	case errors.Is(err, clusterregistry.ErrClusterRevoked):
-		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("cluster is revoked"))
+		return connect.Errorf(connect.CodePermissionDenied, "cluster is revoked")
 	case errors.Is(err, clusterregistry.ErrClusterNotPending):
-		return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("cluster enrollment pending approval"))
+		return connect.Errorf(connect.CodeFailedPrecondition, "cluster enrollment pending approval")
 	default:
-		return connect.NewError(connect.CodeInternal, fmt.Errorf("consume token: %w", err))
+		return connect.NewError(connect.CodeInternal, fmt.Errorf("consume token: %w", err).Error())
 	}
 }

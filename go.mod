@@ -3,7 +3,7 @@ module github.com/7K-Inari/inari-server
 go 1.26.3
 
 require (
-	connectrpc.com/connect v1.21.1
+	connectrpc.com/connect/v2 v2.0.0
 	github.com/7K-Inari/inari-api v0.6.1-0.20261014162811-64180114b63f
 	github.com/aws/aws-sdk-go-v2 v1.47.3
 	github.com/aws/aws-sdk-go-v2/config v1.33.9
@@ -234,3 +234,5 @@ require (
 )
 
 replace github.com/go-openapi/testify/v2 => github.com/go-openapi/testify/v2 v2.8.0
+
+replace github.com/7K-Inari/inari-api => ../inari-api

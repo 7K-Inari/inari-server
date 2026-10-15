@@ -15,7 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 
 	pluginv1 "github.com/7K-Inari/inari-api/gen/go/inari/plugin/v1"
 	"github.com/7K-Inari/inari-api/gen/go/inari/plugin/v1/pluginv1connect"
@@ -39,14 +40,14 @@ const handshakeTimeout = 5 * time.Second
 // the registry record (defense against a rogue process squatting on the
 // endpoint).
 func VerifyHandshake(ctx context.Context, endpoint string, ext *types.Extension) (*pluginv1.PluginInfo, error) {
-	client := pluginv1connect.NewPluginContractServiceClient(http.DefaultClient, endpoint)
+	client := pluginv1connect.NewPluginContractServiceClient(connect.NewClient(connecthttp.NewTransport(http.DefaultClient, endpoint, connecthttp.WithReadMaxBytes(0))))
 	hctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
-	resp, err := client.GetInfo(hctx, connect.NewRequest(&pluginv1.GetInfoRequest{}))
+	resp, err := client.GetInfo(hctx, &pluginv1.GetInfoRequest{})
 	if err != nil {
 		return nil, fmt.Errorf("extensionhost: handshake getinfo: %w", err)
 	}
-	info := resp.Msg.GetInfo()
+	info := resp.GetInfo()
 	if info == nil {
 		return nil, fmt.Errorf("extensionhost: handshake: empty plugin info")
 	}

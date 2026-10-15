@@ -60,7 +60,8 @@ import (
 	"github.com/7K-Inari/inari-server/internal/types"
 	"github.com/7K-Inari/inari-server/internal/usergit"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	agentv1connect "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1/agentv1connect"
 )
 
@@ -955,17 +956,23 @@ func run() error {
 	// Agent-facing Connect-RPC services mount on chi directly, outside the
 	// huma bearer middleware: registration is token-authenticated, the event
 	// stream authenticates via its own interceptor (cluster_id claim).
-	regPath, regHandler := agentv1connect.NewRegistrationServiceHandler(gateway)
-	streamPath, streamHandler := agentv1connect.NewEventStreamServiceHandler(gateway,
-		connect.WithInterceptors(agentgateway.AuthInterceptor(validator)))
-	router.Handle(regPath+"*", regHandler)
-	router.Handle(streamPath+"*", streamHandler)
+	agentRPC := connect.NewServer()
+	agentv1connect.RegisterRegistrationServiceHandler(agentRPC, gateway)
+	authedAgentRPC := connect.NewServer(agentgateway.AuthInterceptor(validator))
+	agentv1connect.RegisterEventStreamServiceHandler(authedAgentRPC, gateway)
 	if credVault != nil {
-		credPath, credHandler := agentv1connect.NewAgentCredentialsServiceHandler(
-			agentgateway.NewCredentialsHandler(credVault),
-			connect.WithInterceptors(agentgateway.AuthInterceptor(validator)))
-		router.Handle(credPath+"*", credHandler)
+		agentv1connect.RegisterAgentCredentialsServiceHandler(authedAgentRPC,
+			agentgateway.NewCredentialsHandler(credVault))
 	}
+	// Mount on a plain ServeMux first: chi only treats "*" as a wildcard in
+	// the final path segment, and connecthttp.Mount registers exact
+	// procedure patterns plus service-prefix unknown-method handlers.
+	rpcMux := http.NewServeMux()
+	connecthttp.Mount(rpcMux, agentRPC)
+	connecthttp.Mount(rpcMux, authedAgentRPC)
+	router.Handle("/"+agentv1connect.RegistrationServiceName+"/*", rpcMux)
+	router.Handle("/"+agentv1connect.EventStreamServiceName+"/*", rpcMux)
+	router.Handle("/"+agentv1connect.AgentCredentialsServiceName+"/*", rpcMux)
 
 	// Extension-gateway tunnel (plan §5.8): extensions invoke imperative
 	// actions on tenant clusters, authenticated by per-extension identity

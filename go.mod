@@ -3,13 +3,13 @@ module github.com/7K-Inari/inari-server
 go 1.26.3
 
 require (
-	connectrpc.com/connect/v2 v2.0.0
-	github.com/7K-Inari/inari-api v0.6.1-0.20261015003247-4a8072241473
+	connectrpc.com/connect/v2 v2.0.1
+	github.com/7K-Inari/inari-api v0.7.0-d1dc5a2
 	github.com/aws/aws-sdk-go-v2 v1.47.3
 	github.com/aws/aws-sdk-go-v2/config v1.33.9
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.9
 	github.com/aws/aws-sdk-go-v2/service/iam v1.64.4
-	github.com/aws/aws-sdk-go-v2/service/organizations v1.61.3
+	github.com/aws/aws-sdk-go-v2/service/organizations v1.62.0
 	github.com/aws/aws-sdk-go-v2/service/sts v1.51.4
 	github.com/blang/semver v3.5.1+incompatible
 	github.com/coreos/go-oidc/v3 v3.21.0

@@ -37,6 +37,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/extensionhost"
 	"github.com/7K-Inari/inari-server/internal/featureflags"
 	"github.com/7K-Inari/inari-server/internal/fleetmanager"
+	"github.com/7K-Inari/inari-server/internal/gitrepos"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/kubeproxy"
@@ -733,6 +734,10 @@ func run() error {
 	orchestratorSvc := orchestrator.NewService(database, inventory.NewStore(), catalogSvc, registry,
 		approvalsSvc, gateway.Queue(), git, auditStore)
 
+	// Multi-repo GitOps registry (Feature A): team-filtered repo CRUD with
+	// guarded unregister, over the same inventory store + git resolver.
+	gitReposSvc := gitrepos.NewService(inventory.NewStore(), git, gateway.Queue(), auditStore, database)
+
 	cloudAccountsSvc := cloudaccounts.NewService(database, cloudaccounts.NewStore(), auditStore, cloudaccounts.NewSTSValidator())
 
 	notificationsSvc := notifications.NewService(database, notifications.NewStore(), auditStore,
@@ -919,6 +924,7 @@ func run() error {
 		Inventory:         inventorySvc,
 		PlatformResources: platformResourcesSvc,
 		Orchestrator:      orchestratorSvc,
+		GitRepos:          gitReposSvc,
 		CloudAccounts:     cloudAccountsSvc,
 		Notifications:     notificationsSvc,
 		Policies:          policySvc,

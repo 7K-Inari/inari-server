@@ -27,6 +27,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/extensionhost"
 	"github.com/7K-Inari/inari-server/internal/featureflags"
 	"github.com/7K-Inari/inari-server/internal/fleetmanager"
+	"github.com/7K-Inari/inari-server/internal/gitrepos"
 	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/notifications"
 	"github.com/7K-Inari/inari-server/internal/orchestrator"
@@ -53,6 +54,7 @@ type Deps struct {
 	Inventory          *inventory.Service
 	PlatformResources  *platformresources.Service
 	Orchestrator       *orchestrator.Service
+	GitRepos           *gitrepos.Service
 	CloudAccounts      *cloudaccounts.Service
 	Notifications      *notifications.Service
 	Policies           *policyservice.Service
@@ -113,6 +115,7 @@ func Register(api huma.API, d Deps) {
 	platformresources.NewHandler(d.PlatformResources, d.Tenancy, d.Authz).RegisterRoutes(api)
 	orchestrator.NewHandler(d.Orchestrator, d.Tenancy, d.Authz).
 		WithAllowedAPIBases(d.AllowedAPIBases).RegisterRoutes(api)
+	gitrepos.NewHandler(d.GitRepos, d.Tenancy, d.Authz).RegisterRoutes(api)
 	cloudaccounts.NewHandler(d.CloudAccounts, d.Tenancy, d.Clusters, d.Authz).RegisterRoutes(api)
 	notifications.NewHandler(d.Notifications, d.Tenancy, d.Authz).RegisterRoutes(api)
 	policyservice.NewHandler(d.Policies, d.Tenancy, d.Authz).RegisterRoutes(api)

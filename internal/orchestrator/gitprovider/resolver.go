@@ -64,6 +64,93 @@ type Resolver interface {
 // as an end user (static/fake/local wiring).
 var ErrUserModelUnsupported = errors.New("gitprovider: user auth model unsupported by this resolver")
 
+// RepoSelectorDefault selects the org's default repo row. Selectors are row
+// IDs (ULIDs), never names, so the sentinel cannot collide with a real row.
+const RepoSelectorDefault = "default"
+
+// RepoStore is the narrow registry seam RepoResolver needs (implemented by
+// inventory.Store).
+type RepoStore interface {
+	GetGitRepo(ctx context.Context, orgID, id string) (*types.TenantGitRepo, error)
+	GetDefaultGitRepo(ctx context.Context, orgID string) (*types.TenantGitRepo, error)
+}
+
+// OrgGitConfigs exposes the org-wide BYO GitHub App reference from
+// tenant_git_configs (the middle tier of the credential precedence:
+// per-repo BYO → org-wide app → platform app). A nil return means the org
+// has no org-wide app configured.
+type OrgGitConfigs interface {
+	OrgGitHubApp(ctx context.Context, orgID string) (*types.GitHubAppConfig, error)
+}
+
+// RepoResolver resolves git credentials for a registry repo row (Feature A):
+// it looks the row up by ID (or RepoSelectorDefault), merges the credential
+// precedence (per-repo BYO override → org-wide app → platform app), and
+// delegates to the credential Resolver.
+type RepoResolver struct {
+	repos RepoStore
+	orgs  OrgGitConfigs
+	inner Resolver
+}
+
+// NewRepoResolver wires the facade. orgs may be nil (no org-wide fallback).
+func NewRepoResolver(repos RepoStore, orgs OrgGitConfigs, inner Resolver) *RepoResolver {
+	return &RepoResolver{repos: repos, orgs: orgs, inner: inner}
+}
+
+// ResolveRepo returns the repo row plus the Provider/AuthInfo resolved with
+// the effective credentials for that row.
+func (rr *RepoResolver) ResolveRepo(ctx context.Context, orgID, selector string) (*types.TenantGitRepo, Provider, *AuthInfo, error) {
+	row, err := rr.repoRow(ctx, orgID, selector)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	cfg, err := rr.effectiveConfig(ctx, orgID, row)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	p, info, err := rr.inner.ForTenant(ctx, cfg)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return row, p, info, nil
+}
+
+// ValidateRepo resolves credentials for the row without returning a
+// provider — the registration-time fail-fast check (decision 3c). Typed
+// errors (ErrAppNotInstalled with install URL, ErrAppCredentialsRevoked)
+// propagate from the underlying resolver.
+func (rr *RepoResolver) ValidateRepo(ctx context.Context, orgID, selector string) error {
+	_, _, _, err := rr.ResolveRepo(ctx, orgID, selector)
+	return err
+}
+
+func (rr *RepoResolver) repoRow(ctx context.Context, orgID, selector string) (*types.TenantGitRepo, error) {
+	if selector == "" || selector == RepoSelectorDefault {
+		return rr.repos.GetDefaultGitRepo(ctx, orgID)
+	}
+	return rr.repos.GetGitRepo(ctx, orgID, selector)
+}
+
+// effectiveConfig merges the repo row with the credential precedence:
+// the row's own BYO app wins; otherwise the org-wide app from
+// tenant_git_configs; otherwise nil (platform app, model A).
+func (rr *RepoResolver) effectiveConfig(ctx context.Context, orgID string, row *types.TenantGitRepo) (*types.TenantGitConfig, error) {
+	app := row.GitHubApp
+	if app == nil && rr.orgs != nil {
+		orgApp, err := rr.orgs.OrgGitHubApp(ctx, orgID)
+		if err != nil {
+			return nil, err
+		}
+		app = orgApp
+	}
+	return &types.TenantGitConfig{
+		OrgID: orgID, Repo: row.Repo,
+		CommitPolicy: row.CommitPolicy, BaseBranch: row.BaseBranch,
+		GitHubApp: app,
+	}, nil
+}
+
 // StaticResolver wraps a single Provider (fake/dev and legacy wiring).
 type StaticResolver struct{ P Provider }
 

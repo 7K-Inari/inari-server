@@ -396,7 +396,12 @@ func (r *Resolver) EvictTenant(orgID string) {
 			delete(r.providers, k)
 		}
 	}
-	delete(r.status, orgID)
+	// Clear probe statuses: BYO entries (t:orgID:...) and the platform entry.
+	for k := range r.status {
+		if strings.HasPrefix(k, prefix) || k == "p:"+orgID {
+			delete(r.status, k)
+		}
+	}
 }
 
 func (r *Resolver) invalidate(owner string) {
@@ -547,19 +552,32 @@ func (r *Resolver) scopeCheck(ctx context.Context, p *Provider, orgID, repo stri
 	r.emit(ctx, ResolvedEvent{OrgID: orgID, AuthModel: info.Model, AppID: info.AppID, InstallationID: info.InstallationID, APIBase: info.APIBase, Result: "scope_warning"})
 }
 
-// Probe health-checks a tenant's git provider auth (cached 60s).
+// Probe health-checks a tenant's git provider auth (cached 60s). The cache
+// key includes the credential identity so per-repo BYO apps within one org
+// don't collide (Feature A).
 func (r *Resolver) Probe(ctx context.Context, cfg *types.TenantGitConfig) *types.GitProviderStatus {
+	key := probeCacheKey(cfg)
 	r.mu.Lock()
-	entry, ok := r.status[cfg.OrgID]
+	entry, ok := r.status[key]
 	r.mu.Unlock()
 	if ok && r.now().Sub(entry.checkedAt) < time.Minute {
 		return entry.status
 	}
 	st := r.probe(ctx, cfg)
 	r.mu.Lock()
-	r.status[cfg.OrgID] = statusEntry{status: st, checkedAt: r.now()}
+	r.status[key] = statusEntry{status: st, checkedAt: r.now()}
 	r.mu.Unlock()
 	return st
+}
+
+// probeCacheKey scopes the probe cache to the credential identity: BYO apps
+// key by their app+installation; the platform app keys by org (one platform
+// installation per git-org).
+func probeCacheKey(cfg *types.TenantGitConfig) string {
+	if cfg.GitHubApp != nil {
+		return byoCacheKey(cfg)
+	}
+	return "p:" + cfg.OrgID
 }
 
 func (r *Resolver) probe(ctx context.Context, cfg *types.TenantGitConfig) *types.GitProviderStatus {

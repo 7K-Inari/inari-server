@@ -599,6 +599,46 @@ func TestProbeCached(t *testing.T) {
 	}
 }
 
+// Two repos in the same org with different BYO apps must not share a probe
+// cache entry — the first probe's result must not leak into the second.
+func TestProbeCacheIsolationPerRepo(t *testing.T) {
+	gh := &fakeGitHub{installations: []map[string]any{inst(2, "acme"), inst(3, "acme")}}
+	_, keyA := writePlatformKey(t)
+	_, keyB := writePlatformKey(t)
+	r, srv := newTestResolver(t, gh, func(c *ResolverConfig) {
+		c.KeyLoader = func(_ context.Context, ref *types.GitHubAppSecretRef) (*rsa.PrivateKey, error) {
+			switch ref.SecretName {
+			case "key-a":
+				return keyA, nil
+			case "key-b":
+				return keyB, nil
+			}
+			return nil, fmt.Errorf("unknown secret %q", ref.SecretName)
+		}
+	})
+	ctx := context.Background()
+
+	cfgA := gitCfg("org:1", "acme/team-a-gitops")
+	cfgA.GitHubApp = &types.GitHubAppConfig{
+		AppID: 91, InstallationID: 2, APIBase: srv.URL,
+		KeyRef: &types.GitHubAppSecretRef{SecretName: "key-a", Namespace: "ns", Key: "k"},
+	}
+	cfgB := gitCfg("org:1", "acme/team-b-gitops")
+	cfgB.GitHubApp = &types.GitHubAppConfig{
+		AppID: 92, InstallationID: 3, APIBase: srv.URL,
+		KeyRef: &types.GitHubAppSecretRef{SecretName: "key-b", Namespace: "ns", Key: "k"},
+	}
+
+	stA := r.Probe(ctx, cfgA)
+	stB := r.Probe(ctx, cfgB)
+	if stA.InstallationID == stB.InstallationID && stA.InstallationID != 0 {
+		t.Errorf("probe cache leaked across repos: both got installation %d", stA.InstallationID)
+	}
+	if stA.InstallationID != 2 || stB.InstallationID != 3 {
+		t.Errorf("probe installations = %d, %d; want 2 and 3", stA.InstallationID, stB.InstallationID)
+	}
+}
+
 // Two repos in the same org with different per-repo BYO apps must resolve
 // to distinct providers (the cache key is per-credential, not per-org).
 func TestResolverBYOCacheIsolationPerRepo(t *testing.T) {

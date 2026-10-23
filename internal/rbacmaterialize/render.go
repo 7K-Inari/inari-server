@@ -166,6 +166,39 @@ subjects:
 	}
 }
 
+// TeamRBACPath is the per-team repo path for the opt-in team-repo writes
+// (Feature A): teams/<team>/rbac/clusterrolebindings.yaml.
+func TeamRBACPath(teamName string) string {
+	return "teams/" + teamName + "/rbac/clusterrolebindings.yaml"
+}
+
+// RenderTeamRBAC renders one team's role-qualified ClusterRoleBinding into
+// its own repo (teams/<team>/rbac/). The team repo's ArgoCD root app
+// (Feature B) syncs it; the binding shape is identical to the baseline
+// render so in-cluster semantics match.
+func RenderTeamRBAC(slug string, team types.Team) []gitprovider.File {
+	if team.RoleName == "" {
+		return nil
+	}
+	binding := fmt.Sprintf(`apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: %s
+  labels:
+    app.kubernetes.io/managed-by: inari
+    inari.io/tenant: %s
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: %s
+subjects:
+  - kind: Group
+    name: %s
+    apiGroup: rbac.authorization.k8s.io
+`, BindingName(slug, team.Name, team.RoleName), slug, ClusterRoleName(slug, team.RoleName), GroupSubjectName(team.KeycloakGroupPath))
+	return []gitprovider.File{{Path: TeamRBACPath(team.Name), Content: []byte(binding)}}
+}
+
 // RenderRootApp renders the tenant-local ArgoCD root application syncing
 // baseline/ from the state repo. It is the minimal slice of
 // tenantzonefactory.RenderBaseline needed to make a repo created outside

@@ -228,6 +228,130 @@ func TestHandlerPropagatesGitErrors(t *testing.T) {
 	}
 }
 
+// fakeGitRepos is the registry seam fake (default row + team rows).
+type fakeGitRepos struct {
+	def   *types.TenantGitRepo
+	teams []*types.TenantGitRepo
+	err   error
+}
+
+func (f *fakeGitRepos) GetDefaultGitRepo(context.Context, string) (*types.TenantGitRepo, error) {
+	return f.def, f.err
+}
+
+func (f *fakeGitRepos) ListTeamGitRepos(context.Context, string) ([]*types.TenantGitRepo, error) {
+	return f.teams, f.err
+}
+
+// TestHandlerPrefersRegistryDefault pins Feature A targeting: when the
+// registry has a default row, its repo/branch/policy win over the legacy
+// git-config projection.
+func TestHandlerPrefersRegistryDefault(t *testing.T) {
+	git := gitprovider.NewFake()
+	h := NewHandler(&fakeTenancy{
+		org: &types.Organization{ID: "org:1", Slug: "acme", Status: "active"},
+	}, &fakeGitConfigs{cfg: &types.TenantGitConfig{
+		OrgID: "org:1", Repo: "legacy/state", CommitPolicy: types.CommitPolicyDirect, BaseBranch: "main",
+	}}, git, nil).WithGitRepos(&fakeGitRepos{def: &types.TenantGitRepo{
+		ID: "r1", OrgID: "org:1", Name: "baseline", Repo: "registry/baseline",
+		Scope: types.GitRepoScopePlatform, CommitPolicy: types.CommitPolicyDirect, BaseBranch: "trunk",
+		IsDefault: true,
+	}})
+	if err := h.Handle(context.Background(), event(t, types.EventRBACMappingsUpdated,
+		types.RBACMappingsPayload{OrgID: "org:1"})); err != nil {
+		t.Fatal(err)
+	}
+	if files := git.Files("registry/baseline", "trunk"); len(files) == 0 {
+		t.Error("nothing committed to the registry default repo/branch")
+	}
+	if files := git.Files("legacy/state", "main"); len(files) != 0 {
+		t.Errorf("legacy git-config repo must not be written: %v", keys(files))
+	}
+}
+
+// TestHandlerRegistryDefaultPullRequest pins PR policy from the row.
+func TestHandlerRegistryDefaultPullRequest(t *testing.T) {
+	git := gitprovider.NewFake()
+	h := NewHandler(&fakeTenancy{
+		org: &types.Organization{ID: "org:1", Slug: "acme", Status: "active"},
+	}, &fakeGitConfigs{}, git, nil).WithGitRepos(&fakeGitRepos{def: &types.TenantGitRepo{
+		ID: "r1", OrgID: "org:1", Name: "baseline", Repo: "acme-inari-state",
+		Scope: types.GitRepoScopePlatform, CommitPolicy: types.CommitPolicyPullRequest, BaseBranch: "main",
+		IsDefault: true,
+	}})
+	if err := h.Handle(context.Background(), event(t, types.EventRBACMappingsUpdated,
+		types.RBACMappingsPayload{OrgID: "org:1"})); err != nil {
+		t.Fatal(err)
+	}
+	if len(git.PRs) != 1 {
+		t.Fatalf("expected 1 PR, got %d", len(git.PRs))
+	}
+	if files := git.Files("acme-inari-state", "main"); len(files) != 0 {
+		t.Errorf("PR policy must not commit directly: %v", keys(files))
+	}
+}
+
+// TestHandlerTeamRepoWritesDisabledByDefault pins the default: no team
+// repos are written even when team rows exist.
+func TestHandlerTeamRepoWritesDisabledByDefault(t *testing.T) {
+	git := gitprovider.NewFake()
+	h := NewHandler(&fakeTenancy{
+		org: &types.Organization{ID: "org:1", Slug: "acme", Status: "active"},
+		teams: []types.Team{
+			{ID: "t1", Name: "team-a", RoleName: "editor", KeycloakGroupPath: "tenant-acme/team-a"},
+		},
+	}, &fakeGitConfigs{}, git, nil).WithGitRepos(&fakeGitRepos{
+		teams: []*types.TenantGitRepo{{
+			ID: "r2", OrgID: "org:1", Name: "team-a", Repo: "acme/team-a-gitops",
+			Scope: types.GitRepoScopeTeam, TeamID: "t1", CommitPolicy: types.CommitPolicyDirect, BaseBranch: "main",
+		}},
+	})
+	if err := h.Handle(context.Background(), event(t, types.EventRBACMappingsUpdated,
+		types.RBACMappingsPayload{OrgID: "org:1"})); err != nil {
+		t.Fatal(err)
+	}
+	if files := git.Files("acme/team-a-gitops", "main"); len(files) != 0 {
+		t.Errorf("team repo written while team writes are disabled: %v", keys(files))
+	}
+}
+
+// TestHandlerTeamRepoWrites pins the opt-in per-team path: each team-scope
+// repo gets that team's bindings at teams/<team>/rbac/.
+func TestHandlerTeamRepoWrites(t *testing.T) {
+	git := gitprovider.NewFake()
+	h := NewHandler(&fakeTenancy{
+		org: &types.Organization{ID: "org:1", Slug: "acme", Status: "active"},
+		teams: []types.Team{
+			{ID: "t1", Name: "team-a", RoleName: "editor", KeycloakGroupPath: "tenant-acme/team-a"},
+			{ID: "t2", Name: "team-b", RoleName: "viewer", KeycloakGroupPath: "tenant-acme/team-b"},
+		},
+	}, &fakeGitConfigs{}, git, nil).WithGitRepos(&fakeGitRepos{
+		teams: []*types.TenantGitRepo{{
+			ID: "r2", OrgID: "org:1", Name: "team-a", Repo: "acme/team-a-gitops",
+			Scope: types.GitRepoScopeTeam, TeamID: "t1", CommitPolicy: types.CommitPolicyDirect, BaseBranch: "main",
+		}},
+	}).WithTeamRepoWrites()
+	if err := h.Handle(context.Background(), event(t, types.EventRBACMappingsUpdated,
+		types.RBACMappingsPayload{OrgID: "org:1"})); err != nil {
+		t.Fatal(err)
+	}
+	// Baseline write still happened (default convention repo).
+	if files := git.Files("acme-inari-state", "main"); len(files) == 0 {
+		t.Error("baseline repo not written")
+	}
+	files := git.Files("acme/team-a-gitops", "main")
+	bindings, ok := files["teams/team-a/rbac/clusterrolebindings.yaml"]
+	if !ok {
+		t.Fatalf("team-a bindings not committed: %v", keys(files))
+	}
+	if !strings.Contains(bindings, "tenant-acme-team-a-editor") {
+		t.Errorf("team-a binding missing:\n%s", bindings)
+	}
+	if strings.Contains(bindings, "team-b") {
+		t.Errorf("team-a repo must not carry team-b bindings:\n%s", bindings)
+	}
+}
+
 type failGit struct{ *gitprovider.Fake }
 
 func (f *failGit) CommitFiles(context.Context, string, string, []gitprovider.File, string) (*gitprovider.Result, error) {

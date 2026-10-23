@@ -96,6 +96,13 @@ type Deps struct {
 	FeatureFlags            *featureflags.Service
 	FeatureFlagsResolver    *featureflags.Resolver
 	FeatureFlagEnvOverrides map[string]bool
+
+	// Repo-write enforcement seams for the orchestrator handler (Feature
+	// A, decision 5b). Nil-safe: a zero Deps (export-openapi) leaves the
+	// check disabled.
+	OrchestratorTeams     orchestrator.TeamLister
+	OrchestratorRepos     orchestrator.RepoGetter
+	OrchestratorInstances orchestrator.InstanceGetter
 }
 
 // Register mounts every module's REST routes on the huma API. The call order
@@ -114,7 +121,9 @@ func Register(api huma.API, d Deps) {
 	inventory.NewHandler(d.Inventory, d.Tenancy, d.Authz).RegisterRoutes(api)
 	platformresources.NewHandler(d.PlatformResources, d.Tenancy, d.Authz).RegisterRoutes(api)
 	orchestrator.NewHandler(d.Orchestrator, d.Tenancy, d.Authz).
-		WithAllowedAPIBases(d.AllowedAPIBases).RegisterRoutes(api)
+		WithAllowedAPIBases(d.AllowedAPIBases).
+		WithRepoWriteEnforcement(d.OrchestratorTeams, d.OrchestratorRepos, d.OrchestratorInstances).
+		RegisterRoutes(api)
 	gitrepos.NewHandler(d.GitRepos, d.Tenancy, d.Authz).RegisterRoutes(api)
 	cloudaccounts.NewHandler(d.CloudAccounts, d.Tenancy, d.Clusters, d.Authz).RegisterRoutes(api)
 	notifications.NewHandler(d.Notifications, d.Tenancy, d.Authz).RegisterRoutes(api)

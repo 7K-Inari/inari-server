@@ -186,6 +186,33 @@ func (a orgGitConfigsAdapter) OrgGitHubApp(ctx context.Context, orgID string) (*
 	return cfg.GitHubApp, nil
 }
 
+// instanceGetterAdapter binds inventory.Store to the orchestrator's
+// InstanceGetter seam (recorded-repo enforcement on mutations).
+type instanceGetterAdapter struct {
+	store *inventory.Store
+	db    *db.DB
+}
+
+func (a instanceGetterAdapter) GetInstance(ctx context.Context, id string) (*types.ResourceInstance, error) {
+	return a.store.Get(ctx, a.db.Pool, id)
+}
+
+// baselineReposAdapter registers the zone's state repo in the
+// tenant_git_repos registry (tenantzonefactory.BaselineRepos seam,
+// Feature A). Idempotent: upsert keyed on (org_id, 'baseline').
+type baselineReposAdapter struct {
+	store *inventory.Store
+	db    *db.DB
+}
+
+func (a baselineReposAdapter) EnsureDefaultBaselineRepo(ctx context.Context, orgID, repo string) error {
+	return a.store.UpsertGitRepo(ctx, a.db.Pool, &types.TenantGitRepo{
+		OrgID: orgID, Name: "baseline", Repo: repo,
+		Provider: types.GitRepoProviderGitHub, Scope: types.GitRepoScopePlatform,
+		CommitPolicy: types.CommitPolicyDirect, BaseBranch: "main", IsDefault: true,
+	})
+}
+
 // policyCheckerAdapter maps the orchestrator's policy seam onto the Policy
 // Service (plan §5.11).
 type policyCheckerAdapter struct{ ps *policyservice.Service }
@@ -767,9 +794,11 @@ func run() error {
 	// Multi-repo GitOps registry (Feature A): team-filtered repo CRUD with
 	// guarded unregister, over the same inventory store + a repo-aware git
 	// resolver (per-repo BYO → org-wide app → platform app precedence).
-	gitReposSvc := gitrepos.NewService(invStore,
-		gitprovider.NewRepoResolver(repoStoreAdapter{invStore, database}, orgGitConfigsAdapter{invStore, database}, git),
-		gateway.Queue(), auditStore, database)
+	repoResolver := gitprovider.NewRepoResolver(repoStoreAdapter{invStore, database}, orgGitConfigsAdapter{invStore, database}, git)
+	gitReposSvc := gitrepos.NewService(invStore, repoResolver, gateway.Queue(), auditStore, database)
+	// Writers resolve their target repo through the registry (Feature A):
+	// deploy/update/delete honor the repoId selector / recorded repo.
+	orchestratorSvc.WithRepoResolver(repoResolver)
 
 	cloudAccountsSvc := cloudaccounts.NewService(database, cloudaccounts.NewStore(), auditStore, cloudaccounts.NewSTSValidator())
 
@@ -896,6 +925,7 @@ func run() error {
 	tzfEnv.Wiring = &tenantzonefactory.ModuleWiring{
 		Tenants: svc, IDP: idp, Clusters: registry, Accounts: cloudAccountsSvc,
 		Git: gitPerRepo, GitCfg: orchestratorSvc,
+		BaselineRepos:      baselineReposAdapter{invStore, database},
 		PlatformResources:  platformResourcesSvc,
 		PlatformGitOpsRepo: cfg.PlatformGitOpsRepo,
 		Agent:              agentParams,
@@ -927,9 +957,16 @@ func run() error {
 			// anchor ClusterRoles + Keycloak-group bindings into the tenant
 			// state repo on rbac.mappings.updated / tenant & team lifecycle
 			// events; the tenant-local ArgoCD syncs them into the cluster.
-			audit.Named("rbac-materialize", rbacmaterialize.NewHandler(svc,
-				rbacmaterialize.NewInventoryGitConfigs(database, inventory.NewStore()), gitprovider.PerRepo{R: git}, log).
-				WithStateRepoOrg(cfg.GitStateRepoOrg)),
+			audit.Named("rbac-materialize", func() *rbacmaterialize.Handler {
+				h := rbacmaterialize.NewHandler(svc,
+					rbacmaterialize.NewInventoryGitConfigs(database, inventory.NewStore()), gitprovider.PerRepo{R: git}, log).
+					WithStateRepoOrg(cfg.GitStateRepoOrg).
+					WithGitRepos(rbacmaterialize.NewInventoryGitRepos(database, inventory.NewStore()))
+				if cfg.RBACTeamRepoWrites {
+					h = h.WithTeamRepoWrites()
+				}
+				return h
+			}()),
 		})
 	if err != nil {
 		return err
@@ -976,6 +1013,12 @@ func run() error {
 		RemoteEntries:     remoteEntries,
 
 		PlatformAdminGroup: cfg.PlatformAdminGroup,
+
+		// Feature A repo-write enforcement (decision 5b): team-scope repos
+		// are writable by owning-team members; platform repos by settings-write.
+		OrchestratorTeams:     svc,
+		OrchestratorRepos:     repoStoreAdapter{invStore, database},
+		OrchestratorInstances: instanceGetterAdapter{invStore, database},
 
 		AgentSupportedRange:     cfg.AgentSupportedRange,
 		AgentCurrentVersion:     cfg.CurrentAgentVersion,

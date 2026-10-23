@@ -278,7 +278,7 @@ func TestQAAuthzMatrix(t *testing.T) {
 
 	checks := []struct {
 		method, path, token, body string
-		want                        int
+		want                      int
 	}{
 		{"GET", base, "", "", http.StatusUnauthorized},
 		{"POST", base, "", `{"name":"y","repo":"acme/y"}`, http.StatusUnauthorized},

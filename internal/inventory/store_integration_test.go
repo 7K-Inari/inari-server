@@ -524,3 +524,78 @@ func TestGitRepoRefCounts(t *testing.T) {
 		t.Errorf("cross-org refs = %+v, want zero", refs)
 	}
 }
+
+// TestInstanceRepoIDAttribution pins the Feature A rule: an instance with
+// an explicit repo_id attributes to THAT repo (team repo), not to its
+// cluster's bound baseline.
+func TestInstanceRepoIDAttribution(t *testing.T) {
+	database, ctx := setupStoreTest(t)
+	seedOrg(t, database, ctx, "org:1", "acme")
+	clusterID := seedCluster(t, database, ctx, "org:1", "prod")
+	s := NewStore()
+
+	baseline := &types.TenantGitRepo{OrgID: "org:1", Name: "baseline", Repo: "acme/state",
+		Scope: types.GitRepoScopePlatform, IsDefault: true}
+	if err := s.UpsertGitRepo(ctx, database.Pool, baseline); err != nil {
+		t.Fatal(err)
+	}
+	teamRepo := &types.TenantGitRepo{OrgID: "org:1", Name: "team-a", Repo: "acme/team-a",
+		Scope: types.GitRepoScopeTeam}
+	if err := s.UpsertGitRepo(ctx, database.Pool, teamRepo); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BindClusterBaseline(ctx, database.Pool, clusterID, baseline.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Instance recorded against the team repo on the baseline-bound cluster.
+	inst := &types.ResourceInstance{
+		ID: "inst-team", OrgID: "org:1", ClusterID: clusterID, CatalogItemID: "curated:web-service",
+		Version: "v1", Spec: json.RawMessage(`{}`), State: "running", ManagementMode: "adopt",
+		RepoID: teamRepo.ID,
+	}
+	if err := s.Create(ctx, database.Pool, inst); err != nil {
+		t.Fatal(err)
+	}
+
+	// Round-trip: the recorded repo survives a read.
+	got, err := s.Get(ctx, database.Pool, "inst-team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RepoID != teamRepo.ID {
+		t.Errorf("read repo_id = %q, want %q", got.RepoID, teamRepo.ID)
+	}
+
+	// Attributes to the team repo, not the baseline.
+	refs, err := s.GitRepoRefCounts(ctx, database.Pool, "org:1", teamRepo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refs.Instances != 1 {
+		t.Errorf("team repo instance refs = %d, want 1", refs.Instances)
+	}
+	refs, err = s.GitRepoRefCounts(ctx, database.Pool, "org:1", baseline.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refs.Instances != 0 {
+		t.Errorf("baseline instance refs = %d, want 0 (instance lives on the team repo)", refs.Instances)
+	}
+
+	// ListGitRepoInstances follows the same attribution.
+	teamInsts, err := s.ListGitRepoInstances(ctx, database.Pool, "org:1", teamRepo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(teamInsts) != 1 || teamInsts[0].ID != "inst-team" {
+		t.Errorf("team repo instances = %+v, want [inst-team]", teamInsts)
+	}
+	baseInsts, err := s.ListGitRepoInstances(ctx, database.Pool, "org:1", baseline.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(baseInsts) != 0 {
+		t.Errorf("baseline instances = %+v, want none", baseInsts)
+	}
+}

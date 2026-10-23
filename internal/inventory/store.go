@@ -257,6 +257,28 @@ func (s *Store) GitConfig(ctx context.Context, q db.Querier, orgID string) (*typ
 	return &c, nil
 }
 
+// packGitHubAppColumns flattens a BYO app reference into its storage
+// columns. A nil KeyRef is rejected here: persisting it would violate the
+// all-or-nothing CHECK constraint (app id set, key ref NULL) and a nil
+// dereference must never escape the store.
+func packGitHubAppColumns(app *types.GitHubAppConfig) (appID, installationID *int64, keySecret, keyKey, apiBase *string, err error) {
+	if app == nil {
+		return nil, nil, nil, nil, nil, nil
+	}
+	if app.KeyRef == nil {
+		return nil, nil, nil, nil, nil, errors.New("inventory: github app keyRef is required")
+	}
+	appID = &app.AppID
+	installationID = &app.InstallationID
+	packed := app.KeyRef.Namespace + "/" + app.KeyRef.SecretName
+	keySecret = &packed
+	keyKey = &app.KeyRef.Key
+	if app.APIBase != "" {
+		apiBase = &app.APIBase
+	}
+	return appID, installationID, keySecret, keyKey, apiBase, nil
+}
+
 // gitAppFromColumns rebuilds the BYO app reference from storage. The
 // namespace/name pair is packed in one column (validated at write time).
 func gitAppFromColumns(appID int64, installationID *int64, keySecret, keyKey, apiBase *string) *types.GitHubAppConfig {
@@ -294,13 +316,10 @@ func (s *Store) UpsertGitConfig(ctx context.Context, q db.Querier, c *types.Tena
 	var appID, installationID *int64
 	var keySecret, keyKey, apiBase *string
 	if c.GitHubApp != nil {
-		appID = &c.GitHubApp.AppID
-		installationID = &c.GitHubApp.InstallationID
-		packed := c.GitHubApp.KeyRef.Namespace + "/" + c.GitHubApp.KeyRef.SecretName
-		keySecret = &packed
-		keyKey = &c.GitHubApp.KeyRef.Key
-		if c.GitHubApp.APIBase != "" {
-			apiBase = &c.GitHubApp.APIBase
+		var err error
+		appID, installationID, keySecret, keyKey, apiBase, err = packGitHubAppColumns(c.GitHubApp)
+		if err != nil {
+			return err
 		}
 	}
 	// An omitted githubApp must not wipe the stored reference (a writer
@@ -375,13 +394,10 @@ func (s *Store) syncDefaultRepoFromConfig(ctx context.Context, q db.Querier, c *
 	var appID, installationID *int64
 	var keySecret, keyKey, apiBase *string
 	if c.GitHubApp != nil {
-		appID = &c.GitHubApp.AppID
-		installationID = &c.GitHubApp.InstallationID
-		packed := c.GitHubApp.KeyRef.Namespace + "/" + c.GitHubApp.KeyRef.SecretName
-		keySecret = &packed
-		keyKey = &c.GitHubApp.KeyRef.Key
-		if c.GitHubApp.APIBase != "" {
-			apiBase = &c.GitHubApp.APIBase
+		var perr error
+		appID, installationID, keySecret, keyKey, apiBase, perr = packGitHubAppColumns(c.GitHubApp)
+		if perr != nil {
+			return perr
 		}
 	}
 	if c.ClearGitHubApp {
@@ -496,13 +512,10 @@ func (s *Store) UpsertGitRepo(ctx context.Context, q db.Querier, r *types.Tenant
 	var appID, installationID *int64
 	var keySecret, keyKey, apiBase *string
 	if r.GitHubApp != nil {
-		appID = &r.GitHubApp.AppID
-		installationID = &r.GitHubApp.InstallationID
-		packed := r.GitHubApp.KeyRef.Namespace + "/" + r.GitHubApp.KeyRef.SecretName
-		keySecret = &packed
-		keyKey = &r.GitHubApp.KeyRef.Key
-		if r.GitHubApp.APIBase != "" {
-			apiBase = &r.GitHubApp.APIBase
+		var err error
+		appID, installationID, keySecret, keyKey, apiBase, err = packGitHubAppColumns(r.GitHubApp)
+		if err != nil {
+			return err
 		}
 	}
 	byoClause := `github_app_id = COALESCE(EXCLUDED.github_app_id, tenant_git_repos.github_app_id),

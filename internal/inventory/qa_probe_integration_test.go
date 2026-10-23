@@ -1,9 +1,7 @@
 //go:build integration
 
 // QA probe tests: boundary, error-path, and concurrency coverage for the
-// multi-repo GitOps registry. Probes marked "BUG confirmed" characterize
-// behavior flagged in review; they log rather than fail so the suite stays
-// green until the owning task decides on the fix.
+// multi-repo GitOps registry.
 package inventory
 
 import (
@@ -33,8 +31,9 @@ func TestQARepoUniqueConflictOnRepoColumn(t *testing.T) {
 	t.Logf("repo collision error: %v", err)
 }
 
-// QA: a team-scope repo can reference a team owned by a DIFFERENT org —
-// no cross-org FK guard exists. Document actual behavior.
+// QA: a team-scope repo referencing a team owned by a DIFFERENT org must
+// be rejected — otherwise the team filter in ListGitRepos leaks the repo
+// to the foreign team.
 func TestQACrossOrgTeamReference(t *testing.T) {
 	database, ctx := setupStoreTest(t)
 	seedOrg(t, database, ctx, "org:1", "acme")
@@ -46,22 +45,14 @@ func TestQACrossOrgTeamReference(t *testing.T) {
 		OrgID: "org:1", Name: "sneaky", Repo: "acme/sneaky",
 		Scope: types.GitRepoScopeTeam, TeamID: teamInOrg2,
 	}
-	err := s.UpsertGitRepo(ctx, database.Pool, r)
-	if err == nil {
-		t.Log("BUG: team-scope repo in org:1 accepted a team_id owned by org:2")
-		// And org:2's team now sees org:1's repo in its filtered list.
-		view, lerr := s.ListGitRepos(ctx, database.Pool, "org:1", &teamInOrg2)
-		if lerr != nil {
-			t.Fatal(lerr)
-		}
-		for _, got := range view {
-			if got.Name == "sneaky" {
-				t.Log("BUG confirmed: cross-org team can see the repo via team filter")
-			}
-		}
-		return
+	if err := s.UpsertGitRepo(ctx, database.Pool, r); !errors.Is(err, ErrTeamNotInOrg) {
+		t.Fatalf("want ErrTeamNotInOrg, got %v", err)
 	}
-	t.Logf("cross-org team reference rejected: %v", err)
+	// A nonexistent team id is rejected the same way.
+	r.TeamID = "00000000-0000-0000-0000-000000000000"
+	if err := s.UpsertGitRepo(ctx, database.Pool, r); !errors.Is(err, ErrTeamNotInOrg) {
+		t.Fatalf("missing team: want ErrTeamNotInOrg, got %v", err)
+	}
 }
 
 // QA: GitHubApp with nil KeyRef must not panic the store.
@@ -77,7 +68,7 @@ func TestQANilKeyRef(t *testing.T) {
 	}()
 	r := &types.TenantGitRepo{
 		OrgID: "org:1", Name: "nil-keyref", Repo: "acme/nil-keyref",
-		Scope:    types.GitRepoScopeTeam,
+		Scope:     types.GitRepoScopeTeam,
 		GitHubApp: &types.GitHubAppConfig{AppID: 1, InstallationID: 2},
 	}
 	if err := s.UpsertGitRepo(ctx, database.Pool, r); err != nil {
@@ -106,8 +97,8 @@ func TestQANilKeyRefConfig(t *testing.T) {
 	}
 }
 
-// QA: SetDefaultGitRepo on a pool (no tx) — demote succeeds, promote of a
-// missing id fails, leaving the org with ZERO defaults.
+// QA: SetDefaultGitRepo is atomic even without a tx: a missing target id
+// must leave the existing default untouched.
 func TestQASetDefaultNonAtomic(t *testing.T) {
 	database, ctx := setupStoreTest(t)
 	seedOrg(t, database, ctx, "org:1", "acme")
@@ -117,16 +108,21 @@ func TestQASetDefaultNonAtomic(t *testing.T) {
 	if err := s.UpsertGitRepo(ctx, database.Pool, r); err != nil {
 		t.Fatal(err)
 	}
-	// Non-tx call with a bogus id: demote runs, promote no-ops.
+	// Non-tx call with a bogus id: must not demote the current default.
 	err := s.SetDefaultGitRepo(ctx, database.Pool, "org:1", "does-not-exist")
 	if !errors.Is(err, ErrRepoNotFound) {
 		t.Fatalf("want ErrRepoNotFound, got %v", err)
 	}
-	_, derr := s.GetDefaultGitRepo(ctx, database.Pool, "org:1")
-	if errors.Is(derr, ErrRepoNotFound) {
-		t.Log("BUG confirmed: org left with zero default repos after failed non-tx SetDefaultGitRepo")
-	} else if derr != nil {
-		t.Fatal(derr)
+	def, derr := s.GetDefaultGitRepo(ctx, database.Pool, "org:1")
+	if derr != nil {
+		t.Fatalf("default lost after failed SetDefaultGitRepo: %v", derr)
+	}
+	if def.ID != r.ID {
+		t.Errorf("default changed to %q on failed promote", def.ID)
+	}
+	// Re-setting the same repo as default is idempotent.
+	if err := s.SetDefaultGitRepo(ctx, database.Pool, "org:1", r.ID); err != nil {
+		t.Fatalf("idempotent re-set: %v", err)
 	}
 }
 
@@ -154,8 +150,8 @@ func TestQASecondDefaultRejected(t *testing.T) {
 	}
 }
 
-// QA: re-upserting the default repo with IsDefault zero-value demotes it
-// (known review finding — confirm empirically).
+// QA: re-upserting the default repo with IsDefault zero-value must keep
+// the stored flag — promotion/demotion is SetDefaultGitRepo's job only.
 func TestQAUpsertDemotesDefault(t *testing.T) {
 	database, ctx := setupStoreTest(t)
 	seedOrg(t, database, ctx, "org:1", "acme")
@@ -170,11 +166,12 @@ func TestQAUpsertDemotesDefault(t *testing.T) {
 	if err := s.UpsertGitRepo(ctx, database.Pool, upd); err != nil {
 		t.Fatal(err)
 	}
-	_, derr := s.GetDefaultGitRepo(ctx, database.Pool, "org:1")
-	if errors.Is(derr, ErrRepoNotFound) {
-		t.Log("CONFIRMED review finding: re-upsert demoted the default; org has zero defaults")
-	} else if derr != nil {
-		t.Fatal(derr)
+	def, derr := s.GetDefaultGitRepo(ctx, database.Pool, "org:1")
+	if derr != nil {
+		t.Fatalf("default lost on re-upsert: %v", derr)
+	}
+	if def.ID != r.ID || def.Repo != "acme/state-2" {
+		t.Errorf("default = %+v, want id %q with updated repo", def, r.ID)
 	}
 }
 

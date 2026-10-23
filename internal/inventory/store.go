@@ -29,6 +29,11 @@ var ErrAddonNotFound = errors.New("inventory: cluster addon not found")
 // org default).
 var ErrRepoInUse = errors.New("inventory: git repo in use")
 
+// ErrTeamNotInOrg is returned when a repo write references a team owned by
+// a different org (cross-org team references are an authorization leak:
+// the team filter in ListGitRepos would show the repo to the foreign team).
+var ErrTeamNotInOrg = errors.New("inventory: team does not belong to org")
+
 // newULID returns a new ULID string for registry rows.
 func newULID() string {
 	return ulid.MustNew(ulid.Timestamp(time.Now()), rand.Reader).String()
@@ -489,6 +494,10 @@ func (s *Store) GetDefaultGitRepo(ctx context.Context, q db.Querier, orgID strin
 // UpsertGitRepo inserts or updates a repo row (conflict key: org_id+name).
 // A new row gets a generated ULID. BYO app columns follow the same
 // preserve-on-omit / ClearGitHubApp semantics as UpsertGitConfig.
+// is_default is insert-only: promotion/demotion goes exclusively through
+// SetDefaultGitRepo, so a re-upsert with the Go zero value cannot strip an
+// org's default. A team-scope write referencing another org's team is
+// rejected with ErrTeamNotInOrg.
 func (s *Store) UpsertGitRepo(ctx context.Context, q db.Querier, r *types.TenantGitRepo) error {
 	if r.ID == "" {
 		r.ID = newULID()
@@ -507,6 +516,16 @@ func (s *Store) UpsertGitRepo(ctx context.Context, q db.Querier, r *types.Tenant
 	}
 	var teamID *string
 	if r.TeamID != "" {
+		var teamOrg string
+		if err := q.QueryRow(ctx, `SELECT org_id FROM teams WHERE id = $1::uuid`, r.TeamID).Scan(&teamOrg); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrTeamNotInOrg
+			}
+			return err
+		}
+		if teamOrg != r.OrgID {
+			return ErrTeamNotInOrg
+		}
 		teamID = &r.TeamID
 	}
 	var appID, installationID *int64
@@ -534,7 +553,7 @@ func (s *Store) UpsertGitRepo(ctx context.Context, q db.Querier, r *types.Tenant
 		ON CONFLICT (org_id, name) DO UPDATE SET repo = EXCLUDED.repo,
 		  provider = EXCLUDED.provider, scope = EXCLUDED.scope, team_id = EXCLUDED.team_id,
 		  commit_policy = EXCLUDED.commit_policy, base_branch = EXCLUDED.base_branch,
-		  is_default = EXCLUDED.is_default, updated_at = now(), %s`
+		  updated_at = now(), %s`
 	_, err := q.Exec(ctx, fmt.Sprintf(sqlFmt, byoClause),
 		r.ID, r.OrgID, r.Name, r.Repo, r.Provider, r.Scope, teamID, r.CommitPolicy, r.BaseBranch, r.IsDefault,
 		appID, installationID, keySecret, keyKey, apiBase)
@@ -564,18 +583,34 @@ func (s *Store) DeleteGitRepo(ctx context.Context, q db.Querier, orgID, id strin
 }
 
 // SetDefaultGitRepo promotes one repo to the org default, demoting the
-// previous one. The partial unique index one_default_repo_per_org enforces
-// a single default; both updates must run inside one transaction (the
-// caller passes a tx Querier).
+// previous one. The flip is a single statement with a forced demote-then-
+// promote order (the partial unique index one_default_repo_per_org is
+// checked per row, so the old default must clear before the new one sets).
+// The demote is gated on the target row existing, so a missing id leaves
+// the current default untouched (ErrRepoNotFound) and the org can never
+// end up with zero defaults. Safe to call on any Querier — no transaction
+// required.
 func (s *Store) SetDefaultGitRepo(ctx context.Context, q db.Querier, orgID, id string) error {
-	if _, err := q.Exec(ctx, `UPDATE tenant_git_repos SET is_default = FALSE, updated_at = now() WHERE org_id = $1 AND is_default`, orgID); err != nil {
+	const sql = `WITH target AS (
+		SELECT id FROM tenant_git_repos WHERE org_id = $1 AND id = $2
+	), demoted AS (
+		UPDATE tenant_git_repos SET is_default = FALSE, updated_at = now()
+		WHERE org_id = $1 AND is_default AND EXISTS (SELECT 1 FROM target)
+		RETURNING id
+	), promoted AS (
+		-- The COUNT(*) >= 0 predicate is always true; it exists to force
+		-- promoted to run after demoted (data-modifying CTEs otherwise
+		-- execute in unspecified order and the unique index would see a
+		-- transient double default).
+		UPDATE tenant_git_repos SET is_default = TRUE, updated_at = now()
+		WHERE id IN (SELECT id FROM target) AND (SELECT COUNT(*) FROM demoted) >= 0
+	)
+	SELECT COUNT(*) FROM target`
+	var n int
+	if err := q.QueryRow(ctx, sql, orgID, id).Scan(&n); err != nil {
 		return err
 	}
-	tag, err := q.Exec(ctx, `UPDATE tenant_git_repos SET is_default = TRUE, updated_at = now() WHERE org_id = $1 AND id = $2`, orgID, id)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
+	if n == 0 {
 		return ErrRepoNotFound
 	}
 	return nil

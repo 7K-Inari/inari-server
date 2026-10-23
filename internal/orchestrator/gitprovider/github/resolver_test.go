@@ -33,6 +33,7 @@ type fakeGitHub struct {
 	probeStatus   atomic.Int32 // force status on /installation/repositories
 	repoSelection string
 	repoNames     []string
+	repoPages     int // >0: paginate /installation/repositories
 }
 
 func (f *fakeGitHub) handler() http.Handler {
@@ -100,8 +101,25 @@ func (f *fakeGitHub) handler() http.Handler {
 				if names == nil {
 					names = []string{"acme-inari-state"}
 				}
+				// Paginate when repoPages > 1 (scopeCheck pagination test).
+				page := 1
+				if p := r.URL.Query().Get("page"); p != "" {
+					_, _ = fmt.Sscanf(p, "%d", &page)
+				}
+				perPage := len(names)
+				if f.repoPages > 1 {
+					perPage = (len(names) + f.repoPages - 1) / f.repoPages
+				}
+				start := (page - 1) * perPage
+				end := start + perPage
+				if start > len(names) {
+					start = len(names)
+				}
+				if end > len(names) {
+					end = len(names)
+				}
 				repos := []map[string]any{}
-				for _, n := range names {
+				for _, n := range names[start:end] {
 					repos = append(repos, map[string]any{"name": n})
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"repository_selection": sel, "repositories": repos})
@@ -745,6 +763,35 @@ func TestResolver401InvalidatesOnlyAffectedGitOrg(t *testing.T) {
 // Repo-aware scope check (Feature A): the advisory warning fires only when
 // the installation is "selected"-scoped AND does not cover the target repo
 // — arbitrary team repo names must not trigger it.
+// scopeCheck paginates through all installation repos: a target on page 2+
+// must not trigger a false scope_warning.
+func TestResolverScopeCheckPaginates(t *testing.T) {
+	// 150 repos across 2 pages; the target is on page 2.
+	names := make([]string, 150)
+	for i := range names {
+		names[i] = fmt.Sprintf("repo-%03d", i)
+	}
+	names[149] = "team-a-gitops" // target on the last page
+	gh := &fakeGitHub{
+		installations: []map[string]any{inst(2, "acme")},
+		repoSelection: "selected",
+		repoNames:     names,
+		repoPages:     2,
+	}
+	var events []ResolvedEvent
+	r, _ := newTestResolver(t, gh, func(c *ResolverConfig) {
+		c.OnResolved = func(_ context.Context, ev ResolvedEvent) { events = append(events, ev) }
+	})
+	if _, _, err := r.ForTenant(context.Background(), gitCfg("org:1", "acme/team-a-gitops")); err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range events {
+		if ev.Result == "scope_warning" {
+			t.Fatalf("false scope_warning for paginated target (events=%+v)", events)
+		}
+	}
+}
+
 func TestResolverScopeCheckRepoAware(t *testing.T) {
 	cases := []struct {
 		name      string

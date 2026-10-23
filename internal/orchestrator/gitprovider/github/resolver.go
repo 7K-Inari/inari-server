@@ -303,26 +303,44 @@ func (r *Resolver) forTenantBYO(ctx context.Context, cfg *types.TenantGitConfig)
 	if ok {
 		return cp.provider, cp.info, nil
 	}
-	keyBytes, err := r.cfg.KeyLoader(ctx, cfg.GitHubApp.KeyRef)
+	// Single-flight the key load + provider construction: concurrent
+	// resolutions for the same credential share one KeyLoader call.
+	v, err, _ := r.sf.Do("byo:"+key, func() (any, error) {
+		// Re-check inside the flight: another goroutine may have completed
+		// while we waited.
+		r.mu.Lock()
+		cp, ok := r.providers[key]
+		r.mu.Unlock()
+		if ok {
+			return cp, nil
+		}
+		keyBytes, err := r.cfg.KeyLoader(ctx, cfg.GitHubApp.KeyRef)
+		if err != nil {
+			return nil, fmt.Errorf("gitprovider github: load tenant app key: %w", err)
+		}
+		base := strings.TrimSuffix(cfg.GitHubApp.APIBase, "/")
+		if base == "" {
+			base = "https://api.github.com"
+		}
+		info := &gitprovider.AuthInfo{
+			Model: gitprovider.AuthModelBYO, AppID: cfg.GitHubApp.AppID,
+			InstallationID: cfg.GitHubApp.InstallationID, APIBase: base,
+		}
+		inner := NewWithKey(cfg.GitHubApp.AppID, cfg.GitHubApp.InstallationID, keyBytes, base)
+		wrapped := r.wrapBYO(inner, cfg.OrgID, key, info)
+		entry := &cachedProvider{provider: wrapped, info: info}
+		r.mu.Lock()
+		r.providers[key] = entry
+		r.mu.Unlock()
+		r.emit(ctx, ResolvedEvent{OrgID: cfg.OrgID, AuthModel: info.Model, AppID: info.AppID, InstallationID: info.InstallationID, APIBase: base, Result: "resolved"})
+		r.scopeCheck(ctx, inner, cfg.OrgID, cfg.Repo, info)
+		return entry, nil
+	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("gitprovider github: load tenant app key: %w", err)
+		return nil, nil, err
 	}
-	base := strings.TrimSuffix(cfg.GitHubApp.APIBase, "/")
-	if base == "" {
-		base = "https://api.github.com"
-	}
-	info := &gitprovider.AuthInfo{
-		Model: gitprovider.AuthModelBYO, AppID: cfg.GitHubApp.AppID,
-		InstallationID: cfg.GitHubApp.InstallationID, APIBase: base,
-	}
-	inner := NewWithKey(cfg.GitHubApp.AppID, cfg.GitHubApp.InstallationID, keyBytes, base)
-	wrapped := r.wrapBYO(inner, cfg.OrgID, key, info)
-	r.mu.Lock()
-	r.providers[key] = &cachedProvider{provider: wrapped, info: info}
-	r.mu.Unlock()
-	r.emit(ctx, ResolvedEvent{OrgID: cfg.OrgID, AuthModel: info.Model, AppID: info.AppID, InstallationID: info.InstallationID, APIBase: base, Result: "resolved"})
-	r.scopeCheck(ctx, inner, cfg.OrgID, cfg.Repo, info)
-	return wrapped, info, nil
+	cp = v.(*cachedProvider)
+	return cp.provider, cp.info, nil
 }
 
 // wrapBYO maps auth failures to typed errors and evicts the failed BYO
@@ -496,27 +514,34 @@ func (r *Resolver) appGetURL(ctx context.Context, url string, out any) (string, 
 // installed-but-not-granted misconfiguration. "all"-scoped installations
 // are broad but functional: no warning. Repo names are arbitrary (Feature
 // A team repos), so the check is repo-aware, not name-pattern-based.
-// Tolerates GHE skew (404/405).
+// Paginates through all installation repos (100 per page). Tolerates GHE
+// skew (404/405).
 func (r *Resolver) scopeCheck(ctx context.Context, p *Provider, orgID, repo string, info *gitprovider.AuthInfo) {
 	_, name, err := splitRepo(repo)
 	if err != nil {
 		return // advisory only
 	}
-	var out struct {
-		Selection string `json:"repository_selection"`
-		Repos     []struct {
-			Name string `json:"name"`
-		} `json:"repositories"`
-	}
-	if _, err := p.do(ctx, http.MethodGet, "/installation/repositories?per_page=100", nil, &out); err != nil {
-		return // advisory only
-	}
-	if out.Selection != "selected" {
-		return
-	}
-	for _, rp := range out.Repos {
-		if strings.EqualFold(rp.Name, name) {
+	for page := 1; page <= 50; page++ { // 5000-repo safety cap
+		var out struct {
+			Selection string `json:"repository_selection"`
+			Repos     []struct {
+				Name string `json:"name"`
+			} `json:"repositories"`
+		}
+		path := fmt.Sprintf("/installation/repositories?per_page=100&page=%d", page)
+		if _, err := p.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+			return // advisory only
+		}
+		if page == 1 && out.Selection != "selected" {
 			return
+		}
+		for _, rp := range out.Repos {
+			if strings.EqualFold(rp.Name, name) {
+				return
+			}
+		}
+		if len(out.Repos) == 0 {
+			break
 		}
 	}
 	r.emit(ctx, ResolvedEvent{OrgID: orgID, AuthModel: info.Model, AppID: info.AppID, InstallationID: info.InstallationID, APIBase: info.APIBase, Result: "scope_warning"})

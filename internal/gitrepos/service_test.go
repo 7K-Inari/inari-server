@@ -219,7 +219,7 @@ func TestUnregisterGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	team, err := svc.Register(context.Background(), "org:1", RegisterInput{
-		Name: "team", Repo: "acme/team", Scope: types.GitRepoScopeTeam, TeamID: "team-1",
+		Name: "team", Repo: "acme/team", Scope: types.GitRepoScopeTeam, TeamID: "11111111-1111-1111-1111-111111111111",
 	}, "user:u")
 	if err != nil {
 		t.Fatal(err)
@@ -265,7 +265,7 @@ func TestUnregisterTeardownDeletesManifests(t *testing.T) {
 	svc := NewService(store, &fakeResolver{provider: prov}, nil, nil)
 
 	team, err := svc.Register(context.Background(), "org:1", RegisterInput{
-		Name: "team", Repo: "acme/team", Scope: types.GitRepoScopeTeam, TeamID: "team-1",
+		Name: "team", Repo: "acme/team", Scope: types.GitRepoScopeTeam, TeamID: "11111111-1111-1111-1111-111111111111",
 	}, "user:u")
 	if err != nil {
 		t.Fatal(err)

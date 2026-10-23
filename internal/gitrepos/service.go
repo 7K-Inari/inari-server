@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -202,6 +203,11 @@ func (s *Service) Register(ctx context.Context, orgID string, in RegisterInput, 
 	default:
 		return nil, fmt.Errorf("%w: scope must be platform or team", ErrInvalidInput)
 	}
+	if in.TeamID != "" {
+		if _, err := uuid.Parse(in.TeamID); err != nil {
+			return nil, fmt.Errorf("%w: teamId must be a UUID", ErrInvalidInput)
+		}
+	}
 
 	row := &types.TenantGitRepo{
 		OrgID: orgID, Name: in.Name, Repo: in.Repo,
@@ -278,6 +284,11 @@ func (s *Service) Update(ctx context.Context, orgID, id string, in PatchInput, a
 	if in.TeamID != nil {
 		if row.Scope != types.GitRepoScopeTeam && *in.TeamID != "" {
 			return nil, fmt.Errorf("%w: platform repos cannot have a team", ErrInvalidInput)
+		}
+		if *in.TeamID != "" {
+			if _, err := uuid.Parse(*in.TeamID); err != nil {
+				return nil, fmt.Errorf("%w: teamId must be a UUID", ErrInvalidInput)
+			}
 		}
 		row.TeamID = *in.TeamID
 	}

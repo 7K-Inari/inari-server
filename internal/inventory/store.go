@@ -54,19 +54,23 @@ func NewStore() *Store { return &Store{} }
 
 const instanceCols = `id, org_id, cluster_id, catalog_item_id, version, owner_team, spec, resource_ref,
                       health, sync_state, status_message, state, management_mode, commit_sha, pr_url,
-                      generation, created_at, updated_at`
+                      repo_id, generation, created_at, updated_at`
 
 func scanInstance(row pgx.Row) (*types.ResourceInstance, error) {
 	var it types.ResourceInstance
 	var ref json.RawMessage
+	var repoID *string
 	err := row.Scan(&it.ID, &it.OrgID, &it.ClusterID, &it.CatalogItemID, &it.Version, &it.OwnerTeam,
 		&it.Spec, &ref, &it.Health, &it.SyncState, &it.StatusMessage, &it.State, &it.ManagementMode,
-		&it.CommitSHA, &it.PRURL, &it.Generation, &it.CreatedAt, &it.UpdatedAt)
+		&it.CommitSHA, &it.PRURL, &repoID, &it.Generation, &it.CreatedAt, &it.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 	if len(ref) > 0 {
 		_ = json.Unmarshal(ref, &it.ResourceRef)
+	}
+	if repoID != nil {
+		it.RepoID = *repoID
 	}
 	return &it, nil
 }
@@ -76,13 +80,17 @@ func (s *Store) Create(ctx context.Context, q db.Querier, it *types.ResourceInst
 	if err != nil {
 		return err
 	}
+	var repoID *string
+	if it.RepoID != "" {
+		repoID = &it.RepoID
+	}
 	const sql = `INSERT INTO resource_instances
 	               (id, org_id, cluster_id, catalog_item_id, version, owner_team, spec, resource_ref,
-	                health, sync_state, status_message, state, management_mode, commit_sha, pr_url, generation)
-	             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`
+	                health, sync_state, status_message, state, management_mode, commit_sha, pr_url, repo_id, generation)
+	             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`
 	_, err = q.Exec(ctx, sql, it.ID, it.OrgID, it.ClusterID, it.CatalogItemID, it.Version, it.OwnerTeam,
 		it.Spec, ref, it.Health, it.SyncState, it.StatusMessage, it.State, it.ManagementMode,
-		it.CommitSHA, it.PRURL, it.Generation)
+		it.CommitSHA, it.PRURL, repoID, it.Generation)
 	return err
 }
 
@@ -648,15 +656,16 @@ func (s *Store) BindClusterBaseline(ctx context.Context, q db.Querier, clusterID
 }
 
 // GitRepoRefCounts counts the live workloads referencing a repo (Feature A
-// unregister guard, decision 6): instances on clusters bound to the repo as
-// their baseline, managed addons pointing at the repo, and bound clusters.
+// unregister guard, decision 6): instances recorded against the repo
+// (repo_id; pre-0036 rows fall back to their cluster's baseline binding),
+// managed addons pointing at the repo, and bound clusters.
 // The repo must belong to the org (cross-org reads as zero counts).
 func (s *Store) GitRepoRefCounts(ctx context.Context, q db.Querier, orgID, repoID string) (*types.GitRepoRefCounts, error) {
 	var c types.GitRepoRefCounts
 	err := q.QueryRow(ctx, `SELECT
 		(SELECT count(*) FROM resource_instances i
 			JOIN clusters c2 ON c2.id = i.cluster_id
-			WHERE i.org_id = $1 AND c2.baseline_repo_id = $2),
+			WHERE i.org_id = $1 AND COALESCE(i.repo_id, c2.baseline_repo_id) = $2),
 		(SELECT count(*) FROM cluster_addons a
 			WHERE a.org_id = $1 AND a.repo_id = $2),
 		(SELECT count(*) FROM clusters c3
@@ -668,9 +677,10 @@ func (s *Store) GitRepoRefCounts(ctx context.Context, q db.Querier, orgID, repoI
 	return &c, nil
 }
 
-// GitRepoInstanceRef is one instance referencing a repo (via its cluster's
-// baseline binding), with the fields the unregister teardown needs to
-// compute repo paths and enqueue ArgoCD app deletions.
+// GitRepoInstanceRef is one instance referencing a repo (its recorded
+// repo_id; pre-0036 rows fall back to the cluster's baseline binding), with
+// the fields the unregister teardown needs to compute repo paths and
+// enqueue ArgoCD app deletions.
 type GitRepoInstanceRef struct {
 	ID            string
 	ClusterID     string
@@ -687,12 +697,12 @@ type GitRepoAddonRef struct {
 	DeployMode string
 }
 
-// ListGitRepoInstances returns the instances attributing to the repo via
-// their cluster's baseline binding (see GitRepoRefCounts).
+// ListGitRepoInstances returns the instances attributing to the repo (see
+// GitRepoRefCounts for the COALESCE fallback rule).
 func (s *Store) ListGitRepoInstances(ctx context.Context, q db.Querier, orgID, repoID string) ([]GitRepoInstanceRef, error) {
 	rows, err := q.Query(ctx, `SELECT i.id, i.cluster_id, i.catalog_item_id
 		FROM resource_instances i JOIN clusters c ON c.id = i.cluster_id
-		WHERE i.org_id = $1 AND c.baseline_repo_id = $2 ORDER BY i.id`, orgID, repoID)
+		WHERE i.org_id = $1 AND COALESCE(i.repo_id, c.baseline_repo_id) = $2 ORDER BY i.id`, orgID, repoID)
 	if err != nil {
 		return nil, err
 	}

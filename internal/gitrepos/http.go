@@ -106,25 +106,15 @@ func (h *Handler) authorizeOrg(ctx context.Context, slug, relation string) (*typ
 	return org, id, nil
 }
 
-// callerTeams resolves the caller's team IDs inside the org by matching the
-// identity's Keycloak group paths (/tenant-<slug>/<team>) against the org's
-// teams (decision 5; the identity-side convention, no FGA round-trip).
+// callerTeams resolves the caller's team IDs inside the org via the shared
+// group-claim matcher (decision 5; the identity-side convention, no FGA
+// round-trip).
 func (h *Handler) callerTeams(ctx context.Context, id *authn.Identity, orgID string) ([]string, error) {
 	teams, err := h.tenants.ListTeams(ctx, orgID)
 	if err != nil {
 		return nil, err
 	}
-	inGroups := map[string]bool{}
-	for _, g := range id.Groups {
-		inGroups[g] = true
-	}
-	var out []string
-	for _, t := range teams {
-		if inGroups[t.KeycloakGroupPath] {
-			out = append(out, t.ID)
-		}
-	}
-	return out, nil
+	return authn.CallerTeamIDs(id, teams), nil
 }
 
 // hasRelation is a fail-closed relation check used for the privilege

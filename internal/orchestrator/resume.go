@@ -86,6 +86,7 @@ func (h *ResumeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) error
 		Version: req.Version, Channel: req.Channel, Name: req.Name,
 		Namespace: req.Namespace, OwnerTeam: req.OwnerTeam,
 		Spec: req.Spec, Requester: impersonation.SystemActor("approvals"),
+		RepoID: req.RepoID,
 	}
 	item, err := h.svc.catalog.GetItemByID(ctx, req.ItemID)
 	if err != nil {

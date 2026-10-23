@@ -591,6 +591,9 @@ type ApprovalRequest struct {
 	Channel     string          `json:"channel,omitempty"`
 	InstanceID  string          `json:"instanceId,omitempty"`
 	Action      string          `json:"action,omitempty"`
+	// RepoID carries the deploy-time repo selector through the approval
+	// gate so the resumed deploy commits to the same repo (Feature A).
+	RepoID      string          `json:"repoId,omitempty"`
 	CreatedAt   time.Time       `json:"createdAt"`
 	DecidedAt   *time.Time      `json:"decidedAt,omitempty"`
 	ExpiresAt   *time.Time      `json:"expiresAt,omitempty"`
@@ -636,6 +639,10 @@ type ResourceInstance struct {
 	ManagementMode ManagementMode  `json:"managementMode"`
 	CommitSHA      string          `json:"commitSha,omitempty"`
 	PRURL          string          `json:"prUrl,omitempty"`
+	// RepoID is the tenant_git_repos row this instance's manifests were
+	// committed to (Feature A). Empty predates the column; readers fall
+	// back to the cluster's baseline binding.
+	RepoID         string          `json:"repoId,omitempty"`
 	Generation     int             `json:"generation"`
 	CreatedAt      time.Time       `json:"createdAt"`
 	UpdatedAt      time.Time       `json:"updatedAt"`
@@ -899,6 +906,10 @@ type DeployRequestedPayload struct {
 	AuthModel      string `json:"authModel,omitempty"`
 	InstallationID int64  `json:"installationId,omitempty"`
 	APIBase        string `json:"apiBase,omitempty"`
+	// RepoID/Repo identify the tenant_git_repos row + slug the deploy
+	// committed to (Feature A); empty predates the registry selector.
+	RepoID string `json:"repoId,omitempty"`
+	Repo   string `json:"repo,omitempty"`
 }
 
 // InstancePayload is the outbox payload for instance lifecycle events.

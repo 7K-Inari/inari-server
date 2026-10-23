@@ -129,6 +129,9 @@ type DeployRequest struct {
 	OwnerTeam string
 	Spec      json.RawMessage
 	Requester string
+	// RepoID selects the tenant_git_repos row the manifests are committed
+	// to (Feature A); empty = the org's default repo.
+	RepoID string
 }
 
 // DeployResult reports the deploy outcome.
@@ -152,6 +155,9 @@ type Service struct {
 	policy    PolicyChecker // nil = no policy enforcement
 	queue     Queue
 	git       gitprovider.Resolver
+	// gitRepos is the repo-aware resolver (Feature A). nil = legacy
+	// single-repo mode: deploys resolve via git.ForTenant(GitConfig(org)).
+	gitRepos  *gitprovider.RepoResolver
 	audit     *audit.Store
 }
 
@@ -165,6 +171,11 @@ func NewService(d *db.DB, instances *inventory.Store, catalog CatalogResolver, c
 
 // WithPolicyChecker attaches the Policy Service seam (main wiring).
 func (s *Service) WithPolicyChecker(p PolicyChecker) *Service { s.policy = p; return s }
+
+// WithRepoResolver attaches the repo-aware git resolver (Feature A main
+// wiring). Once set, deploy/update/delete writes resolve the target repo
+// row (selector or the instance's recorded repo) through the registry.
+func (s *Service) WithRepoResolver(rr *gitprovider.RepoResolver) *Service { s.gitRepos = rr; return s }
 
 // preFlight runs request-time policy checks; a blocking decision yields a
 // *PolicyViolationError.
@@ -242,7 +253,7 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 	gate, err := s.gate.Gate(ctx, approvals.GateInput{
 		OrgID: req.OrgID, Item: item, Version: version, ClusterID: req.ClusterID,
 		Spec: req.Spec, Requester: req.Requester, Name: req.Name, Namespace: req.Namespace,
-		OwnerTeam: req.OwnerTeam, Channel: req.Channel,
+		OwnerTeam: req.OwnerTeam, Channel: req.Channel, RepoID: req.RepoID,
 	})
 	if err != nil {
 		return nil, err
@@ -259,15 +270,38 @@ func (s *Service) apply(ctx context.Context, req DeployRequest, item *types.Cata
 	return s.applyWithEvent(ctx, req, item, version, existing, "", false)
 }
 
-// applyWithEvent is apply with an overridable outbox event type and, for
-// spec-only updates (same version), spec persistence. An empty eventType
-// keeps the default (deploy.requested / instance.upgraded).
-func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *types.CatalogItem, version string, existing *types.ResourceInstance, eventType string, specUpdate bool) (*DeployResult, error) {
-	ver, err := s.catalog.GetVersion(ctx, req.ItemID, version)
-	if err != nil {
-		return nil, err
+// gitTarget is the resolved repo a write lands in: the registry row when
+// the repo-aware resolver is wired, otherwise the legacy git-config
+// projection (default repo).
+type gitTarget struct {
+	repoID     string // registry row id; empty in legacy mode
+	repo       string // owner/name
+	branch     string
+	policy     types.CommitPolicy
+	provider   gitprovider.Provider
+	authInfo   *gitprovider.AuthInfo
+	ensureRepo bool // legacy mode only: registered rows skip EnsureRepo
+}
+
+// resolveTarget resolves the repo a deploy/mutation writes to. With the
+// repo-aware resolver wired, selector ("" = default) goes through the
+// registry; otherwise the legacy git-config path runs unchanged.
+func (s *Service) resolveTarget(ctx context.Context, orgID, selector string) (*gitTarget, error) {
+	if s.gitRepos != nil {
+		row, p, info, err := s.gitRepos.ResolveRepo(ctx, orgID, selector)
+		if errors.Is(err, inventory.ErrRepoNotFound) && (selector == "" || selector == gitprovider.RepoSelectorDefault) {
+			// Back-compat: no default row reads as "no git config" (409).
+			return nil, ErrNoGitConfig
+		}
+		if err != nil {
+			return nil, err
+		}
+		return &gitTarget{
+			repoID: row.ID, repo: row.Repo, branch: row.BaseBranch,
+			policy: row.CommitPolicy, provider: p, authInfo: info,
+		}, nil
 	}
-	gitCfg, err := s.instances.GitConfig(ctx, s.db.Pool, req.OrgID)
+	gitCfg, err := s.instances.GitConfig(ctx, s.db.Pool, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -278,8 +312,36 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 	if err != nil {
 		return nil, err
 	}
-	if _, err := git.EnsureRepo(ctx, gitCfg.Repo); err != nil {
+	return &gitTarget{
+		repo: gitCfg.Repo, branch: gitCfg.BaseBranch, policy: gitCfg.CommitPolicy,
+		provider: git, authInfo: authInfo, ensureRepo: true,
+	}, nil
+}
+
+// applyWithEvent is apply with an overridable outbox event type and, for
+// spec-only updates (same version), spec persistence. An empty eventType
+// keeps the default (deploy.requested / instance.upgraded).
+func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *types.CatalogItem, version string, existing *types.ResourceInstance, eventType string, specUpdate bool) (*DeployResult, error) {
+	ver, err := s.catalog.GetVersion(ctx, req.ItemID, version)
+	if err != nil {
 		return nil, err
+	}
+	selector := req.RepoID
+	if existing != nil {
+		// Mutations always land in the instance's recorded repo; an
+		// explicit selector that disagrees is rejected by the caller
+		// (ErrRepoMismatch) before reaching apply.
+		selector = existing.RepoID
+	}
+	target, err := s.resolveTarget(ctx, req.OrgID, selector)
+	if err != nil {
+		return nil, err
+	}
+	git, authInfo := target.provider, target.authInfo
+	if target.ensureRepo {
+		if _, err := git.EnsureRepo(ctx, target.repo); err != nil {
+			return nil, err
+		}
 	}
 
 	instanceID := req.Name
@@ -310,12 +372,15 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 		return nil, err
 	}
 	path := RepoPath(req.ClusterID, req.ItemID, instanceID)
+	// NOTE: for team-repo deploys the tenant ArgoCD needs repo-creds for
+	// that repo; root-app attachment is Feature B. The orchestrator does
+	// not block team-repo deploys meanwhile.
 	app := RenderArgoCDApplication(ApplicationParams{
 		Name:           "inari-" + instanceID,
 		Project:        "default",
-		RepoURL:        repoURL(gitCfg.Repo),
+		RepoURL:        repoURL(target.repo),
 		Path:           path,
-		TargetRevision: gitCfg.BaseBranch,
+		TargetRevision: target.branch,
 		DestNamespace:  namespace,
 	})
 	files := []gitprovider.File{
@@ -325,10 +390,10 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 
 	message := fmt.Sprintf("deploy %s@%s to %s (instance %s)", req.ItemID, version, req.ClusterID, instanceID)
 	var gitResult *gitprovider.Result
-	if gitCfg.CommitPolicy == types.CommitPolicyPullRequest {
-		gitResult, err = git.OpenPR(ctx, gitCfg.Repo, gitCfg.BaseBranch, message, "", files)
+	if target.policy == types.CommitPolicyPullRequest {
+		gitResult, err = git.OpenPR(ctx, target.repo, target.branch, message, "", files)
 	} else {
-		gitResult, err = git.CommitFiles(ctx, gitCfg.Repo, gitCfg.BaseBranch, files, message)
+		gitResult, err = git.CommitFiles(ctx, target.repo, target.branch, files, message)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: git write: %w", err)
@@ -337,7 +402,7 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 	// For pull-request policy the app registers after the PR merges (M2:
 	// documented gap; the merge webhook wiring lands with Fleet Manager).
 	if gitResult.PRURL == "" {
-		if err := s.enqueueAppRegistration(ctx, req.ClusterID, instanceID, gitCfg, path, namespace); err != nil {
+		if err := s.enqueueAppRegistration(ctx, req.ClusterID, instanceID, target, path, namespace); err != nil {
 			return nil, err
 		}
 	}
@@ -354,7 +419,7 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 				Spec:        req.Spec,
 				ResourceRef: types.ResourceRef{Group: "kro.run", Kind: kindOf(manifest), Name: name, Namespace: namespace},
 				Health:      "unknown", State: state, ManagementMode: types.ManagementModeAdopt,
-				CommitSHA: gitResult.CommitSHA, PRURL: gitResult.PRURL, Generation: 1,
+				CommitSHA: gitResult.CommitSHA, PRURL: gitResult.PRURL, RepoID: target.repoID, Generation: 1,
 			}
 			if err := s.instances.Create(ctx, tx, inst); err != nil {
 				if isUniqueViolation(err) {
@@ -391,6 +456,7 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 			OrgID: req.OrgID, InstanceID: instanceID, ItemID: req.ItemID, ClusterID: req.ClusterID,
 			Version: version, CommitSHA: gitResult.CommitSHA, PRURL: gitResult.PRURL,
 			AuthModel: string(authInfo.Model), InstallationID: authInfo.InstallationID, APIBase: authInfo.APIBase,
+			RepoID: target.repoID, Repo: target.repo,
 		})
 	})
 	if err != nil {
@@ -404,15 +470,15 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 
 // enqueueAppRegistration dispatches register-argocd-app to the cluster's
 // agent (command ID = instance ID + generation → idempotent re-delivery).
-func (s *Service) enqueueAppRegistration(ctx context.Context, clusterID, instanceID string, gitCfg *types.TenantGitConfig, path, namespace string) error {
+func (s *Service) enqueueAppRegistration(ctx context.Context, clusterID, instanceID string, target *gitTarget, path, namespace string) error {
 	cmd := &agentv1.RegisterArgoCDApp{
 		CommandId: instanceID,
 		Name:      "inari-" + instanceID,
 		Project:   "default",
 		Source: &agentv1.ApplicationSource{
-			RepoUrl:        repoURL(gitCfg.Repo),
+			RepoUrl:        repoURL(target.repo),
 			Path:           path,
-			TargetRevision: gitCfg.BaseBranch,
+			TargetRevision: target.branch,
 		},
 		DestinationServer:    "https://kubernetes.default.svc",
 		DestinationNamespace: namespace,
@@ -437,6 +503,24 @@ func (s *Service) enqueueAppRegistration(ctx context.Context, clusterID, instanc
 // ErrSameVersion rejects a rollback to the version the instance already runs.
 var ErrSameVersion = fmt.Errorf("orchestrator: target version is the current version")
 
+// ErrRepoMismatch rejects an explicit repoId that disagrees with the
+// instance's recorded repo (repo is immutable across mutations; moving an
+// instance between repos is a delete+redeploy).
+var ErrRepoMismatch = fmt.Errorf("orchestrator: repoId does not match the instance's recorded repo")
+
+// checkRepoSelector enforces the repo-immutability rule on instance
+// mutations: an explicit selector must equal the recorded repo.
+func checkRepoSelector(existing *types.ResourceInstance, selector string) error {
+	if selector == "" || selector == existing.RepoID {
+		return nil
+	}
+	// Legacy rows (no recorded repo) accept only the default selector.
+	if existing.RepoID == "" && selector == gitprovider.RepoSelectorDefault {
+		return nil
+	}
+	return ErrRepoMismatch
+}
+
 // Gate actions for instance mutations that must not resume as deploys
 // (ResumeHandler dispatches on these).
 const (
@@ -445,16 +529,17 @@ const (
 )
 
 // Upgrade re-deploys an existing instance at a newer version through the
-// same path (§5.11 resource upgrade flow).
-func (s *Service) Upgrade(ctx context.Context, orgID, instanceID, toVersion, requester string) (*DeployResult, error) {
-	return s.revert(ctx, orgID, instanceID, toVersion, requester, "")
+// same path (§5.11 resource upgrade flow). repoID is the optional explicit
+// selector: when non-empty it must match the instance's recorded repo.
+func (s *Service) Upgrade(ctx context.Context, orgID, instanceID, toVersion, repoID, requester string) (*DeployResult, error) {
+	return s.revert(ctx, orgID, instanceID, toVersion, repoID, requester, "")
 }
 
 // Rollback re-deploys an existing instance at an explicit (older) catalog
 // version. There is no version history yet, so the target version is
 // caller-supplied; the mechanics are the upgrade path with a distinct
 // outbox event.
-func (s *Service) Rollback(ctx context.Context, orgID, instanceID, toVersion, requester string) (*DeployResult, error) {
+func (s *Service) Rollback(ctx context.Context, orgID, instanceID, toVersion, repoID, requester string) (*DeployResult, error) {
 	existing, err := s.instances.Get(ctx, s.db.Pool, instanceID)
 	if err != nil {
 		return nil, err
@@ -465,18 +550,21 @@ func (s *Service) Rollback(ctx context.Context, orgID, instanceID, toVersion, re
 	if existing.Version == toVersion {
 		return nil, ErrSameVersion
 	}
-	return s.revert(ctx, orgID, instanceID, toVersion, requester, types.EventInstanceRolledBack)
+	return s.revert(ctx, orgID, instanceID, toVersion, repoID, requester, types.EventInstanceRolledBack)
 }
 
 // revert is the shared upgrade/rollback path; eventType overrides the
 // outbox event emitted by apply (empty = instance.upgraded).
-func (s *Service) revert(ctx context.Context, orgID, instanceID, toVersion, requester, eventType string) (*DeployResult, error) {
+func (s *Service) revert(ctx context.Context, orgID, instanceID, toVersion, repoID, requester, eventType string) (*DeployResult, error) {
 	existing, err := s.instances.Get(ctx, s.db.Pool, instanceID)
 	if err != nil {
 		return nil, err
 	}
 	if existing.OrgID != orgID {
 		return nil, inventory.ErrInstanceNotFound
+	}
+	if err := checkRepoSelector(existing, repoID); err != nil {
+		return nil, err
 	}
 	cluster, err := s.clusters.GetCluster(ctx, existing.ClusterID)
 	if err != nil {
@@ -499,7 +587,7 @@ func (s *Service) revert(ctx context.Context, orgID, instanceID, toVersion, requ
 	gate, err := s.gate.Gate(ctx, approvals.GateInput{
 		OrgID: orgID, Item: item, Version: toVersion, ClusterID: existing.ClusterID,
 		Spec: existing.Spec, Requester: requester, OwnerTeam: existing.OwnerTeam,
-		InstanceID: instanceID,
+		InstanceID: instanceID, RepoID: existing.RepoID,
 	})
 	if err != nil {
 		return nil, err
@@ -517,13 +605,16 @@ func (s *Service) revert(ctx context.Context, orgID, instanceID, toVersion, requ
 // (edit-spec flow). Approval-gated like upgrades; the gated request carries
 // GateActionInstanceUpdate so the resume handler re-enters updateSpecResume
 // instead of the deploy path.
-func (s *Service) UpdateSpec(ctx context.Context, orgID, instanceID string, spec json.RawMessage, requester string) (*DeployResult, error) {
+func (s *Service) UpdateSpec(ctx context.Context, orgID, instanceID string, spec json.RawMessage, repoID, requester string) (*DeployResult, error) {
 	existing, err := s.instances.Get(ctx, s.db.Pool, instanceID)
 	if err != nil {
 		return nil, err
 	}
 	if existing.OrgID != orgID {
 		return nil, inventory.ErrInstanceNotFound
+	}
+	if err := checkRepoSelector(existing, repoID); err != nil {
+		return nil, err
 	}
 	cluster, err := s.clusters.GetCluster(ctx, existing.ClusterID)
 	if err != nil {
@@ -546,7 +637,7 @@ func (s *Service) UpdateSpec(ctx context.Context, orgID, instanceID string, spec
 	gate, err := s.gate.Gate(ctx, approvals.GateInput{
 		OrgID: orgID, Item: item, Version: existing.Version, ClusterID: existing.ClusterID,
 		Spec: spec, Requester: requester, OwnerTeam: existing.OwnerTeam,
-		InstanceID: instanceID, Action: GateActionInstanceUpdate,
+		InstanceID: instanceID, Action: GateActionInstanceUpdate, RepoID: existing.RepoID,
 	})
 	if err != nil {
 		return nil, err
@@ -626,30 +717,27 @@ func (s *Service) DeleteInstanceResume(ctx context.Context, orgID, instanceID, r
 	return s.deleteInstance(ctx, existing, requester)
 }
 
-// deleteInstance removes the instance's desired state from the tenant state
-// repo, asks the agent to remove the ArgoCD app (best-effort), and deletes
-// the inventory row with audit + outbox in one TX.
+// deleteInstance removes the instance's desired state from the repo it was
+// recorded against (Feature A; legacy rows fall back to the org default),
+// asks the agent to remove the ArgoCD app (best-effort), and deletes the
+// inventory row with audit + outbox in one TX.
 func (s *Service) deleteInstance(ctx context.Context, existing *types.ResourceInstance, requester string) error {
 	orgID, instanceID := existing.OrgID, existing.ID
-	gitCfg, err := s.instances.GitConfig(ctx, s.db.Pool, orgID)
+	target, err := s.resolveTarget(ctx, orgID, existing.RepoID)
 	if err != nil {
 		return err
 	}
-	if gitCfg == nil {
-		return ErrNoGitConfig
-	}
-	git, _, err := s.git.ForTenant(ctx, gitCfg)
-	if err != nil {
-		return err
-	}
-	if _, err := git.EnsureRepo(ctx, gitCfg.Repo); err != nil {
-		return err
+	git := target.provider
+	if target.ensureRepo {
+		if _, err := git.EnsureRepo(ctx, target.repo); err != nil {
+			return err
+		}
 	}
 	path := RepoPath(existing.ClusterID, existing.CatalogItemID, instanceID)
 	message := fmt.Sprintf("undeploy %s from %s (instance %s)", existing.CatalogItemID, existing.ClusterID, instanceID)
 	// NOTE: DeleteFiles commits directly even for pull-request-policy
 	// tenants (no PR-delete path in the provider yet).
-	if _, err := git.DeleteFiles(ctx, gitCfg.Repo, gitCfg.BaseBranch,
+	if _, err := git.DeleteFiles(ctx, target.repo, target.branch,
 		[]string{path + "/instance.yaml", path + "/application.yaml"}, message); err != nil {
 		return fmt.Errorf("orchestrator: git delete: %w", err)
 	}

@@ -654,6 +654,65 @@ func (s *Store) GitRepoRefCounts(ctx context.Context, q db.Querier, orgID, repoI
 	return &c, nil
 }
 
+// GitRepoInstanceRef is one instance referencing a repo (via its cluster's
+// baseline binding), with the fields the unregister teardown needs to
+// compute repo paths and enqueue ArgoCD app deletions.
+type GitRepoInstanceRef struct {
+	ID            string
+	ClusterID     string
+	CatalogItemID string
+}
+
+// GitRepoAddonRef is one addon referencing a repo, with the fields the
+// unregister teardown needs (repo path + ArgoCD app name + cluster).
+type GitRepoAddonRef struct {
+	ID         string
+	ClusterID  string
+	RepoPath   string
+	ArgoCDApp  string
+	DeployMode string
+}
+
+// ListGitRepoInstances returns the instances attributing to the repo via
+// their cluster's baseline binding (see GitRepoRefCounts).
+func (s *Store) ListGitRepoInstances(ctx context.Context, q db.Querier, orgID, repoID string) ([]GitRepoInstanceRef, error) {
+	rows, err := q.Query(ctx, `SELECT i.id, i.cluster_id, i.catalog_item_id
+		FROM resource_instances i JOIN clusters c ON c.id = i.cluster_id
+		WHERE i.org_id = $1 AND c.baseline_repo_id = $2 ORDER BY i.id`, orgID, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []GitRepoInstanceRef
+	for rows.Next() {
+		var r GitRepoInstanceRef
+		if err := rows.Scan(&r.ID, &r.ClusterID, &r.CatalogItemID); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ListGitRepoAddons returns the addons referencing the repo directly.
+func (s *Store) ListGitRepoAddons(ctx context.Context, q db.Querier, orgID, repoID string) ([]GitRepoAddonRef, error) {
+	rows, err := q.Query(ctx, `SELECT id, cluster_id, repo_path, argocd_app, deploy_mode
+		FROM cluster_addons WHERE org_id = $1 AND repo_id = $2 ORDER BY id`, orgID, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []GitRepoAddonRef
+	for rows.Next() {
+		var a GitRepoAddonRef
+		if err := rows.Scan(&a.ID, &a.ClusterID, &a.RepoPath, &a.ArgoCDApp, &a.DeployMode); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 // ---------------------------------------------------------------------------
 // Cluster addons (Feature C schema)
 

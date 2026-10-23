@@ -589,9 +589,23 @@ func (s *Store) DeleteGitRepo(ctx context.Context, q db.Querier, orgID, id strin
 // checked per row, so the old default must clear before the new one sets).
 // The demote is gated on the target row existing, so a missing id leaves
 // the current default untouched (ErrRepoNotFound) and the org can never
-// end up with zero defaults. Safe to call on any Querier — no transaction
-// required.
+// end up with zero defaults.
+//
+// Concurrency: a per-org pg_advisory_xact_lock serializes flips. Without
+// it, two concurrent transactions both pass the demote CTE in their own
+// snapshots and the loser's promote collides with the winner's committed
+// default on the partial unique index (23505). The lock MUST be its own
+// statement: in READ COMMITTED each statement gets a fresh snapshot, so a
+// lock taken inside the flip statement would still execute against the
+// pre-lock snapshot. Callers must run inside an explicit transaction (the
+// gitrepos service's inTx always does); on a bare pool Querier the xact
+// lock releases at statement end and the flip degrades to the unsynchronized
+// single-statement semantics.
 func (s *Store) SetDefaultGitRepo(ctx context.Context, q db.Querier, orgID, id string) error {
+	if _, err := q.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext('tenant_git_repos/default/' || $1))`, orgID); err != nil {
+		return err
+	}
 	const sql = `WITH target AS (
 		SELECT id FROM tenant_git_repos WHERE org_id = $1 AND id = $2
 	), demoted AS (

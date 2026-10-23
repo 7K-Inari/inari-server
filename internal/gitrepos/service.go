@@ -222,6 +222,21 @@ func (s *Service) Register(ctx context.Context, orgID string, in RegisterInput, 
 		row.BaseBranch = "main"
 	}
 
+	// Registering straight into the default slot when the org already has a
+	// default would fail deep in the upsert on one_default_repo_per_org and
+	// surface as a misleading "repo already registered" 409 — pre-check and
+	// point the caller at the PATCH-promote flow instead.
+	if row.IsDefault {
+		existing, err := s.store.GetDefaultGitRepo(ctx, s.querier(), orgID)
+		if err != nil && !errors.Is(err, inventory.ErrRepoNotFound) {
+			return nil, err
+		}
+		if existing != nil {
+			return nil, fmt.Errorf("%w: org already has a default repo (%s); register without isDefault and promote via PATCH instead",
+				ErrInvalidInput, existing.Name)
+		}
+	}
+
 	// Fail fast: the app must be installed in the repo's git org before we
 	// register (decision 3c). Resolution itself performs installation
 	// discovery; ErrAppNotInstalled/ErrAppCredentialsRevoked propagate typed.

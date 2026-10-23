@@ -57,12 +57,12 @@ func TestQARegisterSecondDefault(t *testing.T) {
 	if code == http.StatusOK || code == http.StatusCreated {
 		t.Fatalf("second default registered successfully — unique index not enforced?")
 	}
-	// KNOWN ISSUE (reported in review): the rejection is correct, but the
-	// 409 detail says "repo already registered" — the repo slug is not the
-	// conflict, the second default is. The message should name the default
-	// rule and point at the PATCH-promote flow.
-	if strings.Contains(strings.ToLower(body), "already registered") {
-		t.Logf("KNOWN ISSUE: misleading error message (repo slug is not the conflict): %d %s", code, body)
+	// The rejection must name the default rule and point at the
+	// PATCH-promote flow, not claim the repo slug is already registered.
+	if code != http.StatusUnprocessableEntity ||
+		!strings.Contains(body, "already has a default repo") ||
+		!strings.Contains(body, "PATCH") {
+		t.Errorf("second default: %d %s, want 422 naming the default rule", code, body)
 	}
 }
 
@@ -136,16 +136,9 @@ func TestQAPatchNameConflict(t *testing.T) {
 }
 
 // QA: concurrent default promotion of two different repos must leave
-// exactly one default (unique index + atomic flip).
-//
-// KNOWN ISSUE: SetDefaultGitRepo's demote-then-promote CTE is atomic within
-// one statement but NOT serialized across concurrent transactions — the
-// loser's TX hits the partial unique index (23505) and the API returns 500.
-// The data invariant holds (exactly one default; the loser's TX rolls back),
-// but the API should serialize (advisory lock / FOR UPDATE on the org's
-// default row) or map 23505 to 409. Skipped pending the author's fix.
+// exactly one default (unique index + atomic flip, serialized by the
+// per-org advisory lock in SetDefaultGitRepo).
 func TestQAConcurrentPromote(t *testing.T) {
-	t.Skip("known issue: concurrent promote returns 500 (unique-index race in SetDefaultGitRepo); see QA report")
 	f := newITServer(t)
 	defer f.srv.Close()
 	base := "/api/v1/tenants/acme/git-repos"

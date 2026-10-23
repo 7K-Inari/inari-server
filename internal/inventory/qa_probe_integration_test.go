@@ -8,6 +8,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -337,14 +339,22 @@ func TestQAConcurrentSetDefault(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// Two goroutines racing SetDefaultGitRepo on the pool (non-tx path,
-	// the risky usage the doc comment warns about).
+	// Two goroutines racing SetDefaultGitRepo inside explicit transactions
+	// (the production path: the per-org advisory lock serializes the flips,
+	// so neither may fail).
 	done := make(chan error, 2)
 	for _, id := range []string{r1.ID, r2.ID} {
-		go func(id string) { done <- s.SetDefaultGitRepo(ctx, database.Pool, "org:1", id) }(id)
+		go func(id string) {
+			done <- database.WithTx(ctx, func(tx pgx.Tx) error {
+				return s.SetDefaultGitRepo(ctx, tx, "org:1", id)
+			})
+		}(id)
 	}
-	<-done
-	<-done
+	for i := 0; i < 2; i++ {
+		if err := <-done; err != nil {
+			t.Errorf("concurrent flip in TX: %v (advisory lock should serialize)", err)
+		}
+	}
 	var n int
 	if err := database.Pool.QueryRow(ctx, `SELECT count(*) FROM tenant_git_repos WHERE org_id = 'org:1' AND is_default`).Scan(&n); err != nil {
 		t.Fatal(err)

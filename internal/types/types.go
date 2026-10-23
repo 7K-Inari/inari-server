@@ -695,6 +695,159 @@ type TenantGitConfig struct {
 	ClearGitHubApp bool `json:"-"`
 }
 
+// GitRepoProvider identifies the git hosting provider for a repo row.
+// Only GitHub is implemented today; GitLab/Forgejo are reserved (plan
+// risk #7) and arrive with their webhook adapters in Phase 4.
+type GitRepoProvider string
+
+const (
+	GitRepoProviderGitHub GitRepoProvider = "github"
+)
+
+// GitRepoScope marks a repo as a platform baseline or a team-owned repo.
+type GitRepoScope string
+
+const (
+	GitRepoScopePlatform GitRepoScope = "platform"
+	GitRepoScopeTeam     GitRepoScope = "team"
+)
+
+// TenantGitRepo is one registered GitOps state repo in an org's registry
+// (Feature A). Platform-scope repos are baselines (readable by every org
+// member, writable by the platform team); team-scope repos are owned by a
+// single team. The per-repo GitHubApp is an optional BYO override on top of
+// the org/platform app (same credential-reference model as TenantGitConfig).
+type TenantGitRepo struct {
+	ID       string          `json:"id"`
+	OrgID    string          `json:"orgId"`
+	Name     string          `json:"name"`
+	Repo     string          `json:"repo"` // e.g. myorg/team-a-gitops
+	Provider GitRepoProvider `json:"provider"`
+	Scope    GitRepoScope    `json:"scope"`
+	// TeamID is the owning team for team-scope repos; empty for platform
+	// repos or after the owning team is deleted (ON DELETE SET NULL).
+	TeamID       string       `json:"teamId,omitempty"`
+	CommitPolicy CommitPolicy `json:"commitPolicy"`
+	BaseBranch   string       `json:"baseBranch"`
+	// IsDefault picks the org's fallback repo (new clusters, back-compat
+	// proxy for TenantGitConfig.Repo). At most one per org.
+	IsDefault bool `json:"isDefault"`
+	// GitHubApp is the optional per-repo BYO override; nil falls back to
+	// the org-wide app, then the platform app.
+	GitHubApp *GitHubAppConfig `json:"githubApp,omitempty"`
+	// ClearGitHubApp is a transient write-time signal (never persisted or
+	// serialized): remove this repo's BYO override. Plain nil GitHubApp
+	// keeps the stored reference.
+	ClearGitHubApp bool      `json:"-"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
+}
+
+// AddonState is the lifecycle of a cluster addon (Feature C).
+type AddonState string
+
+const (
+	AddonStateDiscovered   AddonState = "discovered"
+	AddonStateAdopting     AddonState = "adopting"
+	AddonStateManaged      AddonState = "managed"
+	AddonStateUpdateFailed AddonState = "update_failed"
+)
+
+// AddonDeployMode selects single-cluster Application vs fleet-wide
+// ApplicationSet rendering.
+type AddonDeployMode string
+
+const (
+	AddonDeployModeApplication    AddonDeployMode = "application"
+	AddonDeployModeApplicationSet AddonDeployMode = "applicationset"
+)
+
+// SourceKind discriminates the composition type inside a SourceDescriptor.
+type SourceKind string
+
+const (
+	SourceKindHelm       SourceKind = "helm"
+	SourceKindKRO        SourceKind = "kro"
+	SourceKindCrossplane SourceKind = "crossplane"
+	SourceKindManifests  SourceKind = "manifests"
+	SourceKindKustomize  SourceKind = "kustomize"
+)
+
+// SourceDescriptor describes how a workload's resources are composed. The
+// renderer ingests a descriptor and always emits ArgoCD
+// Application/ApplicationSet manifests plus supporting files — exactly one
+// of the kind-specific payloads is set, matching Kind.
+type SourceDescriptor struct {
+	Kind       SourceKind       `json:"kind"`
+	Helm       *HelmSource      `json:"helm,omitempty"`
+	KRO        *KROSource       `json:"kro,omitempty"`
+	Crossplane *XPSource        `json:"crossplane,omitempty"`
+	Manifests  *ManifestSource  `json:"manifests,omitempty"`
+	Kustomize  *KustomizeSource `json:"kustomize,omitempty"`
+}
+
+// HelmSource is a direct upstream chart: the Application's spec.source
+// points at the upstream helm repo/chart/version with git-managed values.
+type HelmSource struct {
+	RepoURL   string `json:"repoUrl"`
+	Chart     string `json:"chart"`
+	Version   string `json:"version"`
+	ValuesRef string `json:"valuesRef,omitempty"` // git path of the values file
+}
+
+// KROSource is a stacked composite: the renderer materializes the KRO
+// instance manifest into the repo; the Application source is the git path.
+type KROSource struct {
+	RGDRef   string          `json:"rgdRef"`
+	Instance json.RawMessage `json:"instance,omitempty"`
+}
+
+// XPSource is Crossplane managed resources / claims materialized into the
+// repo.
+type XPSource struct {
+	Manifests json.RawMessage `json:"manifests,omitempty"`
+}
+
+// ManifestSource is plain (optionally parameterized) YAML materialized into
+// the repo.
+type ManifestSource struct {
+	Inline json.RawMessage   `json:"inline,omitempty"`
+	Params map[string]string `json:"params,omitempty"`
+}
+
+// KustomizeSource is kustomized YAML materialized into the repo.
+type KustomizeSource struct {
+	Path     string   `json:"path"`
+	Overlays []string `json:"overlays,omitempty"`
+}
+
+// ClusterAddon is one addon on one cluster (or a fleet-wide row with
+// ClusterID="*" for ApplicationSet deploy mode). Discovered rows come from
+// the agent's addon scanner; adopted/managed rows are rendered into RepoID
+// and synced by ArgoCD.
+type ClusterAddon struct {
+	ID          string           `json:"id"`
+	OrgID       string           `json:"orgId"`
+	ClusterID   string           `json:"clusterId"` // '*' for fleet rows
+	CatalogItem string           `json:"catalogItem"`
+	State       AddonState       `json:"state"`
+	DeployMode  AddonDeployMode  `json:"deployMode"`
+	RepoID      string           `json:"repoId,omitempty"`
+	RepoPath    string           `json:"repoPath,omitempty"`
+	Source      SourceDescriptor `json:"source"`
+	// ChartVersion is denormalized from Source for the version dropdown UX.
+	ChartVersion string          `json:"chartVersion,omitempty"`
+	Values       json.RawMessage `json:"values,omitempty"`
+	ArgoCDApp    string          `json:"argocdApp,omitempty"`
+	Health       string          `json:"health,omitempty"`
+	Sync         string          `json:"sync,omitempty"`
+	// DiscoveredMeta holds what the scanner saw (release name, namespace,
+	// detected version).
+	DiscoveredMeta json.RawMessage `json:"discoveredMeta,omitempty"`
+	CreatedAt      time.Time       `json:"createdAt"`
+	UpdatedAt      time.Time       `json:"updatedAt"`
+}
+
 // GitProviderStatus reports the health of a tenant's git provider auth.
 type GitProviderStatus struct {
 	State          string    `json:"state"` // ok|not_installed|invalid_credentials|rate_limited|unknown

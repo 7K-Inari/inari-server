@@ -2,12 +2,15 @@ package inventory
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/oklog/ulid/v2"
 
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -15,6 +18,21 @@ import (
 
 // ErrInstanceNotFound is returned when an instance does not exist.
 var ErrInstanceNotFound = errors.New("inventory: instance not found")
+
+// ErrRepoNotFound is returned when a git repo row does not exist.
+var ErrRepoNotFound = errors.New("inventory: git repo not found")
+
+// ErrAddonNotFound is returned when a cluster addon row does not exist.
+var ErrAddonNotFound = errors.New("inventory: cluster addon not found")
+
+// ErrRepoInUse is returned when a repo cannot be deleted (e.g. it is the
+// org default).
+var ErrRepoInUse = errors.New("inventory: git repo in use")
+
+// newULID returns a new ULID string for registry rows.
+func newULID() string {
+	return ulid.MustNew(ulid.Timestamp(time.Now()), rand.Reader).String()
+}
 
 // ListFilters narrows instance queries for the console.
 type ListFilters struct {
@@ -199,7 +217,9 @@ func (s *Store) MarkFailed(ctx context.Context, q db.Querier, id, message string
 	return nil
 }
 
-// GitConfig reads the tenant's git target.
+// GitConfig reads the tenant's git target. The Repo field is a back-compat
+// proxy: when the org has a default row in tenant_git_repos, that repo wins;
+// otherwise the legacy tenant_git_configs.repo column is returned.
 func (s *Store) GitConfig(ctx context.Context, q db.Querier, orgID string) (*types.TenantGitConfig, error) {
 	var c types.TenantGitConfig
 	var scaffoldOrg, keySecret, keyKey, apiBase, userFallback *string
@@ -215,6 +235,15 @@ func (s *Store) GitConfig(ctx context.Context, q db.Querier, orgID string) (*typ
 	}
 	if err != nil {
 		return nil, err
+	}
+	// Back-compat proxy: the registry's default repo is authoritative.
+	var defaultRepo *string
+	if err := q.QueryRow(ctx, `SELECT repo FROM tenant_git_repos WHERE org_id = $1 AND is_default`, orgID).
+		Scan(&defaultRepo); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+	if defaultRepo != nil {
+		c.Repo = *defaultRepo
 	}
 	if scaffoldOrg != nil {
 		c.ScaffoldGitOrg = *scaffoldOrg
@@ -303,5 +332,374 @@ func (s *Store) UpsertGitConfig(ctx context.Context, q db.Querier, c *types.Tena
 		  %s`
 	_, err := q.Exec(ctx, fmt.Sprintf(sqlFmt, byoClause), c.OrgID, c.Repo, c.CommitPolicy, c.BaseBranch, scaffoldOrg,
 		appID, installationID, keySecret, keyKey, apiBase, userFallback)
+	if err != nil {
+		return err
+	}
+	// Back-compat proxy: mirror the legacy write onto the org's default
+	// tenant_git_repos row, creating it when the org predates the registry
+	// (fresh tenants post-migration). This keeps the tenant zone factory and
+	// other legacy writers working unchanged.
+	return s.syncDefaultRepoFromConfig(ctx, q, c)
+}
+
+// syncDefaultRepoFromConfig upserts the org's default platform repo from a
+// legacy TenantGitConfig write.
+func (s *Store) syncDefaultRepoFromConfig(ctx context.Context, q db.Querier, c *types.TenantGitConfig) error {
+	var existing *string
+	err := q.QueryRow(ctx, `SELECT id FROM tenant_git_repos WHERE org_id = $1 AND is_default`, c.OrgID).
+		Scan(&existing)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if existing == nil {
+		repo := &types.TenantGitRepo{
+			OrgID:        c.OrgID,
+			Name:         "baseline",
+			Repo:         c.Repo,
+			Provider:     types.GitRepoProviderGitHub,
+			Scope:        types.GitRepoScopePlatform,
+			CommitPolicy: c.CommitPolicy,
+			BaseBranch:   c.BaseBranch,
+			IsDefault:    true,
+			GitHubApp:    c.GitHubApp,
+		}
+		return s.UpsertGitRepo(ctx, q, repo)
+	}
+	// Update the existing default row. BYO columns follow the same
+	// preserve-on-omit / ClearGitHubApp semantics as the config write.
+	byoSet := `github_app_id = COALESCE($4::bigint, github_app_id),
+		github_app_installation_id = COALESCE($5::bigint, github_app_installation_id),
+		github_app_key_secret = COALESCE($6::text, github_app_key_secret),
+		github_app_key_key = COALESCE($7::text, github_app_key_key),
+		github_app_api_base = COALESCE($8::text, github_app_api_base)`
+	var appID, installationID *int64
+	var keySecret, keyKey, apiBase *string
+	if c.GitHubApp != nil {
+		appID = &c.GitHubApp.AppID
+		installationID = &c.GitHubApp.InstallationID
+		packed := c.GitHubApp.KeyRef.Namespace + "/" + c.GitHubApp.KeyRef.SecretName
+		keySecret = &packed
+		keyKey = &c.GitHubApp.KeyRef.Key
+		if c.GitHubApp.APIBase != "" {
+			apiBase = &c.GitHubApp.APIBase
+		}
+	}
+	if c.ClearGitHubApp {
+		_, err = q.Exec(ctx, `UPDATE tenant_git_repos SET repo = $1, commit_policy = $2, base_branch = $3,
+			updated_at = now(), github_app_id = NULL, github_app_installation_id = NULL,
+			github_app_key_secret = NULL, github_app_key_key = NULL, github_app_api_base = NULL
+			WHERE id = $4`, c.Repo, c.CommitPolicy, c.BaseBranch, *existing)
+		return err
+	}
+	_, err = q.Exec(ctx, fmt.Sprintf(`UPDATE tenant_git_repos SET repo = $1, commit_policy = $2, base_branch = $3,
+		updated_at = now(), %s WHERE id = $9`, byoSet),
+		c.Repo, c.CommitPolicy, c.BaseBranch, appID, installationID, keySecret, keyKey, apiBase, *existing)
 	return err
+}
+
+// ---------------------------------------------------------------------------
+// Git repo registry (Feature A)
+
+const gitRepoCols = `id, org_id, name, repo, provider, scope, team_id, commit_policy, base_branch,
+	is_default, github_app_id, github_app_installation_id, github_app_key_secret,
+	github_app_key_key, github_app_api_base, created_at, updated_at`
+
+func scanGitRepo(row pgx.Row) (*types.TenantGitRepo, error) {
+	var r types.TenantGitRepo
+	var teamID *string
+	var appID, installationID *int64
+	var keySecret, keyKey, apiBase *string
+	err := row.Scan(&r.ID, &r.OrgID, &r.Name, &r.Repo, &r.Provider, &r.Scope, &teamID,
+		&r.CommitPolicy, &r.BaseBranch, &r.IsDefault,
+		&appID, &installationID, &keySecret, &keyKey, &apiBase, &r.CreatedAt, &r.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if teamID != nil {
+		r.TeamID = *teamID
+	}
+	if appID != nil {
+		r.GitHubApp = gitAppFromColumns(*appID, installationID, keySecret, keyKey, apiBase)
+	}
+	return &r, nil
+}
+
+// ListGitRepos returns the org's registered repos. A nil teamID returns all
+// repos (platform-team view); a non-nil teamID returns platform repos plus
+// that team's repos (baseline read-all + own team, plan risk #5).
+func (s *Store) ListGitRepos(ctx context.Context, q db.Querier, orgID string, teamID *string) ([]*types.TenantGitRepo, error) {
+	sql := `SELECT ` + gitRepoCols + ` FROM tenant_git_repos WHERE org_id = $1`
+	args := []any{orgID}
+	if teamID != nil {
+		args = append(args, *teamID)
+		sql += fmt.Sprintf(` AND (scope = 'platform' OR team_id = $%d::uuid)`, len(args))
+	}
+	sql += ` ORDER BY created_at`
+	rows, err := q.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*types.TenantGitRepo
+	for rows.Next() {
+		r, err := scanGitRepo(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// GetGitRepo returns one repo by id, scoped to the org.
+func (s *Store) GetGitRepo(ctx context.Context, q db.Querier, orgID, id string) (*types.TenantGitRepo, error) {
+	r, err := scanGitRepo(q.QueryRow(ctx, `SELECT `+gitRepoCols+` FROM tenant_git_repos WHERE org_id = $1 AND id = $2`, orgID, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrRepoNotFound
+	}
+	return r, err
+}
+
+// GetDefaultGitRepo returns the org's default repo, or ErrRepoNotFound when
+// the org has none.
+func (s *Store) GetDefaultGitRepo(ctx context.Context, q db.Querier, orgID string) (*types.TenantGitRepo, error) {
+	r, err := scanGitRepo(q.QueryRow(ctx, `SELECT `+gitRepoCols+` FROM tenant_git_repos WHERE org_id = $1 AND is_default`, orgID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrRepoNotFound
+	}
+	return r, err
+}
+
+// UpsertGitRepo inserts or updates a repo row (conflict key: org_id+name).
+// A new row gets a generated ULID. BYO app columns follow the same
+// preserve-on-omit / ClearGitHubApp semantics as UpsertGitConfig.
+func (s *Store) UpsertGitRepo(ctx context.Context, q db.Querier, r *types.TenantGitRepo) error {
+	if r.ID == "" {
+		r.ID = newULID()
+	}
+	if r.Provider == "" {
+		r.Provider = types.GitRepoProviderGitHub
+	}
+	if r.Scope == "" {
+		r.Scope = types.GitRepoScopeTeam
+	}
+	if r.CommitPolicy == "" {
+		r.CommitPolicy = types.CommitPolicyDirect
+	}
+	if r.BaseBranch == "" {
+		r.BaseBranch = "main"
+	}
+	var teamID *string
+	if r.TeamID != "" {
+		teamID = &r.TeamID
+	}
+	var appID, installationID *int64
+	var keySecret, keyKey, apiBase *string
+	if r.GitHubApp != nil {
+		appID = &r.GitHubApp.AppID
+		installationID = &r.GitHubApp.InstallationID
+		packed := r.GitHubApp.KeyRef.Namespace + "/" + r.GitHubApp.KeyRef.SecretName
+		keySecret = &packed
+		keyKey = &r.GitHubApp.KeyRef.Key
+		if r.GitHubApp.APIBase != "" {
+			apiBase = &r.GitHubApp.APIBase
+		}
+	}
+	byoClause := `github_app_id = COALESCE(EXCLUDED.github_app_id, tenant_git_repos.github_app_id),
+		github_app_installation_id = COALESCE(EXCLUDED.github_app_installation_id, tenant_git_repos.github_app_installation_id),
+		github_app_key_secret = COALESCE(EXCLUDED.github_app_key_secret, tenant_git_repos.github_app_key_secret),
+		github_app_key_key = COALESCE(EXCLUDED.github_app_key_key, tenant_git_repos.github_app_key_key),
+		github_app_api_base = COALESCE(EXCLUDED.github_app_api_base, tenant_git_repos.github_app_api_base)`
+	if r.ClearGitHubApp {
+		byoClause = `github_app_id = NULL, github_app_installation_id = NULL,
+			github_app_key_secret = NULL, github_app_key_key = NULL, github_app_api_base = NULL`
+	}
+	const sqlFmt = `INSERT INTO tenant_git_repos
+		(id, org_id, name, repo, provider, scope, team_id, commit_policy, base_branch, is_default,
+		 github_app_id, github_app_installation_id, github_app_key_secret, github_app_key_key, github_app_api_base)
+		VALUES ($1,$2,$3,$4,$5,$6,$7::uuid,$8,$9,$10,$11,$12,$13,$14,$15)
+		ON CONFLICT (org_id, name) DO UPDATE SET repo = EXCLUDED.repo,
+		  provider = EXCLUDED.provider, scope = EXCLUDED.scope, team_id = EXCLUDED.team_id,
+		  commit_policy = EXCLUDED.commit_policy, base_branch = EXCLUDED.base_branch,
+		  is_default = EXCLUDED.is_default, updated_at = now(), %s`
+	_, err := q.Exec(ctx, fmt.Sprintf(sqlFmt, byoClause),
+		r.ID, r.OrgID, r.Name, r.Repo, r.Provider, r.Scope, teamID, r.CommitPolicy, r.BaseBranch, r.IsDefault,
+		appID, installationID, keySecret, keyKey, apiBase)
+	return err
+}
+
+// DeleteGitRepo unregisters a repo. The org default cannot be deleted
+// (promote another repo first); cluster and addon references are nulled by
+// ON DELETE SET NULL. Orphan/teardown semantics for live workloads land in
+// the handler layer.
+func (s *Store) DeleteGitRepo(ctx context.Context, q db.Querier, orgID, id string) error {
+	r, err := s.GetGitRepo(ctx, q, orgID, id)
+	if err != nil {
+		return err
+	}
+	if r.IsDefault {
+		return ErrRepoInUse
+	}
+	tag, err := q.Exec(ctx, `DELETE FROM tenant_git_repos WHERE org_id = $1 AND id = $2`, orgID, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrRepoNotFound
+	}
+	return nil
+}
+
+// SetDefaultGitRepo promotes one repo to the org default, demoting the
+// previous one. The partial unique index one_default_repo_per_org enforces
+// a single default; both updates must run inside one transaction (the
+// caller passes a tx Querier).
+func (s *Store) SetDefaultGitRepo(ctx context.Context, q db.Querier, orgID, id string) error {
+	if _, err := q.Exec(ctx, `UPDATE tenant_git_repos SET is_default = FALSE, updated_at = now() WHERE org_id = $1 AND is_default`, orgID); err != nil {
+		return err
+	}
+	tag, err := q.Exec(ctx, `UPDATE tenant_git_repos SET is_default = TRUE, updated_at = now() WHERE org_id = $1 AND id = $2`, orgID, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrRepoNotFound
+	}
+	return nil
+}
+
+// BindClusterBaseline binds a cluster to a platform-scope repo of the same
+// org. Returns ErrRepoNotFound when the repo is missing, not platform-scope,
+// or belongs to another org.
+func (s *Store) BindClusterBaseline(ctx context.Context, q db.Querier, clusterID, repoID string) error {
+	tag, err := q.Exec(ctx, `UPDATE clusters c SET baseline_repo_id = r.id
+		FROM tenant_git_repos r
+		WHERE r.id = $2 AND r.scope = 'platform' AND r.org_id = c.org_id AND c.id = $1`, clusterID, repoID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrRepoNotFound
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Cluster addons (Feature C schema)
+
+const clusterAddonCols = `id, org_id, cluster_id, catalog_item, state, deploy_mode, repo_id, repo_path,
+	source, chart_version, values, argocd_app, health, sync, discovered_meta, created_at, updated_at`
+
+func scanClusterAddon(row pgx.Row) (*types.ClusterAddon, error) {
+	var a types.ClusterAddon
+	var repoID *string
+	var source []byte
+	err := row.Scan(&a.ID, &a.OrgID, &a.ClusterID, &a.CatalogItem, &a.State, &a.DeployMode,
+		&repoID, &a.RepoPath, &source, &a.ChartVersion, &a.Values, &a.ArgoCDApp, &a.Health, &a.Sync,
+		&a.DiscoveredMeta, &a.CreatedAt, &a.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if repoID != nil {
+		a.RepoID = *repoID
+	}
+	if err := json.Unmarshal(source, &a.Source); err != nil {
+		return nil, fmt.Errorf("inventory: addon %s source: %w", a.ID, err)
+	}
+	return &a, nil
+}
+
+// ListClusterAddons returns addons for one cluster, or the whole org when
+// clusterID is empty.
+func (s *Store) ListClusterAddons(ctx context.Context, q db.Querier, orgID, clusterID string) ([]*types.ClusterAddon, error) {
+	sql := `SELECT ` + clusterAddonCols + ` FROM cluster_addons WHERE org_id = $1`
+	args := []any{orgID}
+	if clusterID != "" {
+		args = append(args, clusterID)
+		sql += fmt.Sprintf(` AND cluster_id = $%d`, len(args))
+	}
+	sql += ` ORDER BY created_at`
+	rows, err := q.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*types.ClusterAddon
+	for rows.Next() {
+		a, err := scanClusterAddon(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// GetClusterAddon returns one addon by (cluster, catalog item).
+func (s *Store) GetClusterAddon(ctx context.Context, q db.Querier, orgID, clusterID, catalogItem string) (*types.ClusterAddon, error) {
+	a, err := scanClusterAddon(q.QueryRow(ctx, `SELECT `+clusterAddonCols+`
+		FROM cluster_addons WHERE org_id = $1 AND cluster_id = $2 AND catalog_item = $3`, orgID, clusterID, catalogItem))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrAddonNotFound
+	}
+	return a, err
+}
+
+// UpsertClusterAddon inserts or updates an addon row (conflict key:
+// cluster_id+catalog_item). A discovery upsert never downgrades a managed
+// row back to discovered (plan §6).
+func (s *Store) UpsertClusterAddon(ctx context.Context, q db.Querier, a *types.ClusterAddon) error {
+	if a.ID == "" {
+		a.ID = newULID()
+	}
+	if a.State == "" {
+		a.State = types.AddonStateDiscovered
+	}
+	if a.DeployMode == "" {
+		a.DeployMode = types.AddonDeployModeApplication
+	}
+	source, err := json.Marshal(a.Source)
+	if err != nil {
+		return err
+	}
+	values := a.Values
+	if len(values) == 0 {
+		values = json.RawMessage(`{}`)
+	}
+	var repoID *string
+	if a.RepoID != "" {
+		repoID = &a.RepoID
+	}
+	const sql = `INSERT INTO cluster_addons
+		(id, org_id, cluster_id, catalog_item, state, deploy_mode, repo_id, repo_path,
+		 source, chart_version, values, argocd_app, health, sync, discovered_meta)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+		ON CONFLICT (cluster_id, catalog_item) DO UPDATE SET
+		  state = CASE WHEN cluster_addons.state = 'managed' THEN cluster_addons.state ELSE EXCLUDED.state END,
+		  deploy_mode = EXCLUDED.deploy_mode,
+		  repo_id = COALESCE(EXCLUDED.repo_id, cluster_addons.repo_id),
+		  repo_path = CASE WHEN EXCLUDED.repo_path = '' THEN cluster_addons.repo_path ELSE EXCLUDED.repo_path END,
+		  source = EXCLUDED.source,
+		  chart_version = CASE WHEN EXCLUDED.chart_version = '' THEN cluster_addons.chart_version ELSE EXCLUDED.chart_version END,
+		  values = EXCLUDED.values,
+		  argocd_app = CASE WHEN EXCLUDED.argocd_app = '' THEN cluster_addons.argocd_app ELSE EXCLUDED.argocd_app END,
+		  health = CASE WHEN EXCLUDED.health = '' THEN cluster_addons.health ELSE EXCLUDED.health END,
+		  sync = CASE WHEN EXCLUDED.sync = '' THEN cluster_addons.sync ELSE EXCLUDED.sync END,
+		  discovered_meta = COALESCE(EXCLUDED.discovered_meta, cluster_addons.discovered_meta),
+		  updated_at = now()`
+	_, err = q.Exec(ctx, sql, a.ID, a.OrgID, a.ClusterID, a.CatalogItem, a.State, a.DeployMode,
+		repoID, a.RepoPath, source, a.ChartVersion, values, a.ArgoCDApp, a.Health, a.Sync, a.DiscoveredMeta)
+	return err
+}
+
+// DeleteClusterAddon removes an addon row by id, scoped to the org.
+func (s *Store) DeleteClusterAddon(ctx context.Context, q db.Querier, orgID, id string) error {
+	tag, err := q.Exec(ctx, `DELETE FROM cluster_addons WHERE org_id = $1 AND id = $2`, orgID, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrAddonNotFound
+	}
+	return nil
 }

@@ -667,3 +667,76 @@ func TestResolverEvictTenantAllRepos(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Multiple git orgs (decision 3a): the installation cache is keyed by
+// git-org (repo owner). A negative entry for one git-org must not affect
+// another, and one discovery call warms every org seen.
+func TestResolverGitOrgCacheIsolation(t *testing.T) {
+	gh := &fakeGitHub{installations: []map[string]any{inst(2, "acme"), inst(3, "globex")}}
+	r, _ := newTestResolver(t, gh, nil)
+	ctx := context.Background()
+
+	// Missing git-org: typed error + negative cache entry.
+	if _, _, err := r.ForTenant(ctx, gitCfg("org:9", "missing/missing-inari-state")); err == nil {
+		t.Fatal("want not-installed error")
+	} else {
+		var ni *ErrAppNotInstalled
+		if !errors.As(err, &ni) {
+			t.Fatalf("err = %v, want ErrAppNotInstalled", err)
+		}
+	}
+	// The negative entry must not shadow the installed git-orgs, and both
+	// resolve from the same discovery warm (no extra list calls).
+	before := gh.listCalls.Load()
+	if _, info, err := r.ForTenant(ctx, gitCfg("org:1", "acme/acme-inari-state")); err != nil || info.InstallationID != 2 {
+		t.Fatalf("acme: info=%+v err=%v", info, err)
+	}
+	if _, info, err := r.ForTenant(ctx, gitCfg("org:2", "globex/globex-inari-state")); err != nil || info.InstallationID != 3 {
+		t.Fatalf("globex: info=%+v err=%v", info, err)
+	}
+	if n := gh.listCalls.Load() - before; n != 0 {
+		t.Errorf("list calls after warm = %d, want 0 (discovery warms all git-orgs)", n)
+	}
+}
+
+// A 401 invalidates only the affected git-org's installation entry; other
+// git-orgs keep their cached installations.
+func TestResolver401InvalidatesOnlyAffectedGitOrg(t *testing.T) {
+	gh := &fakeGitHub{installations: []map[string]any{inst(2, "acme"), inst(3, "globex")}}
+	r, _ := newTestResolver(t, gh, nil)
+	ctx := context.Background()
+
+	p1, _, err := r.ForTenant(ctx, gitCfg("org:1", "acme/acme-inari-state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.ForTenant(ctx, gitCfg("org:2", "globex/globex-inari-state")); err != nil {
+		t.Fatal(err)
+	}
+	// Suspend acme's installation: 401 on data routes for acme only.
+	gh.failData.Store(true)
+	if _, err := p1.EnsureRepo(ctx, "acme/acme-inari-state"); err == nil {
+		t.Fatal("want 401 error")
+	} else {
+		var revoked *ErrAppCredentialsRevoked
+		if !errors.As(err, &revoked) {
+			t.Fatalf("err = %v, want ErrAppCredentialsRevoked", err)
+		}
+	}
+	gh.failData.Store(false)
+	// globex resolves from cache without a new discovery list call...
+	before := gh.listCalls.Load()
+	if _, _, err := r.ForTenant(ctx, gitCfg("org:2", "globex/globex-inari-state")); err != nil {
+		t.Fatal(err)
+	}
+	if n := gh.listCalls.Load() - before; n != 0 {
+		t.Errorf("list calls = %d, want 0 (globex cache survived acme invalidation)", n)
+	}
+	// ...while acme re-discovers.
+	if _, _, err := r.ForTenant(ctx, gitCfg("org:1", "acme/acme-inari-state")); err != nil {
+		t.Fatal(err)
+	}
+	if n := gh.listCalls.Load() - before; n != 1 {
+		t.Errorf("list calls = %d, want 1 (acme re-discovered)", n)
+	}
+}

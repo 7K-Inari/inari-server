@@ -234,13 +234,13 @@ func (h *Handler) enforceRecordedRepoWrite(ctx context.Context, id *authn.Identi
 type deployInput struct {
 	Org  string `path:"org"`
 	Body struct {
-		ItemID    string          `json:"itemId" minLength:"1"`
-		ClusterID string          `json:"clusterId" minLength:"1"`
-		Version   string          `json:"version,omitempty"`
-		Channel   string          `json:"channel,omitempty"`
-		Name      string          `json:"name,omitempty" pattern:"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" maxLength:"63" doc:"Instance name (DNS-1123 label); becomes the instance ID and repo path segment"`
-		Namespace string          `json:"namespace,omitempty" pattern:"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" maxLength:"63"`
-		OwnerTeam string          `json:"ownerTeam,omitempty"`
+		ItemID    string `json:"itemId" minLength:"1"`
+		ClusterID string `json:"clusterId" minLength:"1"`
+		Version   string `json:"version,omitempty"`
+		Channel   string `json:"channel,omitempty"`
+		Name      string `json:"name,omitempty" pattern:"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" maxLength:"63" doc:"Instance name (DNS-1123 label); becomes the instance ID and repo path segment"`
+		Namespace string `json:"namespace,omitempty" pattern:"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" maxLength:"63"`
+		OwnerTeam string `json:"ownerTeam,omitempty"`
 		// RepoID selects the GitOps state repo (tenant_git_repos row id);
 		// empty = the org's default repo.
 		RepoID string          `json:"repoId,omitempty"`

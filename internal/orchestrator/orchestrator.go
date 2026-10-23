@@ -157,8 +157,8 @@ type Service struct {
 	git       gitprovider.Resolver
 	// gitRepos is the repo-aware resolver (Feature A). nil = legacy
 	// single-repo mode: deploys resolve via git.ForTenant(GitConfig(org)).
-	gitRepos  *gitprovider.RepoResolver
-	audit     *audit.Store
+	gitRepos *gitprovider.RepoResolver
+	audit    *audit.Store
 }
 
 func NewService(d *db.DB, instances *inventory.Store, catalog CatalogResolver, clusters ClusterResolver,

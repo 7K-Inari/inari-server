@@ -213,7 +213,7 @@ func (r *Resolver) forTenantPlatform(ctx context.Context, cfg *types.TenantGitCo
 		if inst.notFound {
 			return nil, nil, r.notInstalledErr(owner)
 		}
-		return r.platformProvider(ctx, cfg.OrgID, owner, inst.id)
+		return r.platformProvider(ctx, cfg.OrgID, owner, cfg.Repo, inst.id)
 	}
 
 	// Cold/stale: rediscover (single-flight per org).
@@ -234,7 +234,7 @@ func (r *Resolver) forTenantPlatform(ctx context.Context, cfg *types.TenantGitCo
 		r.emit(ctx, ResolvedEvent{OrgID: cfg.OrgID, AuthModel: gitprovider.AuthModelPlatform, AppID: r.cfg.PlatformAppID, APIBase: r.apiBase, Result: "not_installed"})
 		return nil, nil, r.notInstalledErr(owner)
 	}
-	return r.platformProvider(ctx, cfg.OrgID, owner, inst.id)
+	return r.platformProvider(ctx, cfg.OrgID, owner, cfg.Repo, inst.id)
 }
 
 func (r *Resolver) notInstalledErr(org string) *ErrAppNotInstalled {
@@ -242,7 +242,7 @@ func (r *Resolver) notInstalledErr(org string) *ErrAppNotInstalled {
 }
 
 // platformProvider returns the cached provider for one installation.
-func (r *Resolver) platformProvider(ctx context.Context, orgID, owner string, installationID int64) (gitprovider.Provider, *gitprovider.AuthInfo, error) {
+func (r *Resolver) platformProvider(ctx context.Context, orgID, owner, repo string, installationID int64) (gitprovider.Provider, *gitprovider.AuthInfo, error) {
 	key := fmt.Sprintf("i:%d", installationID)
 	r.mu.Lock()
 	cp, ok := r.providers[key]
@@ -260,7 +260,7 @@ func (r *Resolver) platformProvider(ctx context.Context, orgID, owner string, in
 	r.providers[key] = &cachedProvider{provider: wrapped, info: info, owner: owner}
 	r.mu.Unlock()
 	r.emit(ctx, ResolvedEvent{OrgID: orgID, AuthModel: info.Model, AppID: info.AppID, InstallationID: installationID, APIBase: r.apiBase, Result: "resolved"})
-	r.scopeCheck(ctx, inner, orgID, info)
+	r.scopeCheck(ctx, inner, orgID, repo, info)
 	return wrapped, info, nil
 }
 
@@ -321,7 +321,7 @@ func (r *Resolver) forTenantBYO(ctx context.Context, cfg *types.TenantGitConfig)
 	r.providers[key] = &cachedProvider{provider: wrapped, info: info}
 	r.mu.Unlock()
 	r.emit(ctx, ResolvedEvent{OrgID: cfg.OrgID, AuthModel: info.Model, AppID: info.AppID, InstallationID: info.InstallationID, APIBase: base, Result: "resolved"})
-	r.scopeCheck(ctx, inner, cfg.OrgID, info)
+	r.scopeCheck(ctx, inner, cfg.OrgID, cfg.Repo, info)
 	return wrapped, info, nil
 }
 
@@ -491,9 +491,17 @@ func (r *Resolver) appGetURL(ctx context.Context, url string, out any) (string, 
 	return resp.Header.Get("Link"), json.NewDecoder(resp.Body).Decode(out)
 }
 
-// scopeCheck records a (non-blocking) warning when an installation is
-// scoped broader than the *-inari-state repos. Tolerates GHE skew (404/405).
-func (r *Resolver) scopeCheck(ctx context.Context, p *Provider, orgID string, info *gitprovider.AuthInfo) {
+// scopeCheck records a (non-blocking) warning when a "selected"-scoped
+// installation does not cover the target repo — the classic
+// installed-but-not-granted misconfiguration. "all"-scoped installations
+// are broad but functional: no warning. Repo names are arbitrary (Feature
+// A team repos), so the check is repo-aware, not name-pattern-based.
+// Tolerates GHE skew (404/405).
+func (r *Resolver) scopeCheck(ctx context.Context, p *Provider, orgID, repo string, info *gitprovider.AuthInfo) {
+	_, name, err := splitRepo(repo)
+	if err != nil {
+		return // advisory only
+	}
 	var out struct {
 		Selection string `json:"repository_selection"`
 		Repos     []struct {
@@ -503,18 +511,15 @@ func (r *Resolver) scopeCheck(ctx context.Context, p *Provider, orgID string, in
 	if _, err := p.do(ctx, http.MethodGet, "/installation/repositories?per_page=100", nil, &out); err != nil {
 		return // advisory only
 	}
-	broad := out.Selection != "selected"
-	if !broad {
-		for _, repo := range out.Repos {
-			if !strings.HasSuffix(repo.Name, "-inari-state") {
-				broad = true
-				break
-			}
+	if out.Selection != "selected" {
+		return
+	}
+	for _, rp := range out.Repos {
+		if strings.EqualFold(rp.Name, name) {
+			return
 		}
 	}
-	if broad {
-		r.emit(ctx, ResolvedEvent{OrgID: orgID, AuthModel: info.Model, AppID: info.AppID, InstallationID: info.InstallationID, APIBase: info.APIBase, Result: "scope_warning"})
-	}
+	r.emit(ctx, ResolvedEvent{OrgID: orgID, AuthModel: info.Model, AppID: info.AppID, InstallationID: info.InstallationID, APIBase: info.APIBase, Result: "scope_warning"})
 }
 
 // Probe health-checks a tenant's git provider auth (cached 60s).

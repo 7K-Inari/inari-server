@@ -499,7 +499,8 @@ func TestResolverGHEBaseSeparation(t *testing.T) {
 func TestResolverScopeWarningEvent(t *testing.T) {
 	gh := &fakeGitHub{
 		installations: []map[string]any{inst(2, "acme")},
-		repoSelection: "all",
+		repoSelection: "selected",
+		repoNames:     []string{"some-other-repo"},
 	}
 	var events []ResolvedEvent
 	r, _ := newTestResolver(t, gh, func(c *ResolverConfig) {
@@ -738,5 +739,48 @@ func TestResolver401InvalidatesOnlyAffectedGitOrg(t *testing.T) {
 	}
 	if n := gh.listCalls.Load() - before; n != 1 {
 		t.Errorf("list calls = %d, want 1 (acme re-discovered)", n)
+	}
+}
+
+// Repo-aware scope check (Feature A): the advisory warning fires only when
+// the installation is "selected"-scoped AND does not cover the target repo
+// — arbitrary team repo names must not trigger it.
+func TestResolverScopeCheckRepoAware(t *testing.T) {
+	cases := []struct {
+		name      string
+		selection string
+		repos     []string
+		repo      string
+		wantWarn  bool
+	}{
+		{"selected covers target", "selected", []string{"team-a-gitops"}, "acme/team-a-gitops", false},
+		{"selected misses target", "selected", []string{"other-repo"}, "acme/team-a-gitops", true},
+		{"all is broad but functional", "all", nil, "acme/team-a-gitops", false},
+		{"selected empty list", "selected", nil, "acme/team-a-gitops", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gh := &fakeGitHub{
+				installations: []map[string]any{inst(2, "acme")},
+				repoSelection: tc.selection,
+				repoNames:     tc.repos,
+			}
+			var events []ResolvedEvent
+			r, _ := newTestResolver(t, gh, func(c *ResolverConfig) {
+				c.OnResolved = func(_ context.Context, ev ResolvedEvent) { events = append(events, ev) }
+			})
+			if _, _, err := r.ForTenant(context.Background(), gitCfg("org:1", tc.repo)); err != nil {
+				t.Fatal(err)
+			}
+			var found bool
+			for _, ev := range events {
+				if ev.Result == "scope_warning" {
+					found = true
+				}
+			}
+			if found != tc.wantWarn {
+				t.Errorf("scope_warning = %v, want %v (events=%+v)", found, tc.wantWarn, events)
+			}
+		})
 	}
 }

@@ -2,7 +2,6 @@ package gitrepos
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/7K-Inari/inari-server/internal/authn"
@@ -144,5 +143,3 @@ func TestCanWriteRepo(t *testing.T) {
 		t.Error("settings-write must write team repos")
 	}
 }
-
-var _ = errors.Is // placeholder to keep imports stable while scaffolding

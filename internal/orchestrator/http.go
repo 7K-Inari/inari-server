@@ -330,6 +330,9 @@ func (h *Handler) upgrade(ctx context.Context, in *upgradeInput) (*deployOutput,
 	if errors.As(err, &pve) {
 		return nil, huma.Error422UnprocessableEntity(pve.Error())
 	}
+	if errors.Is(err, ErrRepoMismatch) {
+		return nil, huma.Error422UnprocessableEntity(err.Error())
+	}
 	if errors.Is(err, inventory.ErrInstanceNotFound) {
 		return nil, huma.Error404NotFound("instance not found")
 	}

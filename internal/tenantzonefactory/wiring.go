@@ -52,6 +52,13 @@ type GitConfigSetter interface {
 	SetGitConfig(ctx context.Context, actor string, cfg *types.TenantGitConfig) error
 }
 
+// BaselineRepos registers the zone's state repo in the tenant_git_repos
+// registry (Feature A): scope=platform, is_default=true. Idempotent — zone
+// retries re-run it safely.
+type BaselineRepos interface {
+	EnsureDefaultBaselineRepo(ctx context.Context, orgID, repo string) error
+}
+
 // PlatformResourceEnsurer upserts the tenant's base platform resources
 // (platformresources.Service seam, M7.W2).
 type PlatformResourceEnsurer interface {
@@ -66,6 +73,10 @@ type ModuleWiring struct {
 	Accounts AccountRegistrar
 	Git      gitprovider.Provider
 	GitCfg   GitConfigSetter
+	// BaselineRepos registers the zone repo in the git-repo registry
+	// (Feature A). nil skips the explicit registry write (legacy wiring;
+	// the back-compat mirror in UpsertGitConfig still covers it).
+	BaselineRepos BaselineRepos
 	// PlatformResources ensures the base platform-resource rows; nil skips
 	// the platform-resources bootstrap.
 	PlatformResources PlatformResourceEnsurer
@@ -172,6 +183,11 @@ func (w *ModuleWiring) WireZone(ctx context.Context, zone *types.TenantZone, rol
 			OrgID: org.ID, Repo: repo, CommitPolicy: types.CommitPolicyDirect, BaseBranch: "main",
 		}); err != nil {
 			return nil, fmt.Errorf("tzf: wiring git config: %w", err)
+		}
+	}
+	if w.BaselineRepos != nil {
+		if err := w.BaselineRepos.EnsureDefaultBaselineRepo(ctx, org.ID, repo); err != nil {
+			return nil, fmt.Errorf("tzf: wiring baseline repo registry row: %w", err)
 		}
 	}
 	return &WiringResult{

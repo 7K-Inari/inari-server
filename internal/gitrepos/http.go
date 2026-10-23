@@ -259,7 +259,7 @@ type repoOutput struct {
 }
 
 func (h *Handler) register(ctx context.Context, in *registerInput) (*repoOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantSettingsWrite)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantSettingsWrite)
 	if err != nil {
 		return nil, err
 	}
@@ -268,7 +268,7 @@ func (h *Handler) register(ctx context.Context, in *registerInput) (*repoOutput,
 		Scope: types.GitRepoScope(in.Body.Scope), TeamID: in.Body.TeamID,
 		CommitPolicy: types.CommitPolicy(in.Body.CommitPolicy), BaseBranch: in.Body.BaseBranch,
 		IsDefault: in.Body.IsDefault,
-	}, "user:"+httpserver.IdentityFromContext(ctx).Subject)
+	}, "user:"+id.Subject)
 	if err != nil {
 		return nil, repoError(err)
 	}
@@ -369,11 +369,11 @@ type unregisterOutput struct {
 }
 
 func (h *Handler) unregister(ctx context.Context, in *unregisterInput) (*unregisterOutput, error) {
-	org, _, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantSettingsWrite)
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantSettingsWrite)
 	if err != nil {
 		return nil, err
 	}
-	if err := h.svc.Unregister(ctx, org.ID, in.ID, in.Force, UnregisterMode(in.Mode), "user:"+httpserver.IdentityFromContext(ctx).Subject); err != nil {
+	if err := h.svc.Unregister(ctx, org.ID, in.ID, in.Force, UnregisterMode(in.Mode), "user:"+id.Subject); err != nil {
 		return nil, repoError(err)
 	}
 	out := &unregisterOutput{}

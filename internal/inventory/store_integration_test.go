@@ -117,14 +117,19 @@ func TestGitRepoCRUD(t *testing.T) {
 		t.Fatalf("list all = %d, %v", len(all), err)
 	}
 	// Team A sees baseline + its own repo.
-	aView, err := s.ListGitRepos(ctx, database.Pool, "org:1", &teamA)
+	aView, err := s.ListGitRepos(ctx, database.Pool, "org:1", []string{teamA})
 	if err != nil || len(aView) != 2 {
 		t.Fatalf("team A list = %d, %v", len(aView), err)
 	}
 	// Team B sees only the baseline.
-	bView, err := s.ListGitRepos(ctx, database.Pool, "org:1", &teamB)
+	bView, err := s.ListGitRepos(ctx, database.Pool, "org:1", []string{teamB})
 	if err != nil || len(bView) != 1 || bView[0].Name != "baseline" {
 		t.Fatalf("team B list = %+v, %v", bView, err)
+	}
+	// A user in both teams sees baseline + both team repos.
+	abView, err := s.ListGitRepos(ctx, database.Pool, "org:1", []string{teamA, teamB})
+	if err != nil || len(abView) != 2 {
+		t.Fatalf("multi-team list = %d, %v", len(abView), err)
 	}
 
 	// Upsert same name updates in place.
@@ -439,5 +444,83 @@ func TestClusterAddonCRUD(t *testing.T) {
 	}
 	if err := s.DeleteClusterAddon(ctx, database.Pool, "org:1", got.ID); !errors.Is(err, ErrAddonNotFound) {
 		t.Errorf("re-delete: want ErrAddonNotFound, got %v", err)
+	}
+}
+
+func TestGitRepoRefCounts(t *testing.T) {
+	database, ctx := setupStoreTest(t)
+	seedOrg(t, database, ctx, "org:1", "acme")
+	clusterID := seedCluster(t, database, ctx, "org:1", "prod")
+	otherCluster := seedCluster(t, database, ctx, "org:1", "staging")
+	s := NewStore()
+
+	repo := &types.TenantGitRepo{OrgID: "org:1", Name: "baseline", Repo: "acme/state",
+		Scope: types.GitRepoScopePlatform, IsDefault: true}
+	if err := s.UpsertGitRepo(ctx, database.Pool, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	// Zero refs on a fresh repo.
+	refs, err := s.GitRepoRefCounts(ctx, database.Pool, "org:1", repo.ID)
+	if err != nil {
+		t.Fatalf("ref counts: %v", err)
+	}
+	if refs.Instances != 0 || refs.Addons != 0 || refs.Clusters != 0 {
+		t.Fatalf("fresh repo refs = %+v, want zero", refs)
+	}
+
+	// Bind a cluster to the baseline.
+	if err := s.BindClusterBaseline(ctx, database.Pool, clusterID, repo.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// An instance on the bound cluster attributes to the repo.
+	inst := &types.ResourceInstance{
+		ID: "inst-1", OrgID: "org:1", ClusterID: clusterID, CatalogItemID: "platform:cert-manager",
+		Version: "v1", Spec: json.RawMessage(`{}`), State: "running", ManagementMode: "adopt",
+	}
+	if err := s.Create(ctx, database.Pool, inst); err != nil {
+		t.Fatal(err)
+	}
+	// An instance on an unbound cluster does not attribute to the repo.
+	inst2 := &types.ResourceInstance{
+		ID: "inst-2", OrgID: "org:1", ClusterID: otherCluster, CatalogItemID: "platform:istio",
+		Version: "v1", Spec: json.RawMessage(`{}`), State: "running", ManagementMode: "adopt",
+	}
+	if err := s.Create(ctx, database.Pool, inst2); err != nil {
+		t.Fatal(err)
+	}
+
+	// A managed addon referencing the repo.
+	addon := &types.ClusterAddon{
+		OrgID: "org:1", ClusterID: clusterID, CatalogItem: "platform:cert-manager",
+		State: types.AddonStateManaged, RepoID: repo.ID, RepoPath: "addons/cert-manager",
+		Source: types.SourceDescriptor{Kind: types.SourceKindHelm},
+	}
+	if err := s.UpsertClusterAddon(ctx, database.Pool, addon); err != nil {
+		t.Fatal(err)
+	}
+
+	refs, err = s.GitRepoRefCounts(ctx, database.Pool, "org:1", repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refs.Instances != 1 || refs.Addons != 1 || refs.Clusters != 1 {
+		t.Errorf("refs = %+v, want {Instances:1 Addons:1 Clusters:1}", refs)
+	}
+
+	// Cross-org isolation: refs never leak across orgs.
+	seedOrg(t, database, ctx, "org:2", "other")
+	otherRepo := &types.TenantGitRepo{OrgID: "org:2", Name: "baseline", Repo: "other/state",
+		Scope: types.GitRepoScopePlatform, IsDefault: true}
+	if err := s.UpsertGitRepo(ctx, database.Pool, otherRepo); err != nil {
+		t.Fatal(err)
+	}
+	refs, err = s.GitRepoRefCounts(ctx, database.Pool, "org:2", otherRepo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refs.Instances != 0 || refs.Addons != 0 || refs.Clusters != 0 {
+		t.Errorf("cross-org refs = %+v, want zero", refs)
 	}
 }

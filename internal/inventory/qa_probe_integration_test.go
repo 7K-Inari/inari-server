@@ -211,7 +211,7 @@ func TestQAListReposBadUUID(t *testing.T) {
 	seedOrg(t, database, ctx, "org:1", "acme")
 	s := NewStore()
 	bad := "not-a-uuid"
-	_, err := s.ListGitRepos(ctx, database.Pool, "org:1", &bad)
+	_, err := s.ListGitRepos(ctx, database.Pool, "org:1", []string{bad})
 	if err == nil {
 		t.Fatal("expected uuid cast error")
 	}

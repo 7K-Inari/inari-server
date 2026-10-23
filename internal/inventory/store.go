@@ -445,15 +445,16 @@ func scanGitRepo(row pgx.Row) (*types.TenantGitRepo, error) {
 	return &r, nil
 }
 
-// ListGitRepos returns the org's registered repos. A nil teamID returns all
-// repos (platform-team view); a non-nil teamID returns platform repos plus
-// that team's repos (baseline read-all + own team, plan risk #5).
-func (s *Store) ListGitRepos(ctx context.Context, q db.Querier, orgID string, teamID *string) ([]*types.TenantGitRepo, error) {
+// ListGitRepos returns the org's registered repos. An empty teamIDs filter
+// returns all repos (platform-team view); a non-empty filter returns
+// platform repos plus repos owned by any of the given teams (baseline
+// read-all + own teams, plan risk #5 — members may belong to many teams).
+func (s *Store) ListGitRepos(ctx context.Context, q db.Querier, orgID string, teamIDs []string) ([]*types.TenantGitRepo, error) {
 	sql := `SELECT ` + gitRepoCols + ` FROM tenant_git_repos WHERE org_id = $1`
 	args := []any{orgID}
-	if teamID != nil {
-		args = append(args, *teamID)
-		sql += fmt.Sprintf(` AND (scope = 'platform' OR team_id = $%d::uuid)`, len(args))
+	if len(teamIDs) > 0 {
+		args = append(args, teamIDs)
+		sql += fmt.Sprintf(` AND (scope = 'platform' OR team_id = ANY($%d::uuid[]))`, len(args))
 	}
 	sql += ` ORDER BY created_at`
 	rows, err := q.Query(ctx, sql, args...)
@@ -630,6 +631,27 @@ func (s *Store) BindClusterBaseline(ctx context.Context, q db.Querier, clusterID
 		return ErrRepoNotFound
 	}
 	return nil
+}
+
+// GitRepoRefCounts counts the live workloads referencing a repo (Feature A
+// unregister guard, decision 6): instances on clusters bound to the repo as
+// their baseline, managed addons pointing at the repo, and bound clusters.
+// The repo must belong to the org (cross-org reads as zero counts).
+func (s *Store) GitRepoRefCounts(ctx context.Context, q db.Querier, orgID, repoID string) (*types.GitRepoRefCounts, error) {
+	var c types.GitRepoRefCounts
+	err := q.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM resource_instances i
+			JOIN clusters c2 ON c2.id = i.cluster_id
+			WHERE i.org_id = $1 AND c2.baseline_repo_id = $2),
+		(SELECT count(*) FROM cluster_addons a
+			WHERE a.org_id = $1 AND a.repo_id = $2),
+		(SELECT count(*) FROM clusters c3
+			WHERE c3.org_id = $1 AND c3.baseline_repo_id = $2)`,
+		orgID, repoID).Scan(&c.Instances, &c.Addons, &c.Clusters)
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
 }
 
 // ---------------------------------------------------------------------------

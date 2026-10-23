@@ -743,6 +743,20 @@ type TenantGitRepo struct {
 	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
+// GitRepoRefCounts reports how many live workloads reference a repo row;
+// the unregister guard (Feature A, decision 6) hard-blocks on any non-zero
+// count unless forced. Instances attribute to a repo through their
+// cluster's baseline_repo_id binding (instances carry no repo column yet);
+// addons reference repo_id directly; clusters are bound baselines.
+type GitRepoRefCounts struct {
+	Instances int `json:"instances"`
+	Addons    int `json:"addons"`
+	Clusters  int `json:"clusters"`
+}
+
+// Total reports the sum of all reference counts.
+func (c GitRepoRefCounts) Total() int { return c.Instances + c.Addons + c.Clusters }
+
 // AddonState is the lifecycle of a cluster addon (Feature C).
 type AddonState string
 

@@ -118,7 +118,7 @@ type PatchInput struct {
 type Service struct {
 	db    *db.DB
 	store Store
-	git   gitprovider.Resolver
+	git   *gitprovider.RepoResolver
 	queue Queue
 	audit *audit.Store
 }
@@ -126,7 +126,7 @@ type Service struct {
 // NewService wires the module. db may be nil in unit tests (audit/outbox
 // TXs are then skipped); queue may be nil (teardown then skips agent
 // commands); audit may be nil (audit writes skipped).
-func NewService(store Store, git gitprovider.Resolver, queue Queue, auditStore *audit.Store, dbs ...*db.DB) *Service {
+func NewService(store Store, git *gitprovider.RepoResolver, queue Queue, auditStore *audit.Store, dbs ...*db.DB) *Service {
 	s := &Service{store: store, git: git, queue: queue, audit: auditStore}
 	if len(dbs) > 0 {
 		s.db = dbs[0]
@@ -158,17 +158,10 @@ func (s *Service) Get(ctx context.Context, orgID, id string) (*types.TenantGitRe
 	return s.store.GetGitRepo(ctx, s.querier(), orgID, id)
 }
 
-// Probe health-checks the repo's git provider auth, reusing the resolver's
-// Probe seam (orchestrator GitProviderStatus pattern); a resolver without
-// Probe degrades to "unknown".
+// Probe health-checks the repo's git provider auth with the effective
+// (precedence-merged) credentials via the RepoResolver's Probe seam.
 func (s *Service) Probe(ctx context.Context, r *types.TenantGitRepo) *types.GitProviderStatus {
-	prober, ok := s.git.(interface {
-		Probe(context.Context, *types.TenantGitConfig) *types.GitProviderStatus
-	})
-	if !ok {
-		return &types.GitProviderStatus{State: "unknown", AuthModel: "static"}
-	}
-	return prober.Probe(ctx, cfgFromRepo(r))
+	return s.git.ProbeRepo(ctx, r)
 }
 
 // Register validates input, fail-fast checks the GitHub App is installed in
@@ -239,8 +232,9 @@ func (s *Service) Register(ctx context.Context, orgID string, in RegisterInput, 
 
 	// Fail fast: the app must be installed in the repo's git org before we
 	// register (decision 3c). Resolution itself performs installation
-	// discovery; ErrAppNotInstalled/ErrAppCredentialsRevoked propagate typed.
-	if _, _, err := s.git.ForTenant(ctx, cfgFromRepo(row)); err != nil {
+	// discovery with the effective credentials (per-repo BYO → org app →
+	// platform); ErrAppNotInstalled/ErrAppCredentialsRevoked propagate typed.
+	if err := s.git.ValidateRepo(ctx, row); err != nil {
 		return nil, err
 	}
 
@@ -383,7 +377,7 @@ func (s *Service) teardown(ctx context.Context, orgID string, row *types.TenantG
 		return err
 	}
 
-	git, _, err := s.git.ForTenant(ctx, cfgFromRepo(row))
+	git, _, err := s.git.ResolveRow(ctx, row)
 	if err != nil {
 		return err
 	}
@@ -458,16 +452,6 @@ func (s *Service) enqueueAppDeletion(ctx context.Context, clusterID, appName str
 		Type:      agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_INVOKE_ACTION),
 		Payload:   raw,
 	})
-}
-
-// cfgFromRepo synthesizes the legacy TenantGitConfig view of a repo row so
-// the existing resolver (platform app → per-repo BYO override) applies
-// unchanged.
-func cfgFromRepo(r *types.TenantGitRepo) *types.TenantGitConfig {
-	return &types.TenantGitConfig{
-		OrgID: r.OrgID, Repo: r.Repo, CommitPolicy: r.CommitPolicy,
-		BaseBranch: r.BaseBranch, GitHubApp: r.GitHubApp,
-	}
 }
 
 func (s *Service) querier() db.Querier {

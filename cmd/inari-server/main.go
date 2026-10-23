@@ -156,6 +156,36 @@ func (a scaffoldTenantResolver) ResolveTenant(ctx context.Context, orgID string)
 	return tc, nil
 }
 
+// repoStoreAdapter maps the inventory store onto the gitprovider.RepoStore
+// seam (drops the db.Querier — the pool is bound here).
+type repoStoreAdapter struct {
+	store *inventory.Store
+	db    *db.DB
+}
+
+func (a repoStoreAdapter) GetGitRepo(ctx context.Context, orgID, id string) (*types.TenantGitRepo, error) {
+	return a.store.GetGitRepo(ctx, a.db.Pool, orgID, id)
+}
+
+func (a repoStoreAdapter) GetDefaultGitRepo(ctx context.Context, orgID string) (*types.TenantGitRepo, error) {
+	return a.store.GetDefaultGitRepo(ctx, a.db.Pool, orgID)
+}
+
+// orgGitConfigsAdapter exposes the org-wide BYO GitHub App reference from
+// tenant_git_configs for the RepoResolver credential precedence.
+type orgGitConfigsAdapter struct {
+	store *inventory.Store
+	db    *db.DB
+}
+
+func (a orgGitConfigsAdapter) OrgGitHubApp(ctx context.Context, orgID string) (*types.GitHubAppConfig, error) {
+	cfg, err := a.store.GitConfig(ctx, a.db.Pool, orgID)
+	if err != nil || cfg == nil {
+		return nil, err
+	}
+	return cfg.GitHubApp, nil
+}
+
 // policyCheckerAdapter maps the orchestrator's policy seam onto the Policy
 // Service (plan §5.11).
 type policyCheckerAdapter struct{ ps *policyservice.Service }
@@ -731,12 +761,15 @@ func run() error {
 	if cfg.PlatformGitOpsRepo != "" {
 		platformResourcesSvc.WithGitOps(cfg.PlatformGitOpsRepo, gitPerRepo)
 	}
-	orchestratorSvc := orchestrator.NewService(database, inventory.NewStore(), catalogSvc, registry,
+	orchestratorSvc := orchestrator.NewService(database, invStore, catalogSvc, registry,
 		approvalsSvc, gateway.Queue(), git, auditStore)
 
 	// Multi-repo GitOps registry (Feature A): team-filtered repo CRUD with
-	// guarded unregister, over the same inventory store + git resolver.
-	gitReposSvc := gitrepos.NewService(inventory.NewStore(), git, gateway.Queue(), auditStore, database)
+	// guarded unregister, over the same inventory store + a repo-aware git
+	// resolver (per-repo BYO → org-wide app → platform app precedence).
+	gitReposSvc := gitrepos.NewService(invStore,
+		gitprovider.NewRepoResolver(repoStoreAdapter{invStore, database}, orgGitConfigsAdapter{invStore, database}, git),
+		gateway.Queue(), auditStore, database)
 
 	cloudAccountsSvc := cloudaccounts.NewService(database, cloudaccounts.NewStore(), auditStore, cloudaccounts.NewSTSValidator())
 

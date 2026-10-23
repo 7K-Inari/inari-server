@@ -199,20 +199,20 @@ func TestRepoResolverPlatformAppWhenNeitherSet(t *testing.T) {
 
 func TestRepoResolverValidateRepo(t *testing.T) {
 	row := repoRow("org:1", "r1", "acme/team-a-gitops", nil)
-	store := &fakeRepoStore{byID: map[string]*types.TenantGitRepo{"org:1/r1": row}, def: row}
 	rec := &recordingResolver{provider: NewFake(), info: &AuthInfo{}}
-	rr := NewRepoResolver(store, &fakeOrgConfigs{}, rec)
+	rr := NewRepoResolver(&fakeRepoStore{}, &fakeOrgConfigs{}, rec)
 
-	if err := rr.ValidateRepo(context.Background(), "org:1", "r1"); err != nil {
+	// Candidate row (not yet persisted): validation works on the row itself.
+	if err := rr.ValidateRepo(context.Background(), row); err != nil {
 		t.Fatal(err)
 	}
-	if rec.lastCfg == nil {
-		t.Fatal("ValidateRepo did not resolve credentials")
+	if rec.lastCfg == nil || rec.lastCfg.Repo != row.Repo {
+		t.Fatalf("ValidateRepo did not resolve credentials for the row: %+v", rec.lastCfg)
 	}
 
 	wantErr := errors.New("not installed")
 	rec.err = wantErr
-	if err := rr.ValidateRepo(context.Background(), "org:1", "r1"); !errors.Is(err, wantErr) {
+	if err := rr.ValidateRepo(context.Background(), row); !errors.Is(err, wantErr) {
 		t.Fatalf("err = %v, want %v", err, wantErr)
 	}
 }

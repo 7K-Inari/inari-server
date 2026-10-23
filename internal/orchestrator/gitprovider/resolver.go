@@ -105,24 +105,48 @@ func (rr *RepoResolver) ResolveRepo(ctx context.Context, orgID, selector string)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	cfg, err := rr.effectiveConfig(ctx, orgID, row)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	p, info, err := rr.inner.ForTenant(ctx, cfg)
+	p, info, err := rr.ResolveRow(ctx, row)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	return row, p, info, nil
 }
 
+// ResolveRow resolves credentials for an in-memory repo row — used by the
+// registry itself, which already holds the row (including candidate rows
+// not yet persisted, at registration time).
+func (rr *RepoResolver) ResolveRow(ctx context.Context, row *types.TenantGitRepo) (Provider, *AuthInfo, error) {
+	cfg, err := rr.effectiveConfig(ctx, row.OrgID, row)
+	if err != nil {
+		return nil, nil, err
+	}
+	return rr.inner.ForTenant(ctx, cfg)
+}
+
 // ValidateRepo resolves credentials for the row without returning a
 // provider — the registration-time fail-fast check (decision 3c). Typed
 // errors (ErrAppNotInstalled with install URL, ErrAppCredentialsRevoked)
 // propagate from the underlying resolver.
-func (rr *RepoResolver) ValidateRepo(ctx context.Context, orgID, selector string) error {
-	_, _, _, err := rr.ResolveRepo(ctx, orgID, selector)
+func (rr *RepoResolver) ValidateRepo(ctx context.Context, row *types.TenantGitRepo) error {
+	_, _, err := rr.ResolveRow(ctx, row)
 	return err
+}
+
+// ProbeRepo health-checks the row's git provider auth with the effective
+// (precedence-merged) credentials, reusing the inner resolver's Probe seam
+// when it has one; otherwise it degrades to "unknown".
+func (rr *RepoResolver) ProbeRepo(ctx context.Context, row *types.TenantGitRepo) *types.GitProviderStatus {
+	prober, ok := rr.inner.(interface {
+		Probe(context.Context, *types.TenantGitConfig) *types.GitProviderStatus
+	})
+	if !ok {
+		return &types.GitProviderStatus{State: "unknown", AuthModel: "static"}
+	}
+	cfg, err := rr.effectiveConfig(ctx, row.OrgID, row)
+	if err != nil {
+		return &types.GitProviderStatus{State: "unknown"}
+	}
+	return prober.Probe(ctx, cfg)
 }
 
 func (rr *RepoResolver) repoRow(ctx context.Context, orgID, selector string) (*types.TenantGitRepo, error) {

@@ -134,6 +134,13 @@ func (f *fakeResolver) ForUser(_ context.Context, _, _ string) (gitprovider.Prov
 	return nil, nil, gitprovider.ErrUserModelUnsupported
 }
 
+// repoResolver wraps a fake credential resolver into the RepoResolver seam
+// the service consumes. The service only resolves in-memory rows
+// (ValidateRepo/ResolveRow/ProbeRepo), so no registry store is needed.
+func repoResolver(r gitprovider.Resolver) *gitprovider.RepoResolver {
+	return gitprovider.NewRepoResolver(nil, nil, r)
+}
+
 // recordingProvider records DeleteFiles paths; embeds the Fake for the rest.
 type recordingProvider struct {
 	*gitprovider.Fake
@@ -146,7 +153,7 @@ func (p *recordingProvider) DeleteFiles(ctx context.Context, repo, branch string
 }
 
 func TestRegisterValidatesInput(t *testing.T) {
-	svc := NewService(newFakeStore(), &fakeResolver{provider: gitprovider.NewFake()}, nil, nil)
+	svc := NewService(newFakeStore(), repoResolver(&fakeResolver{provider: gitprovider.NewFake()}), nil, nil)
 
 	cases := []struct {
 		name string
@@ -171,7 +178,7 @@ func TestRegisterValidatesInput(t *testing.T) {
 
 func TestRegisterAppNotInstalledPropagates(t *testing.T) {
 	notInstalled := &gitgithub.ErrAppNotInstalled{Org: "acme", InstallURL: "https://github.com/apps/x/installations/new"}
-	svc := NewService(newFakeStore(), &fakeResolver{err: notInstalled}, nil, nil)
+	svc := NewService(newFakeStore(), repoResolver(&fakeResolver{err: notInstalled}), nil, nil)
 
 	_, err := svc.Register(context.Background(), "org:1", RegisterInput{
 		Name: "team-a", Repo: "acme/team-a", Scope: types.GitRepoScopePlatform,
@@ -184,7 +191,7 @@ func TestRegisterAppNotInstalledPropagates(t *testing.T) {
 
 func TestRegisterPersistsWithDefaults(t *testing.T) {
 	store := newFakeStore()
-	svc := NewService(store, &fakeResolver{provider: gitprovider.NewFake()}, nil, nil)
+	svc := NewService(store, repoResolver(&fakeResolver{provider: gitprovider.NewFake()}), nil, nil)
 
 	r, err := svc.Register(context.Background(), "org:1", RegisterInput{
 		Name: "baseline", Repo: "acme/state", Scope: types.GitRepoScopePlatform, IsDefault: true,
@@ -210,7 +217,7 @@ func TestRegisterPersistsWithDefaults(t *testing.T) {
 
 func TestUnregisterGuard(t *testing.T) {
 	store := newFakeStore()
-	svc := NewService(store, &fakeResolver{provider: gitprovider.NewFake()}, nil, nil)
+	svc := NewService(store, repoResolver(&fakeResolver{provider: gitprovider.NewFake()}), nil, nil)
 
 	baseline, err := svc.Register(context.Background(), "org:1", RegisterInput{
 		Name: "baseline", Repo: "acme/state", Scope: types.GitRepoScopePlatform, IsDefault: true,
@@ -262,7 +269,7 @@ func TestUnregisterTeardownDeletesManifests(t *testing.T) {
 		t.Fatal(err)
 	}
 	prov := &recordingProvider{Fake: fake}
-	svc := NewService(store, &fakeResolver{provider: prov}, nil, nil)
+	svc := NewService(store, repoResolver(&fakeResolver{provider: prov}), nil, nil)
 
 	team, err := svc.Register(context.Background(), "org:1", RegisterInput{
 		Name: "team", Repo: "acme/team", Scope: types.GitRepoScopeTeam, TeamID: "11111111-1111-1111-1111-111111111111",
@@ -288,7 +295,7 @@ func TestUnregisterTeardownDeletesManifests(t *testing.T) {
 
 func TestUpdatePromotesDefault(t *testing.T) {
 	store := newFakeStore()
-	svc := NewService(store, &fakeResolver{provider: gitprovider.NewFake()}, nil, nil)
+	svc := NewService(store, repoResolver(&fakeResolver{provider: gitprovider.NewFake()}), nil, nil)
 
 	r1, _ := svc.Register(context.Background(), "org:1", RegisterInput{
 		Name: "baseline", Repo: "acme/state", Scope: types.GitRepoScopePlatform, IsDefault: true}, "user:u")

@@ -105,7 +105,9 @@ func newITServer(t *testing.T) *itFixture {
 	tenancySvc := tenancy.NewService(database, nil, tenancy.NewStore(), auditStore)
 	fake := gitprovider.NewFake()
 	queue := &itQueue{}
-	svc := gitrepos.NewService(inventory.NewStore(), gitprovider.StaticResolver{P: fake}, queue, auditStore, database)
+	svc := gitrepos.NewService(inventory.NewStore(),
+		gitprovider.NewRepoResolver(nil, nil, gitprovider.StaticResolver{P: fake}),
+		queue, auditStore, database)
 
 	router, api := httpserver.NewRouter(slog.Default(), itValidator{}, database)
 	gitrepos.NewHandler(svc, tenancySvc, itAuthorizer{}).RegisterRoutes(api)

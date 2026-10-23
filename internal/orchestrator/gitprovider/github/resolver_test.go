@@ -579,3 +579,91 @@ func TestProbeCached(t *testing.T) {
 		t.Errorf("probe after cache expiry = %q, want unknown", st3.State)
 	}
 }
+
+// Two repos in the same org with different per-repo BYO apps must resolve
+// to distinct providers (the cache key is per-credential, not per-org).
+func TestResolverBYOCacheIsolationPerRepo(t *testing.T) {
+	gh := &fakeGitHub{installations: []map[string]any{inst(2, "acme"), inst(3, "acme")}}
+	_, keyA := writePlatformKey(t)
+	_, keyB := writePlatformKey(t)
+	r, srv := newTestResolver(t, gh, func(c *ResolverConfig) {
+		c.KeyLoader = func(_ context.Context, ref *types.GitHubAppSecretRef) (*rsa.PrivateKey, error) {
+			switch ref.SecretName {
+			case "key-a":
+				return keyA, nil
+			case "key-b":
+				return keyB, nil
+			}
+			return nil, fmt.Errorf("unknown secret %q", ref.SecretName)
+		}
+	})
+	ctx := context.Background()
+	cfgA := gitCfg("org:1", "acme/team-a-gitops")
+	cfgA.GitHubApp = &types.GitHubAppConfig{
+		AppID: 91, InstallationID: 2, APIBase: srv.URL,
+		KeyRef: &types.GitHubAppSecretRef{SecretName: "key-a", Namespace: "ns", Key: "k"},
+	}
+	cfgB := gitCfg("org:1", "acme/team-b-gitops")
+	cfgB.GitHubApp = &types.GitHubAppConfig{
+		AppID: 92, InstallationID: 3, APIBase: srv.URL,
+		KeyRef: &types.GitHubAppSecretRef{SecretName: "key-b", Namespace: "ns", Key: "k"},
+	}
+	_, infoA, err := r.ForTenant(ctx, cfgA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, infoB, err := r.ForTenant(ctx, cfgB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if infoA.AppID != 91 || infoB.AppID != 92 {
+		t.Fatalf("resolved apps = %d, %d; want 91 and 92 (no cross-repo cache collision)", infoA.AppID, infoB.AppID)
+	}
+}
+
+// EvictTenant drops every BYO provider cached for the org (all repos), but
+// leaves platform (i:) entries alone.
+func TestResolverEvictTenantAllRepos(t *testing.T) {
+	gh := &fakeGitHub{installations: []map[string]any{inst(2, "acme"), inst(3, "acme")}}
+	_, key := writePlatformKey(t)
+	var loads atomic.Int32
+	r, srv := newTestResolver(t, gh, func(c *ResolverConfig) {
+		c.KeyLoader = func(_ context.Context, _ *types.GitHubAppSecretRef) (*rsa.PrivateKey, error) {
+			loads.Add(1)
+			return key, nil
+		}
+	})
+	ctx := context.Background()
+	mk := func(repo string, appID, instID int64) *types.TenantGitConfig {
+		cfg := gitCfg("org:1", repo)
+		cfg.GitHubApp = &types.GitHubAppConfig{
+			AppID: appID, InstallationID: instID, APIBase: srv.URL,
+			KeyRef: &types.GitHubAppSecretRef{SecretName: "k", Namespace: "ns", Key: "k"},
+		}
+		return cfg
+	}
+	if _, _, err := r.ForTenant(ctx, mk("acme/team-a-gitops", 91, 2)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.ForTenant(ctx, mk("acme/team-b-gitops", 92, 3)); err != nil {
+		t.Fatal(err)
+	}
+	// A platform resolution for another org must survive the eviction.
+	if _, _, err := r.ForTenant(ctx, gitCfg("org:2", "acme/acme-inari-state")); err != nil {
+		t.Fatal(err)
+	}
+	r.EvictTenant("org:1")
+	if _, _, err := r.ForTenant(ctx, mk("acme/team-a-gitops", 91, 2)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.ForTenant(ctx, mk("acme/team-b-gitops", 92, 3)); err != nil {
+		t.Fatal(err)
+	}
+	if n := loads.Load(); n != 4 {
+		t.Errorf("key loads = %d, want 4 (both repos reloaded after eviction)", n)
+	}
+	// Platform provider for org:2 still works without re-discovery.
+	if _, _, err := r.ForTenant(ctx, gitCfg("org:2", "acme/acme-inari-state")); err != nil {
+		t.Fatal(err)
+	}
+}

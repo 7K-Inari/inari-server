@@ -296,7 +296,7 @@ func (r *Resolver) forTenantBYO(ctx context.Context, cfg *types.TenantGitConfig)
 	if r.cfg.KeyLoader == nil {
 		return nil, nil, fmt.Errorf("gitprovider github: tenant BYO git app configured but no key loader is wired (INARI_TENANT_GIT_KEY_MOUNT_ROOT)")
 	}
-	key := "t:" + cfg.OrgID
+	key := byoCacheKey(cfg)
 	r.mu.Lock()
 	cp, ok := r.providers[key]
 	r.mu.Unlock()
@@ -316,7 +316,7 @@ func (r *Resolver) forTenantBYO(ctx context.Context, cfg *types.TenantGitConfig)
 		InstallationID: cfg.GitHubApp.InstallationID, APIBase: base,
 	}
 	inner := NewWithKey(cfg.GitHubApp.AppID, cfg.GitHubApp.InstallationID, keyBytes, base)
-	wrapped := r.wrapBYO(inner, cfg.OrgID, info)
+	wrapped := r.wrapBYO(inner, cfg.OrgID, key, info)
 	r.mu.Lock()
 	r.providers[key] = &cachedProvider{provider: wrapped, info: info}
 	r.mu.Unlock()
@@ -325,9 +325,11 @@ func (r *Resolver) forTenantBYO(ctx context.Context, cfg *types.TenantGitConfig)
 	return wrapped, info, nil
 }
 
-// wrapBYO maps auth failures to typed errors and evicts the tenant provider
-// so the next resolution reloads the key (rotation pickup, model B).
-func (r *Resolver) wrapBYO(inner *Provider, orgID string, info *gitprovider.AuthInfo) gitprovider.Provider {
+// wrapBYO maps auth failures to typed errors and evicts the failed BYO
+// provider so the next resolution reloads the key (rotation pickup, model
+// B). Only the affected credential is evicted — other repos' BYO apps in
+// the same org keep their cached providers.
+func (r *Resolver) wrapBYO(inner *Provider, orgID, cacheKey string, info *gitprovider.AuthInfo) gitprovider.Provider {
 	return &resolvingProvider{inner: inner, mapErr: func(err error) error {
 		apiErr := asAPIError(err)
 		if apiErr == nil {
@@ -338,22 +340,44 @@ func (r *Resolver) wrapBYO(inner *Provider, orgID string, info *gitprovider.Auth
 			if apiErr.Status == http.StatusForbidden && !apiErr.indicatesRevoked() {
 				return fmt.Errorf("gitprovider github: %s %s: %s", apiErr.Method, apiErr.Path, apiErr.Body)
 			}
-			r.EvictTenant(orgID)
+			r.evictBYO(cacheKey)
 			return &ErrAppCredentialsRevoked{OrgID: orgID, AppID: info.AppID, InstallationID: info.InstallationID, APIBase: info.APIBase}
 		case apiErr.Status == http.StatusNotFound && strings.Contains(apiErr.Path, "/access_tokens"):
-			r.EvictTenant(orgID)
+			r.evictBYO(cacheKey)
 			return &ErrAppCredentialsRevoked{OrgID: orgID, AppID: info.AppID, InstallationID: info.InstallationID, APIBase: info.APIBase}
 		}
 		return err
 	}}
 }
 
-// EvictTenant drops the cached BYO provider (and status) for a tenant —
-// called after git-config changes so the next deploy picks up new creds.
+// evictBYO drops one cached BYO provider by its credential-scoped key.
+func (r *Resolver) evictBYO(cacheKey string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.providers, cacheKey)
+}
+
+// byoCacheKey scopes a cached BYO provider to its credential identity, not
+// just the org: two repos in one org may carry different per-repo BYO apps
+// (Feature A), and a per-org key would silently cross-use credentials.
+func byoCacheKey(cfg *types.TenantGitConfig) string {
+	app := cfg.GitHubApp
+	return fmt.Sprintf("t:%s:%d:%d:%s", cfg.OrgID, app.AppID, app.InstallationID, strings.TrimSuffix(app.APIBase, "/"))
+}
+
+// EvictTenant drops every cached BYO provider (and the status) for a
+// tenant — called after git-config changes so the next deploy picks up new
+// creds. Platform (i:) entries belong to installations, not tenants, and
+// are left alone.
 func (r *Resolver) EvictTenant(orgID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.providers, "t:"+orgID)
+	prefix := "t:" + orgID + ":"
+	for k := range r.providers {
+		if strings.HasPrefix(k, prefix) {
+			delete(r.providers, k)
+		}
+	}
 	delete(r.status, orgID)
 }
 

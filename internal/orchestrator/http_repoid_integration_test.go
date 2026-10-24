@@ -509,3 +509,61 @@ func TestApprovalResumePreservesRepoID(t *testing.T) {
 		t.Errorf("baseline repo unexpectedly written: %v", keysOf(bf))
 	}
 }
+
+// TestQALegacyInstanceMutation pins the back-compat path for pre-0036
+// instances (repo_id NULL): mutations resolve the org default repo, accept
+// only the empty/"default" selector, and — current behavior — leave
+// repo_id NULL (MarkDeployed/MarkSpecUpdated never backfill it; the
+// COALESCE(repo_id, cluster baseline) fallback in the registry ref-counts
+// covers attribution as long as the cluster is bound).
+func TestQALegacyInstanceMutation(t *testing.T) {
+	srv, database, git, _, baselineID, teamRepoID := itServerWithRepoResolver(t)
+	defer srv.Close()
+	ctx := context.Background()
+
+	d := deployInstance(t, srv, deployBody(""))
+	// Simulate a pre-0036 row: clear the recorded repo.
+	if _, err := database.Pool.Exec(ctx,
+		`UPDATE resource_instances SET repo_id = NULL WHERE id = $1`, d.InstanceID); err != nil {
+		t.Fatal(err)
+	}
+
+	// An explicit repoId naming the default ROW ID is rejected for legacy
+	// rows (only the empty/"default" selector is accepted) — 422.
+	code, body := itReq(t, srv, "POST", "/api/v1/tenants/acme/instances/"+d.InstanceID+"/upgrade", "good",
+		`{"toVersion":"1.1.0","repoId":"`+baselineID+`"}`)
+	if code != http.StatusUnprocessableEntity {
+		t.Fatalf("legacy upgrade with default row id: got %d, want 422 (%s)", code, body)
+	}
+	// A team repo id is likewise rejected.
+	code, body = itReq(t, srv, "POST", "/api/v1/tenants/acme/instances/"+d.InstanceID+"/upgrade", "good",
+		`{"toVersion":"1.1.0","repoId":"`+teamRepoID+`"}`)
+	if code != http.StatusUnprocessableEntity {
+		t.Fatalf("legacy upgrade with team repo id: got %d, want 422 (%s)", code, body)
+	}
+
+	// No selector: upgrade lands in the default repo.
+	code, body = itReq(t, srv, "POST", "/api/v1/tenants/acme/instances/"+d.InstanceID+"/upgrade", "good",
+		`{"toVersion":"1.1.0"}`)
+	if code != http.StatusOK {
+		t.Fatalf("legacy upgrade: %d %s", code, body)
+	}
+	files := git.Files("inari-dev/acme-inari-state", "main")
+	if _, ok := files["clusters/cluster-1/postgres-aws/my-db/instance.yaml"]; !ok {
+		t.Fatalf("legacy upgrade not committed to default repo: %v", keysOf(files))
+	}
+	// Current behavior: repo_id stays NULL after the mutation (no
+	// backfill). Pinned so a future backfill change updates this test.
+	if got := instanceRepoID(t, database, d.InstanceID); got != "" {
+		t.Errorf("legacy instance repo_id = %q after upgrade, want NULL (no backfill)", got)
+	}
+
+	// Delete resolves the default repo for the legacy row.
+	code, body = itReq(t, srv, "DELETE", "/api/v1/tenants/acme/instances/"+d.InstanceID, "good", "")
+	if code != http.StatusOK {
+		t.Fatalf("legacy delete: %d %s", code, body)
+	}
+	if _, ok := git.Files("inari-dev/acme-inari-state", "main")["clusters/cluster-1/postgres-aws/my-db/instance.yaml"]; ok {
+		t.Error("legacy instance manifest still present in default repo after delete")
+	}
+}

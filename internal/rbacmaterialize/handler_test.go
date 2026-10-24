@@ -365,3 +365,71 @@ func keys(m map[string]string) []string {
 	}
 	return out
 }
+
+// TestHandlerTeamRepoWritesPullRequest pins the per-row policy: a team
+// repo with pull_request policy gets a PR, not a direct commit.
+func TestHandlerTeamRepoWritesPullRequest(t *testing.T) {
+	git := gitprovider.NewFake()
+	h := NewHandler(&fakeTenancy{
+		org: &types.Organization{ID: "org:1", Slug: "acme", Status: "active"},
+		teams: []types.Team{
+			{ID: "t1", Name: "team-a", RoleName: "editor", KeycloakGroupPath: "tenant-acme/team-a"},
+		},
+	}, &fakeGitConfigs{}, git, nil).WithGitRepos(&fakeGitRepos{
+		teams: []*types.TenantGitRepo{{
+			ID: "r2", OrgID: "org:1", Name: "team-a", Repo: "acme/team-a-gitops",
+			Scope: types.GitRepoScopeTeam, TeamID: "t1", CommitPolicy: types.CommitPolicyPullRequest, BaseBranch: "main",
+		}},
+	}).WithTeamRepoWrites()
+	if err := h.Handle(context.Background(), event(t, types.EventRBACMappingsUpdated,
+		types.RBACMappingsPayload{OrgID: "org:1"})); err != nil {
+		t.Fatal(err)
+	}
+	if files := git.Files("acme/team-a-gitops", "main"); len(files) != 0 {
+		t.Errorf("PR-policy team repo must not be committed directly: %v", keys(files))
+	}
+	var sawTeamPR bool
+	for _, pr := range git.PRs {
+		if pr.Repo == "acme/team-a-gitops" {
+			sawTeamPR = true
+		}
+	}
+	if !sawTeamPR {
+		t.Errorf("no PR opened for the team repo: %+v", git.PRs)
+	}
+}
+
+// TestHandlerTeamRepoWriteFailurePropagates pins the retry contract: a
+// failing team-repo write surfaces so the dispatcher retries (the baseline
+// write is idempotent, so a re-drive is safe).
+func TestHandlerTeamRepoWriteFailurePropagates(t *testing.T) {
+	git := &failRepoGit{Fake: gitprovider.NewFake(), repo: "acme/team-a-gitops"}
+	h := NewHandler(&fakeTenancy{
+		org: &types.Organization{ID: "org:1", Slug: "acme", Status: "active"},
+		teams: []types.Team{
+			{ID: "t1", Name: "team-a", RoleName: "editor", KeycloakGroupPath: "tenant-acme/team-a"},
+		},
+	}, &fakeGitConfigs{}, git, nil).WithGitRepos(&fakeGitRepos{
+		teams: []*types.TenantGitRepo{{
+			ID: "r2", OrgID: "org:1", Name: "team-a", Repo: "acme/team-a-gitops",
+			Scope: types.GitRepoScopeTeam, TeamID: "t1", CommitPolicy: types.CommitPolicyDirect, BaseBranch: "main",
+		}},
+	}).WithTeamRepoWrites()
+	if err := h.Handle(context.Background(), event(t, types.EventRBACMappingsUpdated,
+		types.RBACMappingsPayload{OrgID: "org:1"})); err == nil {
+		t.Fatal("expected team-repo write failure to propagate")
+	}
+}
+
+// failRepoGit fails CommitFiles for one repo only (team-write error path).
+type failRepoGit struct {
+	*gitprovider.Fake
+	repo string
+}
+
+func (f *failRepoGit) CommitFiles(ctx context.Context, repo, branch string, files []gitprovider.File, message string) (*gitprovider.Result, error) {
+	if repo == f.repo {
+		return nil, errors.New("boom")
+	}
+	return f.Fake.CommitFiles(ctx, repo, branch, files, message)
+}

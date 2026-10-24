@@ -509,14 +509,27 @@ var ErrSameVersion = fmt.Errorf("orchestrator: target version is the current ver
 var ErrRepoMismatch = fmt.Errorf("orchestrator: repoId does not match the instance's recorded repo")
 
 // checkRepoSelector enforces the repo-immutability rule on instance
-// mutations: an explicit selector must equal the recorded repo.
-func checkRepoSelector(existing *types.ResourceInstance, selector string) error {
+// mutations: an explicit selector must equal the recorded repo. The
+// "default" sentinel matches when the recorded repo IS the org's current
+// default (or when the row predates attribution); any other disagreement
+// is ErrRepoMismatch.
+func (s *Service) checkRepoSelector(ctx context.Context, existing *types.ResourceInstance, selector string) error {
 	if selector == "" || selector == existing.RepoID {
 		return nil
 	}
-	// Legacy rows (no recorded repo) accept only the default selector.
-	if existing.RepoID == "" && selector == gitprovider.RepoSelectorDefault {
-		return nil
+	if selector == gitprovider.RepoSelectorDefault {
+		// Legacy rows (no recorded repo) always accept the default
+		// selector; recorded rows accept it when their repo is the
+		// current default.
+		if existing.RepoID == "" {
+			return nil
+		}
+		if s.gitRepos != nil {
+			row, _, _, err := s.gitRepos.ResolveRepo(ctx, existing.OrgID, gitprovider.RepoSelectorDefault)
+			if err == nil && row.ID == existing.RepoID {
+				return nil
+			}
+		}
 	}
 	return ErrRepoMismatch
 }
@@ -563,7 +576,7 @@ func (s *Service) revert(ctx context.Context, orgID, instanceID, toVersion, repo
 	if existing.OrgID != orgID {
 		return nil, inventory.ErrInstanceNotFound
 	}
-	if err := checkRepoSelector(existing, repoID); err != nil {
+	if err := s.checkRepoSelector(ctx, existing, repoID); err != nil {
 		return nil, err
 	}
 	cluster, err := s.clusters.GetCluster(ctx, existing.ClusterID)
@@ -613,7 +626,7 @@ func (s *Service) UpdateSpec(ctx context.Context, orgID, instanceID string, spec
 	if existing.OrgID != orgID {
 		return nil, inventory.ErrInstanceNotFound
 	}
-	if err := checkRepoSelector(existing, repoID); err != nil {
+	if err := s.checkRepoSelector(ctx, existing, repoID); err != nil {
 		return nil, err
 	}
 	cluster, err := s.clusters.GetCluster(ctx, existing.ClusterID)

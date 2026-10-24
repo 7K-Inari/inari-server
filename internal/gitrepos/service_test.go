@@ -165,6 +165,8 @@ func TestRegisterValidatesInput(t *testing.T) {
 		{"unsupported provider", RegisterInput{Name: "x", Repo: "acme/x", Provider: "gitlab"}, ErrInvalidInput},
 		{"team scope without team", RegisterInput{Name: "x", Repo: "acme/x", Scope: types.GitRepoScopeTeam}, ErrInvalidInput},
 		{"platform scope with team", RegisterInput{Name: "x", Repo: "acme/x", Scope: types.GitRepoScopePlatform, TeamID: "t1"}, ErrInvalidInput},
+		{"team scope as default", RegisterInput{Name: "x", Repo: "acme/x", Scope: types.GitRepoScopeTeam,
+			TeamID: "11111111-1111-1111-1111-111111111111", IsDefault: true}, ErrInvalidInput},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -326,6 +328,29 @@ func TestUpdatePromotesDefault(t *testing.T) {
 	}
 	if got.CommitPolicy != types.CommitPolicyPullRequest || got.BaseBranch != "trunk" {
 		t.Errorf("patch not applied: %+v", got)
+	}
+}
+
+// TestUpdatePromoteTeamRepoRejected pins the default-slot scope guard: a
+// team-scope repo can never be promoted to the org default (the
+// orchestrator's team-write enforcement skips empty selectors, so a
+// team-scope default would be writable by any org member).
+func TestUpdatePromoteTeamRepoRejected(t *testing.T) {
+	store := newFakeStore()
+	svc := NewService(store, repoResolver(&fakeResolver{provider: gitprovider.NewFake()}), nil, nil)
+
+	if _, err := svc.Register(context.Background(), "org:1", RegisterInput{
+		Name: "baseline", Repo: "acme/state", Scope: types.GitRepoScopePlatform, IsDefault: true}, "user:u"); err != nil {
+		t.Fatal(err)
+	}
+	team, err := svc.Register(context.Background(), "org:1", RegisterInput{
+		Name: "team", Repo: "acme/team", Scope: types.GitRepoScopeTeam,
+		TeamID: "11111111-1111-1111-1111-111111111111"}, "user:u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Update(context.Background(), "org:1", team.ID, PatchInput{IsDefault: boolPtr(true)}, "user:u"); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("promote team repo: want ErrInvalidInput, got %v", err)
 	}
 }
 

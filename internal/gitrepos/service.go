@@ -215,6 +215,14 @@ func (s *Service) Register(ctx context.Context, orgID string, in RegisterInput, 
 		row.BaseBranch = "main"
 	}
 
+	// The org default is the fallback repo for empty selectors; the
+	// orchestrator's team-write enforcement skips empty selectors, so a
+	// team-scope default would be writable by any org member. Restrict the
+	// default slot to platform repos (decision 5b).
+	if row.IsDefault && row.Scope != types.GitRepoScopePlatform {
+		return nil, fmt.Errorf("%w: only platform repos can be the org default", ErrInvalidInput)
+	}
+
 	// Registering straight into the default slot when the org already has a
 	// default would fail deep in the upsert on one_default_repo_per_org and
 	// surface as a misleading "repo already registered" 409 — pre-check and
@@ -270,6 +278,10 @@ func (s *Service) Update(ctx context.Context, orgID, id string, in PatchInput, a
 	}
 	if in.IsDefault != nil && !*in.IsDefault {
 		return nil, fmt.Errorf("%w: cannot demote the default directly; promote another repo instead", ErrInvalidInput)
+	}
+	// Promotion targets the default slot: platform repos only (see Register).
+	if in.IsDefault != nil && *in.IsDefault && row.Scope != types.GitRepoScopePlatform {
+		return nil, fmt.Errorf("%w: only platform repos can be the org default", ErrInvalidInput)
 	}
 	if in.Name != nil {
 		if strings.TrimSpace(*in.Name) == "" {

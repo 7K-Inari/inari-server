@@ -283,6 +283,12 @@ func (h *Handler) deploy(ctx context.Context, in *deployInput) (*deployOutput, e
 	if errors.Is(err, ErrNoGitConfig) {
 		return nil, huma.Error409Conflict(err.Error())
 	}
+	// The repo can vanish between the enforcement check and resolution
+	// (TOCTOU), or the check can be unwired (export-openapi): read the
+	// store's sentinel as a 404, never a bare 500.
+	if errors.Is(err, inventory.ErrRepoNotFound) {
+		return nil, huma.Error404NotFound("git repo not found")
+	}
 	if errors.Is(err, ErrClusterNotActive) {
 		return nil, huma.Error409Conflict(err.Error())
 	}
@@ -368,6 +374,11 @@ func instanceMutationError(err error) error {
 	}
 	if errors.Is(err, ErrNoGitConfig) {
 		return huma.Error409Conflict(err.Error())
+	}
+	// The recorded repo can vanish mid-request (unregister racing a
+	// mutation): read the store's sentinel as a 404, never a bare 500.
+	if errors.Is(err, inventory.ErrRepoNotFound) {
+		return huma.Error404NotFound("git repo not found")
 	}
 	if errors.Is(err, ErrSameVersion) {
 		return huma.Error409Conflict(err.Error())

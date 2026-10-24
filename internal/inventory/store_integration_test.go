@@ -194,6 +194,40 @@ func TestSetDefaultGitRepo(t *testing.T) {
 	}
 }
 
+// TestSetDefaultGitRepoRejectsTeamScope pins the store-level scope guard:
+// the default slot is platform-only (the orchestrator's team-write
+// enforcement skips empty selectors, so a team-scope default would be
+// writable by any org member). A team-scope target reads as
+// ErrRepoNotFound and leaves the current default untouched.
+func TestSetDefaultGitRepoRejectsTeamScope(t *testing.T) {
+	database, ctx := setupStoreTest(t)
+	seedOrg(t, database, ctx, "org:1", "acme")
+	teamID := seedTeam(t, database, ctx, "org:1", "team-a")
+	s := NewStore()
+
+	baseline := &types.TenantGitRepo{OrgID: "org:1", Name: "baseline", Repo: "acme/state",
+		Scope: types.GitRepoScopePlatform, IsDefault: true}
+	teamRepo := &types.TenantGitRepo{OrgID: "org:1", Name: "team-a", Repo: "acme/team-a",
+		Scope: types.GitRepoScopeTeam, TeamID: teamID}
+	if err := s.UpsertGitRepo(ctx, database.Pool, baseline); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertGitRepo(ctx, database.Pool, teamRepo); err != nil {
+		t.Fatal(err)
+	}
+
+	err := database.WithTx(ctx, func(tx pgx.Tx) error {
+		return s.SetDefaultGitRepo(ctx, tx, "org:1", teamRepo.ID)
+	})
+	if !errors.Is(err, ErrRepoNotFound) {
+		t.Fatalf("team-scope promote: want ErrRepoNotFound, got %v", err)
+	}
+	def, derr := s.GetDefaultGitRepo(ctx, database.Pool, "org:1")
+	if derr != nil || def.ID != baseline.ID {
+		t.Errorf("default changed after rejected promote: %+v, %v", def, derr)
+	}
+}
+
 func TestGitRepoBYOApp(t *testing.T) {
 	database, ctx := setupStoreTest(t)
 	seedOrg(t, database, ctx, "org:1", "acme")

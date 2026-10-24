@@ -176,13 +176,15 @@ func TestDeployDefaultRepoBackCompat(t *testing.T) {
 	}
 }
 
-// TestDeployUnknownRepoID is a 404 from the registry lookup.
+// TestDeployUnknownRepoID is a 404 from the registry lookup — even with
+// the enforcement seams unwired (this server), the service's
+// inventory.ErrRepoNotFound maps to 404, never a bare 500.
 func TestDeployUnknownRepoID(t *testing.T) {
 	srv, _, _, _, _, _ := itServerWithRepoResolver(t)
 	defer srv.Close()
 
 	code, body := itReq(t, srv, "POST", "/api/v1/tenants/acme/deploys", "good", deployBody("01JUNKNOWNREPOID0000000000"))
-	if code != http.StatusNotFound && code != http.StatusInternalServerError {
+	if code != http.StatusNotFound {
 		t.Fatalf("unknown repoId: got %d, want 404 (body: %s)", code, body)
 	}
 }

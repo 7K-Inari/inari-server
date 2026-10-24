@@ -597,7 +597,10 @@ func (s *Store) DeleteGitRepo(ctx context.Context, q db.Querier, orgID, id strin
 // checked per row, so the old default must clear before the new one sets).
 // The demote is gated on the target row existing, so a missing id leaves
 // the current default untouched (ErrRepoNotFound) and the org can never
-// end up with zero defaults.
+// end up with zero defaults. The default slot is platform-scope only (the
+// orchestrator's team-write enforcement skips empty selectors, so a
+// team-scope default would be writable by any org member); a team-scope
+// target reads as ErrRepoNotFound, leaving the current default untouched.
 //
 // Concurrency: a per-org pg_advisory_xact_lock serializes flips. Without
 // it, two concurrent transactions both pass the demote CTE in their own
@@ -615,7 +618,7 @@ func (s *Store) SetDefaultGitRepo(ctx context.Context, q db.Querier, orgID, id s
 		return err
 	}
 	const sql = `WITH target AS (
-		SELECT id FROM tenant_git_repos WHERE org_id = $1 AND id = $2
+		SELECT id FROM tenant_git_repos WHERE org_id = $1 AND id = $2 AND scope = 'platform'
 	), demoted AS (
 		UPDATE tenant_git_repos SET is_default = FALSE, updated_at = now()
 		WHERE org_id = $1 AND is_default AND EXISTS (SELECT 1 FROM target)

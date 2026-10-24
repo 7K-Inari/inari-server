@@ -575,29 +575,29 @@ const (
 // the deploy (M3); InstanceID is set for upgrade approvals. For lifecycle
 // approvals (Action set, ItemID empty), Spec carries the action context.
 type ApprovalRequest struct {
-	ID          string          `json:"id"`
-	OrgID       string          `json:"orgId"`
-	ItemID      string          `json:"itemId"`
-	Version     string          `json:"version"`
-	ClusterID   string          `json:"clusterId"`
-	Spec        json.RawMessage `json:"spec"`
-	Requester   string          `json:"requester"`
-	Approver    string          `json:"approver,omitempty"`
-	State       string          `json:"state"`
-	Reason      string          `json:"reason,omitempty"`
-	Name        string          `json:"name,omitempty"`
-	Namespace   string          `json:"namespace,omitempty"`
-	OwnerTeam   string          `json:"ownerTeam,omitempty"`
-	Channel     string          `json:"channel,omitempty"`
-	InstanceID  string          `json:"instanceId,omitempty"`
-	Action      string          `json:"action,omitempty"`
+	ID         string          `json:"id"`
+	OrgID      string          `json:"orgId"`
+	ItemID     string          `json:"itemId"`
+	Version    string          `json:"version"`
+	ClusterID  string          `json:"clusterId"`
+	Spec       json.RawMessage `json:"spec"`
+	Requester  string          `json:"requester"`
+	Approver   string          `json:"approver,omitempty"`
+	State      string          `json:"state"`
+	Reason     string          `json:"reason,omitempty"`
+	Name       string          `json:"name,omitempty"`
+	Namespace  string          `json:"namespace,omitempty"`
+	OwnerTeam  string          `json:"ownerTeam,omitempty"`
+	Channel    string          `json:"channel,omitempty"`
+	InstanceID string          `json:"instanceId,omitempty"`
+	Action     string          `json:"action,omitempty"`
 	// RepoID carries the deploy-time repo selector through the approval
 	// gate so the resumed deploy commits to the same repo (Feature A).
-	RepoID      string          `json:"repoId,omitempty"`
-	CreatedAt   time.Time       `json:"createdAt"`
-	DecidedAt   *time.Time      `json:"decidedAt,omitempty"`
-	ExpiresAt   *time.Time      `json:"expiresAt,omitempty"`
-	CancelledBy string          `json:"cancelledBy,omitempty"`
+	RepoID      string     `json:"repoId,omitempty"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	DecidedAt   *time.Time `json:"decidedAt,omitempty"`
+	ExpiresAt   *time.Time `json:"expiresAt,omitempty"`
+	CancelledBy string     `json:"cancelledBy,omitempty"`
 }
 
 // InstanceState is the resource instance lifecycle (plan §5.11).
@@ -642,10 +642,10 @@ type ResourceInstance struct {
 	// RepoID is the tenant_git_repos row this instance's manifests were
 	// committed to (Feature A). Empty predates the column; readers fall
 	// back to the cluster's baseline binding.
-	RepoID         string          `json:"repoId,omitempty"`
-	Generation     int             `json:"generation"`
-	CreatedAt      time.Time       `json:"createdAt"`
-	UpdatedAt      time.Time       `json:"updatedAt"`
+	RepoID     string    `json:"repoId,omitempty"`
+	Generation int       `json:"generation"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
 }
 
 // CommitPolicy selects direct commit vs pull request (plan §11.2).

@@ -125,7 +125,14 @@ func (s *Store) CreateCluster(ctx context.Context, q db.Querier, c *types.Cluste
 	if err != nil {
 		return err
 	}
-	const sql = `INSERT INTO clusters (id, org_id, name, labels, state) VALUES ($1,$2,$3,$4,$5)
+	// baseline_repo_id defaults to the org's default platform repo (Feature
+	// A, plan §4: each cluster binds to exactly one baseline at
+	// registration). NULL when the org has no registry row yet (cluster
+	// created before the zone's repo); readers fall back to the org
+	// default. Re-binding is an explicit BindClusterBaseline call.
+	const sql = `INSERT INTO clusters (id, org_id, name, labels, state, baseline_repo_id)
+	             SELECT $1,$2,$3,$4,$5,
+	                (SELECT id FROM tenant_git_repos WHERE org_id = $2 AND is_default)
 	             RETURNING ` + clusterCols
 	row := q.QueryRow(ctx, sql, c.ID, c.OrgID, c.Name, labels, c.State)
 	out, err := scanCluster(row)

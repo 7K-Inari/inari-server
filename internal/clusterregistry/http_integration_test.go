@@ -743,3 +743,40 @@ func TestClusterKubeconfigFlagOff410(t *testing.T) {
 		t.Errorf("kubeconfig with flag off = %d, want 410", code)
 	}
 }
+
+// TestClusterCreateBindsDefaultBaseline pins the Feature A registration
+// binding (plan §4): a new cluster binds to the org's default platform
+// repo when one exists at create time; without a registry row the column
+// stays NULL (readers fall back to the org default).
+func TestClusterCreateBindsDefaultBaseline(t *testing.T) {
+	srv, _, database := itServerDB(t, itAuthorizer{allow: true})
+	defer srv.Close()
+	ctx := context.Background()
+
+	// No registry rows: NULL binding.
+	unbound := itCreate(t, srv, "acme", "unbound")
+	var baselineRepoID *string
+	if err := database.Pool.QueryRow(ctx,
+		`SELECT baseline_repo_id FROM clusters WHERE id = $1`, unbound).Scan(&baselineRepoID); err != nil {
+		t.Fatal(err)
+	}
+	if baselineRepoID != nil {
+		t.Errorf("unbound cluster baseline_repo_id = %v, want NULL", *baselineRepoID)
+	}
+
+	// Register a default platform repo, then create: bound at insert.
+	repoID := "01JTESTBASELINEREPO000000000"
+	if _, err := database.Pool.Exec(ctx, `INSERT INTO tenant_git_repos
+		(id, org_id, name, repo, provider, scope, commit_policy, base_branch, is_default)
+		VALUES ($1, 'org:1', 'baseline', 'acme/state', 'github', 'platform', 'direct', 'main', true)`, repoID); err != nil {
+		t.Fatal(err)
+	}
+	bound := itCreate(t, srv, "acme", "bound")
+	if err := database.Pool.QueryRow(ctx,
+		`SELECT baseline_repo_id FROM clusters WHERE id = $1`, bound).Scan(&baselineRepoID); err != nil {
+		t.Fatal(err)
+	}
+	if baselineRepoID == nil || *baselineRepoID != repoID {
+		t.Errorf("bound cluster baseline_repo_id = %v, want %q", baselineRepoID, repoID)
+	}
+}

@@ -367,6 +367,20 @@ func TestGitConfigBackCompatProxy(t *testing.T) {
 	if got.Repo != "acme/acme-state-v2" {
 		t.Errorf("read proxy = %q, want default repo", got.Repo)
 	}
+
+	// Policy/branch proxy too: a PATCH on the git-repos API (which updates
+	// only the registry row) must not leave the legacy view stale.
+	if _, err := database.Pool.Exec(ctx, `UPDATE tenant_git_repos SET commit_policy = 'pull_request', base_branch = 'trunk'
+		WHERE org_id = 'org:1' AND is_default`); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.GitConfig(ctx, database.Pool, "org:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CommitPolicy != types.CommitPolicyPullRequest || got.BaseBranch != "trunk" {
+		t.Errorf("policy/branch proxy = %q/%q, want pull_request/trunk", got.CommitPolicy, got.BaseBranch)
+	}
 }
 
 func TestMigrationBackfill(t *testing.T) {

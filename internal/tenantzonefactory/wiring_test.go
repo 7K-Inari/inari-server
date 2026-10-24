@@ -56,10 +56,13 @@ func TestWireZoneEnsuresPlatformResourcesAndCommitsManifests(t *testing.T) {
 	}
 }
 
-// fakeBaselineRepos records EnsureDefaultBaselineRepo calls.
+// fakeBaselineRepos records EnsureDefaultBaselineRepo/BindClusterBaseline
+// calls.
 type fakeBaselineRepos struct {
-	calls []string
-	err   error
+	calls     []string
+	bindCalls []string
+	err       error
+	bindErr   error
 }
 
 func (f *fakeBaselineRepos) EnsureDefaultBaselineRepo(_ context.Context, orgID, repo string) error {
@@ -67,6 +70,14 @@ func (f *fakeBaselineRepos) EnsureDefaultBaselineRepo(_ context.Context, orgID, 
 		return f.err
 	}
 	f.calls = append(f.calls, orgID+"|"+repo)
+	return nil
+}
+
+func (f *fakeBaselineRepos) BindClusterBaseline(_ context.Context, clusterID string) error {
+	if f.bindErr != nil {
+		return f.bindErr
+	}
+	f.bindCalls = append(f.bindCalls, clusterID)
 	return nil
 }
 
@@ -89,6 +100,11 @@ func TestWireZoneRegistersBaselineRepo(t *testing.T) {
 	}
 	if len(repos.calls) != 1 || repos.calls[0] != "org-acme|acme-inari-state" {
 		t.Errorf("EnsureDefaultBaselineRepo calls = %v, want [org-acme|acme-inari-state]", repos.calls)
+	}
+	// The zone's cluster is bound to the default row (it was created before
+	// the row existed, so the registration-time default could not apply).
+	if len(repos.bindCalls) != 1 {
+		t.Errorf("BindClusterBaseline calls = %v, want 1 call", repos.bindCalls)
 	}
 	// Idempotent on retry.
 	if _, err := w.WireZone(context.Background(), zone, "arn:role"); err != nil {
@@ -124,7 +140,7 @@ func TestWireZoneWithoutPlatformResources(t *testing.T) {
 		Clusters: &qaClusters{},
 		Accounts: &qaAccounts{},
 		Git:      git,
-		Agent:   AgentInstallParams{ImageRepo: "img", GatewayAddress: "https://gw"},
+		Agent:    AgentInstallParams{ImageRepo: "img", GatewayAddress: "https://gw"},
 	}
 	zone := &types.TenantZone{Slug: "acme", DisplayName: "Acme", Region: "eu-west-1", Tier: "starter"}
 	if _, err := w.WireZone(context.Background(), zone, "arn:role"); err != nil {

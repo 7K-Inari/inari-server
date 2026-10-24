@@ -512,10 +512,9 @@ func TestApprovalResumePreservesRepoID(t *testing.T) {
 
 // TestQALegacyInstanceMutation pins the back-compat path for pre-0036
 // instances (repo_id NULL): mutations resolve the org default repo, accept
-// only the empty/"default" selector, and — current behavior — leave
-// repo_id NULL (MarkDeployed/MarkSpecUpdated never backfill it; the
-// COALESCE(repo_id, cluster baseline) fallback in the registry ref-counts
-// covers attribution as long as the cluster is bound).
+// only the empty/"default" selector, and self-heal the attribution —
+// MarkDeployed backfills repo_id to the repo the mutation just wrote
+// (COALESCE: an already-attributed row is never moved).
 func TestQALegacyInstanceMutation(t *testing.T) {
 	srv, database, git, _, baselineID, teamRepoID := itServerWithRepoResolver(t)
 	defer srv.Close()
@@ -528,14 +527,15 @@ func TestQALegacyInstanceMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// An explicit repoId naming the default ROW ID is rejected for legacy
-	// rows (only the empty/"default" selector is accepted) — 422.
+	// An explicit repoId naming the default ROW ID is accepted for legacy
+	// rows (their manifests live in the default repo by definition).
 	code, body := itReq(t, srv, "POST", "/api/v1/tenants/acme/instances/"+d.InstanceID+"/upgrade", "good",
 		`{"toVersion":"1.1.0","repoId":"`+baselineID+`"}`)
-	if code != http.StatusUnprocessableEntity {
-		t.Fatalf("legacy upgrade with default row id: got %d, want 422 (%s)", code, body)
+	if code != http.StatusOK {
+		t.Fatalf("legacy upgrade with default row id: got %d, want 200 (%s)", code, body)
 	}
-	// A team repo id is likewise rejected.
+	// A team repo id is rejected (422) — the legacy row's manifests are not
+	// there.
 	code, body = itReq(t, srv, "POST", "/api/v1/tenants/acme/instances/"+d.InstanceID+"/upgrade", "good",
 		`{"toVersion":"1.1.0","repoId":"`+teamRepoID+`"}`)
 	if code != http.StatusUnprocessableEntity {
@@ -552,10 +552,10 @@ func TestQALegacyInstanceMutation(t *testing.T) {
 	if _, ok := files["clusters/cluster-1/postgres-aws/my-db/instance.yaml"]; !ok {
 		t.Fatalf("legacy upgrade not committed to default repo: %v", keysOf(files))
 	}
-	// Current behavior: repo_id stays NULL after the mutation (no
-	// backfill). Pinned so a future backfill change updates this test.
-	if got := instanceRepoID(t, database, d.InstanceID); got != "" {
-		t.Errorf("legacy instance repo_id = %q after upgrade, want NULL (no backfill)", got)
+	// The mutation self-heals the attribution: repo_id backfills to the
+	// default repo the upgrade wrote to.
+	if got := instanceRepoID(t, database, d.InstanceID); got != baselineID {
+		t.Errorf("legacy instance repo_id = %q after upgrade, want backfilled default %q", got, baselineID)
 	}
 
 	// Delete resolves the default repo for the legacy row.

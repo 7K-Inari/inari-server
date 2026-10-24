@@ -428,10 +428,10 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 				return err
 			}
 		} else if specUpdate {
-			if err := s.instances.MarkSpecUpdated(ctx, tx, instanceID, req.Spec, gitResult.CommitSHA, gitResult.PRURL, state); err != nil {
+			if err := s.instances.MarkSpecUpdated(ctx, tx, instanceID, req.Spec, gitResult.CommitSHA, gitResult.PRURL, target.repoID, state); err != nil {
 				return err
 			}
-		} else if err := s.instances.MarkDeployed(ctx, tx, instanceID, version, gitResult.CommitSHA, gitResult.PRURL, state, true); err != nil {
+		} else if err := s.instances.MarkDeployed(ctx, tx, instanceID, version, gitResult.CommitSHA, gitResult.PRURL, target.repoID, state, true); err != nil {
 			return err
 		}
 		ev := &types.AuditEvent{
@@ -511,25 +511,42 @@ var ErrRepoMismatch = fmt.Errorf("orchestrator: repoId does not match the instan
 // checkRepoSelector enforces the repo-immutability rule on instance
 // mutations: an explicit selector must equal the recorded repo. The
 // "default" sentinel matches when the recorded repo IS the org's current
-// default (or when the row predates attribution); any other disagreement
-// is ErrRepoMismatch.
+// default; a legacy row (no recorded repo) accepts any selector that
+// resolves to the current default (its manifests live there by
+// definition). Any other disagreement is ErrRepoMismatch.
 func (s *Service) checkRepoSelector(ctx context.Context, existing *types.ResourceInstance, selector string) error {
 	if selector == "" || selector == existing.RepoID {
 		return nil
 	}
-	if selector == gitprovider.RepoSelectorDefault {
-		// Legacy rows (no recorded repo) always accept the default
-		// selector; recorded rows accept it when their repo is the
-		// current default.
-		if existing.RepoID == "" {
+	if s.gitRepos == nil {
+		// Legacy single-repo wiring: no registry to resolve against; only
+		// the empty/default selectors are meaningful.
+		if existing.RepoID == "" && selector == gitprovider.RepoSelectorDefault {
 			return nil
 		}
-		if s.gitRepos != nil {
-			row, _, _, err := s.gitRepos.ResolveRepo(ctx, existing.OrgID, gitprovider.RepoSelectorDefault)
-			if err == nil && row.ID == existing.RepoID {
-				return nil
-			}
+		return ErrRepoMismatch
+	}
+	if selector == gitprovider.RepoSelectorDefault && existing.RepoID == "" {
+		return nil
+	}
+	// Resolve the caller's selector and the instance's effective repo
+	// (recorded, else the default) and compare row IDs.
+	want, _, _, err := s.gitRepos.ResolveRepo(ctx, existing.OrgID, selector)
+	if err != nil {
+		// Unknown selector: the deploy path 404s at enforcement; here it
+		// reads as a mismatch.
+		return ErrRepoMismatch
+	}
+	effective := existing.RepoID
+	if effective == "" {
+		def, _, _, derr := s.gitRepos.ResolveRepo(ctx, existing.OrgID, gitprovider.RepoSelectorDefault)
+		if derr != nil {
+			return derr
 		}
+		effective = def.ID
+	}
+	if want.ID == effective {
+		return nil
 	}
 	return ErrRepoMismatch
 }

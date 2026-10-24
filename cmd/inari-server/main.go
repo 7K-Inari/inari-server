@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/open-feature/go-sdk/openfeature"
 	"github.com/open-feature/go-sdk-contrib/providers/ofrep"
+	"github.com/open-feature/go-sdk/openfeature"
 
 	"github.com/7K-Inari/inari-server/internal/agentgateway"
 	"github.com/7K-Inari/inari-server/internal/approvals"
@@ -211,6 +211,12 @@ func (a baselineReposAdapter) EnsureDefaultBaselineRepo(ctx context.Context, org
 		Provider: types.GitRepoProviderGitHub, Scope: types.GitRepoScopePlatform,
 		CommitPolicy: types.CommitPolicyDirect, BaseBranch: "main", IsDefault: true,
 	})
+}
+
+// BindClusterBaseline binds the zone's cluster to the org default row (the
+// cluster record predates the row in the zone flow).
+func (a baselineReposAdapter) BindClusterBaseline(ctx context.Context, clusterID string) error {
+	return a.store.BindClusterBaselineToDefault(ctx, a.db.Pool, clusterID)
 }
 
 // policyCheckerAdapter maps the orchestrator's policy seam onto the Policy

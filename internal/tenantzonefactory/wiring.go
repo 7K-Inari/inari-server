@@ -54,9 +54,12 @@ type GitConfigSetter interface {
 
 // BaselineRepos registers the zone's state repo in the tenant_git_repos
 // registry (Feature A): scope=platform, is_default=true. Idempotent — zone
-// retries re-run it safely.
+// retries re-run it safely. BindClusterBaseline binds the zone's cluster to
+// the org default row (the cluster was created before the row existed, so
+// the registration-time default could not apply).
 type BaselineRepos interface {
 	EnsureDefaultBaselineRepo(ctx context.Context, orgID, repo string) error
+	BindClusterBaseline(ctx context.Context, clusterID string) error
 }
 
 // PlatformResourceEnsurer upserts the tenant's base platform resources
@@ -188,6 +191,9 @@ func (w *ModuleWiring) WireZone(ctx context.Context, zone *types.TenantZone, rol
 	if w.BaselineRepos != nil {
 		if err := w.BaselineRepos.EnsureDefaultBaselineRepo(ctx, org.ID, repo); err != nil {
 			return nil, fmt.Errorf("tzf: wiring baseline repo registry row: %w", err)
+		}
+		if err := w.BaselineRepos.BindClusterBaseline(ctx, cluster.ID); err != nil {
+			return nil, fmt.Errorf("tzf: binding cluster baseline repo: %w", err)
 		}
 	}
 	return &WiringResult{

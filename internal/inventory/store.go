@@ -165,15 +165,19 @@ func (s *Store) ApplyStatus(ctx context.Context, q db.Querier, clusterID string,
 	return it, true, nil
 }
 
-// MarkDeployed records the git outcome of a deploy/upgrade.
-func (s *Store) MarkDeployed(ctx context.Context, q db.Querier, id, version, commitSHA, prURL string, state types.InstanceState, bumpGeneration bool) error {
+// MarkDeployed records the git outcome of a deploy/upgrade. repoID
+// backfills the instance's repo attribution (Feature A): a legacy NULL row
+// self-heals to the repo the mutation just wrote; an already-attributed row
+// is never moved (repo immutability).
+func (s *Store) MarkDeployed(ctx context.Context, q db.Querier, id, version, commitSHA, prURL, repoID string, state types.InstanceState, bumpGeneration bool) error {
 	sql := `UPDATE resource_instances
-	        SET version = $2, commit_sha = $3, pr_url = $4, state = $5, updated_at = now()`
+        SET version = $2, commit_sha = $3, pr_url = $4, state = $5, updated_at = now(),
+            repo_id = COALESCE(repo_id, NULLIF($6, ''))`
 	if bumpGeneration {
 		sql += `, generation = generation + 1`
 	}
 	sql += ` WHERE id = $1`
-	tag, err := q.Exec(ctx, sql, id, version, commitSHA, prURL, state)
+	tag, err := q.Exec(ctx, sql, id, version, commitSHA, prURL, state, repoID)
 	if err != nil {
 		return err
 	}
@@ -184,13 +188,15 @@ func (s *Store) MarkDeployed(ctx context.Context, q db.Querier, id, version, com
 }
 
 // MarkSpecUpdated records a spec-only update (same version): stores the new
-// spec plus the git outcome and bumps the generation.
-func (s *Store) MarkSpecUpdated(ctx context.Context, q db.Querier, id string, spec json.RawMessage, commitSHA, prURL string, state types.InstanceState) error {
+// spec plus the git outcome and bumps the generation. repoID backfills the
+// repo attribution the same way MarkDeployed does.
+func (s *Store) MarkSpecUpdated(ctx context.Context, q db.Querier, id string, spec json.RawMessage, commitSHA, prURL, repoID string, state types.InstanceState) error {
 	const sql = `UPDATE resource_instances
-	             SET spec = $2, commit_sha = $3, pr_url = $4, state = $5,
-	                 generation = generation + 1, updated_at = now()
-	             WHERE id = $1`
-	tag, err := q.Exec(ctx, sql, id, spec, commitSHA, prURL, state)
+             SET spec = $2, commit_sha = $3, pr_url = $4, state = $5,
+                 generation = generation + 1, updated_at = now(),
+                 repo_id = COALESCE(repo_id, NULLIF($6, ''))
+             WHERE id = $1`
+	tag, err := q.Exec(ctx, sql, id, spec, commitSHA, prURL, state, repoID)
 	if err != nil {
 		return err
 	}
@@ -230,9 +236,10 @@ func (s *Store) MarkFailed(ctx context.Context, q db.Querier, id, message string
 	return nil
 }
 
-// GitConfig reads the tenant's git target. The Repo field is a back-compat
-// proxy: when the org has a default row in tenant_git_repos, that repo wins;
-// otherwise the legacy tenant_git_configs.repo column is returned.
+// GitConfig reads the tenant's git target. Repo/CommitPolicy/BaseBranch are
+// a back-compat proxy: when the org has a default row in tenant_git_repos,
+// that row's values win; otherwise the legacy tenant_git_configs columns are
+// returned.
 func (s *Store) GitConfig(ctx context.Context, q db.Querier, orgID string) (*types.TenantGitConfig, error) {
 	var c types.TenantGitConfig
 	var scaffoldOrg, keySecret, keyKey, apiBase, userFallback *string
@@ -249,14 +256,22 @@ func (s *Store) GitConfig(ctx context.Context, q db.Querier, orgID string) (*typ
 	if err != nil {
 		return nil, err
 	}
-	// Back-compat proxy: the registry's default repo is authoritative.
-	var defaultRepo *string
-	if err := q.QueryRow(ctx, `SELECT repo FROM tenant_git_repos WHERE org_id = $1 AND is_default`, orgID).
-		Scan(&defaultRepo); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	// Back-compat proxy: the registry's default repo is authoritative for
+	// repo/policy/branch (a PATCH on the git-repos API must not leave this
+	// legacy view stale).
+	var defaultRepo, defaultPolicy, defaultBranch *string
+	if err := q.QueryRow(ctx, `SELECT repo, commit_policy, base_branch FROM tenant_git_repos WHERE org_id = $1 AND is_default`, orgID).
+		Scan(&defaultRepo, &defaultPolicy, &defaultBranch); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
 	}
 	if defaultRepo != nil {
 		c.Repo = *defaultRepo
+	}
+	if defaultPolicy != nil {
+		c.CommitPolicy = types.CommitPolicy(*defaultPolicy)
+	}
+	if defaultBranch != nil {
+		c.BaseBranch = *defaultBranch
 	}
 	if scaffoldOrg != nil {
 		c.ScaffoldGitOrg = *scaffoldOrg
@@ -649,6 +664,22 @@ func (s *Store) BindClusterBaseline(ctx context.Context, q db.Querier, clusterID
 	tag, err := q.Exec(ctx, `UPDATE clusters c SET baseline_repo_id = r.id
 		FROM tenant_git_repos r
 		WHERE r.id = $2 AND r.scope = 'platform' AND r.org_id = c.org_id AND c.id = $1`, clusterID, repoID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrRepoNotFound
+	}
+	return nil
+}
+
+// BindClusterBaselineToDefault binds a cluster to its org's default
+// platform repo. Returns ErrRepoNotFound when the org has no default row
+// (or the cluster is missing).
+func (s *Store) BindClusterBaselineToDefault(ctx context.Context, q db.Querier, clusterID string) error {
+	tag, err := q.Exec(ctx, `UPDATE clusters c SET baseline_repo_id = r.id
+		FROM tenant_git_repos r
+		WHERE r.org_id = c.org_id AND r.is_default AND c.id = $1`, clusterID)
 	if err != nil {
 		return err
 	}

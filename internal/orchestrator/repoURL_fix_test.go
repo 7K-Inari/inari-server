@@ -1,5 +1,7 @@
 package orchestrator
+
 import "testing"
+
 func TestRepoURLCasing(t *testing.T) {
 	if got := RepoURL("7K-Group/7kgroup-inari-state"); got != "https://github.com/7k-group/7kgroup-inari-state" {
 		t.Errorf("got %q", got)

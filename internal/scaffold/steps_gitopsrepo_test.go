@@ -73,8 +73,8 @@ func gitopsFixture(t *testing.T, values string) (*RunContext, map[string]*types.
 	run.Values = json.RawMessage(values)
 	repoResult := json.RawMessage(`{"repoName":"acme-platform/team-a-gitops","repoUrl":"https://fake.git/acme-platform/team-a-gitops.git","branch":"main","commitSha":"abc"}`)
 	steps := map[string]*types.ScaffoldRunStep{
-		"rendering":    {RunID: run.ID, Name: "rendering", State: types.ScaffoldStepCompleted, Result: json.RawMessage(`{"files":[]}`)},
-		"creating-repo": {RunID: run.ID, Name: "creating-repo", State: types.ScaffoldStepCompleted, Result: repoResult},
+		"rendering":          {RunID: run.ID, Name: "rendering", State: types.ScaffoldStepCompleted, Result: json.RawMessage(`{"files":[]}`)},
+		"creating-repo":      {RunID: run.ID, Name: "creating-repo", State: types.ScaffoldStepCompleted, Result: repoResult},
 		"registering-repo":   {RunID: run.ID, Name: "registering-repo", State: types.ScaffoldStepPending, MaxAttempts: 5},
 		"attaching-root-app": {RunID: run.ID, Name: "attaching-root-app", State: types.ScaffoldStepPending, MaxAttempts: 5},
 		"binding-rbac":       {RunID: run.ID, Name: "binding-rbac", State: types.ScaffoldStepPending, MaxAttempts: 5},

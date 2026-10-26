@@ -244,7 +244,7 @@ func TestTemplateKindParsing(t *testing.T) {
 
 func TestFilePullerKindValidation(t *testing.T) {
 	cases := map[string]string{
-		"unknown kind":              "name: svc\nversion: 0.1.0\nkind: banana\n",
+		"unknown kind":                "name: svc\nversion: 0.1.0\nkind: banana\n",
 		"gitops-repo with user scope": "name: svc\nversion: 0.1.0\nkind: gitops-repo\nscaffold:\n  scope: user\n",
 	}
 	for name, manifest := range cases {

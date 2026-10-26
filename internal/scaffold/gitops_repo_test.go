@@ -75,12 +75,11 @@ func TestSeedGitopsRepoRendersWithSchemaValidValues(t *testing.T) {
 	}
 
 	wantPaths := map[string]bool{
-		"README.md":             false,
-		"root-application.yaml": false,
-		"project.yaml":          false,
-		"apps/README.md":        false,
-		"clusters/README.md":    false,
-		"policies/README.md":    false,
+		"README.md":          false,
+		"project.yaml":       false,
+		"apps/README.md":     false,
+		"clusters/README.md": false,
+		"policies/README.md": false,
 	}
 	for _, f := range res.Files {
 		if strings.Contains(f.Content, "{{") {

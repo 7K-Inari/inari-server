@@ -570,6 +570,9 @@ func (s *Store) UpsertGitRepo(ctx context.Context, q db.Querier, r *types.Tenant
 		byoClause = `github_app_id = NULL, github_app_installation_id = NULL,
 			github_app_key_secret = NULL, github_app_key_key = NULL, github_app_api_base = NULL`
 	}
+	// RETURNING id keeps the caller's row.ID authoritative on the conflict
+	// path: ON CONFLICT DO UPDATE keeps the existing row's ID, so without
+	// this a retry would hand back the freshly generated, never-stored ULID.
 	const sqlFmt = `INSERT INTO tenant_git_repos
 		(id, org_id, name, repo, provider, scope, team_id, commit_policy, base_branch, is_default,
 		 github_app_id, github_app_installation_id, github_app_key_secret, github_app_key_key, github_app_api_base)
@@ -577,10 +580,11 @@ func (s *Store) UpsertGitRepo(ctx context.Context, q db.Querier, r *types.Tenant
 		ON CONFLICT (org_id, name) DO UPDATE SET repo = EXCLUDED.repo,
 		  provider = EXCLUDED.provider, scope = EXCLUDED.scope, team_id = EXCLUDED.team_id,
 		  commit_policy = EXCLUDED.commit_policy, base_branch = EXCLUDED.base_branch,
-		  updated_at = now(), %s`
-	_, err := q.Exec(ctx, fmt.Sprintf(sqlFmt, byoClause),
+		  updated_at = now(), %s
+		RETURNING id`
+	err := q.QueryRow(ctx, fmt.Sprintf(sqlFmt, byoClause),
 		r.ID, r.OrgID, r.Name, r.Repo, r.Provider, r.Scope, teamID, r.CommitPolicy, r.BaseBranch, r.IsDefault,
-		appID, installationID, keySecret, keyKey, apiBase)
+		appID, installationID, keySecret, keyKey, apiBase).Scan(&r.ID)
 	return err
 }
 

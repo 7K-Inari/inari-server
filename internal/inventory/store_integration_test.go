@@ -257,6 +257,11 @@ func TestGitRepoBYOApp(t *testing.T) {
 	if err := s.UpsertGitRepo(ctx, database.Pool, upd); err != nil {
 		t.Fatal(err)
 	}
+	// The conflict path must hand back the existing row's ID, not the
+	// freshly generated one (scaffold registering-repo retry depends on it).
+	if upd.ID != r.ID {
+		t.Errorf("conflict upsert ID = %q, want existing %q", upd.ID, r.ID)
+	}
 	got, _ = s.GetGitRepo(ctx, database.Pool, "org:1", r.ID)
 	if got.GitHubApp == nil || got.GitHubApp.AppID != 42 {
 		t.Errorf("preserve-on-omit failed: %+v", got.GitHubApp)

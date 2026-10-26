@@ -673,9 +673,22 @@ func (s *Store) BindClusterBaseline(ctx context.Context, q db.Querier, clusterID
 	return nil
 }
 
+// BaselineRepo returns the repo slug ("owner/name") for the cluster's
+// bound baseline, or empty when unbound.
+func (s *Store) BaselineRepo(ctx context.Context, q db.Querier, clusterID string) (string, error) {
+	var repo string
+	err := q.QueryRow(ctx, `
+		SELECT r.repo FROM clusters c
+		JOIN tenant_git_repos r ON r.id = c.baseline_repo_id
+		WHERE c.id = $1`, clusterID).Scan(&repo)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return repo, err
+}
+
 // BindClusterBaselineToDefault binds a cluster to its org's default
-// platform repo. Returns ErrRepoNotFound when the org has no default row
-// (or the cluster is missing).
+// platform repo. No-op when the org has no default.
 func (s *Store) BindClusterBaselineToDefault(ctx context.Context, q db.Querier, clusterID string) error {
 	tag, err := q.Exec(ctx, `UPDATE clusters c SET baseline_repo_id = r.id
 		FROM tenant_git_repos r

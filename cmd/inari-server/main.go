@@ -219,6 +219,17 @@ func (a baselineReposAdapter) BindClusterBaseline(ctx context.Context, clusterID
 	return a.store.BindClusterBaselineToDefault(ctx, a.db.Pool, clusterID)
 }
 
+// baselineRepoLookupAdapter adapts inventory.Store to the agentgateway's
+// BaselineRepoLookup seam (Feature A).
+type baselineRepoLookupAdapter struct {
+	store *inventory.Store
+	db    *db.DB
+}
+
+func (a baselineRepoLookupAdapter) BaselineRepo(ctx context.Context, clusterID string) (string, error) {
+	return a.store.BaselineRepo(ctx, a.db.Pool, clusterID)
+}
+
 // policyCheckerAdapter maps the orchestrator's policy seam onto the Policy
 // Service (plan §5.11).
 type policyCheckerAdapter struct{ ps *policyservice.Service }
@@ -644,7 +655,8 @@ func run() error {
 		CurrentAgentVersion:     cfg.CurrentAgentVersion,
 		AgentSupportedRange:     cfg.AgentSupportedRange,
 		AgentRecommendedVersion: cfg.AgentRecommendedVersion,
-	}).WithSecretWriter(secretWriter).WithPlatformResources(platformResourcesSvc)
+	}).WithSecretWriter(secretWriter).WithPlatformResources(platformResourcesSvc).
+		WithBaselineRepoLookup(baselineRepoLookupAdapter{store: inventory.NewStore(), db: database})
 
 	// W3 credential vault (plan §5.8): envelope-encrypted per-user tokens
 	// for InvokeAction, redeemed once by agents via AgentCredentials. The

@@ -24,6 +24,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/capabilities"
 	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/secrets"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -104,6 +105,15 @@ func seedOrg(t *testing.T, database *db.DB, id string) {
 	}
 }
 
+type baselineRepoLookupAdapter struct {
+	store *inventory.Store
+	db    *db.DB
+}
+
+func (a baselineRepoLookupAdapter) BaselineRepo(ctx context.Context, clusterID string) (string, error) {
+	return a.store.BaselineRepo(ctx, a.db.Pool, clusterID)
+}
+
 type rig struct {
 	gw       *Gateway
 	registry *clusterregistry.Service
@@ -126,7 +136,8 @@ func newRig(t *testing.T, approvalRequired bool) *rig {
 	gw := NewGateway(database, registry, clients, caps, auditStore, Config{
 		OIDCIssuerURL:  "http://keycloak/realms/inari",
 		ESOSecretStore: "inari-platform",
-	}).WithSecretWriter(secretsW)
+	}).WithSecretWriter(secretsW).
+		WithBaselineRepoLookup(baselineRepoLookupAdapter{store: inventory.NewStore(), db: database})
 	return &rig{gw: gw, registry: registry, caps: caps, clients: clients, secrets: secretsW, db: database}
 }
 
@@ -212,6 +223,57 @@ func TestRegistrationExchangeEndToEnd(t *testing.T) {
 	// Unknown token is rejected.
 	if _, err := r.gw.RegisterCluster(ctx, registerReq("bogus")); connect.CodeOf(err) != connect.CodeUnauthenticated {
 		t.Errorf("bogus token code = %v, want Unauthenticated", connect.CodeOf(err))
+	}
+}
+
+func TestRegisterClusterReturnsBaselineRepo(t *testing.T) {
+	r := newRig(t, false)
+	ctx := context.Background()
+
+	// Seed a platform repo and bind the cluster to it.
+	_, err := r.db.Pool.Exec(ctx,
+		`INSERT INTO tenant_git_repos (id, org_id, name, repo, scope, is_default) VALUES ('repo-1', 'org:1', 'baseline', 'myorg/platform-baseline', 'platform', true)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cluster, err := r.registry.CreateCluster(ctx, "user-1", "org:1", "kind-dev", map[string]string{"env": "dev"})
+	if err != nil {
+		t.Fatalf("CreateCluster: %v", err)
+	}
+	token, _, err := r.registry.IssueToken(ctx, "user-1", cluster.ID)
+	if err != nil {
+		t.Fatalf("IssueToken: %v", err)
+	}
+
+	res, err := r.gw.RegisterCluster(ctx, registerReq(token))
+	if err != nil {
+		t.Fatalf("RegisterCluster: %v", err)
+	}
+	if res.BaselineRepo != "myorg/platform-baseline" {
+		t.Errorf("BaselineRepo = %q, want %q", res.BaselineRepo, "myorg/platform-baseline")
+	}
+}
+
+func TestRegisterClusterReturnsEmptyBaselineRepoWhenNoRegistryRow(t *testing.T) {
+	r := newRig(t, false)
+	ctx := context.Background()
+
+	cluster, err := r.registry.CreateCluster(ctx, "user-1", "org:1", "kind-dev", map[string]string{"env": "dev"})
+	if err != nil {
+		t.Fatalf("CreateCluster: %v", err)
+	}
+	token, _, err := r.registry.IssueToken(ctx, "user-1", cluster.ID)
+	if err != nil {
+		t.Fatalf("IssueToken: %v", err)
+	}
+
+	res, err := r.gw.RegisterCluster(ctx, registerReq(token))
+	if err != nil {
+		t.Fatalf("RegisterCluster: %v", err)
+	}
+	if res.BaselineRepo != "" {
+		t.Errorf("BaselineRepo = %q, want empty", res.BaselineRepo)
 	}
 }
 

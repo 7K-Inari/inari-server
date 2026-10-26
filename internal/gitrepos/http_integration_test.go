@@ -182,7 +182,15 @@ func TestGitReposEndToEnd(t *testing.T) {
 		t.Fatalf("dev register: %d %s", code, body)
 	}
 
-	// Register team-a repo.
+	// Register team-a repo. The attach flow commits its root app into the
+	// baseline repo, so the fake git host must know both repos.
+	ctx := context.Background()
+	if _, err := f.git.EnsureRepo(ctx, "acme/acme-inari-state"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.git.EnsureRepo(ctx, "acme/team-a-gitops"); err != nil {
+		t.Fatal(err)
+	}
 	code, body = f.req(t, "POST", base, "admin", `{"name":"team-a-gitops","repo":"acme/team-a-gitops","scope":"team","teamId":"11111111-1111-1111-1111-111111111111"}`)
 	if code != http.StatusOK && code != http.StatusCreated {
 		t.Fatalf("register team repo: %d %s", code, body)
@@ -236,6 +244,18 @@ func TestGitReposEndToEnd(t *testing.T) {
 	}
 	if getOut.Status == nil || getOut.Status.State == "" {
 		t.Errorf("missing provider status probe: %s", body)
+	}
+
+	// Baseline is read-visible to every org member (decision 5a): both devs
+	// can GET it, but neither can write it (platform repos are
+	// settings-write only).
+	for _, tok := range []string{"dev-a", "dev-b"} {
+		if code, body := f.req(t, "GET", base+"/"+baseline.ID, tok, ""); code != http.StatusOK {
+			t.Errorf("%s get baseline: %d %s, want 200 (baseline read-all)", tok, code, body)
+		}
+		if code, _ := f.req(t, "PATCH", base+"/"+baseline.ID, tok, `{"commitPolicy":"direct"}`); code != http.StatusForbidden {
+			t.Errorf("%s patch baseline: %d, want 403", tok, code)
+		}
 	}
 
 	// PATCH: dev-a (owning team, deployments_create) may patch policy/branch.
@@ -373,6 +393,70 @@ func TestGitRepoUnregisterGuardAndTeardown(t *testing.T) {
 	// Row gone.
 	if code, _ := f.req(t, "GET", base+"/"+repoID, "admin", ""); code != http.StatusNotFound {
 		t.Errorf("get after teardown: %d, want 404", code)
+	}
+}
+
+// TestForceDeleteOrphanMode pins the orphan path over HTTP (decision 6):
+// the row is unregistered, repo content is untouched, no agent commands are
+// enqueued, and instance references are nulled by the FK (SET NULL).
+func TestForceDeleteOrphanMode(t *testing.T) {
+	f := newITServer(t)
+	defer f.srv.Close()
+	base := "/api/v1/tenants/acme/git-repos"
+	ctx := context.Background()
+
+	code, body := f.req(t, "POST", base, "admin", `{"name":"team-a","repo":"acme/team-a","scope":"team","teamId":"11111111-1111-1111-1111-111111111111"}`)
+	if code != http.StatusOK && code != http.StatusCreated {
+		t.Fatalf("register: %d %s", code, body)
+	}
+	var regOut struct {
+		Repo repoView `json:"repo"`
+	}
+	if err := json.Unmarshal([]byte(body), &regOut); err != nil {
+		t.Fatal(err)
+	}
+	repoID := regOut.Repo.ID
+
+	store := inventory.NewStore()
+	if err := store.Create(ctx, f.database.Pool, &types.ResourceInstance{
+		ID: "inst-orphan", OrgID: "org:1", ClusterID: "cluster-1", CatalogItemID: "platform:cert-manager",
+		Version: "v1", Spec: json.RawMessage(`{}`), State: "running", ManagementMode: "adopt",
+		RepoID: repoID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Blocked without force (409 with ref counts in the message).
+	code, body = f.req(t, "DELETE", base+"/"+repoID, "admin", "")
+	if code != http.StatusConflict {
+		t.Fatalf("unforced delete: %d %s, want 409", code, body)
+	}
+	if !strings.Contains(body, "instances=1") {
+		t.Errorf("409 body lacks instance count: %s", body)
+	}
+
+	// Forced orphan: row gone, no git deletions, no agent commands, the
+	// instance's repo_id is NULLed by the FK.
+	code, body = f.req(t, "DELETE", base+"/"+repoID+"?force=true&mode=orphan", "admin", "")
+	if code != http.StatusOK {
+		t.Fatalf("orphan delete: %d %s", code, body)
+	}
+	if len(f.git.Deletions) != 0 {
+		t.Errorf("orphan mode deleted repo content: %v", f.git.Deletions)
+	}
+	if len(f.queue.cmds) != 0 {
+		t.Errorf("orphan mode enqueued agent commands: %v", f.queue.cmds)
+	}
+	var orphaned *string
+	if err := f.database.Pool.QueryRow(ctx,
+		`SELECT repo_id FROM resource_instances WHERE id = 'inst-orphan'`).Scan(&orphaned); err != nil {
+		t.Fatal(err)
+	}
+	if orphaned != nil {
+		t.Errorf("instance repo_id = %v, want NULL after orphan", *orphaned)
+	}
+	if code, _ := f.req(t, "GET", base+"/"+repoID, "admin", ""); code != http.StatusNotFound {
+		t.Errorf("get after orphan: %d, want 404", code)
 	}
 }
 

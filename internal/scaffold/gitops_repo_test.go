@@ -103,6 +103,48 @@ func TestSeedGitopsRepoRendersWithSchemaValidValues(t *testing.T) {
 	}
 }
 
+// TestSeedGitopsRepoRendersWithEmptyValues verifies that the renderer
+// fails fast when required wizard values are missing (strict missingkey=error).
+func TestSeedGitopsRepoRendersWithEmptyValues(t *testing.T) {
+	env := &ExecEnv{Templates: &FilePuller{Root: "../../templates"}}
+	run := &types.ScaffoldRun{
+		ID: "run:1", OrgID: "org:acme", TemplateItemID: "template:gitops-repo",
+		TemplateVersion: "0.1.0", DisplayName: "test",
+		Values: json.RawMessage(`{}`),
+	}
+	rc := &RunContext{Run: run, Steps: map[string]*types.ScaffoldRunStep{},
+		Tenant: &TenantContext{Slug: "acme", OrgID: "org:acme", Namespace: "acme", GroupPath: "tenant-acme/members"}}
+	step := &types.ScaffoldRunStep{RunID: run.ID, Name: "rendering", State: types.ScaffoldStepRunning}
+	done, err := stepRendering(context.Background(), env, rc, step)
+	if err == nil {
+		t.Fatalf("expected error with empty values, got done=%v", done)
+	}
+	if !strings.Contains(err.Error(), "map has no entry for key") {
+		t.Fatalf("expected missingkey error, got: %v", err)
+	}
+}
+
+// TestSeedGitopsRepoRendersWithInvalidJSON verifies that malformed JSON
+// values produce a decode error.
+func TestSeedGitopsRepoRendersWithInvalidJSON(t *testing.T) {
+	env := &ExecEnv{Templates: &FilePuller{Root: "../../templates"}}
+	run := &types.ScaffoldRun{
+		ID: "run:1", OrgID: "org:acme", TemplateItemID: "template:gitops-repo",
+		TemplateVersion: "0.1.0", DisplayName: "test",
+		Values: json.RawMessage(`{"repoName": invalid json`),
+	}
+	rc := &RunContext{Run: run, Steps: map[string]*types.ScaffoldRunStep{},
+		Tenant: &TenantContext{Slug: "acme", OrgID: "org:acme", Namespace: "acme", GroupPath: "tenant-acme/members"}}
+	step := &types.ScaffoldRunStep{RunID: run.ID, Name: "rendering", State: types.ScaffoldStepRunning}
+	done, err := stepRendering(context.Background(), env, rc, step)
+	if err == nil {
+		t.Fatalf("expected error with invalid JSON, got done=%v", done)
+	}
+	if !strings.Contains(err.Error(), "decode run values") {
+		t.Fatalf("expected decode error, got: %v", err)
+	}
+}
+
 // TestSeedGitopsRepoTemplateSyncPlan verifies the template maps cleanly
 // into a catalog item/version pair.
 func TestSeedGitopsRepoTemplateSyncPlan(t *testing.T) {

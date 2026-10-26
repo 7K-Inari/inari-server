@@ -29,12 +29,12 @@ type registerRepoResult struct {
 }
 
 // attachRootAppResult is the shape persisted for the attaching-root-app
-// step. RootAppPath empty means the org has no baseline repo yet and the
-// attach was skipped (the root app can be committed once a baseline
-// exists); the agent command is still enqueued.
+// step. When the org has no baseline repo yet AttachRootApp skips the
+// baseline commit (the root app can be committed once a baseline exists);
+// RootAppPath still records the intended path and the agent command is
+// still enqueued.
 type attachRootAppResult struct {
 	RootAppPath     string `json:"rootAppPath,omitempty"`
-	BaselineRepo    string `json:"baselineRepo,omitempty"`
 	ApplicationName string `json:"applicationName"`
 	ClusterID       string `json:"clusterId"`
 }

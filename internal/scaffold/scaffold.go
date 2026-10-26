@@ -417,6 +417,19 @@ func (s *Service) CreateRun(ctx context.Context, actor, orgID, name, version, di
 	return run, steps, false, nil
 }
 
+// payloadKind extracts the manifest's kind from a catalog version payload
+// written by the template sync (Feature B); absent or malformed payloads
+// yield the backward-compatible component default.
+func payloadKind(payload json.RawMessage) string {
+	var p struct {
+		Manifest TemplateManifest `json:"manifest"`
+	}
+	if len(payload) == 0 || json.Unmarshal(payload, &p) != nil {
+		return KindComponent
+	}
+	return p.Manifest.kind()
+}
+
 // payloadScope extracts the manifest's scaffold.scope from a catalog
 // version payload written by the template sync (M8.W6); absent or
 // malformed payloads yield the fail-safe platform default.

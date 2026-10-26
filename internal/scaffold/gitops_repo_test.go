@@ -21,6 +21,9 @@ func TestSeedGitopsRepoTemplateLoads(t *testing.T) {
 	for _, p := range pkgs {
 		if p.Manifest.Name == "gitops-repo" {
 			found = true
+			if p.Manifest.kind() != KindGitOpsRepo {
+				t.Errorf("gitops-repo kind = %q, want %q", p.Manifest.Kind, KindGitOpsRepo)
+			}
 			if p.Manifest.DisplayName == "" {
 				t.Error("gitops-repo displayName is empty")
 			}

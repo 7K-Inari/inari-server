@@ -1,0 +1,10 @@
+name: gitops-repo
+displayName: GitOps Repository
+description: Provision a team-scoped GitOps state repository with an app-of-apps root Application, directory layout, and optional ArgoCD AppProject for team isolation.
+tags: [gitops, argocd, repository, platform]
+version: 0.1.0
+channel: stable
+scaffold:
+  createRepo:
+    visibility: private
+    defaultBranch: main

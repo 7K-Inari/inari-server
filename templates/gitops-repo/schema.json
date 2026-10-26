@@ -1,0 +1,33 @@
+{
+  "type": "object",
+  "required": ["repoName", "team"],
+  "properties": {
+    "repoName": {
+      "type": "string",
+      "title": "Repository name",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "description": "Name of the GitOps repository to create"
+    },
+    "team": {
+      "type": "string",
+      "title": "Owning team",
+      "description": "Team that owns this repository"
+    },
+    "gitOrg": {
+      "type": "string",
+      "title": "Git organization",
+      "description": "GitHub organization where the repo is created (defaults to scaffold_git_org)"
+    },
+    "commitPolicy": {
+      "type": "string",
+      "title": "Commit policy",
+      "enum": ["direct", "pull_request"],
+      "default": "direct"
+    },
+    "baseBranch": {
+      "type": "string",
+      "title": "Base branch",
+      "default": "main"
+    }
+  }
+}

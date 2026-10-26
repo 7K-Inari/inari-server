@@ -165,8 +165,24 @@ func (s *Service) Probe(ctx context.Context, r *types.TenantGitRepo) *types.GitP
 }
 
 // Register validates input, fail-fast checks the GitHub App is installed in
-// the target git org (decision 3c), persists the row, and audits.
+// the target git org (decision 3c), persists the row, and audits. Team
+// repos additionally get their root Application attached to the org's
+// baseline repo post-commit.
 func (s *Service) Register(ctx context.Context, orgID string, in RegisterInput, actor string) (*types.TenantGitRepo, error) {
+	return s.register(ctx, orgID, in, actor, true)
+}
+
+// RegisterTeamRepo is the scaffold pipeline variant (Feature B
+// registering-repo step): identical validation/insert/audit but skips the
+// root-app attach — the scaffold run's attaching-root-app step owns that
+// git write so each external side effect sits in its own idempotent step.
+func (s *Service) RegisterTeamRepo(ctx context.Context, orgID string, in RegisterInput, actor string) (*types.TenantGitRepo, error) {
+	return s.register(ctx, orgID, in, actor, false)
+}
+
+// register implements Register/RegisterTeamRepo. attach controls the
+// post-commit root-app attachment for team repos.
+func (s *Service) register(ctx context.Context, orgID string, in RegisterInput, actor string, attach bool) (*types.TenantGitRepo, error) {
 	if strings.TrimSpace(in.Name) == "" {
 		return nil, fmt.Errorf("%w: name is required", ErrInvalidInput)
 	}
@@ -269,8 +285,9 @@ func (s *Service) Register(ctx context.Context, orgID string, in RegisterInput, 
 	// Team repos go live via a root Application committed into the org's
 	// baseline repo (Feature A §3). The git write cannot join the DB TX, so
 	// it runs post-commit; on failure the row is removed best-effort so no
-	// half-registered repo is left behind.
-	if row.Scope == types.GitRepoScopeTeam {
+	// half-registered repo is left behind. Scaffold-driven registrations
+	// (attach=false) skip this — the run's attaching-root-app step owns it.
+	if attach && row.Scope == types.GitRepoScopeTeam {
 		if err := s.AttachRootApp(ctx, orgID, row); err != nil {
 			_ = s.store.DeleteGitRepo(context.WithoutCancel(ctx), s.querier(), orgID, row.ID)
 			return nil, err

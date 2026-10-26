@@ -371,10 +371,27 @@ func gitTargetFor(ctx context.Context, env *ExecEnv, rc *RunContext) (gitOrg, te
 	return gitOrg, tenantBaseBranch, nil
 }
 
+// repoSegmentForRun resolves the repo name segment for the run's template
+// kind: gitops-repo runs take the wizard's repoName verbatim (Feature B);
+// component runs use the manifest's createRepo.name or the default
+// <tenant-slug>-<component>.
+func repoSegmentForRun(rc *RunContext, m *TemplateManifest, component string) (string, error) {
+	if m.kind() == KindGitOpsRepo {
+		values, err := gitopsValues(rc)
+		if err != nil {
+			return "", err
+		}
+		return values.RepoName, nil
+	}
+	return manifestParam(m, "createRepo", "name", rc.Tenant.Slug+"-"+component), nil
+}
+
 // stepCreatingRepo creates the component repository under the platform git
 // org (<GitOrg>/<tenant-slug>-<component>, overridable per-tenant via
 // TenantGitConfig.scaffold_git_org and via the manifest's createRepo.name)
-// and commits the rendered skeleton tree. Idempotent: a step result with
+// and commits the rendered skeleton tree. For kind: gitops-repo the repo
+// is named by values.repoName and the wizard's gitOrg/baseBranch override
+// the tenant/env defaults (Feature B). Idempotent: a step result with
 // repoUrl skips EnsureRepo/CommitFiles entirely.
 func stepCreatingRepo(ctx context.Context, env *ExecEnv, rc *RunContext, step *types.ScaffoldRunStep) (bool, error) {
 	var prev createRepoResult
@@ -399,13 +416,18 @@ func stepCreatingRepo(ctx context.Context, env *ExecEnv, rc *RunContext, step *t
 		json.Unmarshal(rendering.Result, &rendered) != nil || len(rendered.Files) == 0 {
 		return false, errors.New("scaffold: rendering step result missing")
 	}
-	component, err := componentName(rc)
-	if err != nil {
-		return false, err
-	}
 	pkg, err := templatePackage(ctx, env, rc)
 	if err != nil {
 		return false, err
+	}
+	// componentName is only needed for component-kind naming; gitops-repo
+	// names come from values.repoName.
+	component := ""
+	if pkg.Manifest.kind() == KindComponent {
+		component, err = componentName(rc)
+		if err != nil {
+			return false, err
+		}
 	}
 	// Branch precedence: manifest defaultBranch → tenant baseBranch → main.
 	branch := manifestParam(&pkg.Manifest, "createRepo", "defaultBranch", "")
@@ -415,9 +437,24 @@ func stepCreatingRepo(ctx context.Context, env *ExecEnv, rc *RunContext, step *t
 	if branch == "" {
 		branch = "main"
 	}
-	segment := manifestParam(&pkg.Manifest, "createRepo", "name", rc.Tenant.Slug+"-"+component)
+	segment, err := repoSegmentForRun(rc, &pkg.Manifest, component)
+	if err != nil {
+		return false, err
+	}
 	if segment != filepath.Base(segment) || segment == "." || segment == ".." || strings.Contains(segment, `\`) {
 		return false, fmt.Errorf("scaffold: invalid createRepo.name %q", segment)
+	}
+	// Feature B: the gitops-repo wizard's explicit gitOrg/baseBranch win
+	// over the tenant/env defaults.
+	if pkg.Manifest.kind() == KindGitOpsRepo {
+		if values, err := gitopsValues(rc); err == nil {
+			if values.GitOrg != "" {
+				gitOrg = values.GitOrg
+			}
+			if values.BaseBranch != "" {
+				branch = values.BaseBranch
+			}
+		}
 	}
 	repo := gitOrg + "/" + segment
 	git, authModel, connID, connLogin, err := gitProviderFor(ctx, env, rc, &pkg.Manifest)
@@ -432,7 +469,11 @@ func stepCreatingRepo(ctx context.Context, env *ExecEnv, rc *RunContext, step *t
 	for _, f := range rendered.Files {
 		files = append(files, gitprovider.File{Path: f.Path, Content: []byte(f.Content)})
 	}
-	res, err := git.CommitFiles(ctx, repo, branch, files, fmt.Sprintf("scaffold: initial %s skeleton", component))
+	subject := component
+	if subject == "" {
+		subject = segment
+	}
+	res, err := git.CommitFiles(ctx, repo, branch, files, fmt.Sprintf("scaffold: initial %s skeleton", subject))
 	if err != nil {
 		return false, fmt.Errorf("scaffold: commit skeleton to %s: %w", repo, err)
 	}
@@ -622,13 +663,11 @@ func stepBindingRBAC(ctx context.Context, env *ExecEnv, rc *RunContext, step *ty
 	if rc.Tenant == nil || rc.Tenant.Slug == "" {
 		return false, errors.New("scaffold: tenant context required for RBAC binding")
 	}
-	component, err := componentName(rc)
-	if err != nil {
-		return false, err
-	}
 	role := authz.BuiltinRoleEditor
+	var pkg *TemplatePackage
 	if env.Templates != nil {
-		pkg, err := templatePackage(ctx, env, rc)
+		var err error
+		pkg, err = templatePackage(ctx, env, rc)
 		if err != nil {
 			return false, err
 		}
@@ -636,10 +675,30 @@ func stepBindingRBAC(ctx context.Context, env *ExecEnv, rc *RunContext, step *ty
 			return false, err
 		}
 	}
-	teamName := componentMaintainersTeam(component)
-	team, err := env.RBAC.EnsureTeam(ctx, rc.Actor, rc.Tenant.Slug, teamName, role)
-	if err != nil {
-		return false, fmt.Errorf("scaffold: ensure team %s: %w", teamName, err)
+	var team *types.Team
+	var teamName string
+	if pkg != nil && pkg.Manifest.kind() == KindGitOpsRepo {
+		// Feature B: the owning team already exists (wizard dropdown) — map
+		// it, never create a <component>-maintainers team.
+		values, err := gitopsValues(rc)
+		if err != nil {
+			return false, err
+		}
+		team, err = resolveOwningTeam(ctx, env, rc, values.Team)
+		if err != nil {
+			return false, err
+		}
+		teamName = team.Name
+	} else {
+		component, err := componentName(rc)
+		if err != nil {
+			return false, err
+		}
+		teamName = componentMaintainersTeam(component)
+		team, err = env.RBAC.EnsureTeam(ctx, rc.Actor, rc.Tenant.Slug, teamName, role)
+		if err != nil {
+			return false, fmt.Errorf("scaffold: ensure team %s: %w", teamName, err)
+		}
 	}
 	member := ""
 	if rc.Run.CreatedBy != "" {

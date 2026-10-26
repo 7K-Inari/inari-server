@@ -36,10 +36,39 @@ var ErrTemplateNotFound = errors.New("scaffold: template not found")
 // not exist.
 var ErrVersionNotFound = errors.New("scaffold: template version not found")
 
-// stepNames is the canonical phase execution order (plan §3): phases map
-// 1:1 to steps. Used to seed initial step rows and to order ListSteps.
+// stepNames is the canonical phase execution order for component
+// templates (plan §3): phases map 1:1 to steps.
 var stepNames = []string{
 	"rendering", "creating-repo", "creating-pipeline", "registering-catalog", "binding-rbac",
+}
+
+// stepNamesGitOpsRepo is the pipeline for kind: gitops-repo (Feature B,
+// parent plan §5): creating-pipeline/registering-catalog are replaced by
+// registering-repo/attaching-root-app.
+var stepNamesGitOpsRepo = []string{
+	"rendering", "creating-repo", "registering-repo", "attaching-root-app", "binding-rbac",
+}
+
+// stepNamesForKind maps a template kind onto its pipeline step order.
+var stepNamesForKind = map[string][]string{
+	KindComponent:  stepNames,
+	KindGitOpsRepo: stepNamesGitOpsRepo,
+}
+
+// allStepNames is the union of every known step in canonical order; it
+// orders ListSteps (array_position) across both pipeline kinds.
+var allStepNames = []string{
+	"rendering", "creating-repo", "creating-pipeline", "registering-catalog",
+	"registering-repo", "attaching-root-app", "binding-rbac",
+}
+
+// stepOrderForKind returns the pipeline order for a kind, falling back to
+// the component order for unknown kinds (fail-safe backward compat).
+func stepOrderForKind(kind string) []string {
+	if order, ok := stepNamesForKind[kind]; ok {
+		return order
+	}
+	return stepNames
 }
 
 // newUUID returns a random v4 UUID (same scheme as tenantzonefactory).
@@ -373,14 +402,16 @@ func (s *Service) CreateRun(ctx context.Context, actor, orgID, name, version, di
 	if displayName == "" {
 		displayName = defaultDisplayName(it, values)
 	}
+	kind := payloadKind(ver.Payload)
+	order := stepOrderForKind(kind)
 	key := idempotencyKey(orgID, it.Name, version, values)
 	run := &types.ScaffoldRun{
 		ID: "run:" + s.newID(), OrgID: orgID, TemplateItemID: it.ID,
 		TemplateVersion: version, DisplayName: displayName, Values: values,
 		Phase: types.ScaffoldPhasePending, IdempotencyKey: key, CreatedBy: actor,
 	}
-	steps := make([]types.ScaffoldRunStep, 0, len(stepNames))
-	for _, n := range stepNames {
+	steps := make([]types.ScaffoldRunStep, 0, len(order))
+	for _, n := range order {
 		steps = append(steps, types.ScaffoldRunStep{
 			RunID: run.ID, Name: n, State: types.ScaffoldStepPending, MaxAttempts: s.cfg.MaxAttempts,
 		})
@@ -392,7 +423,7 @@ func (s *Service) CreateRun(ctx context.Context, actor, orgID, name, version, di
 		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
 			OrgID: orgID, Actor: actor, Action: "scaffold.run_created",
 			ObjectType: "scaffold_run", ObjectID: run.ID,
-			Payload: json.RawMessage(fmt.Sprintf(`{"template":%q,"version":%q,"displayName":%q,"scope":%q}`, it.Name, version, displayName, scope)),
+			Payload: json.RawMessage(fmt.Sprintf(`{"template":%q,"version":%q,"displayName":%q,"scope":%q,"kind":%q}`, it.Name, version, displayName, scope, kind)),
 		}); err != nil {
 			return err
 		}

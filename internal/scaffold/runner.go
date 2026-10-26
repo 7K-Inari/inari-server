@@ -11,6 +11,7 @@ import (
 	"errors"
 
 	"github.com/7K-Inari/inari-server/internal/approvals"
+	"github.com/7K-Inari/inari-server/internal/gitrepos"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -72,11 +73,33 @@ type GitFallback struct {
 // back to the platform app; the Service supplies audit + outbox.
 type GitFallbackHook func(ctx context.Context, rc *RunContext, fb GitFallback) error
 
+// GitRepoRegistrar registers a team-scoped repo row in the org's repo
+// registry (Feature B registering-repo step; gitrepos.Service subset).
+// Implementations validate + insert + audit but do NOT attach the root
+// app — that is the attaching-root-app step's job.
+type GitRepoRegistrar interface {
+	RegisterTeamRepo(ctx context.Context, orgID string, in gitrepos.RegisterInput, actor string) (*types.TenantGitRepo, error)
+}
+
+// RootAppAttacher commits a team repo's root Application into the org's
+// baseline repo (Feature B attaching-root-app step; gitrepos.Service
+// subset).
+type RootAppAttacher interface {
+	AttachRootApp(ctx context.Context, orgID string, row *types.TenantGitRepo) error
+}
+
+// TeamLookup resolves an existing tenant team by name (Feature B: the
+// gitops-repo wizard picks an owning team; tenancy.Service subset).
+type TeamLookup interface {
+	GetTeamByName(ctx context.Context, slug, name string) (*types.Team, error)
+}
+
 // ExecEnv bundles the backend seams the steps run against. Git, Upsert,
 // RBAC and Registrar are consumed by the W4 phase steps; Templates and
 // Tenants by the rendering step; Gate by the W6 approval hold; GitConfigs
-// by the W6 per-tenant git org override. All are optional — a nil seam
-// makes the depending step fail, not the engine.
+// by the W6 per-tenant git org override; GitRepos/RootApp/Teams by the
+// Feature B gitops-repo steps. All are optional — a nil seam makes the
+// depending step fail, not the engine.
 type ExecEnv struct {
 	Git        GitProvider
 	GitOrg     string // git organization/owner receiving scaffolded repos
@@ -87,6 +110,12 @@ type ExecEnv struct {
 	Tenants    TenantContextResolver
 	Gate       ApprovalGate
 	GitConfigs GitConfigResolver
+	// GitRepos registers team repos (kind: gitops-repo runs).
+	GitRepos GitRepoRegistrar
+	// RootApp attaches team-repo root Applications to the baseline repo.
+	RootApp RootAppAttacher
+	// Teams resolves existing teams by name (kind: gitops-repo runs).
+	Teams TeamLookup
 	// UserGit resolves per-user git providers for user-scoped templates
 	// (nil → user scope behaves as "no connection": the tenant fallback
 	// policy decides).
@@ -121,6 +150,8 @@ var stepFuncs = map[string]StepFunc{
 	"creating-repo":       stepCreatingRepo,
 	"creating-pipeline":   stepCreatingPipeline,
 	"registering-catalog": stepRegisteringCatalog,
+	"registering-repo":    stepRegisteringRepo,
+	"attaching-root-app":  stepAttachingRootApp,
 	"binding-rbac":        stepBindingRBAC,
 }
 

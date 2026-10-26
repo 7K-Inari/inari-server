@@ -3,6 +3,7 @@ package gitrepos
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/7K-Inari/inari-server/internal/db"
@@ -219,7 +220,13 @@ func TestRegisterPersistsWithDefaults(t *testing.T) {
 
 func TestUnregisterGuard(t *testing.T) {
 	store := newFakeStore()
-	svc := NewService(store, repoResolver(&fakeResolver{provider: gitprovider.NewFake()}), nil, nil)
+	fake := gitprovider.NewFake()
+	for _, r := range []string{"acme/state", "acme/team"} {
+		if _, err := fake.EnsureRepo(context.Background(), r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc := NewService(store, repoResolver(&fakeResolver{provider: fake}), nil, nil)
 
 	baseline, err := svc.Register(context.Background(), "org:1", RegisterInput{
 		Name: "baseline", Repo: "acme/state", Scope: types.GitRepoScopePlatform, IsDefault: true,
@@ -337,7 +344,13 @@ func TestUpdatePromotesDefault(t *testing.T) {
 // team-scope default would be writable by any org member).
 func TestUpdatePromoteTeamRepoRejected(t *testing.T) {
 	store := newFakeStore()
-	svc := NewService(store, repoResolver(&fakeResolver{provider: gitprovider.NewFake()}), nil, nil)
+	fake := gitprovider.NewFake()
+	for _, r := range []string{"acme/state", "acme/team"} {
+		if _, err := fake.EnsureRepo(context.Background(), r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc := NewService(store, repoResolver(&fakeResolver{provider: fake}), nil, nil)
 
 	if _, err := svc.Register(context.Background(), "org:1", RegisterInput{
 		Name: "baseline", Repo: "acme/state", Scope: types.GitRepoScopePlatform, IsDefault: true}, "user:u"); err != nil {
@@ -356,3 +369,110 @@ func TestUpdatePromoteTeamRepoRejected(t *testing.T) {
 
 func boolPtr(b bool) *bool    { return &b }
 func strPtr(s string) *string { return &s }
+
+// TestRegisterTeamRepoAttachesRootApp pins the Feature A attach flow
+// (plan §3): registering a team-scope repo commits
+// gitops-repos/<name>/root-app.yaml into the org's default baseline repo,
+// pointing ArgoCD at the team repo.
+func TestRegisterTeamRepoAttachesRootApp(t *testing.T) {
+	store := newFakeStore()
+	fake := gitprovider.NewFake()
+	ctx := context.Background()
+	if _, err := fake.EnsureRepo(ctx, "acme/state"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fake.EnsureRepo(ctx, "acme/team"); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(store, repoResolver(&fakeResolver{provider: fake}), nil, nil)
+
+	if _, err := svc.Register(ctx, "org:1", RegisterInput{
+		Name: "baseline", Repo: "acme/state", Scope: types.GitRepoScopePlatform, IsDefault: true}, "user:u"); err != nil {
+		t.Fatal(err)
+	}
+	team, err := svc.Register(ctx, "org:1", RegisterInput{
+		Name: "team", Repo: "acme/team", Scope: types.GitRepoScopeTeam,
+		TeamID: "11111111-1111-1111-1111-111111111111"}, "user:u")
+	if err != nil {
+		t.Fatalf("register team repo: %v", err)
+	}
+
+	files := fake.Files("acme/state", "main")
+	rootApp, ok := files["gitops-repos/team/root-app.yaml"]
+	if !ok {
+		t.Fatalf("root app not committed to baseline: %v", keysOfMap(files))
+	}
+	for _, want := range []string{"kind: Application", "acme/team", "selfHeal: true", "prune: true", "automated"} {
+		if !strings.Contains(rootApp, want) {
+			t.Errorf("root app missing %q:\n%s", want, rootApp)
+		}
+	}
+
+	// Idempotent: re-registering (upsert) the same repo re-commits without error.
+	if _, err := svc.Register(ctx, "org:1", RegisterInput{
+		Name: "team", Repo: "acme/team", Scope: types.GitRepoScopeTeam,
+		TeamID: "11111111-1111-1111-1111-111111111111"}, "user:u"); err != nil {
+		t.Fatalf("re-register: %v", err)
+	}
+	_ = team
+}
+
+// TestRegisterTeamRepoNoBaselineSkipsAttach pins the edge case: a team repo
+// registered before any platform baseline exists succeeds without attaching
+// (the root app can be attached later once a baseline exists).
+func TestRegisterTeamRepoNoBaselineSkipsAttach(t *testing.T) {
+	store := newFakeStore()
+	fake := gitprovider.NewFake()
+	ctx := context.Background()
+	if _, err := fake.EnsureRepo(ctx, "acme/team"); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(store, repoResolver(&fakeResolver{provider: fake}), nil, nil)
+
+	if _, err := svc.Register(ctx, "org:1", RegisterInput{
+		Name: "team", Repo: "acme/team", Scope: types.GitRepoScopeTeam,
+		TeamID: "11111111-1111-1111-1111-111111111111"}, "user:u"); err != nil {
+		t.Fatalf("register without baseline: %v", err)
+	}
+	if len(fake.Files("acme/state", "main")) != 0 {
+		t.Error("no baseline repo — nothing should have been committed")
+	}
+}
+
+// TestAttachRootAppFailureCompensates pins the failure path: when the
+// baseline commit fails, the registration fails and the row is removed
+// (best-effort compensation), so no half-registered repo is left behind.
+func TestAttachRootAppFailureCompensates(t *testing.T) {
+	store := newFakeStore()
+	fake := gitprovider.NewFake()
+	ctx := context.Background()
+	// Baseline repo row exists but the fake git host has no such repo:
+	// CommitFiles fails.
+	svc := NewService(store, repoResolver(&fakeResolver{provider: fake}), nil, nil)
+
+	if _, err := svc.Register(ctx, "org:1", RegisterInput{
+		Name: "baseline", Repo: "acme/state", Scope: types.GitRepoScopePlatform, IsDefault: true}, "user:u"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fake.EnsureRepo(ctx, "acme/team"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := svc.Register(ctx, "org:1", RegisterInput{
+		Name: "team", Repo: "acme/team", Scope: types.GitRepoScopeTeam,
+		TeamID: "11111111-1111-1111-1111-111111111111"}, "user:u")
+	if err == nil {
+		t.Fatal("register succeeded despite baseline commit failure")
+	}
+	if len(store.repos) != 1 {
+		t.Errorf("compensation: repos left = %d, want only baseline", len(store.repos))
+	}
+}
+
+func keysOfMap(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}

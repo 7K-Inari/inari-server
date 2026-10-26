@@ -378,7 +378,7 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 	app := RenderArgoCDApplication(ApplicationParams{
 		Name:           "inari-" + instanceID,
 		Project:        "default",
-		RepoURL:        repoURL(target.repo),
+		RepoURL:        RepoURL(target.repo),
 		Path:           path,
 		TargetRevision: target.branch,
 		DestNamespace:  namespace,
@@ -476,7 +476,7 @@ func (s *Service) enqueueAppRegistration(ctx context.Context, clusterID, instanc
 		Name:      "inari-" + instanceID,
 		Project:   "default",
 		Source: &agentv1.ApplicationSource{
-			RepoUrl:        repoURL(target.repo),
+			RepoUrl:        RepoURL(target.repo),
 			Path:           path,
 			TargetRevision: target.branch,
 		},
@@ -926,7 +926,10 @@ func (s *Service) GetGitConfig(ctx context.Context, orgID string) (*types.Tenant
 	return s.instances.GitConfig(ctx, s.db.Pool, orgID)
 }
 
-func repoURL(repo string) string {
+// RepoURL normalizes an owner/name slug into a canonical https clone URL
+// (GitHub casing rules: scheme+host+org lowercased for ArgoCD repo-creds
+// prefix matching). Exported for the gitrepos root-app attach render.
+func RepoURL(repo string) string {
 	u := repo
 	if len(u) > 8 && u[:8] == "https://" {
 	} else {

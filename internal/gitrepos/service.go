@@ -266,6 +266,16 @@ func (s *Service) Register(ctx context.Context, orgID string, in RegisterInput, 
 		}
 		return nil, err
 	}
+	// Team repos go live via a root Application committed into the org's
+	// baseline repo (Feature A §3). The git write cannot join the DB TX, so
+	// it runs post-commit; on failure the row is removed best-effort so no
+	// half-registered repo is left behind.
+	if row.Scope == types.GitRepoScopeTeam {
+		if err := s.AttachRootApp(ctx, orgID, row); err != nil {
+			_ = s.store.DeleteGitRepo(context.WithoutCancel(ctx), s.querier(), orgID, row.ID)
+			return nil, err
+		}
+	}
 	return row, nil
 }
 

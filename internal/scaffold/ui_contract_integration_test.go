@@ -160,7 +160,9 @@ func TestUIFullRunContract(t *testing.T) {
 		Templates: &FilePuller{Root: dir}, Tenants: itResolver(),
 	})
 
-	// List templates: TemplateSummary keys exactly as the UI client declares.
+	// List templates: TemplateSummary keys exactly as the UI client declares
+	// (kind is the Feature B additive field — the UI client tolerates
+	// additive fields, same as scope in W6).
 	code, body := f.req(t, "GET", "/api/v1/tenants/acme/templates", "good", "")
 	if code != http.StatusOK {
 		t.Fatalf("want 200, got %d: %s", code, body)
@@ -174,6 +176,7 @@ func TestUIFullRunContract(t *testing.T) {
 			Description string   `json:"description"`
 			Tags        []string `json:"tags"`
 			Version     string   `json:"version"`
+			Kind        string   `json:"kind"`
 		} `json:"templates"`
 	}
 	dec := json.NewDecoder(strings.NewReader(body))

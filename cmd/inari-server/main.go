@@ -846,6 +846,13 @@ func run() error {
 			Tenants:    scaffoldTenantResolver{tenants: svc, clusters: registry},
 			Gate:       approvalsSvc,
 			GitConfigs: scaffoldGitConfigResolver{d: database, store: inventory.NewStore()},
+			// Feature B (kind: gitops-repo): team-repo registration goes
+			// through the repo registry (no attach — the attaching-root-app
+			// step owns that git write); root-app attach + team lookup reuse
+			// the registry and tenancy services.
+			GitRepos: gitReposSvc,
+			RootApp:  gitReposSvc,
+			Teams:    svc,
 			// W6: user-scoped templates resolve the initiating user's
 			// connected git identity through the same resolver (model C,
 			// ForUser wired above; fails closed otherwise).

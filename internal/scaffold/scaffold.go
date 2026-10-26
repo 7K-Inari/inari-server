@@ -165,6 +165,9 @@ type TemplateSummary struct {
 	Description string   `json:"description"`
 	Tags        []string `json:"tags,omitempty"`
 	Version     string   `json:"version"`
+	// Kind is the template's pipeline kind (component | gitops-repo);
+	// empty on old payloads means component.
+	Kind string `json:"kind,omitempty"`
 }
 
 // TemplateDetail adds the wizard schemas to the summary.
@@ -229,6 +232,7 @@ func (s *Service) summary(ctx context.Context, orgID string, it *catalog.ItemVie
 	}
 	if ver, err := s.catalog.GetVersion(ctx, it.ID, version); err == nil {
 		sum.Tags = parseTags(ver.Payload)
+		sum.Kind = payloadKind(ver.Payload)
 	}
 	return sum, nil
 }

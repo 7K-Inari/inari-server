@@ -439,6 +439,51 @@ func TestRegisterTeamRepoNoBaselineSkipsAttach(t *testing.T) {
 	}
 }
 
+// TestRegisterTeamRepoSkipsAttach pins the scaffold-pipeline variant
+// (Feature B): RegisterTeamRepo validates + persists the team repo but
+// never commits the root app — the scaffold run's attaching-root-app step
+// owns that git write.
+func TestRegisterTeamRepoSkipsAttach(t *testing.T) {
+	store := newFakeStore()
+	fake := gitprovider.NewFake()
+	ctx := context.Background()
+	svc := NewService(store, repoResolver(&fakeResolver{provider: fake}), nil, nil)
+
+	if _, err := svc.Register(ctx, "org:1", RegisterInput{
+		Name: "baseline", Repo: "acme/state", Scope: types.GitRepoScopePlatform, IsDefault: true}, "user:u"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fake.EnsureRepo(ctx, "acme/state"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fake.EnsureRepo(ctx, "acme/team"); err != nil {
+		t.Fatal(err)
+	}
+
+	row, err := svc.RegisterTeamRepo(ctx, "org:1", RegisterInput{
+		Name: "team", Repo: "acme/team", Scope: types.GitRepoScopeTeam,
+		TeamID: "11111111-1111-1111-1111-111111111111"}, "user:u")
+	if err != nil {
+		t.Fatalf("RegisterTeamRepo: %v", err)
+	}
+	if store.repos[row.ID] == nil {
+		t.Fatal("row not persisted")
+	}
+	if got := fake.Files("acme/state", "main"); len(got) != 0 {
+		t.Fatalf("RegisterTeamRepo must not attach the root app, baseline files = %v", keysOfMap(got))
+	}
+
+	// The public Register path still attaches.
+	if _, err := svc.Register(ctx, "org:1", RegisterInput{
+		Name: "team-2", Repo: "acme/team-2", Scope: types.GitRepoScopeTeam,
+		TeamID: "11111111-1111-1111-1111-111111111111"}, "user:u"); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.Files("acme/state", "main"); len(got) != 1 || got["gitops-repos/team-2/root-app.yaml"] == "" {
+		t.Fatalf("Register must attach the root app, baseline files = %v", keysOfMap(got))
+	}
+}
+
 // TestAttachRootAppFailureCompensates pins the failure path: when the
 // baseline commit fails, the registration fails and the row is removed
 // (best-effort compensation), so no half-registered repo is left behind.

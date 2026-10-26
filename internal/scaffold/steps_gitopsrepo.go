@@ -16,6 +16,7 @@ import (
 	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
 
 	"github.com/7K-Inari/inari-server/internal/gitrepos"
+	"github.com/7K-Inari/inari-server/internal/impersonation"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -128,6 +129,10 @@ func stepRegisteringRepo(ctx context.Context, env *ExecEnv, rc *RunContext, step
 	if err != nil {
 		return false, err
 	}
+	// The run engine drives steps as the system:scaffold actor; the
+	// registry's audit path requires automation to impersonate the
+	// tenant-scoped virtual user (plan §5.4).
+	ctx = impersonation.WithImpersonator(ctx, impersonation.VirtualUser(rc.Run.OrgID))
 	row, err := env.GitRepos.RegisterTeamRepo(ctx, rc.Run.OrgID, gitrepos.RegisterInput{
 		Name:         values.RepoName,
 		Repo:         repo.RepoName,

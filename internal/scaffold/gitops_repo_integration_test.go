@@ -144,12 +144,13 @@ func TestReconcileGitopsRepoRun(t *testing.T) {
 		t.Fatalf("enqueued commands = %+v", reg.cmds)
 	}
 
-	// binding-rbac: existing team mapped, no maintainers team created.
+	// binding-rbac: existing team mapped, no maintainers team created, and
+	// the creator is NOT joined into the pre-existing owning team.
 	if len(rbac.teams) != 0 {
 		t.Fatalf("gitops-repo must not create teams: %+v", rbac.teams)
 	}
-	if len(rbac.members) != 1 || rbac.members[0].Team != "team-a" {
-		t.Fatalf("members = %+v", rbac.members)
+	if len(rbac.members) != 0 {
+		t.Fatalf("gitops-repo must not join the creator into the owning team: %+v", rbac.members)
 	}
 
 	var outputs map[string]any

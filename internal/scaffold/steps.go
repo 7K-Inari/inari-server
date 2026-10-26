@@ -280,6 +280,30 @@ func componentNamespace(slug, component string) string {
 // app names).
 var componentSlug = regexp.MustCompile(`[^a-z0-9-]+`)
 
+// gitOrgSegment matches a single git organization/owner name (GitHub rules:
+// alphanumerics and single hyphens, no leading/trailing hyphen). Used to
+// validate the gitops-repo wizard's gitOrg override before it is
+// interpolated into the repo slug.
+var gitOrgSegment = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$`)
+
+// validGitBranch enforces the core git refname rules for the wizard's
+// baseBranch override: no "..", no control/space/~^:?*[\] characters, no
+// leading/trailing slash or dot, no ".git"/".lock" suffix tricks.
+func validGitBranch(b string) bool {
+	if b == "" || len(b) > 100 {
+		return false
+	}
+	if strings.Contains(b, "..") || strings.ContainsAny(b, " \t\n~^:?*[\\]") {
+		return false
+	}
+	if strings.HasPrefix(b, "/") || strings.HasPrefix(b, ".") ||
+		strings.HasSuffix(b, "/") || strings.HasSuffix(b, ".") ||
+		strings.HasSuffix(b, ".lock") {
+		return false
+	}
+	return true
+}
+
 // componentName derives the component slug from the wizard values
 // (name/serviceName) falling back to the run display name.
 func componentName(rc *RunContext) (string, error) {
@@ -445,13 +469,21 @@ func stepCreatingRepo(ctx context.Context, env *ExecEnv, rc *RunContext, step *t
 		return false, fmt.Errorf("scaffold: invalid createRepo.name %q", segment)
 	}
 	// Feature B: the gitops-repo wizard's explicit gitOrg/baseBranch win
-	// over the tenant/env defaults.
+	// over the tenant/env defaults. gitOrg is user input interpolated into
+	// the repo slug — validate it as a single safe owner segment (the schema
+	// pattern is the first line; this is the step-level defense).
 	if pkg.Manifest.kind() == KindGitOpsRepo {
 		if values, err := gitopsValues(rc); err == nil {
 			if values.GitOrg != "" {
+				if !gitOrgSegment.MatchString(values.GitOrg) {
+					return false, fmt.Errorf("scaffold: invalid gitOrg %q (want a single git organization name)", values.GitOrg)
+				}
 				gitOrg = values.GitOrg
 			}
 			if values.BaseBranch != "" {
+				if !validGitBranch(values.BaseBranch) {
+					return false, fmt.Errorf("scaffold: invalid baseBranch %q (not a valid git branch name)", values.BaseBranch)
+				}
 				branch = values.BaseBranch
 			}
 		}
@@ -677,7 +709,8 @@ func stepBindingRBAC(ctx context.Context, env *ExecEnv, rc *RunContext, step *ty
 	}
 	var team *types.Team
 	var teamName string
-	if pkg != nil && pkg.Manifest.kind() == KindGitOpsRepo {
+	gitopsKind := pkg != nil && pkg.Manifest.kind() == KindGitOpsRepo
+	if gitopsKind {
 		// Feature B: the owning team already exists (wizard dropdown) — map
 		// it, never create a <component>-maintainers team.
 		values, err := gitopsValues(rc)
@@ -701,7 +734,11 @@ func stepBindingRBAC(ctx context.Context, env *ExecEnv, rc *RunContext, step *ty
 		}
 	}
 	member := ""
-	if rc.Run.CreatedBy != "" {
+	// Component runs join the creator into the freshly created maintainers
+	// team. gitops-repo runs must NOT join the creator into the owning team:
+	// the team pre-exists, and joining it would let anyone with
+	// deployments.create add themselves to any team via a run.
+	if rc.Run.CreatedBy != "" && !gitopsKind {
 		if err := env.RBAC.AddMember(ctx, rc.Actor, rc.Tenant.Slug, teamName, rc.Run.CreatedBy); err != nil {
 			return false, fmt.Errorf("scaffold: add creator to %s: %w", teamName, err)
 		}

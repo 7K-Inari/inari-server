@@ -380,6 +380,60 @@ func TestCreatingRepoGitopsKindRejectsBadRepoName(t *testing.T) {
 	}
 }
 
+// The wizard's gitOrg override is user input interpolated into the repo
+// slug: multi-segment owners, traversal, spaces and other non-owner strings
+// must be rejected before any git call.
+func TestCreatingRepoGitopsKindRejectsBadGitOrg(t *testing.T) {
+	cases := map[string]string{
+		"multi-segment":  `{"repoName":"team-b-gitops","team":"team-b","gitOrg":"a/b"}`,
+		"traversal":      `{"repoName":"team-b-gitops","team":"team-b","gitOrg":".."}`,
+		"space":          `{"repoName":"team-b-gitops","team":"team-b","gitOrg":"evil org"}`,
+		"leading hyphen": `{"repoName":"team-b-gitops","team":"team-b","gitOrg":"-evil"}`,
+	}
+	for name, values := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeGitopsTemplate(t, dir, "gitops-repo", "1.0.0", map[string]string{"a.txt": "x"})
+			rc, repo := gitopsRepoFixture(t, values)
+			git := &countingGit{Fake: gitprovider.NewFake()}
+
+			if _, err := stepCreatingRepo(context.Background(), testEnv(dir, git, nil), rc, repo); err == nil {
+				t.Fatal("invalid gitOrg must fail")
+			}
+			if git.ensures != 0 {
+				t.Fatal("invalid gitOrg hit git")
+			}
+		})
+	}
+}
+
+// The wizard's baseBranch override must satisfy git refname rules before it
+// reaches the provider.
+func TestCreatingRepoGitopsKindRejectsBadBaseBranch(t *testing.T) {
+	cases := map[string]string{
+		"dot-dot":        `{"repoName":"team-b-gitops","team":"team-b","baseBranch":"../../x"}`,
+		"space":          `{"repoName":"team-b-gitops","team":"team-b","baseBranch":"branch with spaces"}`,
+		"leading dot":    `{"repoName":"team-b-gitops","team":"team-b","baseBranch":".hidden"}`,
+		"trailing slash": `{"repoName":"team-b-gitops","team":"team-b","baseBranch":"main/"}`,
+		"lock suffix":    `{"repoName":"team-b-gitops","team":"team-b","baseBranch":"main.lock"}`,
+	}
+	for name, values := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeGitopsTemplate(t, dir, "gitops-repo", "1.0.0", map[string]string{"a.txt": "x"})
+			rc, repo := gitopsRepoFixture(t, values)
+			git := &countingGit{Fake: gitprovider.NewFake()}
+
+			if _, err := stepCreatingRepo(context.Background(), testEnv(dir, git, nil), rc, repo); err == nil {
+				t.Fatal("invalid baseBranch must fail")
+			}
+			if git.ensures != 0 {
+				t.Fatal("invalid baseBranch hit git")
+			}
+		})
+	}
+}
+
 // binding-rbac for kind: gitops-repo maps the existing owning team from
 // the wizard (no <component>-maintainers team is created).
 func TestBindingRBACGitopsKind(t *testing.T) {
@@ -397,19 +451,18 @@ func TestBindingRBACGitopsKind(t *testing.T) {
 	if len(b.teams) != 0 {
 		t.Fatalf("gitops-repo must not create teams: %+v", b.teams)
 	}
-	if len(b.members) != 1 {
-		t.Fatalf("AddMember calls = %+v", b.members)
-	}
-	m := b.members[0]
-	if m.Team != "team-a" || m.UserID != "user:dev-1" || m.Slug != "acme" {
-		t.Fatalf("AddMember = %+v", m)
+	// The creator must NOT be joined into the pre-existing owning team —
+	// joining would let anyone with deployments.create add themselves to any
+	// team by running the gitops-repo template against it.
+	if len(b.members) != 0 {
+		t.Fatalf("gitops-repo must not join the creator into the owning team: %+v", b.members)
 	}
 	var res bindRBACResult
 	if err := json.Unmarshal(steps["binding-rbac"].Result, &res); err != nil {
 		t.Fatal(err)
 	}
 	if res.TeamID != "team:team-a" || res.TeamName != "team-a" ||
-		res.GroupPath != "tenant-acme/team-a" || res.Member != "user:dev-1" {
+		res.GroupPath != "tenant-acme/team-a" || res.Member != "" {
 		t.Fatalf("result = %+v", res)
 	}
 }

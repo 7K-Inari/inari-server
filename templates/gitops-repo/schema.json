@@ -6,6 +6,7 @@
       "type": "string",
       "title": "Repository name",
       "pattern": "^[a-z][a-z0-9-]*$",
+      "maxLength": 100,
       "description": "Name of the GitOps repository to create"
     },
     "team": {
@@ -16,6 +17,8 @@
     "gitOrg": {
       "type": "string",
       "title": "Git organization",
+      "pattern": "^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$",
+      "maxLength": 39,
       "description": "GitHub organization where the repo is created (defaults to scaffold_git_org)"
     },
     "commitPolicy": {
@@ -27,6 +30,8 @@
     "baseBranch": {
       "type": "string",
       "title": "Base branch",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$",
+      "maxLength": 100,
       "default": "main"
     }
   }

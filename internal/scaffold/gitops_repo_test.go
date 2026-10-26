@@ -147,6 +147,52 @@ func TestSeedGitopsRepoRendersWithInvalidJSON(t *testing.T) {
 	}
 }
 
+// TestSeedGitopsRepoSchemaRejectsBadValues runs the shipped schema.json
+// through the same validator CreateRun uses and asserts the dangerous
+// inputs (multi-segment/traversal gitOrg, invalid branch names, oversized
+// repoName) are rejected at the API boundary with 422, not deep in the
+// pipeline.
+func TestSeedGitopsRepoSchemaRejectsBadValues(t *testing.T) {
+	env := &ExecEnv{Templates: &FilePuller{Root: "../../templates"}}
+	pkgs, err := env.Templates.Pull(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema json.RawMessage
+	for _, p := range pkgs {
+		if p.Manifest.Name == "gitops-repo" {
+			schema = p.Schema
+		}
+	}
+	if len(schema) == 0 {
+		t.Fatal("gitops-repo schema not loaded")
+	}
+	cases := map[string]string{
+		"valid":              `{"repoName":"team-a-gitops","team":"team-a","gitOrg":"my-org","commitPolicy":"direct","baseBranch":"main"}`,
+		"valid no optionals": `{"repoName":"team-a-gitops","team":"team-a"}`,
+		"gitOrg multi-part":  `{"repoName":"team-a-gitops","team":"team-a","gitOrg":"a/b"}`,
+		"gitOrg traversal":   `{"repoName":"team-a-gitops","team":"team-a","gitOrg":".."}`,
+		"gitOrg space":       `{"repoName":"team-a-gitops","team":"team-a","gitOrg":"evil org"}`,
+		"repoName uppercase": `{"repoName":"Team-A","team":"team-a"}`,
+		"repoName too long":  `{"repoName":"` + strings.Repeat("a", 101) + `","team":"team-a"}`,
+		"baseBranch spaces":  `{"repoName":"team-a-gitops","team":"team-a","baseBranch":"a b"}`,
+		"commitPolicy bogus": `{"repoName":"team-a-gitops","team":"team-a","commitPolicy":"yolo"}`,
+		"missing team":       `{"repoName":"team-a-gitops"}`,
+	}
+	for name, values := range cases {
+		err := validateValues(schema, json.RawMessage(values))
+		if strings.HasPrefix(name, "valid") {
+			if err != nil {
+				t.Errorf("%s: must validate, got %v", name, err)
+			}
+			continue
+		}
+		if err == nil {
+			t.Errorf("%s: must be rejected", name)
+		}
+	}
+}
+
 // TestSeedGitopsRepoTemplateSyncPlan verifies the template maps cleanly
 // into a catalog item/version pair.
 func TestSeedGitopsRepoTemplateSyncPlan(t *testing.T) {

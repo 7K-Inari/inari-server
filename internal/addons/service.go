@@ -103,6 +103,10 @@ type Store interface {
 	ListClusterAddons(ctx context.Context, q db.Querier, orgID, clusterID string) ([]*types.ClusterAddon, error)
 	UpsertClusterAddon(ctx context.Context, q db.Querier, a *types.ClusterAddon) error
 	UpsertDiscoveredAddon(ctx context.Context, q db.Querier, a *types.ClusterAddon) error
+	// AbsorbDiscoveredAddons deletes one catalog item's per-cluster
+	// state=discovered rows (fleet adoption supersedes them) and returns
+	// their sightings for merging into the fleet row's discovered_meta.
+	AbsorbDiscoveredAddons(ctx context.Context, q db.Querier, orgID, catalogItem string) ([]json.RawMessage, error)
 	// BaselineRepoSelector resolves the repo an adopt defaults to for one
 	// cluster (bound baseline, else org default; "" = none registered).
 	BaselineRepoSelector(ctx context.Context, q db.Querier, orgID, clusterID string) (string, error)
@@ -552,6 +556,24 @@ func (s *Service) Adopt(ctx context.Context, orgID, clusterID, catalogItem strin
 		ClusterSelector: in.ClusterSelector, DiscoveredMeta: discoveredMeta,
 	}
 	err = s.inTx(ctx, func(q db.Querier) error {
+		// Fleet adoption supersedes every per-cluster discovered row for
+		// the item (decision: single source of truth); the scan evidence
+		// moves into the fleet row's discovered_meta as sightings.
+		absorbed := 0
+		if mode == types.AddonDeployModeApplicationSet {
+			sightings, err := s.store.AbsorbDiscoveredAddons(ctx, q, orgID, catalogItem)
+			if err != nil {
+				return err
+			}
+			absorbed = len(sightings)
+			if absorbed > 0 {
+				meta, err := json.Marshal(map[string]any{"absorbedSightings": sightings})
+				if err != nil {
+					return err
+				}
+				row.DiscoveredMeta = meta
+			}
+		}
 		if err := s.store.UpsertClusterAddon(ctx, q, row); err != nil {
 			return err
 		}
@@ -559,6 +581,7 @@ func (s *Service) Adopt(ctx context.Context, orgID, clusterID, catalogItem strin
 			"catalogItem": catalogItem, "cluster": rowCluster, "version": version,
 			"deployMode": string(mode), "repo": repo.Repo, "commitSha": gitResult.CommitSHA,
 			"prUrl": gitResult.PRURL, "authModel": string(authInfo.Model),
+			"absorbedDiscovered": absorbed,
 		}); err != nil {
 			return err
 		}

@@ -998,6 +998,31 @@ func (s *Store) BaselineRepoSelector(ctx context.Context, q db.Querier, orgID, c
 	return *id, nil
 }
 
+// AbsorbDiscoveredAddons deletes one catalog item's per-cluster
+// state=discovered rows (a fleet-wide adoption supersedes them) and
+// returns the absorbed rows' sightings (discovered_meta), so the adopt
+// flow can merge the scan evidence into the fleet row.
+func (s *Store) AbsorbDiscoveredAddons(ctx context.Context, q db.Querier, orgID, catalogItem string) ([]json.RawMessage, error) {
+	rows, err := q.Query(ctx, `DELETE FROM cluster_addons
+		WHERE org_id = $1 AND catalog_item = $2 AND state = 'discovered' AND cluster_id <> '*'
+		RETURNING discovered_meta`, orgID, catalogItem)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []json.RawMessage
+	for rows.Next() {
+		var meta []byte
+		if err := rows.Scan(&meta); err != nil {
+			return nil, err
+		}
+		if len(meta) > 0 {
+			out = append(out, meta)
+		}
+	}
+	return out, rows.Err()
+}
+
 // DeleteClusterAddon removes an addon row by id, scoped to the org.
 func (s *Store) DeleteClusterAddon(ctx context.Context, q db.Querier, orgID, id string) error {
 	tag, err := q.Exec(ctx, `DELETE FROM cluster_addons WHERE org_id = $1 AND id = $2`, orgID, id)

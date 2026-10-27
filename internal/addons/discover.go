@@ -67,8 +67,11 @@ func DecodeReportAddons(payload *anypb.Any) ([]DiscoveredAddon, error) {
 
 // IngestDiscovery upserts scanner-reported addons as state=discovered.
 // Items whose catalog item is unknown are skipped (the scanner matches
-// against the platform-app catalog, so unknowns indicate drift). One TX per
-// batch; a single audit row records the ingest.
+// against the platform-app catalog, so unknowns indicate drift), as are
+// items the org already manages fleet-wide (a managed '*' row absorbs
+// per-cluster sightings — plan §6 "never overwriting managed rows",
+// extended to not re-creating them). One TX per batch; a single audit row
+// records the ingest.
 func (s *Service) IngestDiscovery(ctx context.Context, orgID, clusterID string, items []DiscoveredAddon) error {
 	if len(items) == 0 {
 		return nil
@@ -81,6 +84,12 @@ func (s *Service) IngestDiscovery(ctx context.Context, orgID, clusterID string, 
 			}
 			if _, err := s.catalog.GetItemByID(ctx, item.CatalogItem); err != nil {
 				continue // unknown catalog item: skip
+			}
+			// Fleet-managed item: the '*' row owns the item org-wide;
+			// per-cluster sightings were absorbed at adopt time.
+			if fleet, err := s.store.GetClusterAddon(ctx, q, orgID, "*", item.CatalogItem); err == nil &&
+				fleet.State != types.AddonStateDiscovered {
+				continue
 			}
 			meta, err := json.Marshal(item)
 			if err != nil {

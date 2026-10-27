@@ -293,6 +293,14 @@ func TestFleetReconcileIntegration(t *testing.T) {
 	e := newEnv(t, database, types.CommitPolicyDirect)
 	seedClusterRow(t, database, ctx, "c1", "org:1", "prod-eu", map[string]string{"env": "prod"})
 
+	// A scanner-reported discovered row exists on the cluster pre-adopt.
+	if err := e.svc.IngestDiscovery(ctx, "org:1", "c1", []DiscoveredAddon{{
+		CatalogItem: "platform:cert-manager", ReleaseName: "cert-manager",
+		Namespace: "cert-manager", DetectedVersion: "v1.16.0",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
 	if _, err := e.svc.Adopt(ctx, "org:1", "c1", "platform:cert-manager", AdoptInput{
 		Version: "v1.16.1", DeployMode: types.AddonDeployModeApplicationSet,
 		ClusterSelector: map[string]string{"env": "prod"},
@@ -301,6 +309,18 @@ func TestFleetReconcileIntegration(t *testing.T) {
 	}
 	if len(e.queue.cmds) != 1 || e.queue.cmds[0].Type != RegisterAppSetEventType {
 		t.Fatalf("appset command: %+v", e.queue.cmds)
+	}
+
+	// The per-cluster discovered row was absorbed by the fleet row (SQL).
+	if _, err := e.store.GetClusterAddon(ctx, database.Pool, "org:1", "c1", "platform:cert-manager"); !errors.Is(err, inventory.ErrAddonNotFound) {
+		t.Errorf("discovered row should be absorbed, got %v", err)
+	}
+	fleetRow, err := e.store.GetClusterAddon(ctx, database.Pool, "org:1", "*", "platform:cert-manager")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(fleetRow.DiscoveredMeta), "absorbedSightings") {
+		t.Errorf("fleet discovered_meta = %s, want absorbed sightings", fleetRow.DiscoveredMeta)
 	}
 
 	// Register a second matching cluster; the outbox consumer re-renders.

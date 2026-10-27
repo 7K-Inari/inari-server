@@ -86,6 +86,21 @@ func (f *fakeStore) UpsertDiscoveredAddon(_ context.Context, _ db.Querier, a *ty
 	return nil
 }
 
+// AbsorbDiscoveredAddons mirrors the SQL: delete the item's per-cluster
+// discovered rows (never the '*' fleet row), returning their sightings.
+func (f *fakeStore) AbsorbDiscoveredAddons(_ context.Context, _ db.Querier, orgID, item string) ([]json.RawMessage, error) {
+	var out []json.RawMessage
+	for k, a := range f.addons {
+		if a.OrgID == orgID && a.CatalogItem == item && a.State == types.AddonStateDiscovered && a.ClusterID != "*" {
+			if len(a.DiscoveredMeta) > 0 {
+				out = append(out, a.DiscoveredMeta)
+			}
+			delete(f.addons, k)
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeStore) BaselineRepoSelector(_ context.Context, _ db.Querier, _, clusterID string) (string, error) {
 	return f.baselines[clusterID], nil
 }
@@ -448,6 +463,58 @@ func TestAdoptApplicationSet(t *testing.T) {
 		ClusterSelector: map[string]string{"env": "nonexistent"},
 	}, "user:u1"); !errors.Is(err, ErrEmptyFleet) {
 		t.Errorf("empty fleet: want ErrEmptyFleet, got %v", err)
+	}
+}
+
+func TestFleetAdoptAbsorbsDiscoveredRows(t *testing.T) {
+	store, cat := newFakeStore(), newFakeCatalog()
+	clusters := &fakeClusters{clusters: []types.Cluster{
+		activeCluster("c1", "org:1", "prod-eu", map[string]string{"env": "prod"}),
+		activeCluster("c2", "org:1", "prod-us", map[string]string{"env": "prod"}),
+	}}
+	git, queue := gitprovider.NewFake(), &fakeQueue{}
+	seedBaselineRepo(store, git, "org:1", "acme/state", types.CommitPolicyDirect)
+	svc := newTestService(store, cat, clusters, git, queue)
+	ctx := context.Background()
+
+	// The scanner saw cert-manager on both clusters before adoption.
+	for _, c := range []string{"c1", "c2"} {
+		if err := svc.IngestDiscovery(ctx, "org:1", c, []DiscoveredAddon{{
+			CatalogItem: "platform:cert-manager", ReleaseName: "cert-manager",
+			Namespace: "cert-manager", DetectedVersion: "v1.16.0",
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res, err := svc.Adopt(ctx, "org:1", "c1", "platform:cert-manager", AdoptInput{
+		Version: "v1.16.1", DeployMode: types.AddonDeployModeApplicationSet,
+		ClusterSelector: map[string]string{"env": "prod"},
+	}, "user:u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Both per-cluster discovered rows are absorbed; the scan evidence
+	// moves into the fleet row's discovered_meta.
+	for _, c := range []string{"c1", "c2"} {
+		if _, err := store.GetClusterAddon(ctx, nil, "org:1", c, "platform:cert-manager"); !errors.Is(err, inventory.ErrAddonNotFound) {
+			t.Errorf("%s discovered row should be absorbed, got %v", c, err)
+		}
+	}
+	if !strings.Contains(string(res.Addon.DiscoveredMeta), "absorbedSightings") {
+		t.Errorf("fleet row discovered_meta = %s, want absorbed sightings", res.Addon.DiscoveredMeta)
+	}
+
+	// The scanner reporting the release again must not recreate a
+	// discovered row for a fleet-managed item.
+	if err := svc.IngestDiscovery(ctx, "org:1", "c2", []DiscoveredAddon{{
+		CatalogItem: "platform:cert-manager", ReleaseName: "cert-manager", DetectedVersion: "v1.16.0",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetClusterAddon(ctx, nil, "org:1", "c2", "platform:cert-manager"); !errors.Is(err, inventory.ErrAddonNotFound) {
+		t.Errorf("post-adopt discovery should be skipped, got %v", err)
 	}
 }
 

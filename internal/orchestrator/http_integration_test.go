@@ -269,7 +269,7 @@ func TestDeployToHealthVisible(t *testing.T) {
 
 	// Simulate the agent's status-update.
 	inv := inventory.NewService(database, inventory.NewStore(), audit.NewStore(), nil)
-	matched, err := inv.ApplyStatus(ctx, "cluster-1", inventory.StatusUpdate{
+	matched, err := inv.ApplyStatus(ctx, "org:1", "cluster-1", inventory.StatusUpdate{
 		Resource: types.ResourceRef{Kind: "PostgresAWS", Name: "my-db", Namespace: "apps"},
 		Health:   "healthy", Sync: "synced",
 	})

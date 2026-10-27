@@ -66,20 +66,22 @@ func deriveState(health string) types.InstanceState {
 }
 
 // ApplyStatus folds one agent status-update into the matching instance.
-// Unknown resources (not Inari-managed) are ignored without error.
-func (s *Service) ApplyStatus(ctx context.Context, clusterID string, upd StatusUpdate) (bool, error) {
+// orgID/clusterID come from the authenticated agent session (never the
+// payload) and scope every lookup; unknown resources (not Inari-managed)
+// and rows belonging to another org/cluster are ignored without error.
+func (s *Service) ApplyStatus(ctx context.Context, orgID, clusterID string, upd StatusUpdate) (bool, error) {
 	// Addon ArgoCD apps are checked BEFORE the instance prefix: addon app
 	// names (inari-addon-<id> / inari-addonset-<id>) also carry the inari-
 	// prefix, so the instance branch would misroute them otherwise.
 	if addonID, ok := addonIDForAppRef(upd.Resource); ok {
-		return s.applyAddonAppStatus(ctx, clusterID, addonID, upd)
+		return s.applyAddonAppStatus(ctx, orgID, clusterID, addonID, upd)
 	}
 	// ArgoCD Applications backing an instance are named inari-<instanceID>:
 	// their health/sync (incl. render failures like a missing CRD or an
 	// unreadable repo) report against the instance itself, so a broken
 	// delivery surfaces a message instead of sitting silent in deploying.
 	if instanceID, ok := instanceIDForAppRef(upd.Resource); ok {
-		return s.applyAppStatus(ctx, clusterID, instanceID, upd)
+		return s.applyAppStatus(ctx, orgID, clusterID, instanceID, upd)
 	}
 	state := deriveState(upd.Health)
 	var matched bool
@@ -142,11 +144,13 @@ func addonIDForAppRef(ref types.ResourceRef) (string, bool) {
 }
 
 // applyAddonAppStatus folds the backing ArgoCD app's health/sync into the
-// addon row. Single-cluster rows must belong to the reporting cluster;
-// fleet rows ("*") accept reports from any of the org's clusters. Unknown
-// IDs drop-and-log, mirroring applyAppStatus.
-func (s *Service) applyAddonAppStatus(ctx context.Context, clusterID, addonID string, upd StatusUpdate) (bool, error) {
-	addon, err := s.store.GetClusterAddonByIDAnyOrg(ctx, s.db.Pool, addonID)
+// addon row. The lookup is org-scoped to the reporting agent's session org,
+// so a fleet row ('*') accepts reports from any of ITS org's clusters but
+// never from another tenant's agent; single-cluster rows additionally must
+// belong to the reporting cluster. Unknown IDs drop-and-log, mirroring
+// applyAppStatus.
+func (s *Service) applyAddonAppStatus(ctx context.Context, orgID, clusterID, addonID string, upd StatusUpdate) (bool, error) {
+	addon, err := s.store.GetClusterAddonByID(ctx, s.db.Pool, orgID, addonID)
 	if err != nil {
 		return false, nil
 	}
@@ -185,14 +189,14 @@ func appInstanceState(health, sync string) types.InstanceState {
 	return state
 }
 
-func (s *Service) applyAppStatus(ctx context.Context, clusterID, instanceID string, upd StatusUpdate) (bool, error) {
+func (s *Service) applyAppStatus(ctx context.Context, orgID, clusterID, instanceID string, upd StatusUpdate) (bool, error) {
 	state := appInstanceState(upd.Health, upd.Sync)
 	inst, err := s.store.Get(ctx, s.db.Pool, instanceID)
 	if err != nil {
 		// Not an Inari-managed instance (or wrong cluster): drop-and-log.
 		return false, nil
 	}
-	if inst.ClusterID != clusterID {
+	if inst.OrgID != orgID || inst.ClusterID != clusterID {
 		return false, nil
 	}
 	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {

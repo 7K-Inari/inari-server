@@ -35,7 +35,7 @@ func TestApplyStatusAddonFold(t *testing.T) {
 	}
 
 	// Application status folds into the addon row.
-	matched, err := svc.ApplyStatus(ctx, clusterID, StatusUpdate{
+	matched, err := svc.ApplyStatus(ctx, "org:1", clusterID, StatusUpdate{
 		Resource: types.ResourceRef{Kind: "Application", Name: addon.ArgoCDApp, Namespace: "argocd"},
 		Health:   "healthy", Sync: "synced",
 	})
@@ -61,7 +61,7 @@ func TestApplyStatusAddonFold(t *testing.T) {
 	}
 
 	// A report from the WRONG cluster does not fold.
-	if matched, err := svc.ApplyStatus(ctx, "other-cluster", StatusUpdate{
+	if matched, err := svc.ApplyStatus(ctx, "org:1", "other-cluster", StatusUpdate{
 		Resource: types.ResourceRef{Kind: "Application", Name: addon.ArgoCDApp, Namespace: "argocd"},
 		Health:   "degraded",
 	}); err != nil || matched {
@@ -78,7 +78,7 @@ func TestApplyStatusAddonFold(t *testing.T) {
 	if err := s.UpsertClusterAddon(ctx, database.Pool, fleet); err != nil {
 		t.Fatal(err)
 	}
-	matched, err = svc.ApplyStatus(ctx, clusterID, StatusUpdate{
+	matched, err = svc.ApplyStatus(ctx, "org:1", clusterID, StatusUpdate{
 		Resource: types.ResourceRef{Kind: "Application", Name: "inari-addon-" + fleet.ID + "-prod-eu", Namespace: "argocd"},
 		Health:   "progressing",
 	})
@@ -91,16 +91,29 @@ func TestApplyStatusAddonFold(t *testing.T) {
 	}
 
 	// The ApplicationSet itself also folds.
-	if matched, err := svc.ApplyStatus(ctx, clusterID, StatusUpdate{
+	if matched, err := svc.ApplyStatus(ctx, "org:1", clusterID, StatusUpdate{
 		Resource: types.ResourceRef{Kind: "ApplicationSet", Name: "inari-addonset-" + fleet.ID, Namespace: "argocd"},
 		Health:   "healthy",
 	}); err != nil || !matched {
 		t.Errorf("appset fold: matched=%v err=%v", matched, err)
 	}
 
+	// A report from ANOTHER ORG's agent session does not fold, even for a
+	// fleet row (the org scoping closes the cross-tenant write gap).
+	if matched, err := svc.ApplyStatus(ctx, "org:2", clusterID, StatusUpdate{
+		Resource: types.ResourceRef{Kind: "ApplicationSet", Name: "inari-addonset-" + fleet.ID, Namespace: "argocd"},
+		Health:   "degraded",
+	}); err != nil || matched {
+		t.Errorf("cross-org fold: matched=%v err=%v", matched, err)
+	}
+	gotFleet, _ = s.GetClusterAddonByID(ctx, database.Pool, "org:1", fleet.ID)
+	if gotFleet.Health != "healthy" {
+		t.Errorf("fleet row health after cross-org report = %q, want healthy", gotFleet.Health)
+	}
+
 	// Plain instance names still route to the instance path (regression:
 	// addon parsing must not swallow inari-<instance>).
-	matched, err = svc.ApplyStatus(ctx, clusterID, StatusUpdate{
+	matched, err = svc.ApplyStatus(ctx, "org:1", clusterID, StatusUpdate{
 		Resource: types.ResourceRef{Kind: "Application", Name: "inari-web-1", Namespace: "argocd"},
 		Health:   "healthy",
 	})

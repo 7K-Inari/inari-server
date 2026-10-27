@@ -204,7 +204,7 @@ func (g *Gateway) Queue() *Queue { return g.queue.(*Queue) }
 
 // StatusSink consumes agent status-update events (Resources Inventory).
 type StatusSink interface {
-	ApplyStatus(ctx context.Context, clusterID string, upd StatusUpdate) (bool, error)
+	ApplyStatus(ctx context.Context, orgID, clusterID string, upd StatusUpdate) (bool, error)
 }
 
 // SetStatusSink wires the inventory module post-construction (nil-safe:

@@ -146,7 +146,7 @@ func (s *session) handleEvent(ctx context.Context, ev *agentv1.Event) ([]*agentv
 			return out, nil
 		}
 		if s.gw.statusSink != nil {
-			if _, err := s.gw.statusSink.ApplyStatus(ctx, s.cluster.ID, mapStatusUpdate(&upd)); err != nil {
+			if _, err := s.gw.statusSink.ApplyStatus(ctx, s.cluster.OrgID, s.cluster.ID, mapStatusUpdate(&upd)); err != nil {
 				return nil, fmt.Errorf("apply status update: %w", err)
 			}
 		}

@@ -76,7 +76,7 @@ func main() {
 
 // Narrow seams so the router is unit-testable without a database.
 type inventoryStatusSink interface {
-	ApplyStatus(ctx context.Context, clusterID string, upd inventory.StatusUpdate) (bool, error)
+	ApplyStatus(ctx context.Context, orgID, clusterID string, upd inventory.StatusUpdate) (bool, error)
 }
 
 type platformStatusSink interface {
@@ -91,13 +91,13 @@ type statusSinkRouter struct {
 	plat platformStatusSink
 }
 
-func (r statusSinkRouter) ApplyStatus(ctx context.Context, clusterID string, upd agentgateway.StatusUpdate) (bool, error) {
+func (r statusSinkRouter) ApplyStatus(ctx context.Context, orgID, clusterID string, upd agentgateway.StatusUpdate) (bool, error) {
 	if platformresources.IsPlatformKind(upd.Resource.Kind) {
 		return r.plat.ApplyStatus(ctx, clusterID, platformresources.StatusUpdate{
 			Resource: upd.Resource, Health: upd.Health, Message: upd.Message, ObservedAt: upd.ObservedAt,
 		})
 	}
-	return r.inv.ApplyStatus(ctx, clusterID, inventory.StatusUpdate{
+	return r.inv.ApplyStatus(ctx, orgID, clusterID, inventory.StatusUpdate{
 		Resource: upd.Resource, Health: upd.Health, Sync: upd.Sync, Message: upd.Message,
 	})
 }

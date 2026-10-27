@@ -925,18 +925,6 @@ func (s *Store) GetClusterAddonByID(ctx context.Context, q db.Querier, orgID, id
 	return a, err
 }
 
-// GetClusterAddonByIDAnyOrg returns one addon by primary key regardless of
-// org — the status-fold path keys off the agent-reported app name and
-// authorizes via the reporting cluster, like the instance app-status path.
-func (s *Store) GetClusterAddonByIDAnyOrg(ctx context.Context, q db.Querier, id string) (*types.ClusterAddon, error) {
-	a, err := scanClusterAddon(q.QueryRow(ctx, `SELECT `+clusterAddonCols+`
-		FROM cluster_addons WHERE id = $1`, id))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrAddonNotFound
-	}
-	return a, err
-}
-
 // UpsertDiscoveredAddon is the scanner-ingest variant: it inserts new rows
 // as state=discovered and refreshes discovered_meta (+ the detected version)
 // on existing DISCOVERED rows only. Managed/adopting/update_failed rows are

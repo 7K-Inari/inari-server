@@ -27,6 +27,13 @@ func TestInstanceIDForAppRef(t *testing.T) {
 	if !ok || id != "web-1" {
 		t.Errorf("got %q, %v", id, ok)
 	}
+	// Parsing stays verbatim (legacy lowercase IDs like "web-1" exist);
+	// the canonical-uppercase retry for lowercased ULID names happens at
+	// lookup time in applyAppStatus.
+	id, ok = instanceIDForAppRef(types.ResourceRef{Kind: "Application", Name: "inari-01j5z8k2n4xqj4tvdmx7a3b2c1", Namespace: "argocd"})
+	if !ok || id != "01j5z8k2n4xqj4tvdmx7a3b2c1" {
+		t.Errorf("lowercase ULID parse: got %q, %v", id, ok)
+	}
 	if _, ok := instanceIDForAppRef(types.ResourceRef{Kind: "WebService", Name: "inari-web-1"}); ok {
 		t.Error("non-Application kind must not map")
 	}
@@ -43,6 +50,10 @@ func TestAddonIDForAppRef(t *testing.T) {
 		wantOK bool
 	}{
 		{"single-cluster addon app", types.ResourceRef{Kind: "Application", Name: "inari-addon-01J5Z8K2N4XQJ4TVDMX7A3B2C1"}, "01J5Z8K2N4XQJ4TVDMX7A3B2C1", true},
+		// On-cluster names are lowercased (RFC 1123); parsing normalizes
+		// back to the canonical uppercase ULID.
+		{"lowercase on-cluster name", types.ResourceRef{Kind: "Application", Name: "inari-addon-01j5z8k2n4xqj4tvdmx7a3b2c1"}, "01J5Z8K2N4XQJ4TVDMX7A3B2C1", true},
+		{"lowercase appset child", types.ResourceRef{Kind: "Application", Name: "inari-addon-01j5z8k2n4xqj4tvdmx7a3b2c1-prod-eu"}, "01J5Z8K2N4XQJ4TVDMX7A3B2C1", true},
 		{"fleet applicationset", types.ResourceRef{Kind: "ApplicationSet", Name: "inari-addonset-01J5Z8K2N4XQJ4TVDMX7A3B2C1"}, "01J5Z8K2N4XQJ4TVDMX7A3B2C1", true},
 		{"appset child app", types.ResourceRef{Kind: "Application", Name: "inari-addon-01J5Z8K2N4XQJ4TVDMX7A3B2C1-prod-eu"}, "01J5Z8K2N4XQJ4TVDMX7A3B2C1", true},
 		{"plain instance app", types.ResourceRef{Kind: "Application", Name: "inari-web-1"}, "", false},

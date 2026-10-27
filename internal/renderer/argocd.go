@@ -1,6 +1,8 @@
 package renderer
 
 import (
+	"strings"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -138,7 +140,8 @@ func buildApplicationSet(p RenderParams, tmplSourceBlock map[string]any) []byte 
 			},
 			"template": map[string]any{
 				"metadata": map[string]any{
-					"name": p.AppPrefix + "-" + p.ID + "-{{cluster}}",
+					// Lowercased ID (RFC 1123), same contract as appName.
+					"name": p.AppPrefix + "-" + strings.ToLower(p.ID) + "-{{cluster}}",
 				},
 				"spec": tplSpec,
 			},

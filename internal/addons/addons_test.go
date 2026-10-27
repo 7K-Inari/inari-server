@@ -471,7 +471,7 @@ func TestAdoptApplicationDirectPolicy(t *testing.T) {
 		row.PruneEnabled || row.Namespace != "cert-manager" {
 		t.Errorf("unexpected row: %+v", row)
 	}
-	if row.ArgoCDApp != "inari-addon-"+row.ID {
+	if row.ArgoCDApp != "inari-addon-"+strings.ToLower(row.ID) {
 		t.Errorf("argocd app = %q", row.ArgoCDApp)
 	}
 
@@ -480,7 +480,7 @@ func TestAdoptApplicationDirectPolicy(t *testing.T) {
 	if !ok {
 		t.Fatalf("application.yaml not committed; have %v", keysOf(files))
 	}
-	if !strings.Contains(app, "name: inari-addon-"+row.ID) {
+	if !strings.Contains(app, "name: inari-addon-"+strings.ToLower(row.ID)) {
 		t.Error("application name mismatch")
 	}
 	if !strings.Contains(app, "prune: false") || !strings.Contains(app, "TakeOwnership=true") {
@@ -513,10 +513,10 @@ func TestAdoptApplicationDirectPolicy(t *testing.T) {
 	if err := appAny.UnmarshalTo(&appBridge); err != nil {
 		t.Fatalf("app bridge payload: %v", err)
 	}
-	if got := appBridge.Fields["commandId"].GetStringValue(); got != "inari-addon-"+row.ID {
+	if got := appBridge.Fields["commandId"].GetStringValue(); got != "inari-addon-"+strings.ToLower(row.ID) {
 		t.Errorf("bridge commandId = %q", got)
 	}
-	if got := appBridge.Fields["name"].GetStringValue(); got != "inari-addon-"+row.ID {
+	if got := appBridge.Fields["name"].GetStringValue(); got != "inari-addon-"+strings.ToLower(row.ID) {
 		t.Errorf("bridge name = %q", got)
 	}
 	manifest := appBridge.Fields["manifest"].GetStringValue()
@@ -547,7 +547,7 @@ func TestAdoptApplicationSet(t *testing.T) {
 	if row.ClusterID != "*" || row.DeployMode != types.AddonDeployModeApplicationSet {
 		t.Errorf("fleet row: %+v", row)
 	}
-	if row.ArgoCDApp != "inari-addonset-"+row.ID {
+	if row.ArgoCDApp != "inari-addonset-"+strings.ToLower(row.ID) {
 		t.Errorf("appset name = %q", row.ArgoCDApp)
 	}
 	files := git.Files("acme/acme-inari-state", "main")
@@ -561,7 +561,7 @@ func TestAdoptApplicationSet(t *testing.T) {
 	if strings.Contains(appset, "cluster: dev") {
 		t.Error("dev cluster must be excluded by the selector")
 	}
-	if !strings.Contains(appset, "inari-addon-"+row.ID+"-{{cluster}}") {
+	if !strings.Contains(appset, "inari-addon-"+strings.ToLower(row.ID)+"-{{cluster}}") {
 		t.Error("child app template name mismatch")
 	}
 	if len(queue.cmds) != 1 || queue.cmds[0].Type != RegisterAppSetEventType {
@@ -579,10 +579,10 @@ func TestAdoptApplicationSet(t *testing.T) {
 	if err := cmdAny.UnmarshalTo(&bridge); err != nil {
 		t.Fatalf("appset bridge payload: %v", err)
 	}
-	if got := bridge.Fields["commandId"].GetStringValue(); got != "inari-addonset-"+row.ID {
+	if got := bridge.Fields["commandId"].GetStringValue(); got != "inari-addonset-"+strings.ToLower(row.ID) {
 		t.Errorf("bridge commandId = %q (agent echoes it for acks)", got)
 	}
-	if got := bridge.Fields["name"].GetStringValue(); got != "inari-addonset-"+row.ID {
+	if got := bridge.Fields["name"].GetStringValue(); got != "inari-addonset-"+strings.ToLower(row.ID) {
 		t.Errorf("bridge name = %q", got)
 	}
 	if got := bridge.Fields["namespace"].GetStringValue(); got != "argocd" {

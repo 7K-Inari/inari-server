@@ -528,8 +528,10 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 func (s *Service) enqueueAppRegistration(ctx context.Context, clusterID, instanceID string, target *gitTarget, path, namespace string) error {
 	cmd := &agentv1.RegisterArgoCDApp{
 		CommandId: instanceID,
-		Name:      "inari-" + instanceID,
-		Project:   "default",
+		// Lowercased: ULIDs are uppercase, not RFC 1123-valid on a real
+		// apiserver; must match the renderer's appName.
+		Name:    "inari-" + strings.ToLower(instanceID),
+		Project: "default",
 		Source: &agentv1.ApplicationSource{
 			RepoUrl:        RepoURL(target.repo),
 			Path:           path,
@@ -862,7 +864,7 @@ func (s *Service) enqueueAppDeletion(ctx context.Context, clusterID, instanceID 
 		Action:    "delete",
 		Resource: &agentv1.ResourceRef{
 			Kind:      "Application",
-			Name:      "inari-" + instanceID,
+			Name:      "inari-" + strings.ToLower(instanceID),
 			Namespace: "argocd",
 		},
 	}

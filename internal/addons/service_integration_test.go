@@ -188,7 +188,7 @@ func TestAdoptUpdateEnablePruneEndToEnd(t *testing.T) {
 	}
 	if persisted.State != types.AddonStateManaged || persisted.RepoID != e.baseline.ID ||
 		persisted.CommitSHA == "" || persisted.PRURL != "" || persisted.PruneEnabled ||
-		persisted.Namespace != "cert-manager" || persisted.ArgoCDApp != "inari-addon-"+persisted.ID {
+		persisted.Namespace != "cert-manager" || persisted.ArgoCDApp != "inari-addon-"+strings.ToLower(persisted.ID) {
 		t.Errorf("persisted row: %+v", persisted)
 	}
 	files := e.git.Files("acme/acme-inari-state", "main")

@@ -889,12 +889,15 @@ func (s *Service) resolveRepo(ctx context.Context, orgID, selector string) (*typ
 }
 
 // appName is the ArgoCD Application/ApplicationSet name contract:
-// inari-addon-<id> single-cluster, inari-addonset-<id> fleet-wide.
+// inari-addon-<id> single-cluster, inari-addonset-<id> fleet-wide. The ID
+// is lowercased (RFC 1123 — ULIDs are uppercase); the status fold-back
+// normalizes back to the canonical uppercase form.
 func appName(addonID string, mode types.AddonDeployMode) string {
+	id := strings.ToLower(addonID)
 	if mode == types.AddonDeployModeApplicationSet {
-		return renderer.PrefixAddonSet + "-" + addonID
+		return renderer.PrefixAddonSet + "-" + id
 	}
-	return renderer.PrefixAddon + "-" + addonID
+	return renderer.PrefixAddon + "-" + id
 }
 
 // workloadName derives the release/workload name from a catalog item ID

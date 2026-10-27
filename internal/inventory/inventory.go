@@ -134,11 +134,13 @@ func addonIDForAppRef(ref types.ResourceRef) (string, bool) {
 	}
 	if rest, ok := strings.CutPrefix(ref.Name, "inari-addonset-"); ok {
 		id, _, _ := strings.Cut(rest, "-")
-		return id, id != ""
+		// On-cluster names are lowercased (RFC 1123); normalize back to the
+		// canonical uppercase ULID for the row lookup.
+		return strings.ToUpper(id), id != ""
 	}
 	if rest, ok := strings.CutPrefix(ref.Name, "inari-addon-"); ok {
 		id, _, _ := strings.Cut(rest, "-")
-		return id, id != ""
+		return strings.ToUpper(id), id != ""
 	}
 	return "", false
 }
@@ -193,8 +195,13 @@ func (s *Service) applyAppStatus(ctx context.Context, orgID, clusterID, instance
 	state := appInstanceState(upd.Health, upd.Sync)
 	inst, err := s.store.Get(ctx, s.db.Pool, instanceID)
 	if err != nil {
-		// Not an Inari-managed instance (or wrong cluster): drop-and-log.
-		return false, nil
+		// ULID instance IDs are lowercased in the on-cluster app name
+		// (RFC 1123, renderer appName); retry the canonical uppercase form.
+		if inst, err = s.store.Get(ctx, s.db.Pool, strings.ToUpper(instanceID)); err != nil {
+			// Not an Inari-managed instance (or wrong cluster): drop-and-log.
+			return false, nil
+		}
+		instanceID = strings.ToUpper(instanceID)
 	}
 	if inst.OrgID != orgID || inst.ClusterID != clusterID {
 		return false, nil

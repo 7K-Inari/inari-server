@@ -125,3 +125,23 @@ func TestAppName(t *testing.T) {
 		t.Errorf("verbatim appName = %q", got)
 	}
 }
+
+// ArgoCD object names must be RFC 1123 subdomain-valid: ULIDs are
+// uppercase Crockford base32, so the ID portion is lowercased (envtest
+// caught "inari-addon-01J5Z..." rejected by a real apiserver).
+func TestAppNameLowercasesULIDs(t *testing.T) {
+	p := testParams()
+	p.ID = "01J5Z8K2N4XQJ4TVDMX7A3B2C1"
+	if got := p.appName(); got != "inari-addon-01j5z8k2n4xqj4tvdmx7a3b2c1" {
+		t.Errorf("addon appName = %q", got)
+	}
+	p.DeployMode = types.AddonDeployModeApplicationSet
+	if got := p.appName(); got != "inari-addonset-01j5z8k2n4xqj4tvdmx7a3b2c1" {
+		t.Errorf("appset appName = %q", got)
+	}
+	p.DeployMode = types.AddonDeployModeApplication
+	p.AppPrefix = PrefixInstance
+	if got := p.appName(); got != "inari-01j5z8k2n4xqj4tvdmx7a3b2c1" {
+		t.Errorf("instance appName = %q", got)
+	}
+}

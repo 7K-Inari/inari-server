@@ -317,7 +317,7 @@ func TestAddonsHTTPEndToEnd(t *testing.T) {
 		t.Errorf("adopt result: %s", body)
 	}
 	addonID := adoptOut.Addon.ID
-	if adoptOut.Addon.ArgoCDApp != "inari-addon-"+addonID {
+	if adoptOut.Addon.ArgoCDApp != "inari-addon-"+strings.ToLower(addonID) {
 		t.Errorf("argocdApp = %q", adoptOut.Addon.ArgoCDApp)
 	}
 

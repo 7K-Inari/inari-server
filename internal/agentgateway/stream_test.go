@@ -285,6 +285,32 @@ func TestAckResolvesNamespacedQueueID(t *testing.T) {
 	}
 }
 
+// Addon bridge registrations (Feature C) queue under
+// register-argocd-appset:<name> / register-argocd-app-manifest:<name>;
+// the agent echoes the bare bridge commandId. Acks must retire them.
+func TestAckResolvesBridgeQueueIDs(t *testing.T) {
+	q := &fakeQueue{rows: map[string]*types.AgentCommand{
+		"register-argocd-appset:inari-addonset-a1":    {ID: "register-argocd-appset:inari-addonset-a1"},
+		"register-argocd-app-manifest:inari-addon-b2": {ID: "register-argocd-app-manifest:inari-addon-b2"},
+	}}
+	gw := &Gateway{}
+	gw.queue = q
+	gw.instanceFailures = &fakeFailureSink{}
+	s := gw.newSession(&types.Cluster{ID: "cluster:test", OrgID: "org:test"})
+
+	if _, err := s.handleEvent(context.Background(), ackEvent(t, "inari-addonset-a1", agentv1.CommandResult_COMMAND_RESULT_APPLIED)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.handleEvent(context.Background(), ackEvent(t, "inari-addon-b2", agentv1.CommandResult_COMMAND_RESULT_APPLIED)); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.completed) != 2 ||
+		q.completed[0] != "register-argocd-appset:inari-addonset-a1" ||
+		q.completed[1] != "register-argocd-app-manifest:inari-addon-b2" {
+		t.Fatalf("completed = %v", q.completed)
+	}
+}
+
 func TestNackMarksInstanceFailed(t *testing.T) {
 	q := &fakeQueue{rows: map[string]*types.AgentCommand{
 		"register-argocd-app:web-1": {ID: "register-argocd-app:web-1"},

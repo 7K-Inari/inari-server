@@ -162,12 +162,17 @@ func (s *session) handleEvent(ctx context.Context, ev *agentv1.Event) ([]*agentv
 			status = types.CommandStatusNacked
 		}
 		// The agent echoes the payload's CommandId (bare logical ID), while
-		// queue rows are namespaced ("register-argocd-app:<id>"). Resolve the
-		// queued command ID before completing so acks actually retire.
+		// queue rows are namespaced ("register-argocd-app:<id>", and the
+		// Feature C addon bridges "register-argocd-appset:<id>" /
+		// "register-argocd-app-manifest:<id>"). Resolve the queued command
+		// ID before completing so acks actually retire.
 		cmdID := ack.CommandId
 		if _, err := s.gw.queue.Get(ctx, cmdID); err != nil {
-			if _, err := s.gw.queue.Get(ctx, "register-argocd-app:"+cmdID); err == nil {
-				cmdID = "register-argocd-app:" + cmdID
+			for _, prefix := range []string{"register-argocd-app:", "register-argocd-appset:", "register-argocd-app-manifest:"} {
+				if _, err := s.gw.queue.Get(ctx, prefix+cmdID); err == nil {
+					cmdID = prefix + cmdID
+					break
+				}
 			}
 		}
 		if err := s.gw.queue.Complete(ctx, cmdID, status, ack.Message); err != nil {

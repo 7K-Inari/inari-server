@@ -498,12 +498,30 @@ func TestAdoptApplicationDirectPolicy(t *testing.T) {
 		t.Fatalf("expected 1 registration command, got %d", len(queue.cmds))
 	}
 	cmd := queue.cmds[0]
-	// protojson omits zero values: prune OFF asserts as the ABSENCE of
-	// "prune":true in the payload (the committed application.yaml carries
-	// the explicit prune: false, asserted above).
-	if cmd.ClusterID != "c1" || !strings.Contains(string(cmd.Payload), "inari-addon-"+row.ID) ||
-		strings.Contains(string(cmd.Payload), `"prune":true`) {
-		t.Errorf("unexpected command: %+v %s", cmd, cmd.Payload)
+	// Application-mode addon registrations use the manifest bridge
+	// (EVENT_TYPE_REGISTER_ARGOCD_APP_MANIFEST): the committed
+	// application.yaml is upserted verbatim so multi-source helm apps and
+	// TakeOwnership survive — RegisterArgoCDApp fields cannot express them.
+	if cmd.ClusterID != "c1" || cmd.Type != RegisterAppManifestEventType {
+		t.Errorf("unexpected command: %+v", cmd)
+	}
+	var appAny anypb.Any
+	if err := protojson.Unmarshal(cmd.Payload, &appAny); err != nil {
+		t.Fatalf("command payload is not protojson Any: %v", err)
+	}
+	var appBridge structpb.Struct
+	if err := appAny.UnmarshalTo(&appBridge); err != nil {
+		t.Fatalf("app bridge payload: %v", err)
+	}
+	if got := appBridge.Fields["commandId"].GetStringValue(); got != "inari-addon-"+row.ID {
+		t.Errorf("bridge commandId = %q", got)
+	}
+	if got := appBridge.Fields["name"].GetStringValue(); got != "inari-addon-"+row.ID {
+		t.Errorf("bridge name = %q", got)
+	}
+	manifest := appBridge.Fields["manifest"].GetStringValue()
+	if manifest != app {
+		t.Errorf("bridge manifest must be the committed application.yaml verbatim")
 	}
 }
 
@@ -560,6 +578,9 @@ func TestAdoptApplicationSet(t *testing.T) {
 	var bridge structpb.Struct
 	if err := cmdAny.UnmarshalTo(&bridge); err != nil {
 		t.Fatalf("appset bridge payload: %v", err)
+	}
+	if got := bridge.Fields["commandId"].GetStringValue(); got != "inari-addonset-"+row.ID {
+		t.Errorf("bridge commandId = %q (agent echoes it for acks)", got)
 	}
 	if got := bridge.Fields["name"].GetStringValue(); got != "inari-addonset-"+row.ID {
 		t.Errorf("bridge name = %q", got)
@@ -828,9 +849,9 @@ func TestEnablePrune(t *testing.T) {
 	if !strings.Contains(app, "prune: true") {
 		t.Error("re-rendered application must enable prune")
 	}
-	// The re-registered app carries prune=true.
+	// The re-registered app carries the re-rendered manifest with prune on.
 	last := queue.cmds[len(queue.cmds)-1]
-	if !strings.Contains(string(last.Payload), `"prune":true`) {
+	if last.Type != RegisterAppManifestEventType || !strings.Contains(string(last.Payload), "prune: true") {
 		t.Errorf("re-registration payload: %s", last.Payload)
 	}
 	if _, err := svc.EnablePrune(ctx, "org:1", id, "user:u1"); !errors.Is(err, ErrPruneAlreadyEnabled) {

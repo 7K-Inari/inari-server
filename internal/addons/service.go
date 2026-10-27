@@ -32,8 +32,6 @@ import (
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/structpb"
 
-	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
-
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/impersonation"
@@ -54,6 +52,13 @@ const TakeOwnershipSyncOption = "TakeOwnership=true"
 // message yet (proto mod lands with the agent milestone); until then the
 // command payload is a structpb.Struct bridge — see enqueueRegistration.
 const RegisterAppSetEventType = "EVENT_TYPE_REGISTER_ARGOCD_APPSET"
+
+// RegisterAppManifestEventType is the agent command type for
+// application-mode addon registration. Same bridge rationale: the
+// committed application.yaml is the authoritative desired state and
+// carries what agentv1.RegisterArgoCDApp cannot express — multi-source
+// helm apps (chart + git $values) and TakeOwnership sync options.
+const RegisterAppManifestEventType = "EVENT_TYPE_REGISTER_ARGOCD_APP_MANIFEST"
 
 // Sentinel errors mapped to HTTP statuses by the handler.
 var (
@@ -917,70 +922,47 @@ func commitPerPolicy(ctx context.Context, git gitprovider.Provider, repo *types.
 // enqueueRegistration dispatches the ArgoCD registration command for an
 // addon with prune per the flag (OFF at adoption, decision 2).
 //
-// Application mode uses the existing agentv1.RegisterArgoCDApp contract
-// (plan §6); the take-ownership sync option lives in the committed
-// application.yaml until the agent contract gains syncOptions. Helm addons
-// point the agent-built app at the upstream chart; the committed
-// application.yaml (multi-source with git values) stays the authoritative
-// desired state.
-//
-// ApplicationSet mode enqueues EVENT_TYPE_REGISTER_ARGOCD_APPSET with the
-// full rendered ApplicationSet manifest in a structpb.Struct bridge payload
-// ({name, namespace, manifest}) — the agent cannot rebuild the multi-source
-// template from RegisterArgoCDApp fields, and the pinned contract has no
-// RegisterArgoCDAppSet message yet (proto mod lands with the agent
-// milestone). Queue/dispatch machinery is payload-agnostic (protojson Any),
-// so the command flows today; the future agent handler upserts the manifest
-// verbatim, mirroring EnsureApplication in argocd/apps.go.
+// Both deploy modes enqueue a structpb.Struct bridge command carrying the
+// rendered manifest verbatim ({commandId, name, namespace, manifest}): the
+// committed application.yaml / applicationset.yaml is the authoritative
+// desired state and carries what agentv1.RegisterArgoCDApp cannot express —
+// multi-source helm apps (chart + git $values) and the take-ownership sync
+// option (the proto SyncPolicy has no syncOptions field; the contract mod
+// lands with the agent milestone). The agent upserts the manifest unchanged
+// under the brownfield observe-only rules. Queue/dispatch machinery is
+// payload-agnostic (protojson Any), so the command flows today.
 func (s *Service) enqueueRegistration(ctx context.Context, queueCluster, addonID string, mode types.AddonDeployMode,
 	desc types.SourceDescriptor, repo *types.TenantGitRepo, path, namespace string, prune bool, files []renderer.RenderedFile) error {
 	if s.queue == nil {
 		return nil
 	}
-	if mode == types.AddonDeployModeApplicationSet {
-		name := appName(addonID, mode)
-		var manifest string
-		for _, f := range files {
-			if strings.HasSuffix(f.Path, "/applicationset.yaml") {
-				manifest = string(f.Content)
-			}
-		}
-		if manifest == "" {
-			return errors.New("addons: applicationset render produced no applicationset.yaml")
-		}
-		payload, err := structpb.NewStruct(map[string]any{
-			"name": name, "namespace": "argocd", "manifest": manifest,
-		})
-		if err != nil {
-			return err
-		}
-		return s.enqueue(ctx, queueCluster, "register-argocd-appset:"+name, RegisterAppSetEventType, payload)
-	}
-
 	name := appName(addonID, mode)
-	source := &agentv1.ApplicationSource{
-		RepoUrl:        orchestrator.RepoURL(repo.Repo),
-		Path:           path,
-		TargetRevision: repo.BaseBranch,
+	var eventType, suffix string
+	if mode == types.AddonDeployModeApplicationSet {
+		eventType, suffix = RegisterAppSetEventType, "/applicationset.yaml"
+	} else {
+		eventType, suffix = RegisterAppManifestEventType, "/application.yaml"
 	}
-	if desc.Kind == types.SourceKindHelm && desc.Helm != nil {
-		source = &agentv1.ApplicationSource{
-			RepoUrl:        desc.Helm.RepoURL,
-			Chart:          desc.Helm.Chart,
-			TargetRevision: desc.Helm.Version,
+	var manifest string
+	for _, f := range files {
+		if strings.HasSuffix(f.Path, suffix) {
+			manifest = string(f.Content)
 		}
 	}
-	return s.enqueue(ctx, queueCluster, "register-argocd-app:"+name,
-		agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_REGISTER_ARGOCD_APP),
-		&agentv1.RegisterArgoCDApp{
-			CommandId:            name,
-			Name:                 name,
-			Project:              "default",
-			Source:               source,
-			DestinationServer:    "https://kubernetes.default.svc",
-			DestinationNamespace: namespace,
-			SyncPolicy:           &agentv1.SyncPolicy{Automated: true, SelfHeal: true, Prune: prune},
-		})
+	if manifest == "" {
+		return fmt.Errorf("addons: %s render produced no %s", mode, suffix[1:])
+	}
+	payload, err := structpb.NewStruct(map[string]any{
+		"commandId": name, "name": name, "namespace": "argocd", "manifest": manifest,
+	})
+	if err != nil {
+		return err
+	}
+	queueID := "register-argocd-app-manifest:" + name
+	if mode == types.AddonDeployModeApplicationSet {
+		queueID = "register-argocd-appset:" + name
+	}
+	return s.enqueue(ctx, queueCluster, queueID, eventType, payload)
 }
 
 // enqueue marshals one proto payload into a durable agent command.

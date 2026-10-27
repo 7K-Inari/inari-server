@@ -1,0 +1,30 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+    name: inari-addonset-my-db
+    namespace: argocd
+spec:
+    generators:
+        - list:
+            elements:
+                - cluster: eu
+                  server: https://kubernetes.default.svc
+                - cluster: us
+                  server: https://kubernetes.default.svc
+    goTemplate: false
+    template:
+        metadata:
+            name: inari-addon-my-db-{{cluster}}
+        spec:
+            destination:
+                namespace: apps
+                server: '{{server}}'
+            project: default
+            source:
+                path: clusters/c1/postgres-aws/my-db
+                repoURL: https://github.com/acme/acme-inari-state
+                targetRevision: main
+            syncPolicy:
+                automated:
+                    prune: true
+                    selfHeal: true

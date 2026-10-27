@@ -1,0 +1,18 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+    name: inari-bundle-1
+    namespace: argocd
+spec:
+    destination:
+        namespace: apps
+        server: https://kubernetes.default.svc
+    project: default
+    source:
+        path: clusters/c1/bundle/bundle-1/manifests
+        repoURL: https://github.com/acme/acme-inari-state
+        targetRevision: main
+    syncPolicy:
+        automated:
+            prune: false
+            selfHeal: true

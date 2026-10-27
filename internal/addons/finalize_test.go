@@ -75,6 +75,57 @@ func TestFinalizePRMerge(t *testing.T) {
 	}
 }
 
+// Empty fleet at merge time (selector matched clusters when the PR
+// opened, but membership drained before it merged): nothing can be
+// registered, so finalization acks — the row still records the merge —
+// instead of erroring into 50 redeliveries + a dead-letter. The next
+// cluster.registered event re-renders and re-PRs (fleet reconciler),
+// healing the registration when the fleet refills.
+func TestFinalizePRMergeEmptyFleetAcks(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeStore()
+	git, queue := gitprovider.NewFake(), &fakeQueue{}
+	repo := seedBaselineRepo(store, git, "org:1", "acme/state", types.CommitPolicyPullRequest)
+	// No clusters at all — the selector matches nothing.
+	svc := newTestService(store, newFakeCatalog(), &fakeClusters{}, git, queue)
+
+	mergeSHA := "deadbeefcafe"
+	if _, err := git.CommitFiles(ctx, repo.Repo, mergeSHA, []gitprovider.File{
+		{Path: "addons/cert-manager/applicationset.yaml", Content: []byte("kind: ApplicationSet\n")},
+	}, "merge"); err != nil {
+		t.Fatal(err)
+	}
+	row := &types.ClusterAddon{
+		ID: "addon-fleet", OrgID: "org:1", ClusterID: "*", CatalogItem: "platform:cert-manager",
+		State: types.AddonStateManaged, DeployMode: types.AddonDeployModeApplicationSet,
+		RepoID: repo.ID, RepoPath: "addons/cert-manager", ChartVersion: "v1.16.1",
+		ArgoCDApp:       "inari-addonset-addon-fleet",
+		ClusterSelector: map[string]string{"env": "prod"},
+		CommitSHA:       "old-sha", PRURL: "https://github.com/acme/state/pull/11",
+	}
+	if err := store.UpsertClusterAddon(ctx, nil, row); err != nil {
+		t.Fatal(err)
+	}
+
+	found, err := svc.FinalizePRMerge(ctx, "org:1", row.PRURL, mergeSHA)
+	if err != nil {
+		t.Fatalf("empty fleet must ack, got error: %v", err)
+	}
+	if !found {
+		t.Error("found = false, want true (the row awaited this PR)")
+	}
+	if len(queue.cmds) != 0 {
+		t.Errorf("no registration without targets, got %d commands", len(queue.cmds))
+	}
+	got, err := store.GetClusterAddonByID(ctx, nil, "org:1", "addon-fleet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CommitSHA != mergeSHA || got.PRURL != "" {
+		t.Errorf("row = commit %q pr %q, want merge recorded", got.CommitSHA, got.PRURL)
+	}
+}
+
 // An unknown PR URL matches nothing (found=false, no side effects).
 func TestFinalizePRMergeUnknownPR(t *testing.T) {
 	store := newFakeStore()

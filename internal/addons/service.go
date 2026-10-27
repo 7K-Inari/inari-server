@@ -807,6 +807,24 @@ func (s *Service) FinalizePRMerge(ctx context.Context, orgID, prURL, mergeSHA st
 	if err != nil {
 		return false, err
 	}
+	anchor := row.ClusterID
+	if row.DeployMode == types.AddonDeployModeApplicationSet {
+		targets, err := s.targetsForRow(ctx, row)
+		if errors.Is(err, ErrEmptyFleet) {
+			// The fleet drained between PR open and merge: there is no
+			// cluster to anchor the registration on. Ack (the merge is
+			// still recorded) instead of dead-lettering — the fleet
+			// reconciler re-renders and re-PRs when clusters rejoin, and
+			// THAT merge registers the ApplicationSet.
+			slog.Warn("addons: PR merged with empty fleet; registration deferred to fleet reconcile",
+				"addon", row.ID, "pr", prURL)
+			return s.markPRMerged(ctx, orgID, row, prURL, mergeSHA)
+		}
+		if err != nil {
+			return false, err
+		}
+		anchor = targets[0].ID
+	}
 	repo, provider, _, err := s.git.ResolveRepo(ctx, orgID, row.RepoID)
 	if err != nil {
 		return false, err
@@ -822,21 +840,19 @@ func (s *Service) FinalizePRMerge(ctx context.Context, orgID, prURL, mergeSHA st
 	if manifest == "" {
 		return false, fmt.Errorf("addons: %s missing at merge SHA %s", row.RepoPath+suffix, mergeSHA)
 	}
-	anchor := row.ClusterID
-	if row.DeployMode == types.AddonDeployModeApplicationSet {
-		targets, err := s.targetsForRow(ctx, row)
-		if err != nil {
-			return false, err
-		}
-		anchor = targets[0].ID
-	}
 	// Enqueue before marking (deterministic command ID — see the
 	// orchestrator's FinalizePRMerge for the crash-ordering rationale).
 	files := []renderer.RenderedFile{{Path: row.RepoPath + suffix, Content: []byte(manifest)}}
 	if err := s.enqueueRegistration(ctx, anchor, row.ID, row.DeployMode, files); err != nil {
 		return false, err
 	}
-	err = s.inTx(ctx, func(q db.Querier) error {
+	return s.markPRMerged(ctx, orgID, row, prURL, mergeSHA)
+}
+
+// markPRMerged records the merge SHA and audits the finalization (the
+// pr_url guard in the store makes redelivery a no-op).
+func (s *Service) markPRMerged(ctx context.Context, orgID string, row *types.ClusterAddon, prURL, mergeSHA string) (bool, error) {
+	err := s.inTx(ctx, func(q db.Querier) error {
 		if _, err := s.store.MarkAddonPRMerged(ctx, q, orgID, row.ID, mergeSHA); err != nil {
 			return err
 		}

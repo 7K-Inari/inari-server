@@ -586,20 +586,32 @@ func (s *Service) FinalizePRMerge(ctx context.Context, orgID, prURL, mergeSHA st
 		RepoPath(inst.ClusterID, inst.CatalogItemID, inst.ID), inst.ResourceRef.Namespace); err != nil {
 		return false, err
 	}
-	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
-		if _, err := s.instances.MarkInstancePRMerged(ctx, tx, orgID, inst.ID, mergeSHA); err != nil {
-			return err
-		}
-		return s.audit.Record(ctx, tx, &types.AuditEvent{
-			OrgID: orgID, Actor: "system:git-webhook", Impersonator: impersonation.FromContext(ctx),
-			Action: "deploy.pr_merged", ObjectType: "resource_instance", ObjectID: inst.ID,
-			Payload: json.RawMessage(fmt.Sprintf(`{"prUrl":%q,"mergeSha":%q}`, prURL, mergeSHA)),
-		})
-	})
-	if err != nil {
+	if err := s.markInstancePRMerged(ctx, orgID, inst.ID, prURL, mergeSHA); err != nil {
 		return false, fmt.Errorf("orchestrator: finalize PR merge: %w", err)
 	}
 	return true, nil
+}
+
+// markInstancePRMerged records the merge SHA and audits the finalization
+// in one TX (the pr_url guard in the store makes redelivery a no-op). A
+// racing duplicate delivery that already marked the row (applied=false)
+// skips the audit — the winner's entry stands; sequential redelivery never
+// reaches here because the cleared pr_url fails FindInstanceByPRURL first.
+func (s *Service) markInstancePRMerged(ctx context.Context, orgID, instanceID, prURL, mergeSHA string) error {
+	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		applied, err := s.instances.MarkInstancePRMerged(ctx, tx, orgID, instanceID, mergeSHA)
+		if err != nil {
+			return err
+		}
+		if !applied {
+			return nil
+		}
+		return s.audit.Record(ctx, tx, &types.AuditEvent{
+			OrgID: orgID, Actor: "system:git-webhook", Impersonator: impersonation.FromContext(ctx),
+			Action: "deploy.pr_merged", ObjectType: "resource_instance", ObjectID: instanceID,
+			Payload: json.RawMessage(fmt.Sprintf(`{"prUrl":%q,"mergeSha":%q}`, prURL, mergeSHA)),
+		})
+	})
 }
 
 // ErrSameVersion rejects a rollback to the version the instance already runs.

@@ -10,6 +10,7 @@ import (
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/structpb"
 
+	"github.com/7K-Inari/inari-server/internal/impersonation"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -87,5 +88,44 @@ func TestPRMergeFinalizerIntegration(t *testing.T) {
 	}
 	if found || len(e.queue.cmds) != 1 {
 		t.Errorf("redelivery: found=%v cmds=%d, want false/1", found, len(e.queue.cmds))
+	}
+}
+
+// A RACING duplicate delivery (two outbox replicas pass FindAddonByPRURL
+// before either marks — unlike sequential redelivery, which the pr_url
+// guard acks) must not double-audit: the loser's MarkAddonPRMerged applies
+// nothing, so its audit entry is skipped and the winner's stands.
+func TestPRMergeRacingDuplicateAuditsOnce(t *testing.T) {
+	database, ctx := setupAddonTest(t)
+	e := newEnv(t, database, types.CommitPolicyPullRequest)
+	seedClusterRow(t, database, ctx, "c1", "org:1", "prod-eu", map[string]string{"env": "prod"})
+
+	res, err := e.svc.Adopt(ctx, "org:1", "c1", "platform:cert-manager", AdoptInput{
+		Version: "v1.16.1",
+	}, "user:u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The racing processor fetched its row copy before the winner marked.
+	stale, err := e.store.FindAddonByPRURL(ctx, database.Pool, "org:1", res.PRURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// markPRMerged is called with the impersonated virtual user, as
+	// FinalizePRMerge does (audit requires it for system actors).
+	finCtx := impersonation.WithImpersonator(ctx, impersonation.VirtualUser("org:1"))
+	if _, err := e.svc.markPRMerged(finCtx, "org:1", stale, res.PRURL, "mergedeadbeef"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.markPRMerged(finCtx, "org:1", stale, res.PRURL, "mergedeadbeef"); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := database.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit_events WHERE action = 'addon.pr_merged' AND object_id = $1`, stale.ID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("addon.pr_merged audit rows = %d, want 1 (racing duplicate must not double-audit)", n)
 	}
 }

@@ -850,11 +850,18 @@ func (s *Service) FinalizePRMerge(ctx context.Context, orgID, prURL, mergeSHA st
 }
 
 // markPRMerged records the merge SHA and audits the finalization (the
-// pr_url guard in the store makes redelivery a no-op).
+// pr_url guard in the store makes redelivery a no-op). A racing duplicate
+// delivery that already marked the row (applied=false) skips the audit —
+// the winner's entry stands; sequential redelivery never reaches here
+// because the cleared pr_url fails FindAddonByPRURL first.
 func (s *Service) markPRMerged(ctx context.Context, orgID string, row *types.ClusterAddon, prURL, mergeSHA string) (bool, error) {
 	err := s.inTx(ctx, func(q db.Querier) error {
-		if _, err := s.store.MarkAddonPRMerged(ctx, q, orgID, row.ID, mergeSHA); err != nil {
+		applied, err := s.store.MarkAddonPRMerged(ctx, q, orgID, row.ID, mergeSHA)
+		if err != nil {
 			return err
+		}
+		if !applied {
+			return nil
 		}
 		return s.recordAudit(ctx, q, orgID, "system:git-webhook", "addon.pr_merged", row.ID, map[string]any{
 			"catalogItem": row.CatalogItem, "cluster": row.ClusterID, "prUrl": prURL, "mergeSha": mergeSHA,

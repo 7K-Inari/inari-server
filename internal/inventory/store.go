@@ -962,20 +962,6 @@ func (s *Store) UpsertDiscoveredAddon(ctx context.Context, q db.Querier, a *type
 	return err
 }
 
-// SetClusterAddonPrune flips prune_enabled (the explicit human enable-prune
-// action, decision 2). One-directional: there is no disable path yet.
-func (s *Store) SetClusterAddonPrune(ctx context.Context, q db.Querier, orgID, id string) error {
-	tag, err := q.Exec(ctx, `UPDATE cluster_addons SET prune_enabled = TRUE, updated_at = now()
-		WHERE org_id = $1 AND id = $2`, orgID, id)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrAddonNotFound
-	}
-	return nil
-}
-
 // SetClusterAddonState forces the row's lifecycle state (the update_failed
 // flip must bypass UpsertClusterAddon's never-downgrade-managed guard).
 func (s *Store) SetClusterAddonState(ctx context.Context, q db.Querier, orgID, id string, state types.AddonState) error {

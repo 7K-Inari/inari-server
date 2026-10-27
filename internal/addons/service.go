@@ -103,7 +103,6 @@ type Store interface {
 	ListClusterAddons(ctx context.Context, q db.Querier, orgID, clusterID string) ([]*types.ClusterAddon, error)
 	UpsertClusterAddon(ctx context.Context, q db.Querier, a *types.ClusterAddon) error
 	UpsertDiscoveredAddon(ctx context.Context, q db.Querier, a *types.ClusterAddon) error
-	SetClusterAddonPrune(ctx context.Context, q db.Querier, orgID, id string) error
 	// BaselineRepoSelector resolves the repo an adopt defaults to for one
 	// cluster (bound baseline, else org default; "" = none registered).
 	BaselineRepoSelector(ctx context.Context, q db.Querier, orgID, clusterID string) (string, error)

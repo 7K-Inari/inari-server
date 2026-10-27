@@ -23,7 +23,6 @@ type fakeStore struct {
 	addons    map[string]*types.ClusterAddon // key: clusterID + "|" + catalogItem
 	repos     map[string]*types.TenantGitRepo
 	baselines map[string]string // clusterID → repo selector
-	pruneFlip []string
 }
 
 func newFakeStore() *fakeStore {
@@ -84,17 +83,6 @@ func (f *fakeStore) UpsertDiscoveredAddon(_ context.Context, _ db.Querier, a *ty
 	}
 	f.addons[key] = &cp
 	return nil
-}
-
-func (f *fakeStore) SetClusterAddonPrune(_ context.Context, _ db.Querier, orgID, id string) error {
-	for _, a := range f.addons {
-		if a.ID == id && a.OrgID == orgID {
-			a.PruneEnabled = true
-			f.pruneFlip = append(f.pruneFlip, id)
-			return nil
-		}
-	}
-	return inventory.ErrAddonNotFound
 }
 
 func (f *fakeStore) BaselineRepoSelector(_ context.Context, _ db.Querier, _, clusterID string) (string, error) {
@@ -704,7 +692,7 @@ func TestListTeamFilteringAndVersions(t *testing.T) {
 			if len(a.AvailableVersions) != 2 {
 				t.Errorf("cert-manager versions = %v", a.AvailableVersions)
 			}
-			if !a.PruneEnabled == false {
+			if a.PruneEnabled {
 				t.Error("prune off after adopt")
 			}
 		}

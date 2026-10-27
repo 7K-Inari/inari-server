@@ -84,7 +84,8 @@ func TestQAConcurrentAdopts(t *testing.T) {
 		t.Fatal("no registration command enqueued")
 	}
 	for _, c := range f.queue.cmds {
-		if !strings.Contains(string(c.Payload), rowID) {
+		// The on-cluster name lowercases the ULID (RFC 1123).
+		if !strings.Contains(string(c.Payload), strings.ToLower(rowID)) {
 			t.Errorf("registered command does not reference the persisted row %s: %s", rowID, c.Payload)
 		}
 	}

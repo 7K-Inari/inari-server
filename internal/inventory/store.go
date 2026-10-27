@@ -668,6 +668,28 @@ func (s *Store) SetDefaultGitRepo(ctx context.Context, q db.Querier, orgID, id s
 	return nil
 }
 
+// ListGitReposWithoutWebhook returns every repo (all orgs) with no
+// provisioned webhook — rows created outside gitrepos.Register (TZF
+// baseline upsert, legacy git-config mirror), rows predating the webhook
+// milestone, and rows whose registration-time provisioning failed. The
+// webhook reconcile loop reprovisions them.
+func (s *Store) ListGitReposWithoutWebhook(ctx context.Context, q db.Querier) ([]*types.TenantGitRepo, error) {
+	rows, err := q.Query(ctx, `SELECT `+gitRepoCols+` FROM tenant_git_repos WHERE webhook_url IS NULL ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*types.TenantGitRepo
+	for rows.Next() {
+		r, err := scanGitRepo(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // FindGitRepoByRepo resolves a webhook delivery's repo slug to its registry
 // row, ACROSS orgs (the ingress authenticates via the row's webhook secret,
 // not a bearer token, so no org context exists yet). Rows with a

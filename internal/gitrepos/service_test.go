@@ -51,6 +51,16 @@ func contains(xs []string, v string) bool {
 	return false
 }
 
+func (f *fakeStore) ListGitReposWithoutWebhook(_ context.Context, _ db.Querier) ([]*types.TenantGitRepo, error) {
+	var out []*types.TenantGitRepo
+	for _, r := range f.repos {
+		if r.WebhookURL == "" {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeStore) GetGitRepo(_ context.Context, _ db.Querier, orgID, id string) (*types.TenantGitRepo, error) {
 	r, ok := f.repos[id]
 	if !ok || r.OrgID != orgID {

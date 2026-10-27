@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -76,6 +77,10 @@ func (e *RepoInUseError) Error() string {
 // Store is the inventory seam the service needs.
 type Store interface {
 	ListGitRepos(ctx context.Context, q db.Querier, orgID string, teamIDs []string) ([]*types.TenantGitRepo, error)
+	// ListGitReposWithoutWebhook feeds the webhook reconcile loop
+	// (cross-org: repos created outside Register, pre-webhook rows, and
+	// failed registration-time provisions).
+	ListGitReposWithoutWebhook(ctx context.Context, q db.Querier) ([]*types.TenantGitRepo, error)
 	GetGitRepo(ctx context.Context, q db.Querier, orgID, id string) (*types.TenantGitRepo, error)
 	GetDefaultGitRepo(ctx context.Context, q db.Querier, orgID string) (*types.TenantGitRepo, error)
 	UpsertGitRepo(ctx context.Context, q db.Querier, r *types.TenantGitRepo) error
@@ -330,6 +335,57 @@ func (s *Service) provisionWebhookBestEffort(ctx context.Context, row *types.Ten
 	if _, err := s.webhooks.Provision(ctx, s.querier(), git, row); err != nil {
 		slog.Warn("gitrepos: webhook provisioning failed (retry via POST .../git-repos/{id}/webhook)",
 			"repo", row.ID, "error", err)
+	}
+}
+
+// ReconcileWebhooks provisions webhooks for every registered repo missing
+// one: rows created outside Register (TZF baseline upsert, legacy
+// git-config mirror), rows predating the webhook milestone, and rows whose
+// registration-time provisioning failed. Without this, PR-policy workloads
+// on those repos could never be finalized post-merge — the merge webhook
+// would never arrive. Best-effort per repo (failures are logged and
+// retried on the next sweep); returns the count provisioned.
+func (s *Service) ReconcileWebhooks(ctx context.Context) (int, error) {
+	if s.webhooks == nil {
+		return 0, nil
+	}
+	rows, err := s.store.ListGitReposWithoutWebhook(ctx, s.querier())
+	if err != nil {
+		return 0, err
+	}
+	provisioned := 0
+	for _, row := range rows {
+		git, _, err := s.git.ResolveRow(ctx, row)
+		if err != nil {
+			slog.Warn("gitrepos: webhook reconcile: resolve credentials", "repo", row.ID, "error", err)
+			continue
+		}
+		if _, err := s.webhooks.Provision(ctx, s.querier(), git, row); err != nil {
+			slog.Warn("gitrepos: webhook reconcile: provision", "repo", row.ID, "error", err)
+			continue
+		}
+		provisioned++
+	}
+	return provisioned, nil
+}
+
+// RunWebhookReconcileLoop sweeps for unprovisioned repos on an interval
+// (leader-leased in main, mirroring the other singleton loops).
+func (s *Service) RunWebhookReconcileLoop(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+	for {
+		if _, err := s.ReconcileWebhooks(ctx); err != nil && ctx.Err() == nil {
+			slog.Warn("gitrepos: webhook reconcile sweep failed", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
 	}
 }
 

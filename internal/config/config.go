@@ -153,6 +153,10 @@ type Config struct {
 	// provisioning (local dev); the ingress itself stays enabled as long
 	// as the credential KEK is set.
 	WebhookBaseURL string
+	// WebhookReconcileInterval is how often the leader-leased sweeper
+	// provisions webhooks for repos missing one (rows created outside
+	// gitrepos.Register, pre-M4 rows, failed registration-time retries).
+	WebhookReconcileInterval time.Duration
 
 	// User git connections (W4: per-user git social login). UserGitEnabled
 	// gates the whole module; the dedicated GitHub user-OAuth app (client
@@ -418,20 +422,21 @@ func Load() (*Config, error) {
 		VaultK8sTokenPath: env("INARI_VAULT_K8S_TOKEN_PATH",
 			"/var/run/secrets/kubernetes.io/serviceaccount/token"),
 
-		CatalogOCIPath:          env("INARI_CATALOG_OCI_PATH", ""),
-		CatalogOCIIndexRef:      env("INARI_CATALOG_OCI_INDEX_REF", ""),
-		CatalogSyncInterval:     durEnv("INARI_CATALOG_SYNC_INTERVAL", 0),
-		GitProvider:             env("INARI_GIT_PROVIDER", "fake"),
-		GitLocalRoot:            env("INARI_GIT_LOCAL_ROOT", "/var/lib/inari/git"),
-		GitHubAppID:             intEnv("INARI_GITHUB_APP_ID", 0),
-		GitHubInstallationID:    intEnv("INARI_GITHUB_APP_INSTALLATION_ID", 0),
-		GitHubAppPrivateKeyFile: env("INARI_GITHUB_APP_PRIVATE_KEY_FILE", ""),
-		GitHubAPIBase:           env("INARI_GITHUB_API_BASE", ""),
-		GitHubAppSlug:           env("INARI_GITHUB_APP_SLUG", ""),
-		GitHubInstallCacheTTL:   durEnv("INARI_GITHUB_INSTALL_CACHE_TTL", 5*time.Minute),
-		GitHubAllowedAPIBases:   listEnv("INARI_GITHUB_ALLOWED_API_BASES", nil),
-		TenantGitKeyMountRoot:   env("INARI_TENANT_GIT_KEY_MOUNT_ROOT", "/var/run/inari/tenant-git-keys"),
-		WebhookBaseURL:          env("INARI_WEBHOOK_BASE_URL", ""),
+		CatalogOCIPath:           env("INARI_CATALOG_OCI_PATH", ""),
+		CatalogOCIIndexRef:       env("INARI_CATALOG_OCI_INDEX_REF", ""),
+		CatalogSyncInterval:      durEnv("INARI_CATALOG_SYNC_INTERVAL", 0),
+		GitProvider:              env("INARI_GIT_PROVIDER", "fake"),
+		GitLocalRoot:             env("INARI_GIT_LOCAL_ROOT", "/var/lib/inari/git"),
+		GitHubAppID:              intEnv("INARI_GITHUB_APP_ID", 0),
+		GitHubInstallationID:     intEnv("INARI_GITHUB_APP_INSTALLATION_ID", 0),
+		GitHubAppPrivateKeyFile:  env("INARI_GITHUB_APP_PRIVATE_KEY_FILE", ""),
+		GitHubAPIBase:            env("INARI_GITHUB_API_BASE", ""),
+		GitHubAppSlug:            env("INARI_GITHUB_APP_SLUG", ""),
+		GitHubInstallCacheTTL:    durEnv("INARI_GITHUB_INSTALL_CACHE_TTL", 5*time.Minute),
+		GitHubAllowedAPIBases:    listEnv("INARI_GITHUB_ALLOWED_API_BASES", nil),
+		TenantGitKeyMountRoot:    env("INARI_TENANT_GIT_KEY_MOUNT_ROOT", "/var/run/inari/tenant-git-keys"),
+		WebhookBaseURL:           env("INARI_WEBHOOK_BASE_URL", ""),
+		WebhookReconcileInterval: durEnv("INARI_WEBHOOK_RECONCILE_INTERVAL", 5*time.Minute),
 
 		UserGitEnabled:                boolEnv("INARI_USERGIT_ENABLED", false),
 		UserGitGitHubClientID:         env("INARI_USERGIT_GITHUB_CLIENT_ID", ""),

@@ -842,6 +842,14 @@ func run() error {
 		}
 		if cfg.WebhookBaseURL != "" {
 			gitReposSvc.WithWebhookProvisioner(gitwebhook.NewProvisioner(secretStore, cfg.WebhookBaseURL))
+			// Repos created outside gitrepos.Register (TZF baseline upsert,
+			// legacy git-config mirror), pre-webhook rows, and failed
+			// registration-time provisions get their hooks from the
+			// leader-leased sweeper — without one, PR-policy workloads on
+			// those repos could never be finalized post-merge.
+			go leaderlease.Run(ctx, leaser, "git-webhook-reconcile", func(lctx context.Context) {
+				gitReposSvc.RunWebhookReconcileLoop(lctx, cfg.WebhookReconcileInterval)
+			}, log)
 		} else {
 			log.Warn("INARI_WEBHOOK_BASE_URL unset: webhook hook provisioning disabled (ingress still active)")
 		}

@@ -72,6 +72,74 @@ func TestRegisterNoProvisioner(t *testing.T) {
 	}
 }
 
+// The reconcile sweeper provisions repos created outside Register (TZF
+// baseline, legacy git-config mirror) or whose registration-time provision
+// failed; already-provisioned repos are skipped; per-repo failures don't
+// abort the sweep.
+func TestReconcileWebhooks(t *testing.T) {
+	store := newFakeStore()
+	prov := &fakeProvisioner{}
+	svc := NewService(store, repoResolver(&fakeResolver{provider: gitprovider.NewFake()}), nil, nil).
+		WithWebhookProvisioner(prov)
+
+	// One registered-with-hook repo (skip) and two without (TZF-style).
+	hooked, err := svc.Register(context.Background(), "org:1", RegisterInput{
+		Name: "baseline", Repo: "acme/state", Scope: types.GitRepoScopePlatform, IsDefault: true,
+	}, "user:u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.repos["tzf-1"] = &types.TenantGitRepo{ID: "tzf-1", OrgID: "org:1", Name: "tzf-baseline", Repo: "acme/tzf-state", Scope: types.GitRepoScopePlatform}
+	store.repos["tzf-2"] = &types.TenantGitRepo{ID: "tzf-2", OrgID: "org:2", Name: "other-org", Repo: "other/state", Scope: types.GitRepoScopePlatform}
+
+	n, err := svc.ReconcileWebhooks(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Errorf("provisioned = %d, want 2", n)
+	}
+	for _, id := range []string{"tzf-1", "tzf-2"} {
+		if store.repos[id].WebhookURL == "" {
+			t.Errorf("repo %s not provisioned", id)
+		}
+	}
+	// The already-hooked repo was not re-provisioned by the sweep.
+	callsForHooked := 0
+	for _, c := range prov.calls {
+		if c == hooked.ID {
+			callsForHooked++
+		}
+	}
+	if callsForHooked != 1 { // 1 = registration-time only
+		t.Errorf("provision calls for hooked repo = %d, want 1 (registration only)", callsForHooked)
+	}
+
+	// Per-repo failure doesn't abort the sweep; the repo is retried next time.
+	prov.err = errors.New("provider down")
+	store.repos["tzf-3"] = &types.TenantGitRepo{ID: "tzf-3", OrgID: "org:1", Name: "tzf-third", Repo: "acme/third", Scope: types.GitRepoScopePlatform}
+	if _, err := svc.ReconcileWebhooks(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if store.repos["tzf-3"].WebhookURL != "" {
+		t.Error("failed provision must leave the repo unprovisioned")
+	}
+	prov.err = nil
+	if _, err := svc.ReconcileWebhooks(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if store.repos["tzf-3"].WebhookURL == "" {
+		t.Error("retry must provision the failed repo")
+	}
+
+	// Disabled wiring: sweep is a no-op.
+	svcOff := NewService(newFakeStore(), repoResolver(&fakeResolver{provider: gitprovider.NewFake()}), nil, nil)
+	n, err = svcOff.ReconcileWebhooks(context.Background())
+	if err != nil || n != 0 {
+		t.Errorf("disabled sweep = %d, %v, want 0 nil", n, err)
+	}
+}
+
 // Explicit EnsureWebhook (re)provisions; disabled wiring is a typed error
 // (501 at the API).
 func TestEnsureWebhookEndpoint(t *testing.T) {

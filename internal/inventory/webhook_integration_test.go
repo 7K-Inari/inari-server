@@ -59,6 +59,39 @@ func TestGitRepoWebhookColumns(t *testing.T) {
 	if _, err := s.FindGitRepoByRepo(ctx, database.Pool, "acme/unknown", types.GitRepoProviderGitHub); err == nil {
 		t.Error("want ErrRepoNotFound for unknown slug")
 	}
+
+	// The reconcile sweep's source query: provisioned rows drop out,
+	// unprovisioned rows (any org) stay listed.
+	missing, err := s.ListGitReposWithoutWebhook(ctx, database.Pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range missing {
+		if r.ID == row.ID {
+			t.Error("provisioned repo must not be listed as missing a webhook")
+		}
+	}
+	seedOrg(t, database, ctx, "org:2", "other")
+	bare := &types.TenantGitRepo{
+		OrgID: "org:2", Name: "baseline", Repo: "other/state",
+		Provider: types.GitRepoProviderGitHub, Scope: types.GitRepoScopePlatform, IsDefault: true,
+	}
+	if err := s.UpsertGitRepo(ctx, database.Pool, bare); err != nil {
+		t.Fatal(err)
+	}
+	missing, err = s.ListGitReposWithoutWebhook(ctx, database.Pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := false
+	for _, r := range missing {
+		if r.ID == bare.ID {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Error("unprovisioned repo must be listed for the reconcile sweep")
+	}
 }
 
 // FindByPRURL + MarkPRMerged for instances and addons against real SQL

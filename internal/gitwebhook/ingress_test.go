@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/7K-Inari/inari-server/internal/db"
@@ -28,8 +29,9 @@ func (f *fakeRepoLookup) FindGitRepoByRepo(_ context.Context, _ db.Querier, repo
 	return nil, inventory.ErrRepoNotFound
 }
 
-// fakeOutbox records appended events.
+// fakeOutbox records appended events (mutex: deliveries are concurrent).
 type fakeOutbox struct {
+	mu     sync.Mutex
 	events []recordedEvent
 	err    error
 }
@@ -40,6 +42,8 @@ type recordedEvent struct {
 }
 
 func (f *fakeOutbox) AppendOutbox(_ context.Context, _ db.Querier, orgID, eventType string, payload any) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return f.err
 	}

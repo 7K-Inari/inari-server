@@ -581,7 +581,7 @@ func (s *Service) Adopt(ctx context.Context, orgID, clusterID, catalogItem strin
 	// PR-policy writes register with ArgoCD after the merge (same
 	// documented webhook gap as instance deploys).
 	if gitResult.PRURL == "" {
-		if err := s.enqueueRegistration(ctx, clusterID, addonID, mode, desc, repo, repoPath, namespace, false, files); err != nil {
+		if err := s.enqueueRegistration(ctx, clusterID, addonID, mode, files); err != nil {
 			release()
 			return nil, err
 		}
@@ -744,7 +744,7 @@ func (s *Service) rerender(ctx context.Context, row *types.ClusterAddon, desc ty
 		if row.DeployMode == types.AddonDeployModeApplicationSet {
 			anchor = targets[0].ID
 		}
-		if err := s.enqueueRegistration(ctx, anchor, row.ID, row.DeployMode, desc, repo, row.RepoPath, namespace, prune, files); err != nil {
+		if err := s.enqueueRegistration(ctx, anchor, row.ID, row.DeployMode, files); err != nil {
 			return nil, err
 		}
 	}
@@ -935,7 +935,7 @@ func commitPerPolicy(ctx context.Context, git gitprovider.Provider, repo *types.
 // under the brownfield observe-only rules. Queue/dispatch machinery is
 // payload-agnostic (protojson Any), so the command flows today.
 func (s *Service) enqueueRegistration(ctx context.Context, queueCluster, addonID string, mode types.AddonDeployMode,
-	desc types.SourceDescriptor, repo *types.TenantGitRepo, path, namespace string, prune bool, files []renderer.RenderedFile) error {
+	files []renderer.RenderedFile) error {
 	if s.queue == nil {
 		return nil
 	}

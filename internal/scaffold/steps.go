@@ -603,7 +603,9 @@ func stepCreatingPipeline(ctx context.Context, env *ExecEnv, rc *RunContext, ste
 	if branch == "" {
 		branch = "main"
 	}
-	appName := "inari-" + component
+	// Lowercased to match the renderer's RFC 1123 app-name contract (the
+	// committed manifest and this command must name the same Application).
+	appName := "inari-" + strings.ToLower(component)
 	// The component deploys into its tenant-scoped namespace (plan §6) —
 	// same convention as the rendering step injects into the manifests.
 	destNamespace := componentNamespace(rc.Tenant.Slug, component)

@@ -6,6 +6,7 @@ package inventory
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -194,7 +195,7 @@ func appInstanceState(health, sync string) types.InstanceState {
 func (s *Service) applyAppStatus(ctx context.Context, orgID, clusterID, instanceID string, upd StatusUpdate) (bool, error) {
 	state := appInstanceState(upd.Health, upd.Sync)
 	inst, err := s.store.Get(ctx, s.db.Pool, instanceID)
-	if err != nil {
+	if errors.Is(err, ErrInstanceNotFound) {
 		// ULID instance IDs are lowercased in the on-cluster app name
 		// (RFC 1123, renderer appName); retry the canonical uppercase form.
 		if inst, err = s.store.Get(ctx, s.db.Pool, strings.ToUpper(instanceID)); err != nil {
@@ -202,6 +203,10 @@ func (s *Service) applyAppStatus(ctx context.Context, orgID, clusterID, instance
 			return false, nil
 		}
 		instanceID = strings.ToUpper(instanceID)
+	} else if err != nil {
+		// Preserve the stream's drop-and-log contract for transient store
+		// errors (a hard error would restart the agent session).
+		return false, nil
 	}
 	if inst.OrgID != orgID || inst.ClusterID != clusterID {
 		return false, nil

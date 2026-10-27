@@ -16,10 +16,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/7K-Inari/inari-server/internal/addons"
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/catalog"
+	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/inventory"
@@ -172,6 +175,10 @@ func (l clusterListerAdapter) GetCluster(ctx context.Context, id string) (*types
 	err := l.db.Pool.QueryRow(ctx,
 		`SELECT id, org_id, name, state, COALESCE(labels::text,'{}') FROM clusters WHERE id = $1`, id).
 		Scan(&c.ID, &c.OrgID, &c.Name, &c.State, &labels)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Mirror the production clusterregistry.Service contract.
+		return nil, clusterregistry.ErrClusterNotFound
+	}
 	if err != nil {
 		return nil, err
 	}

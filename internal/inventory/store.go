@@ -1023,6 +1023,53 @@ func (s *Store) AbsorbDiscoveredAddons(ctx context.Context, q db.Querier, orgID,
 	return out, rows.Err()
 }
 
+// ClaimClusterAddonForAdoption atomically claims the (cluster, catalog
+// item) slot for an adopt (concurrency: the check-then-act read in Adopt
+// is not sufficient on its own). One statement covers all cases:
+//   - no row: inserts a state=adopting placeholder with the given ID;
+//   - state=discovered: flips to adopting, KEEPING the row ID (status
+//     folding and UI deep links stay stable across adoption);
+//   - state=adopting older than 10 min: reclaimed (a crashed adopt must
+//     not wedge the slot forever);
+//   - managed / update_failed / fresh adopting: ok=false, the caller maps
+//     that to ErrAlreadyManaged.
+// inserted tells the release path whether the row pre-existed.
+func (s *Store) ClaimClusterAddonForAdoption(ctx context.Context, q db.Querier, a *types.ClusterAddon) (id string, meta json.RawMessage, inserted, ok bool, err error) {
+	source, err := json.Marshal(a.Source)
+	if err != nil {
+		return "", nil, false, false, err
+	}
+	const sql = `INSERT INTO cluster_addons (id, org_id, cluster_id, catalog_item, state, deploy_mode, source)
+		VALUES ($1,$2,$3,$4,'adopting',$5,$6)
+		ON CONFLICT (cluster_id, catalog_item) DO UPDATE SET state = 'adopting', updated_at = now()
+		WHERE cluster_addons.state = 'discovered'
+		   OR (cluster_addons.state = 'adopting' AND cluster_addons.updated_at < now() - interval '10 minutes')
+		RETURNING id, discovered_meta, (xmax = 0)`
+	err = q.QueryRow(ctx, sql, a.ID, a.OrgID, a.ClusterID, a.CatalogItem, a.DeployMode, source).
+		Scan(&id, &meta, &inserted)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil, false, false, nil
+	}
+	if err != nil {
+		return "", nil, false, false, err
+	}
+	return id, meta, inserted, true, nil
+}
+
+// ReleaseClusterAddonClaim rolls back a failed adopt's claim: inserted
+// placeholder rows are deleted; claimed discovered rows flip back to
+// discovered. Best-effort — a stranded adopting row becomes reclaimable
+// after the 10-minute staleness window.
+func (s *Store) ReleaseClusterAddonClaim(ctx context.Context, q db.Querier, orgID, id string, inserted bool) error {
+	if inserted {
+		_, err := q.Exec(ctx, `DELETE FROM cluster_addons WHERE org_id = $1 AND id = $2 AND state = 'adopting'`, orgID, id)
+		return err
+	}
+	_, err := q.Exec(ctx, `UPDATE cluster_addons SET state = 'discovered', updated_at = now()
+		WHERE org_id = $1 AND id = $2 AND state = 'adopting'`, orgID, id)
+	return err
+}
+
 // DeleteClusterAddon removes an addon row by id, scoped to the org.
 func (s *Store) DeleteClusterAddon(ctx context.Context, q db.Querier, orgID, id string) error {
 	tag, err := q.Exec(ctx, `DELETE FROM cluster_addons WHERE org_id = $1 AND id = $2`, orgID, id)

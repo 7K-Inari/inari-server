@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"google.golang.org/protobuf/types/known/anypb"
@@ -20,6 +21,7 @@ import (
 // --- fakes -----------------------------------------------------------------
 
 type fakeStore struct {
+	mu        sync.Mutex                     // guards the claim path (concurrent adopts)
 	addons    map[string]*types.ClusterAddon // key: clusterID + "|" + catalogItem
 	repos     map[string]*types.TenantGitRepo
 	baselines map[string]string // clusterID → repo selector
@@ -32,6 +34,8 @@ func newFakeStore() *fakeStore {
 func addonKey(clusterID, item string) string { return clusterID + "|" + item }
 
 func (f *fakeStore) GetClusterAddon(_ context.Context, _ db.Querier, orgID, clusterID, item string) (*types.ClusterAddon, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	a, ok := f.addons[addonKey(clusterID, item)]
 	if !ok || a.OrgID != orgID {
 		return nil, inventory.ErrAddonNotFound
@@ -40,6 +44,8 @@ func (f *fakeStore) GetClusterAddon(_ context.Context, _ db.Querier, orgID, clus
 }
 
 func (f *fakeStore) GetClusterAddonByID(_ context.Context, _ db.Querier, orgID, id string) (*types.ClusterAddon, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	for _, a := range f.addons {
 		if a.ID == id && a.OrgID == orgID {
 			return a, nil
@@ -49,6 +55,8 @@ func (f *fakeStore) GetClusterAddonByID(_ context.Context, _ db.Querier, orgID, 
 }
 
 func (f *fakeStore) ListClusterAddons(_ context.Context, _ db.Querier, orgID, clusterID string) ([]*types.ClusterAddon, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	var out []*types.ClusterAddon
 	for _, a := range f.addons {
 		// Mirror the SQL: a cluster listing includes fleet ('*') rows.
@@ -60,12 +68,16 @@ func (f *fakeStore) ListClusterAddons(_ context.Context, _ db.Querier, orgID, cl
 }
 
 func (f *fakeStore) UpsertClusterAddon(_ context.Context, _ db.Querier, a *types.ClusterAddon) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	cp := *a
 	f.addons[addonKey(a.ClusterID, a.CatalogItem)] = &cp
 	return nil
 }
 
 func (f *fakeStore) UpsertDiscoveredAddon(_ context.Context, _ db.Querier, a *types.ClusterAddon) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	key := addonKey(a.ClusterID, a.CatalogItem)
 	if existing, ok := f.addons[key]; ok {
 		// Mirror the SQL guard: never touch non-discovered rows.
@@ -89,6 +101,8 @@ func (f *fakeStore) UpsertDiscoveredAddon(_ context.Context, _ db.Querier, a *ty
 // AbsorbDiscoveredAddons mirrors the SQL: delete the item's per-cluster
 // discovered rows (never the '*' fleet row), returning their sightings.
 func (f *fakeStore) AbsorbDiscoveredAddons(_ context.Context, _ db.Querier, orgID, item string) ([]json.RawMessage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	var out []json.RawMessage
 	for k, a := range f.addons {
 		if a.OrgID == orgID && a.CatalogItem == item && a.State == types.AddonStateDiscovered && a.ClusterID != "*" {
@@ -101,11 +115,50 @@ func (f *fakeStore) AbsorbDiscoveredAddons(_ context.Context, _ db.Querier, orgI
 	return out, nil
 }
 
+// ClaimClusterAddonForAdoption mirrors the SQL claim atomically (mutex).
+// The stale-claim reclaim window is not simulated.
+func (f *fakeStore) ClaimClusterAddonForAdoption(_ context.Context, _ db.Querier, a *types.ClusterAddon) (string, json.RawMessage, bool, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := addonKey(a.ClusterID, a.CatalogItem)
+	if ex, ok := f.addons[key]; ok {
+		if ex.State != types.AddonStateDiscovered {
+			return "", nil, false, false, nil
+		}
+		ex.State = types.AddonStateAdopting
+		return ex.ID, ex.DiscoveredMeta, false, true, nil
+	}
+	cp := *a
+	cp.State = types.AddonStateAdopting
+	if cp.ID == "" {
+		cp.ID = "addon-" + a.CatalogItem
+	}
+	f.addons[key] = &cp
+	return cp.ID, nil, true, true, nil
+}
+
+func (f *fakeStore) ReleaseClusterAddonClaim(_ context.Context, _ db.Querier, orgID, id string, inserted bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for k, a := range f.addons {
+		if a.ID == id && a.OrgID == orgID && a.State == types.AddonStateAdopting {
+			if inserted {
+				delete(f.addons, k)
+			} else {
+				a.State = types.AddonStateDiscovered
+			}
+		}
+	}
+	return nil
+}
+
 func (f *fakeStore) BaselineRepoSelector(_ context.Context, _ db.Querier, _, clusterID string) (string, error) {
 	return f.baselines[clusterID], nil
 }
 
 func (f *fakeStore) SetClusterAddonState(_ context.Context, _ db.Querier, orgID, id string, state types.AddonState) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	for _, a := range f.addons {
 		if a.ID == id && a.OrgID == orgID {
 			a.State = state
@@ -263,6 +316,19 @@ func TestValidateValues(t *testing.T) {
 	if err := validateValues(nil, json.RawMessage(`{"anything":true}`)); err != nil {
 		t.Errorf("no schema must allow: %v", err)
 	}
+	// The object-shape requirement applies with or without a schema —
+	// scalar/array values would otherwise 500 deep in the renderer.
+	for _, raw := range []string{`"str"`, `[1,2]`, `42`, `true`} {
+		if err := validateValues(nil, json.RawMessage(raw)); err == nil {
+			t.Errorf("no schema: non-object values %s must be rejected", raw)
+		}
+		if err := validateValues(schema, json.RawMessage(raw)); err == nil {
+			t.Errorf("schema: non-object values %s must be rejected", raw)
+		}
+	}
+	if err := validateValues(nil, json.RawMessage(`null`)); err != nil {
+		t.Errorf("null values = empty object: %v", err)
+	}
 	if err := validateValues(schema, json.RawMessage(`{nope`)); err == nil {
 		t.Error("malformed JSON must be rejected")
 	}
@@ -301,16 +367,39 @@ func TestDescriptorFor(t *testing.T) {
 	}
 }
 
-func TestBumpVersion(t *testing.T) {
-	helm := types.SourceDescriptor{Kind: types.SourceKindHelm, Helm: &types.HelmSource{RepoURL: "r", Chart: "c", Version: "v1"}}
-	got := bumpVersion(helm, "platform:x", "v2")
-	if got.Helm.Version != "v2" {
-		t.Errorf("helm version bump = %q", got.Helm.Version)
+// A version bump must re-derive the source descriptor from the TARGET
+// version's catalog payload: chart coordinates (repoURL/chart) may move
+// between versions, and the stored source only carries the old ones.
+func TestUpdatePicksUpTargetVersionCoordinates(t *testing.T) {
+	store, cat := newFakeStore(), newFakeCatalog()
+	cat.versions["platform:cert-manager"] = append(cat.versions["platform:cert-manager"],
+		types.CatalogItemVersion{
+			ItemID: "platform:cert-manager", Version: "v1.17.0", Channel: "stable",
+			Schema:  certManagerSchema,
+			Payload: json.RawMessage(`{"chart":{"repoURL":"https://charts.example.com/moved","chart":"cert-manager","namespace":"cert-manager"}}`),
+		})
+	clusters := &fakeClusters{clusters: []types.Cluster{activeCluster("c1", "org:1", "prod", nil)}}
+	git, queue := gitprovider.NewFake(), &fakeQueue{}
+	seedBaselineRepo(store, git, "org:1", "acme/state", types.CommitPolicyDirect)
+	svc := newTestService(store, cat, clusters, git, queue)
+	ctx := context.Background()
+
+	res, err := svc.Adopt(ctx, "org:1", "c1", "platform:cert-manager", AdoptInput{Version: "v1.16.1"}, "user:u1")
+	if err != nil {
+		t.Fatal(err)
 	}
-	kro := types.SourceDescriptor{Kind: types.SourceKindKRO, KRO: &types.KROSource{RGDRef: "curated:x@v1"}}
-	got = bumpVersion(kro, "curated:x", "v2")
-	if got.KRO.RGDRef != "curated:x@v2" {
-		t.Errorf("kro ref bump = %q", got.KRO.RGDRef)
+	newVersion := "v1.17.0"
+	upd, err := svc.Update(ctx, "org:1", res.Addon.ID, UpdateInput{ChartVersion: &newVersion}, "user:u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := upd.Addon.Source.Helm.RepoURL; got != "https://charts.example.com/moved" {
+		t.Errorf("stored source repoURL = %q, want the target version's coordinates", got)
+	}
+	app := git.Files("acme/state", "main")["addons/cert-manager/application.yaml"]
+	if !strings.Contains(app, "repoURL: https://charts.example.com/moved") ||
+		!strings.Contains(app, "targetRevision: v1.17.0") {
+		t.Errorf("re-rendered application must use the new version's coordinates:\n%s", app)
 	}
 }
 
@@ -920,4 +1009,71 @@ func keysOf(m map[string]string) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// --- concurrency probes -----------------------------------------------------
+
+// barrierStore synchronizes two concurrent claimers so BOTH arrive at the
+// adopt claim before either proceeds — deterministically exercising the
+// claim's atomicity (pre-fix, the check-then-act read raced here and both
+// adopts won).
+type barrierStore struct {
+	*fakeStore
+	mu       sync.Mutex
+	waiting  int
+	release  chan struct{}
+	claimKey string
+}
+
+func (b *barrierStore) ClaimClusterAddonForAdoption(ctx context.Context, q db.Querier, a *types.ClusterAddon) (string, json.RawMessage, bool, bool, error) {
+	if a.ClusterID+"|"+a.CatalogItem == b.claimKey {
+		b.mu.Lock()
+		b.waiting++
+		if b.waiting == 2 {
+			close(b.release)
+		}
+		b.mu.Unlock()
+		<-b.release
+	}
+	return b.fakeStore.ClaimClusterAddonForAdoption(ctx, q, a)
+}
+
+// Two concurrent adopts of the same item on the same cluster must produce
+// exactly one winner; the loser must get ErrAlreadyManaged. A double win
+// double-commits and registers two ArgoCD apps for one row.
+func TestConcurrentAdoptClaimsOnce(t *testing.T) {
+	base := newFakeStore()
+	store := &barrierStore{fakeStore: base, release: make(chan struct{}), claimKey: "c1|platform:cert-manager"}
+	cat := newFakeCatalog()
+	clusters := &fakeClusters{clusters: []types.Cluster{activeCluster("c1", "org:1", "prod", nil)}}
+	git, queue := gitprovider.NewFake(), &fakeQueue{}
+	seedBaselineRepo(base, git, "org:1", "acme/state", types.CommitPolicyDirect)
+	resolver := gitprovider.NewRepoResolver(fakeRepoStoreAdapter{base}, nil, gitprovider.StaticResolver{P: git})
+	svc := NewService(nil, store, cat, clusters, resolver, queue, nil)
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = svc.Adopt(ctx, "org:1", "c1", "platform:cert-manager", AdoptInput{Version: "v1.16.1"}, "user:u1")
+		}(i)
+	}
+	wg.Wait()
+
+	wins := 0
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			wins++
+		case errors.Is(err, ErrAlreadyManaged):
+		default:
+			t.Errorf("unexpected error: %v", err)
+		}
+	}
+	if wins != 1 {
+		t.Errorf("concurrent adopts: %d winners, want exactly 1 (errs %v)", wins, errs)
+	}
 }

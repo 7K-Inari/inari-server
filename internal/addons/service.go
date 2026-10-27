@@ -103,6 +103,12 @@ type Store interface {
 	ListClusterAddons(ctx context.Context, q db.Querier, orgID, clusterID string) ([]*types.ClusterAddon, error)
 	UpsertClusterAddon(ctx context.Context, q db.Querier, a *types.ClusterAddon) error
 	UpsertDiscoveredAddon(ctx context.Context, q db.Querier, a *types.ClusterAddon) error
+	// ClaimClusterAddonForAdoption atomically claims the (cluster, item)
+	// slot for adopt (concurrent adopts: exactly one winner); a claimed
+	// discovered row keeps its ID. ok=false maps to ErrAlreadyManaged.
+	ClaimClusterAddonForAdoption(ctx context.Context, q db.Querier, a *types.ClusterAddon) (id string, meta json.RawMessage, inserted, ok bool, err error)
+	// ReleaseClusterAddonClaim rolls back a failed adopt's claim.
+	ReleaseClusterAddonClaim(ctx context.Context, q db.Querier, orgID, id string, inserted bool) error
 	// AbsorbDiscoveredAddons deletes one catalog item's per-cluster
 	// state=discovered rows (fleet adoption supersedes them) and returns
 	// their sightings for merging into the fleet row's discovered_meta.
@@ -227,8 +233,23 @@ func descriptorFor(itemID string, ver *types.CatalogItemVersion) (types.SourceDe
 // values schema (platform-app packages vendor the upstream chart's
 // values.schema.json into the version's schema field), values must
 // validate — hard 422 with field-level errors. No schema = allow (lenient
-// fallback for community items).
+// fallback for community items), but the OBJECT-shape requirement applies
+// regardless: scalar/array values can never be helm values or a kro
+// instance spec and would otherwise fail as a 500 deep in the renderer.
 func validateValues(schemaRaw, values json.RawMessage) error {
+	var v any
+	if len(values) > 0 {
+		dec := json.NewDecoder(bytes.NewReader(values))
+		dec.UseNumber()
+		if err := dec.Decode(&v); err != nil {
+			return &ValidationError{Fields: []FieldError{{Path: "", Message: "values is not valid JSON"}}}
+		}
+	}
+	if v == nil {
+		v = map[string]any{}
+	} else if _, ok := v.(map[string]any); !ok {
+		return &ValidationError{Fields: []FieldError{{Path: "", Message: "values must be a JSON object"}}}
+	}
 	if len(schemaRaw) == 0 {
 		return nil
 	}
@@ -243,17 +264,6 @@ func validateValues(schemaRaw, values json.RawMessage) error {
 	sch, err := compiler.Compile("values.schema.json")
 	if err != nil {
 		return fmt.Errorf("addons: compile values schema: %w", err)
-	}
-	var v any
-	if len(values) > 0 {
-		dec := json.NewDecoder(bytes.NewReader(values))
-		dec.UseNumber()
-		if err := dec.Decode(&v); err != nil {
-			return &ValidationError{Fields: []FieldError{{Path: "", Message: "values is not valid JSON"}}}
-		}
-	}
-	if v == nil {
-		v = map[string]any{}
 	}
 	verr := sch.Validate(v)
 	var schemaErr *jsonschema.ValidationError
@@ -469,13 +479,6 @@ func (s *Service) Adopt(ctx context.Context, orgID, clusterID, catalogItem strin
 	if mode == types.AddonDeployModeApplicationSet {
 		rowCluster = "*"
 	}
-	existing, err := s.store.GetClusterAddon(ctx, s.querier(), orgID, rowCluster, catalogItem)
-	if err != nil && !errors.Is(err, inventory.ErrAddonNotFound) {
-		return nil, err
-	}
-	if existing != nil && (existing.State == types.AddonStateManaged || existing.State == types.AddonStateAdopting) {
-		return nil, ErrAlreadyManaged
-	}
 
 	version := in.Version
 	if version == "" {
@@ -506,12 +509,6 @@ func (s *Service) Adopt(ctx context.Context, orgID, clusterID, catalogItem strin
 		return nil, err
 	}
 
-	addonID := ulid.MustNew(ulid.Timestamp(time.Now()), rand.Reader).String()
-	var discoveredMeta json.RawMessage
-	if existing != nil {
-		addonID = existing.ID
-		discoveredMeta = existing.DiscoveredMeta
-	}
 	namespace := in.Namespace
 	if namespace == "" && payload.Chart != nil {
 		namespace = payload.Chart.Namespace
@@ -524,6 +521,39 @@ func (s *Service) Adopt(ctx context.Context, orgID, clusterID, catalogItem strin
 		return nil, err
 	}
 
+	// Claim the (cluster, item) slot atomically BEFORE any side effects:
+	// concurrent adopts race here, and exactly one wins (the others get
+	// ErrAlreadyManaged). A pre-existing discovered row keeps its ID so
+	// status folding and UI deep links stay stable across adoption.
+	provisionalID := ulid.MustNew(ulid.Timestamp(time.Now()), rand.Reader).String()
+	var addonID string
+	var discoveredMeta json.RawMessage
+	var inserted, claimed bool
+	err = s.inTx(ctx, func(q db.Querier) error {
+		var err error
+		addonID, discoveredMeta, inserted, claimed, err = s.store.ClaimClusterAddonForAdoption(ctx, q, &types.ClusterAddon{
+			ID: provisionalID, OrgID: orgID, ClusterID: rowCluster, CatalogItem: catalogItem,
+			DeployMode: mode, Source: desc,
+		})
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !claimed {
+		return nil, ErrAlreadyManaged
+	}
+	// From here on, failures must release the claim so a failed adopt is
+	// retryable (a stranded adopting row also becomes reclaimable after
+	// the store's staleness window).
+	release := func() {
+		if err := s.inTx(ctx, func(q db.Querier) error {
+			return s.store.ReleaseClusterAddonClaim(ctx, q, orgID, addonID, inserted)
+		}); err != nil {
+			slog.Warn("addons: release adopt claim", "addon", addonID, "error", err)
+		}
+	}
+
 	repoPath := "addons/" + workloadName(catalogItem)
 	files, err := s.render(ctx, desc, renderParams{
 		addonID: addonID, name: workloadName(catalogItem), namespace: namespace,
@@ -531,11 +561,13 @@ func (s *Service) Adopt(ctx context.Context, orgID, clusterID, catalogItem strin
 		values: in.Values, repo: repo, path: repoPath,
 	})
 	if err != nil {
+		release()
 		return nil, err
 	}
 	message := fmt.Sprintf("adopt addon %s@%s on %s (addon %s)", catalogItem, version, rowCluster, addonID)
 	gitResult, err := commitPerPolicy(ctx, provider, repo, message, files)
 	if err != nil {
+		release()
 		return nil, fmt.Errorf("addons: git write: %w", err)
 	}
 
@@ -543,6 +575,7 @@ func (s *Service) Adopt(ctx context.Context, orgID, clusterID, catalogItem strin
 	// documented webhook gap as instance deploys).
 	if gitResult.PRURL == "" {
 		if err := s.enqueueRegistration(ctx, clusterID, addonID, mode, desc, repo, repoPath, namespace, false, files); err != nil {
+			release()
 			return nil, err
 		}
 	}
@@ -591,6 +624,7 @@ func (s *Service) Adopt(ctx context.Context, orgID, clusterID, catalogItem strin
 		})
 	})
 	if err != nil {
+		release()
 		return nil, fmt.Errorf("addons: record adopt: %w", err)
 	}
 	return &AdoptResult{Addon: row, CommitSHA: gitResult.CommitSHA, PRURL: gitResult.PRURL}, nil
@@ -633,7 +667,13 @@ func (s *Service) Update(ctx context.Context, orgID, addonID string, in UpdateIn
 	if err := validateValues(ver.Schema, values); err != nil {
 		return nil, err
 	}
-	desc := bumpVersion(row.Source, row.CatalogItem, version)
+	// Re-derive the descriptor from the TARGET version's catalog payload
+	// (chart coordinates/RGD ref may move between versions); the stored
+	// source only carries the old version's coordinates.
+	desc, _, err := descriptorFor(row.CatalogItem, ver)
+	if err != nil {
+		return nil, err
+	}
 
 	res, err := s.rerender(ctx, row, desc, version, values, row.PruneEnabled, actor, "update")
 	if err != nil {
@@ -735,27 +775,6 @@ func (s *Service) rerender(ctx context.Context, row *types.ClusterAddon, desc ty
 		return nil, fmt.Errorf("addons: record %s: %w", action, err)
 	}
 	return &AdoptResult{Addon: &updated, CommitSHA: gitResult.CommitSHA, PRURL: gitResult.PRURL}, nil
-}
-
-// bumpVersion returns the descriptor with the version bump applied:
-// helm sources move to the new chart version; kro sources re-point the
-// catalog-backed RGD ref.
-func bumpVersion(desc types.SourceDescriptor, itemID, version string) types.SourceDescriptor {
-	switch desc.Kind {
-	case types.SourceKindHelm:
-		if desc.Helm != nil {
-			h := *desc.Helm
-			h.Version = version
-			desc.Helm = &h
-		}
-	case types.SourceKindKRO:
-		if desc.KRO != nil {
-			k := *desc.KRO
-			k.RGDRef = itemID + "@" + version
-			desc.KRO = &k
-		}
-	}
-	return desc
 }
 
 // markUpdateFailed flips the row to update_failed after a failed update so

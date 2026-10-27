@@ -140,6 +140,30 @@ func TestReconcileWebhooks(t *testing.T) {
 	}
 }
 
+// WebhookProvisioningStatus surfaces the registration state on repo
+// responses: disabled when no provisioner is wired (KEK or
+// INARI_WEBHOOK_BASE_URL unset), provisioned once the hook URL is
+// recorded, unprovisioned otherwise (the sweeper retries; repair via
+// POST .../git-repos/{id}/webhook).
+func TestWebhookProvisioningStatus(t *testing.T) {
+	newSvc := func(withProvisioner bool) *Service {
+		svc := NewService(newFakeStore(), repoResolver(&fakeResolver{provider: gitprovider.NewFake()}), nil, nil)
+		if withProvisioner {
+			svc.WithWebhookProvisioner(&fakeProvisioner{})
+		}
+		return svc
+	}
+	if got := newSvc(false).WebhookProvisioningStatus(&types.TenantGitRepo{WebhookURL: "https://hook"}); got != "disabled" {
+		t.Errorf("no provisioner = %q, want disabled (even with a stored hook URL)", got)
+	}
+	if got := newSvc(true).WebhookProvisioningStatus(&types.TenantGitRepo{WebhookURL: "https://hook"}); got != "provisioned" {
+		t.Errorf("hook URL recorded = %q, want provisioned", got)
+	}
+	if got := newSvc(true).WebhookProvisioningStatus(&types.TenantGitRepo{}); got != "unprovisioned" {
+		t.Errorf("no hook URL = %q, want unprovisioned", got)
+	}
+}
+
 // Explicit EnsureWebhook (re)provisions; disabled wiring is a typed error
 // (501 at the API).
 func TestEnsureWebhookEndpoint(t *testing.T) {

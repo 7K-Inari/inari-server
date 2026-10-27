@@ -155,6 +155,21 @@ func NewService(store Store, git *gitprovider.RepoResolver, queue Queue, auditSt
 // WithWebhookProvisioner attaches the per-repo webhook provisioner (M4).
 func (s *Service) WithWebhookProvisioner(p WebhookProvisioner) *Service { s.webhooks = p; return s }
 
+// WebhookProvisioningStatus reports the repo's webhook registration state
+// for API responses: "disabled" when no provisioner is wired (credential
+// KEK or INARI_WEBHOOK_BASE_URL unset), "provisioned" once the hook URL is
+// recorded, otherwise "unprovisioned" (the reconcile sweeper retries;
+// repair immediately via POST .../git-repos/{id}/webhook).
+func (s *Service) WebhookProvisioningStatus(row *types.TenantGitRepo) string {
+	if s.webhooks == nil {
+		return "disabled"
+	}
+	if row.WebhookURL != "" {
+		return "provisioned"
+	}
+	return "unprovisioned"
+}
+
 var repoSlugPattern = func(repo string) bool {
 	parts := strings.Split(repo, "/")
 	if len(parts) != 2 {

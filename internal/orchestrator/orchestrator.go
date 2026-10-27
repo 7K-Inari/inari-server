@@ -27,6 +27,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/impersonation"
 	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
+	"github.com/7K-Inari/inari-server/internal/renderer"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -159,14 +160,49 @@ type Service struct {
 	// single-repo mode: deploys resolve via git.ForTenant(GitConfig(org)).
 	gitRepos *gitprovider.RepoResolver
 	audit    *audit.Store
+	// renders is the source-agnostic render pipeline (Feature C, parent
+	// plan §6): deploy/update/rollback build a kro SourceDescriptor and
+	// render through the registry instead of calling render.go directly.
+	// The RGD resolver is catalog-backed (ref format "<itemID>@<version>").
+	renders *renderer.Registry
 }
 
 func NewService(d *db.DB, instances *inventory.Store, catalog CatalogResolver, clusters ClusterResolver,
 	gate Gate, queue Queue, git gitprovider.Resolver, auditStore *audit.Store) *Service {
-	return &Service{
+	s := &Service{
 		db: d, instances: instances, catalog: catalog, clusters: clusters,
 		gate: gate, queue: queue, git: git, audit: auditStore,
 	}
+	s.renders = renderer.New(s.resolveRGD)
+	return s
+}
+
+// rgdRef is the catalog-backed RGD reference carried in kro source
+// descriptors: "<itemID>@<version>".
+func rgdRef(itemID, version string) string { return itemID + "@" + version }
+
+// resolveRGD resolves a kro descriptor's RGDRef against the catalog (the
+// renderer's ResolveRGDFunc seam). The version payload's "rgd" key holds
+// the inline RGD YAML (ociync platform/kro package convention).
+func (s *Service) resolveRGD(ctx context.Context, ref string) ([]byte, error) {
+	itemID, version, ok := strings.Cut(ref, "@")
+	if !ok || itemID == "" || version == "" {
+		return nil, fmt.Errorf("orchestrator: malformed RGD ref %q (want <itemID>@<version>)", ref)
+	}
+	ver, err := s.catalog.GetVersion(ctx, itemID, version)
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: resolve RGD %q: %w", ref, err)
+	}
+	var payload struct {
+		RGD string `json:"rgd"`
+	}
+	if err := json.Unmarshal(ver.Payload, &payload); err != nil {
+		return nil, fmt.Errorf("orchestrator: parse version payload: %w", err)
+	}
+	if payload.RGD == "" {
+		return nil, fmt.Errorf("orchestrator: catalog version %s has no rgd payload", ref)
+	}
+	return []byte(payload.RGD), nil
 }
 
 // WithPolicyChecker attaches the Policy Service seam (main wiring).
@@ -322,8 +358,10 @@ func (s *Service) resolveTarget(ctx context.Context, orgID, selector string) (*g
 // spec-only updates (same version), spec persistence. An empty eventType
 // keeps the default (deploy.requested / instance.upgraded).
 func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *types.CatalogItem, version string, existing *types.ResourceInstance, eventType string, specUpdate bool) (*DeployResult, error) {
-	ver, err := s.catalog.GetVersion(ctx, req.ItemID, version)
-	if err != nil {
+	// Fail fast on an unknown catalog version (and preserve the historical
+	// error precedence over git-target resolution); the RGD itself is
+	// resolved lazily by the renderer's catalog-backed resolver.
+	if _, err := s.catalog.GetVersion(ctx, req.ItemID, version); err != nil {
 		return nil, err
 	}
 	selector := req.RepoID
@@ -364,28 +402,45 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 		}
 	}
 
-	manifest, err := RenderInstanceManifest(ver, name, namespace, req.Spec)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.renderCheck(ctx, req.OrgID, manifest); err != nil {
-		return nil, err
+	// Render through the source-agnostic pipeline (kro handler): the
+	// descriptor carries the catalog-backed RGD ref + the user spec; the
+	// handler materializes instance.yaml and the git-path Application —
+	// byte-identical to the pre-migration render.go output (parity-pinned
+	// by render_parity_test.go and the renderer golden tests).
+	desc := types.SourceDescriptor{
+		Kind: types.SourceKindKRO,
+		KRO:  &types.KROSource{RGDRef: rgdRef(req.ItemID, version), Instance: req.Spec},
 	}
 	path := RepoPath(req.ClusterID, req.ItemID, instanceID)
 	// NOTE: for team-repo deploys the tenant ArgoCD needs repo-creds for
 	// that repo; root-app attachment is Feature B. The orchestrator does
 	// not block team-repo deploys meanwhile.
-	app := RenderArgoCDApplication(ApplicationParams{
-		Name:           "inari-" + instanceID,
-		Project:        "default",
-		RepoURL:        RepoURL(target.repo),
-		Path:           path,
-		TargetRevision: target.branch,
-		DestNamespace:  namespace,
+	rendered, err := s.renders.Render(ctx, desc, renderer.RenderParams{
+		Name: name, Namespace: namespace,
+		ID: instanceID, AppPrefix: renderer.PrefixInstance,
+		DeployMode: types.AddonDeployModeApplication,
+		Clusters:   []renderer.ClusterTarget{{ID: req.ClusterID, Name: req.ClusterID}},
+		Prune:      true, // instance deploys keep their historical prune-on policy
+		Project:    "default",
+		RepoURL:    RepoURL(target.repo), BaseBranch: target.branch,
+		Path: path,
 	})
-	files := []gitprovider.File{
-		{Path: path + "/instance.yaml", Content: manifest},
-		{Path: path + "/application.yaml", Content: app},
+	if err != nil {
+		return nil, err
+	}
+	var manifest []byte
+	files := make([]gitprovider.File, 0, len(rendered))
+	for _, f := range rendered {
+		if strings.HasSuffix(f.Path, "/instance.yaml") {
+			manifest = f.Content
+		}
+		files = append(files, gitprovider.File{Path: f.Path, Content: f.Content})
+	}
+	if manifest == nil {
+		return nil, fmt.Errorf("orchestrator: kro render produced no instance manifest")
+	}
+	if err := s.renderCheck(ctx, req.OrgID, manifest); err != nil {
+		return nil, err
 	}
 
 	message := fmt.Sprintf("deploy %s@%s to %s (instance %s)", req.ItemID, version, req.ClusterID, instanceID)

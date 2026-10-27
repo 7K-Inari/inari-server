@@ -256,6 +256,9 @@ type repoOutput struct {
 	Body struct {
 		Repo   *types.TenantGitRepo     `json:"repo"`
 		Status *types.GitProviderStatus `json:"gitProviderStatus,omitempty"`
+		// WebhookStatus surfaces the M4 webhook registration state on
+		// repo detail/register/update responses.
+		WebhookStatus string `json:"webhookStatus" enum:"provisioned,unprovisioned,disabled" doc:"webhook registration state: provisioned (provider hook live), unprovisioned (reconcile sweeper retries; repair via POST .../git-repos/{id}/webhook), disabled (provisioning not configured)"`
 	}
 }
 
@@ -275,6 +278,7 @@ func (h *Handler) register(ctx context.Context, in *registerInput) (*repoOutput,
 	}
 	out := &repoOutput{}
 	out.Body.Repo = row
+	out.Body.WebhookStatus = h.svc.WebhookProvisioningStatus(row)
 	return out, nil
 }
 
@@ -304,6 +308,7 @@ func (h *Handler) get(ctx context.Context, in *getInput) (*repoOutput, error) {
 	out.Body.Repo = row
 	// Best-effort health probe; failures degrade to "unknown", never 5xx.
 	out.Body.Status = h.svc.Probe(ctx, row)
+	out.Body.WebhookStatus = h.svc.WebhookProvisioningStatus(row)
 	return out, nil
 }
 
@@ -352,6 +357,7 @@ func (h *Handler) update(ctx context.Context, in *updateInput) (*repoOutput, err
 	}
 	out := &repoOutput{}
 	out.Body.Repo = updated
+	out.Body.WebhookStatus = h.svc.WebhookProvisioningStatus(updated)
 	return out, nil
 }
 

@@ -457,6 +457,9 @@ func (s *Service) EnsureWebhook(ctx context.Context, orgID, id, actor string) (*
 
 // Update applies a partial update; IsDefault=true promotes the repo and
 // demotes the previous default atomically (baseline replacement flow).
+// Webhook note (M4): Update deliberately never re-provisions the repo's
+// webhook — the hook's target (repo slug + provider) is immutable here,
+// and the reconcile sweeper provisions any row missing a hook.
 func (s *Service) Update(ctx context.Context, orgID, id string, in PatchInput, actor string) (*types.TenantGitRepo, error) {
 	row, err := s.store.GetGitRepo(ctx, s.querier(), orgID, id)
 	if err != nil {

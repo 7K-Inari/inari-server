@@ -4,6 +4,9 @@ package gitrepos_test
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -47,6 +50,97 @@ func (p *slowProvisioner) Provision(ctx context.Context, q db.Querier, _ gitprov
 	repo.WebhookURL = url
 	repo.WebhookExternalID = "hook-1"
 	return url, nil
+}
+
+// flakyProvisioner simulates a provider outage at registration time
+// (best-effort provisioning is non-fatal); once repaired it persists like
+// the real gitwebhook.Provisioner (via the TX it is handed).
+type flakyProvisioner struct{ fail bool }
+
+func (p *flakyProvisioner) Provision(ctx context.Context, q db.Querier, _ gitprovider.Provider, repo *types.TenantGitRepo) (string, error) {
+	if p.fail {
+		return "", errors.New("provider down")
+	}
+	url := "https://inari.example.com/api/v1/webhooks/git/github"
+	if err := inventory.NewStore().SetGitRepoWebhook(ctx, q, repo.ID, []byte("enc"), []byte("dek"), "hook-1", url); err != nil {
+		return "", err
+	}
+	repo.WebhookURL = url
+	repo.WebhookExternalID = "hook-1"
+	return url, nil
+}
+
+// repoStatusView decodes the webhookStatus field of repo responses.
+type repoStatusView struct {
+	Repo struct {
+		ID string `json:"id"`
+	} `json:"repo"`
+	WebhookStatus string `json:"webhookStatus"`
+}
+
+// The repo detail/register responses surface the M4 webhook registration
+// state: disabled when no provisioner is wired, unprovisioned when
+// registration-time provisioning failed (non-fatal), provisioned after a
+// successful (re)provision via the rotation endpoint.
+func TestRepoWebhookStatusResponses(t *testing.T) {
+	base := "/api/v1/tenants/acme/git-repos"
+	var out repoStatusView
+
+	// No provisioner wired → disabled on register and detail.
+	f := newITServer(t)
+	defer f.srv.Close()
+	code, body := f.req(t, "POST", base, "admin", `{"name":"baseline","repo":"acme/state","scope":"platform","isDefault":true}`)
+	if code != http.StatusOK && code != http.StatusCreated {
+		t.Fatalf("register: %d %s", code, body)
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.WebhookStatus != "disabled" {
+		t.Errorf("register webhookStatus = %q, want disabled", out.WebhookStatus)
+	}
+	code, body = f.req(t, "GET", base+"/"+out.Repo.ID, "admin", "")
+	if code != http.StatusOK {
+		t.Fatalf("get: %d %s", code, body)
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.WebhookStatus != "disabled" {
+		t.Errorf("get webhookStatus = %q, want disabled", out.WebhookStatus)
+	}
+
+	// Provisioner wired but failing at registration → unprovisioned;
+	// repair via the rotation endpoint → provisioned on detail.
+	f2 := newITServer(t)
+	defer f2.srv.Close()
+	prov := &flakyProvisioner{fail: true}
+	f2.svc.WithWebhookProvisioner(prov)
+	code, body = f2.req(t, "POST", base, "admin", `{"name":"baseline","repo":"acme/state","scope":"platform","isDefault":true}`)
+	if code != http.StatusOK && code != http.StatusCreated {
+		t.Fatalf("register: %d %s", code, body)
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.WebhookStatus != "unprovisioned" {
+		t.Errorf("register with failed provisioning webhookStatus = %q, want unprovisioned", out.WebhookStatus)
+	}
+	repoID := out.Repo.ID
+	prov.fail = false
+	if code, body = f2.req(t, "POST", base+"/"+repoID+"/webhook", "admin", ""); code != http.StatusOK {
+		t.Fatalf("rotate: %d %s", code, body)
+	}
+	code, body = f2.req(t, "GET", base+"/"+repoID, "admin", "")
+	if code != http.StatusOK {
+		t.Fatalf("get: %d %s", code, body)
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.WebhookStatus != "provisioned" {
+		t.Errorf("get after rotation webhookStatus = %q, want provisioned", out.WebhookStatus)
+	}
 }
 
 // Concurrent (re)provisions of the SAME repo must be serialized by the

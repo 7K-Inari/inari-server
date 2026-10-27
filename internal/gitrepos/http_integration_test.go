@@ -74,6 +74,7 @@ type itFixture struct {
 	database *db.DB
 	git      *gitprovider.Fake
 	queue    *itQueue
+	svc      *gitrepos.Service
 }
 
 func newITServer(t *testing.T) *itFixture {
@@ -111,7 +112,7 @@ func newITServer(t *testing.T) *itFixture {
 
 	router, api := httpserver.NewRouter(slog.Default(), itValidator{}, database)
 	gitrepos.NewHandler(svc, tenancySvc, itAuthorizer{}).RegisterRoutes(api)
-	return &itFixture{srv: httptest.NewServer(router), database: database, git: fake, queue: queue}
+	return &itFixture{srv: httptest.NewServer(router), database: database, git: fake, queue: queue, svc: svc}
 }
 
 func (f *itFixture) req(t *testing.T, method, path, token, body string) (int, string) {

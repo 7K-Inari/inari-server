@@ -20,6 +20,7 @@ import (
 	"github.com/open-feature/go-sdk-contrib/providers/ofrep"
 	"github.com/open-feature/go-sdk/openfeature"
 
+	"github.com/7K-Inari/inari-server/internal/addons"
 	"github.com/7K-Inari/inari-server/internal/agentgateway"
 	"github.com/7K-Inari/inari-server/internal/approvals"
 	"github.com/7K-Inari/inari-server/internal/audit"
@@ -818,6 +819,12 @@ func run() error {
 	// deploy/update/delete honor the repoId selector / recorded repo.
 	orchestratorSvc.WithRepoResolver(repoResolver)
 
+	// First-class addons (Feature C): discover → adopt → update over the
+	// source-agnostic renderer, committed per repo policy and registered
+	// with the tenant ArgoCD via the agent queue.
+	addonsSvc := addons.NewService(database, invStore, catalogSvc, registry, repoResolver, gateway.Queue(), auditStore)
+	gateway.SetAddonDiscoverySink(addonsSvc)
+
 	cloudAccountsSvc := cloudaccounts.NewService(database, cloudaccounts.NewStore(), auditStore, cloudaccounts.NewSTSValidator())
 
 	notificationsSvc := notifications.NewService(database, notifications.NewStore(), auditStore,
@@ -978,6 +985,10 @@ func run() error {
 			audit.Named("tenant-deletion-resume", tenancy.NewDeletionResumeHandler(svc, tenantDeleter, approvalsSvc, log)),
 			audit.Named("fleet-resume", fleetmanager.NewResumeHandler(fleetSvc, approvalsSvc, log)),
 			audit.Named("scaffold-resume", scaffold.NewResumeHandler(scaffoldSvc, approvalsSvc, log)),
+			// Feature C decision 8: cluster register/delete events
+			// re-render managed ApplicationSet addons whose server-side
+			// selector membership changed.
+			audit.Named("addons-fleet-reconcile", addons.NewFleetReconciler(addonsSvc, log)),
 			// RBAC mapping materialization (plan §7.1): renders the tenant's
 			// anchor ClusterRoles + Keycloak-group bindings into the tenant
 			// state repo on rbac.mappings.updated / tenant & team lifecycle
@@ -1020,6 +1031,7 @@ func run() error {
 		PlatformResources: platformResourcesSvc,
 		Orchestrator:      orchestratorSvc,
 		GitRepos:          gitReposSvc,
+		Addons:            addonsSvc,
 		CloudAccounts:     cloudAccountsSvc,
 		Notifications:     notificationsSvc,
 		Policies:          policySvc,

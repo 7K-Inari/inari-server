@@ -15,6 +15,7 @@ package restsurface
 import (
 	"github.com/danielgtaylor/huma/v2"
 
+	"github.com/7K-Inari/inari-server/internal/addons"
 	"github.com/7K-Inari/inari-server/internal/approvals"
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/auditapi"
@@ -55,6 +56,7 @@ type Deps struct {
 	PlatformResources  *platformresources.Service
 	Orchestrator       *orchestrator.Service
 	GitRepos           *gitrepos.Service
+	Addons             *addons.Service
 	CloudAccounts      *cloudaccounts.Service
 	Notifications      *notifications.Service
 	Policies           *policyservice.Service
@@ -125,6 +127,11 @@ func Register(api huma.API, d Deps) {
 		WithRepoWriteEnforcement(d.OrchestratorTeams, d.OrchestratorRepos, d.OrchestratorInstances).
 		RegisterRoutes(api)
 	gitrepos.NewHandler(d.GitRepos, d.Tenancy, d.Authz).RegisterRoutes(api)
+	// Addons reuse the orchestrator's repo-write enforcement seams
+	// (Feature A decision 5b applies to addon writes too).
+	addons.NewHandler(d.Addons, d.Tenancy, d.Authz).
+		WithRepoWriteEnforcement(d.OrchestratorTeams, d.OrchestratorRepos).
+		RegisterRoutes(api)
 	cloudaccounts.NewHandler(d.CloudAccounts, d.Tenancy, d.Clusters, d.Authz).RegisterRoutes(api)
 	notifications.NewHandler(d.Notifications, d.Tenancy, d.Authz).RegisterRoutes(api)
 	policyservice.NewHandler(d.Policies, d.Tenancy, d.Authz).RegisterRoutes(api)

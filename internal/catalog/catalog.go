@@ -226,6 +226,12 @@ func (s *Service) LatestVersions(ctx context.Context, itemIDs []string) (map[str
 	return out, nil
 }
 
+// ListVersions returns every non-empty version row of an item (the addon
+// version-dropdown source, Feature C).
+func (s *Service) ListVersions(ctx context.Context, itemID string) ([]types.CatalogItemVersion, error) {
+	return s.store.ListVersions(ctx, s.db.Pool, itemID)
+}
+
 // GetVersion returns one version row.
 func (s *Service) GetVersion(ctx context.Context, itemID, version string) (*types.CatalogItemVersion, error) {
 	versions, err := s.store.ListVersions(ctx, s.db.Pool, itemID)
@@ -346,11 +352,45 @@ var PlatformApps = []types.CatalogItem{
 	{ID: "platform:argocd", Source: types.CatalogSourcePlatform, Name: "argocd", DisplayName: "ArgoCD", Description: "GitOps continuous delivery"},
 }
 
+// PlatformAppVersions seeds deployable versions for the platform-app stubs
+// (Feature C): the payload carries the upstream chart coordinates
+// ("chart" key, the ocisync platform-app convention) so the addons service
+// can render helm source descriptors, and Schema vendors a (minimal) values
+// schema for the adopt/update 422 validation (decision 4). The OCI catalog
+// sync overwrites these with the full upstream documents when configured.
+var PlatformAppVersions = map[string][]types.CatalogItemVersion{
+	"platform:cert-manager": {
+		{
+			ItemID: "platform:cert-manager", Version: "v1.16.1", Channel: "stable",
+			Schema:  json.RawMessage(`{"type":"object","properties":{"crds":{"type":"object","properties":{"enabled":{"type":"boolean"}}},"replicaCount":{"type":"integer","minimum":1}}}`),
+			Payload: json.RawMessage(`{"chart":{"repoURL":"https://charts.jetstack.io","chart":"cert-manager","namespace":"cert-manager"}}`),
+		},
+		{
+			ItemID: "platform:cert-manager", Version: "v1.16.2", Channel: "stable",
+			Schema:  json.RawMessage(`{"type":"object","properties":{"crds":{"type":"object","properties":{"enabled":{"type":"boolean"}}},"replicaCount":{"type":"integer","minimum":1}}}`),
+			Payload: json.RawMessage(`{"chart":{"repoURL":"https://charts.jetstack.io","chart":"cert-manager","namespace":"cert-manager"}}`),
+		},
+	},
+	"platform:external-secrets": {
+		{
+			// No schema: exercises the lenient "no schema = allow" fallback.
+			ItemID: "platform:external-secrets", Version: "v0.12.1", Channel: "stable",
+			Payload: json.RawMessage(`{"chart":{"repoURL":"https://charts.external-secrets.io","chart":"external-secrets","namespace":"external-secrets"}}`),
+		},
+	},
+}
+
 // SeedPlatformApps upserts the stub platform app catalog items idempotently.
 func (s *Service) SeedPlatformApps(ctx context.Context) error {
 	for i := range PlatformApps {
 		if err := s.UpsertItem(ctx, &PlatformApps[i], nil); err != nil {
 			return err
+		}
+		for j := range PlatformAppVersions[PlatformApps[i].ID] {
+			v := PlatformAppVersions[PlatformApps[i].ID][j]
+			if err := s.UpsertItem(ctx, &PlatformApps[i], &v); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

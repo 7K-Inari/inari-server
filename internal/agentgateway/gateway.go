@@ -14,6 +14,7 @@ import (
 
 	"connectrpc.com/connect/v2"
 
+	"github.com/7K-Inari/inari-server/internal/addons"
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/capabilities"
@@ -94,6 +95,9 @@ type Gateway struct {
 	db         *db.DB
 	cfg        Config
 	statusSink StatusSink
+	// addonDiscovery ingests scanner-reported addons (Feature C; nil-safe:
+	// reports are drop-and-log until wired).
+	addonDiscovery AddonDiscoverySink
 	// instanceFailures marks instances failed when the agent NACKs a
 	// delivery command (nil-safe).
 	instanceFailures InstanceFailureSink
@@ -206,6 +210,16 @@ type StatusSink interface {
 // SetStatusSink wires the inventory module post-construction (nil-safe:
 // status updates are drop-and-log until wired).
 func (g *Gateway) SetStatusSink(s StatusSink) { g.statusSink = s }
+
+// AddonDiscoverySink consumes scanner-reported addon batches (the addons
+// module's IngestDiscovery seam, Feature C).
+type AddonDiscoverySink interface {
+	IngestDiscovery(ctx context.Context, orgID, clusterID string, items []addons.DiscoveredAddon) error
+}
+
+// SetAddonDiscoverySink wires the addons module post-construction
+// (nil-safe: ReportAddons events are drop-and-log until wired).
+func (g *Gateway) SetAddonDiscoverySink(s AddonDiscoverySink) { g.addonDiscovery = s }
 
 // InstanceFailureSink surfaces agent delivery failures on resource
 // instances (inventory.Service seam).

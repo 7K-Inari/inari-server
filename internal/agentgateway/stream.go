@@ -19,6 +19,7 @@ import (
 	"github.com/7K-Inari/inari-api/gen/go/inari/agent/v1/agentv1connect"
 	"github.com/google/uuid"
 
+	"github.com/7K-Inari/inari-server/internal/addons"
 	"github.com/7K-Inari/inari-server/internal/fleetmanager"
 	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -206,6 +207,23 @@ func (s *session) handleEvent(ctx context.Context, ev *agentv1.Event) ([]*agentv
 		s.resyncSent = false
 
 	default:
+		// Addon scanner reports (Feature C): the contract bridge payload is
+		// a structpb.Struct until inari-api gains the ReportAddons message.
+		// Drop-and-log on undecodable payloads (compatibility contract).
+		if ev.Type == addons.ReportAddonsEventType {
+			if s.gw.addonDiscovery == nil {
+				return out, nil
+			}
+			items, err := addons.DecodeReportAddons(ev.Payload)
+			if err != nil {
+				slog.Warn("agentgateway: bad report-addons payload", "cluster", s.cluster.ID, "error", err)
+				return out, nil
+			}
+			if err := s.gw.addonDiscovery.IngestDiscovery(ctx, s.cluster.OrgID, s.cluster.ID, items); err != nil {
+				return nil, fmt.Errorf("ingest addons: %w", err)
+			}
+			return out, nil
+		}
 		// Handshake is carried as a regular event (the contract's stream
 		// envelope is ConnectRequest/ConnectResponse only).
 		if ev.Payload != nil && ev.Payload.MessageIs(&agentv1.HandshakeRequest{}) {

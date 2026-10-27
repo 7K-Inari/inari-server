@@ -35,13 +35,37 @@ func TestInstanceIDForAppRef(t *testing.T) {
 	}
 }
 
+func TestAddonIDForAppRef(t *testing.T) {
+	cases := []struct {
+		name   string
+		ref    types.ResourceRef
+		wantID string
+		wantOK bool
+	}{
+		{"single-cluster addon app", types.ResourceRef{Kind: "Application", Name: "inari-addon-01J5Z8K2N4XQJ4TVDMX7A3B2C1"}, "01J5Z8K2N4XQJ4TVDMX7A3B2C1", true},
+		{"fleet applicationset", types.ResourceRef{Kind: "ApplicationSet", Name: "inari-addonset-01J5Z8K2N4XQJ4TVDMX7A3B2C1"}, "01J5Z8K2N4XQJ4TVDMX7A3B2C1", true},
+		{"appset child app", types.ResourceRef{Kind: "Application", Name: "inari-addon-01J5Z8K2N4XQJ4TVDMX7A3B2C1-prod-eu"}, "01J5Z8K2N4XQJ4TVDMX7A3B2C1", true},
+		{"plain instance app", types.ResourceRef{Kind: "Application", Name: "inari-web-1"}, "", false},
+		{"unrelated kind", types.ResourceRef{Kind: "WebService", Name: "inari-addon-01J5Z8K2N4XQJ4TVDMX7A3B2C1"}, "", false},
+		{"unrelated name", types.ResourceRef{Kind: "Application", Name: "cert-manager"}, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id, ok := addonIDForAppRef(tc.ref)
+			if id != tc.wantID || ok != tc.wantOK {
+				t.Errorf("addonIDForAppRef(%+v) = %q, %v; want %q, %v", tc.ref, id, ok, tc.wantID, tc.wantOK)
+			}
+		})
+	}
+}
+
 func TestAppInstanceState(t *testing.T) {
 	cases := []struct {
 		health, sync string
 		want         types.InstanceState
 	}{
 		{"healthy", "synced", types.InstanceStateRunning},
-		{"healthy", "", types.InstanceStateRunning}, // sync unknown to old agents: keep contract
+		{"healthy", "", types.InstanceStateRunning},          // sync unknown to old agents: keep contract
 		{"healthy", "error", types.InstanceStateDeploying},   // bogus healthy: never synced
 		{"healthy", "unknown", types.InstanceStateDeploying}, // render failure (missing CRD / unreadable repo)
 		{"degraded", "outofsync", types.InstanceStateDegraded},

@@ -237,3 +237,12 @@ func (a PerRepo) ReadFile(ctx context.Context, repo, branch, path string) (strin
 	}
 	return p.ReadFile(ctx, repo, branch, path)
 }
+
+// EnsureWebhook implements Provider (platform-app credentials).
+func (a PerRepo) EnsureWebhook(ctx context.Context, repo string, cfg WebhookConfig) (string, error) {
+	p, err := a.resolve(ctx, repo)
+	if err != nil {
+		return "", err
+	}
+	return p.EnsureWebhook(ctx, repo, cfg)
+}

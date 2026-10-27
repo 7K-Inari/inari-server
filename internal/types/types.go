@@ -753,9 +753,17 @@ type TenantGitRepo struct {
 	// ClearGitHubApp is a transient write-time signal (never persisted or
 	// serialized): remove this repo's BYO override. Plain nil GitHubApp
 	// keeps the stored reference.
-	ClearGitHubApp bool      `json:"-"`
-	CreatedAt      time.Time `json:"createdAt"`
-	UpdatedAt      time.Time `json:"updatedAt"`
+	ClearGitHubApp bool `json:"-"`
+	// WebhookURL is the ingress URL registered with the provider
+	// (EnsureWebhook); empty when no hook is provisioned. The per-repo
+	// webhook secret is envelope-encrypted on the row and never leaves
+	// the server.
+	WebhookURL string `json:"webhookUrl,omitempty"`
+	// WebhookExternalID is the provider-side hook ID (patch/delete
+	// target); empty when no hook is provisioned.
+	WebhookExternalID string    `json:"-"`
+	CreatedAt         time.Time `json:"createdAt"`
+	UpdatedAt         time.Time `json:"updatedAt"`
 }
 
 // GitRepoRefCounts reports how many live workloads reference a repo row;

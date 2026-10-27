@@ -446,16 +446,17 @@ func (s *Store) syncDefaultRepoFromConfig(ctx context.Context, q db.Querier, c *
 
 const gitRepoCols = `id, org_id, name, repo, provider, scope, team_id, commit_policy, base_branch,
 	is_default, github_app_id, github_app_installation_id, github_app_key_secret,
-	github_app_key_key, github_app_api_base, created_at, updated_at`
+	github_app_key_key, github_app_api_base, webhook_external_id, webhook_url, created_at, updated_at`
 
 func scanGitRepo(row pgx.Row) (*types.TenantGitRepo, error) {
 	var r types.TenantGitRepo
 	var teamID *string
 	var appID, installationID *int64
 	var keySecret, keyKey, apiBase *string
+	var hookID, hookURL *string
 	err := row.Scan(&r.ID, &r.OrgID, &r.Name, &r.Repo, &r.Provider, &r.Scope, &teamID,
 		&r.CommitPolicy, &r.BaseBranch, &r.IsDefault,
-		&appID, &installationID, &keySecret, &keyKey, &apiBase, &r.CreatedAt, &r.UpdatedAt)
+		&appID, &installationID, &keySecret, &keyKey, &apiBase, &hookID, &hookURL, &r.CreatedAt, &r.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -464,6 +465,12 @@ func scanGitRepo(row pgx.Row) (*types.TenantGitRepo, error) {
 	}
 	if appID != nil {
 		r.GitHubApp = gitAppFromColumns(*appID, installationID, keySecret, keyKey, apiBase)
+	}
+	if hookID != nil {
+		r.WebhookExternalID = *hookID
+	}
+	if hookURL != nil {
+		r.WebhookURL = *hookURL
 	}
 	return &r, nil
 }
@@ -659,6 +666,101 @@ func (s *Store) SetDefaultGitRepo(ctx context.Context, q db.Querier, orgID, id s
 		return ErrRepoNotFound
 	}
 	return nil
+}
+
+// FindGitRepoByRepo resolves a webhook delivery's repo slug to its registry
+// row, ACROSS orgs (the ingress authenticates via the row's webhook secret,
+// not a bearer token, so no org context exists yet). Rows with a
+// provisioned webhook sort first; duplicates (the same slug registered in
+// two orgs) break ties by creation order.
+func (s *Store) FindGitRepoByRepo(ctx context.Context, q db.Querier, repo string, provider types.GitRepoProvider) (*types.TenantGitRepo, error) {
+	r, err := scanGitRepo(q.QueryRow(ctx, `SELECT `+gitRepoCols+` FROM tenant_git_repos
+		WHERE repo = $1 AND provider = $2
+		ORDER BY (webhook_secret_enc IS NOT NULL) DESC, created_at LIMIT 1`, repo, provider))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrRepoNotFound
+	}
+	return r, err
+}
+
+// SetGitRepoWebhook persists the provider hook registration and the
+// envelope-encrypted per-repo webhook secret (migration 0038; ciphertext
+// only — the vault layer owns encrypt/decrypt).
+func (s *Store) SetGitRepoWebhook(ctx context.Context, q db.Querier, id string, secretEnc, dekEnc []byte, externalID, url string) error {
+	tag, err := q.Exec(ctx, `UPDATE tenant_git_repos
+		SET webhook_secret_enc = $2, webhook_dek_enc = $3, webhook_external_id = NULLIF($4, ''),
+		    webhook_url = NULLIF($5, ''), updated_at = now()
+		WHERE id = $1`, id, secretEnc, dekEnc, externalID, url)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrRepoNotFound
+	}
+	return nil
+}
+
+// GitRepoWebhookSecret loads the envelope-encrypted webhook secret for a
+// repo row. found=false means no hook is provisioned (the ingress 404s —
+// deliveries to an unprovisioned repo cannot be authenticated).
+func (s *Store) GitRepoWebhookSecret(ctx context.Context, q db.Querier, id string) (secretEnc, dekEnc []byte, found bool, err error) {
+	err = q.QueryRow(ctx, `SELECT webhook_secret_enc, webhook_dek_enc FROM tenant_git_repos WHERE id = $1`, id).
+		Scan(&secretEnc, &dekEnc)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil, false, ErrRepoNotFound
+	}
+	if err != nil {
+		return nil, nil, false, err
+	}
+	return secretEnc, dekEnc, secretEnc != nil, nil
+}
+
+// FindInstanceByPRURL returns the instance awaiting one pull request's
+// merge (PR-policy deploys defer ArgoCD registration until then).
+func (s *Store) FindInstanceByPRURL(ctx context.Context, q db.Querier, orgID, prURL string) (*types.ResourceInstance, error) {
+	it, err := scanInstance(q.QueryRow(ctx, `SELECT `+instanceCols+`
+		FROM resource_instances WHERE org_id = $1 AND pr_url = $2`, orgID, prURL))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrInstanceNotFound
+	}
+	return it, err
+}
+
+// MarkInstancePRMerged records the merge: the merge SHA becomes the
+// instance's commit and the pr_url is cleared so a redelivered webhook is
+// a no-op (idempotent finalization). applied=false means the row was
+// already finalized (or the PR was superseded by a newer one).
+func (s *Store) MarkInstancePRMerged(ctx context.Context, q db.Querier, orgID, id, mergeSHA string) (applied bool, err error) {
+	tag, err := q.Exec(ctx, `UPDATE resource_instances
+		SET commit_sha = $3, pr_url = '', updated_at = now()
+		WHERE org_id = $1 AND id = $2 AND pr_url <> ''`, orgID, id, mergeSHA)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// FindAddonByPRURL returns the managed addon awaiting one pull request's
+// merge (same deferred-registration rule as instances).
+func (s *Store) FindAddonByPRURL(ctx context.Context, q db.Querier, orgID, prURL string) (*types.ClusterAddon, error) {
+	a, err := scanClusterAddon(q.QueryRow(ctx, `SELECT `+clusterAddonCols+`
+		FROM cluster_addons WHERE org_id = $1 AND pr_url = $2`, orgID, prURL))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrAddonNotFound
+	}
+	return a, err
+}
+
+// MarkAddonPRMerged is the addon twin of MarkInstancePRMerged (idempotent
+// via the pr_url guard).
+func (s *Store) MarkAddonPRMerged(ctx context.Context, q db.Querier, orgID, id, mergeSHA string) (applied bool, err error) {
+	tag, err := q.Exec(ctx, `UPDATE cluster_addons
+		SET commit_sha = $3, pr_url = '', updated_at = now()
+		WHERE org_id = $1 AND id = $2 AND pr_url <> ''`, orgID, id, mergeSHA)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // BindClusterBaseline binds a cluster to a platform-scope repo of the same

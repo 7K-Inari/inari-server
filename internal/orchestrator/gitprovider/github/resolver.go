@@ -667,6 +667,11 @@ func (p *resolvingProvider) ReadFile(ctx context.Context, repo, branch, path str
 	return s, p.mapErr(err)
 }
 
+func (p *resolvingProvider) EnsureWebhook(ctx context.Context, repo string, cfg gitprovider.WebhookConfig) (string, error) {
+	id, err := p.inner.EnsureWebhook(ctx, repo, cfg)
+	return id, p.mapErr(err)
+}
+
 // webBaseFrom derives the clone-URL host from an API base.
 func webBaseFrom(apiBase string) string {
 	if apiBase == "https://api.github.com" {

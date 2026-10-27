@@ -160,6 +160,12 @@ func (l *Local) ReadFile(_ context.Context, repo, branch, path string) (string, 
 	return f.Contents()
 }
 
+// EnsureWebhook is a no-op: local filesystem repos have no hook concept
+// (the e2e syncer polls), so there is no hook ID to return.
+func (l *Local) EnsureWebhook(context.Context, string, WebhookConfig) (string, error) {
+	return "", nil
+}
+
 // openBare opens the bare repo (erroring when it does not exist).
 func (l *Local) openBare(repo string) (*git.Repository, error) {
 	path, err := l.repoPath(repo)

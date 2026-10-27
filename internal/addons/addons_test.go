@@ -51,7 +51,8 @@ func (f *fakeStore) GetClusterAddonByID(_ context.Context, _ db.Querier, orgID, 
 func (f *fakeStore) ListClusterAddons(_ context.Context, _ db.Querier, orgID, clusterID string) ([]*types.ClusterAddon, error) {
 	var out []*types.ClusterAddon
 	for _, a := range f.addons {
-		if a.OrgID == orgID && (clusterID == "" || a.ClusterID == clusterID) {
+		// Mirror the SQL: a cluster listing includes fleet ('*') rows.
+		if a.OrgID == orgID && (clusterID == "" || a.ClusterID == clusterID || a.ClusterID == "*") {
 			out = append(out, a)
 		}
 	}
@@ -716,6 +717,45 @@ func TestListTeamFilteringAndVersions(t *testing.T) {
 		t.Errorf("team-a list = %d, %v", len(ta), err)
 	}
 	_ = res
+}
+
+func TestListIncludesSelectorMatchedFleetRows(t *testing.T) {
+	store, cat := newFakeStore(), newFakeCatalog()
+	clusters := &fakeClusters{clusters: []types.Cluster{
+		activeCluster("c1", "org:1", "prod-eu", map[string]string{"env": "prod"}),
+		activeCluster("c2", "org:1", "dev-eu", map[string]string{"env": "dev"}),
+	}}
+	git, queue := gitprovider.NewFake(), &fakeQueue{}
+	seedBaselineRepo(store, git, "org:1", "acme/state", types.CommitPolicyDirect)
+	svc := newTestService(store, cat, clusters, git, queue)
+	ctx := context.Background()
+
+	// Fleet-wide addon targeting env=prod (adopted from a prod cluster).
+	if _, err := svc.Adopt(ctx, "org:1", "c1", "platform:cert-manager", AdoptInput{
+		Version: "v1.16.1", DeployMode: types.AddonDeployModeApplicationSet,
+		ClusterSelector: map[string]string{"env": "prod"},
+	}, "user:u1"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The targeted cluster lists the fleet addon (badged by clusterId "*",
+	// with the version dropdown populated like any managed row).
+	prod, err := svc.List(ctx, "org:1", "c1", nil)
+	if err != nil || len(prod) != 1 {
+		t.Fatalf("prod list = %d, %v", len(prod), err)
+	}
+	if prod[0].ClusterID != "*" || prod[0].DeployMode != types.AddonDeployModeApplicationSet {
+		t.Errorf("fleet row = cluster %q mode %q", prod[0].ClusterID, prod[0].DeployMode)
+	}
+	if len(prod[0].AvailableVersions) != 2 {
+		t.Errorf("fleet row versions = %v", prod[0].AvailableVersions)
+	}
+
+	// A cluster outside the selector does not list it.
+	dev, err := svc.List(ctx, "org:1", "c2", nil)
+	if err != nil || len(dev) != 0 {
+		t.Errorf("dev list = %d, %v (fleet selector must not match env=dev)", len(dev), err)
+	}
 }
 
 func TestFleetReconcilerRerendersOnMembershipChange(t *testing.T) {

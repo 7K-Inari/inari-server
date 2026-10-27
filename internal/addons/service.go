@@ -319,15 +319,25 @@ type AddonView struct {
 	AvailableVersions []string `json:"availableVersions,omitempty"`
 }
 
-// List returns the cluster's addons (discovered + managed). teamIDs nil =
-// privileged caller (see all); otherwise managed rows are visible only when
-// the caller's teams own the row's repo (platform repos read-visible to
-// all, decision 5), while discovered rows (no repo yet) are visible to
-// every org member — they are plain cluster state.
+// List returns the cluster's addons (discovered + managed), including
+// managed fleet ('*') rows whose cluster selector matches this cluster's
+// labels — the same server-side targeting semantics as the renderer
+// (decision 8). teamIDs nil = privileged caller (see all); otherwise
+// managed rows are visible only when the caller's teams own the row's repo
+// (platform repos read-visible to all, decision 5), while discovered rows
+// (no repo yet) are visible to every org member — they are plain cluster
+// state.
 func (s *Service) List(ctx context.Context, orgID, clusterID string, teamIDs []string) ([]AddonView, error) {
 	rows, err := s.store.ListClusterAddons(ctx, s.querier(), orgID, clusterID)
 	if err != nil {
 		return nil, err
+	}
+	// Fleet rows are re-filtered against this cluster's labels; an
+	// unresolvable cluster yields nil labels, so only selector-less fleet
+	// rows (target: all clusters) match — consistent with matchSelector.
+	var clusterLabels map[string]string
+	if c, err := s.clusters.GetCluster(ctx, clusterID); err == nil {
+		clusterLabels = c.Labels
 	}
 	repoCache := map[string]*types.TenantGitRepo{}
 	visible := func(a *types.ClusterAddon) (bool, error) {
@@ -361,6 +371,9 @@ func (s *Service) List(ctx context.Context, orgID, clusterID string, teamIDs []s
 	items := map[string]bool{}
 	var filtered []*types.ClusterAddon
 	for _, a := range rows {
+		if a.ClusterID == "*" && !matchSelector(a.ClusterSelector, clusterLabels) {
+			continue // fleet addon not targeting this cluster
+		}
 		ok, err := visible(a)
 		if err != nil {
 			return nil, err

@@ -819,14 +819,16 @@ func scanClusterAddon(row pgx.Row) (*types.ClusterAddon, error) {
 	return &a, nil
 }
 
-// ListClusterAddons returns addons for one cluster, or the whole org when
-// clusterID is empty.
+// ListClusterAddons returns addons for one cluster — including fleet-wide
+// ('*') ApplicationSet rows, which potentially manage it — or the whole org
+// when clusterID is empty. Callers that need exact targeting re-evaluate
+// the fleet row's selector against the cluster's labels (addons.Service).
 func (s *Store) ListClusterAddons(ctx context.Context, q db.Querier, orgID, clusterID string) ([]*types.ClusterAddon, error) {
 	sql := `SELECT ` + clusterAddonCols + ` FROM cluster_addons WHERE org_id = $1`
 	args := []any{orgID}
 	if clusterID != "" {
 		args = append(args, clusterID)
-		sql += fmt.Sprintf(` AND cluster_id = $%d`, len(args))
+		sql += fmt.Sprintf(` AND (cluster_id = $%d OR cluster_id = '*')`, len(args))
 	}
 	sql += ` ORDER BY created_at`
 	rows, err := q.Query(ctx, sql, args...)

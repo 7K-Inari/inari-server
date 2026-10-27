@@ -195,6 +195,9 @@ func repoError(err error) error {
 	if errors.Is(err, ErrRepoConflict) {
 		return huma.Error409Conflict(err.Error())
 	}
+	if errors.Is(err, ErrRepoRegisteredElsewhere) {
+		return huma.Error409Conflict(err.Error())
+	}
 	if errors.Is(err, inventory.ErrTeamNotInOrg) {
 		return huma.Error422UnprocessableEntity(err.Error())
 	}

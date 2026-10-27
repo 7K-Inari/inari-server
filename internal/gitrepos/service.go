@@ -39,6 +39,13 @@ var ErrInvalidInput = errors.New("gitrepos: invalid input")
 // registered under a different name in this org.
 var ErrRepoConflict = errors.New("gitrepos: repo already registered")
 
+// ErrRepoRegisteredElsewhere is a 409-class failure: the repo slug is
+// registered by ANOTHER org. Webhook deliveries are routed per
+// (lower(repo), provider) to a single row whose secret verifies the
+// signature — a slug can therefore live in exactly one org (migration
+// 0039 enforces it against races).
+var ErrRepoRegisteredElsewhere = errors.New("gitrepos: repo is registered by another organization")
+
 // UnregisterMode selects the forced-delete semantics (decision 6).
 type UnregisterMode string
 
@@ -81,6 +88,10 @@ type Store interface {
 	// (cross-org: repos created outside Register, pre-webhook rows, and
 	// failed registration-time provisions).
 	ListGitReposWithoutWebhook(ctx context.Context, q db.Querier) ([]*types.TenantGitRepo, error)
+	// FindGitRepoByRepo resolves a repo slug ACROSS orgs, case-
+	// insensitively (the webhook ingress's lookup): registration uses it
+	// to reject cross-org duplicates (ErrRepoRegisteredElsewhere).
+	FindGitRepoByRepo(ctx context.Context, q db.Querier, repo string, provider types.GitRepoProvider) (*types.TenantGitRepo, error)
 	GetGitRepo(ctx context.Context, q db.Querier, orgID, id string) (*types.TenantGitRepo, error)
 	GetDefaultGitRepo(ctx context.Context, q db.Querier, orgID string) (*types.TenantGitRepo, error)
 	UpsertGitRepo(ctx context.Context, q db.Querier, r *types.TenantGitRepo) error
@@ -288,6 +299,21 @@ func (s *Service) register(ctx context.Context, orgID string, in RegisterInput, 
 			return nil, fmt.Errorf("%w: org already has a default repo (%s); register without isDefault and promote via PATCH instead",
 				ErrInvalidInput, existing.Name)
 		}
+	}
+
+	// Cross-org duplicate ban (M4 webhook routing): deliveries are
+	// resolved to ONE row by (lower(repo), provider) and verified with
+	// that row's secret — a second org holding the same slug would
+	// deterministically 401 every delivery. Migration 0039's unique
+	// index is the race backstop; this pre-check gives the precise
+	// error. Same-org duplicates fall through to the existing
+	// ErrRepoConflict path below.
+	if existing, err := s.store.FindGitRepoByRepo(ctx, s.querier(), row.Repo, row.Provider); err == nil {
+		if existing.OrgID != orgID {
+			return nil, ErrRepoRegisteredElsewhere
+		}
+	} else if !errors.Is(err, inventory.ErrRepoNotFound) {
+		return nil, err
 	}
 
 	// Fail fast: the app must be installed in the repo's git org before we

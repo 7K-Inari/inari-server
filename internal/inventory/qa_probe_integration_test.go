@@ -33,6 +33,33 @@ func TestQARepoUniqueConflictOnRepoColumn(t *testing.T) {
 	t.Logf("repo collision error: %v", err)
 }
 
+// QA: the same repo slug (case-insensitively) must not be persistable in
+// two orgs — webhook deliveries are routed per (lower(repo), provider) to
+// a single row whose secret verifies the signature; a second org holding
+// the slug would make its deliveries deterministically 401. The service
+// rejects with ErrRepoRegisteredElsewhere; migration 0039's unique index
+// is the race backstop.
+func TestQACrossOrgRepoSlugUnique(t *testing.T) {
+	database, ctx := setupStoreTest(t)
+	seedOrg(t, database, ctx, "org:1", "acme")
+	seedOrg(t, database, ctx, "org:2", "other")
+	s := NewStore()
+
+	a := &types.TenantGitRepo{OrgID: "org:1", Name: "baseline", Repo: "acme/shared", Scope: types.GitRepoScopePlatform, IsDefault: true}
+	if err := s.UpsertGitRepo(ctx, database.Pool, a); err != nil {
+		t.Fatal(err)
+	}
+	b := &types.TenantGitRepo{OrgID: "org:2", Name: "baseline", Repo: "acme/shared", Scope: types.GitRepoScopePlatform, IsDefault: true}
+	if err := s.UpsertGitRepo(ctx, database.Pool, b); err == nil {
+		t.Error("cross-org duplicate slug must violate the unique index")
+	}
+	// Case variants address the same git-host repo.
+	c := &types.TenantGitRepo{OrgID: "org:2", Name: "baseline", Repo: "ACME/SHARED", Scope: types.GitRepoScopePlatform, IsDefault: true}
+	if err := s.UpsertGitRepo(ctx, database.Pool, c); err == nil {
+		t.Error("case-variant cross-org duplicate must violate the unique index")
+	}
+}
+
 // QA: a team-scope repo referencing a team owned by a DIFFERENT org must
 // be rejected — otherwise the team filter in ListGitRepos leaks the repo
 // to the foreign team.

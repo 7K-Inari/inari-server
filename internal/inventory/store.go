@@ -694,7 +694,10 @@ func (s *Store) ListGitReposWithoutWebhook(ctx context.Context, q db.Querier) ([
 // row, ACROSS orgs (the ingress authenticates via the row's webhook secret,
 // not a bearer token, so no org context exists yet). Rows with a
 // provisioned webhook sort first; duplicates (the same slug registered in
-// two orgs) break ties by creation order. Matching is case-insensitive:
+// two orgs) break ties by creation order — a legacy safeguard only:
+// migration 0039's unique index plus the ErrRepoRegisteredElsewhere
+// rejection in gitrepos.Register make cross-org duplicates impossible for
+// new rows. Matching is case-insensitive:
 // git hosts treat owner/repo as case-insensitive, but deliveries preserve
 // creation case while registration stores the user-typed casing — an exact
 // match would 404 every delivery on a casing slip.

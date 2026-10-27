@@ -15,8 +15,8 @@ import (
 // fakeSecretRepo is an in-memory WebhookSecretRepo.
 type fakeSecretRepo struct {
 	rows map[string]struct {
-		secretEnc, dekEnc       []byte
-		externalID, url         string
+		secretEnc, dekEnc []byte
+		externalID, url   string
 	}
 }
 

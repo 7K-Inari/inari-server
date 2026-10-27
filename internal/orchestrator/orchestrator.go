@@ -588,8 +588,8 @@ func (s *Service) FinalizePRMerge(ctx context.Context, orgID, prURL, mergeSHA st
 			return err
 		}
 		return s.audit.Record(ctx, tx, &types.AuditEvent{
-			OrgID: orgID, Actor: "system:git-webhook", Action: "deploy.pr_merged",
-			ObjectType: "resource_instance", ObjectID: inst.ID,
+			OrgID: orgID, Actor: "system:git-webhook", Impersonator: impersonation.FromContext(ctx),
+			Action: "deploy.pr_merged", ObjectType: "resource_instance", ObjectID: inst.ID,
 			Payload: json.RawMessage(fmt.Sprintf(`{"prUrl":%q,"mergeSha":%q}`, prURL, mergeSHA)),
 		})
 	})

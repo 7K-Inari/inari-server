@@ -118,7 +118,7 @@ func TestManifestsHandlerValidation(t *testing.T) {
 		t.Error("empty inline: expected error")
 	}
 	// Unparseable YAML is rejected.
-	if _, err := r.Render(context.Background(), manifestsDesc(mustJSONString(t, ":\n  - ["), p), p); err == nil {
+	if _, err := r.Render(context.Background(), manifestsDesc(mustJSONString(t, ":\n  - ["), nil), p); err == nil {
 		t.Error("bad YAML: expected error")
 	}
 }

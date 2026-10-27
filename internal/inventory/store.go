@@ -694,10 +694,13 @@ func (s *Store) ListGitReposWithoutWebhook(ctx context.Context, q db.Querier) ([
 // row, ACROSS orgs (the ingress authenticates via the row's webhook secret,
 // not a bearer token, so no org context exists yet). Rows with a
 // provisioned webhook sort first; duplicates (the same slug registered in
-// two orgs) break ties by creation order.
+// two orgs) break ties by creation order. Matching is case-insensitive:
+// git hosts treat owner/repo as case-insensitive, but deliveries preserve
+// creation case while registration stores the user-typed casing — an exact
+// match would 404 every delivery on a casing slip.
 func (s *Store) FindGitRepoByRepo(ctx context.Context, q db.Querier, repo string, provider types.GitRepoProvider) (*types.TenantGitRepo, error) {
 	r, err := scanGitRepo(q.QueryRow(ctx, `SELECT `+gitRepoCols+` FROM tenant_git_repos
-		WHERE repo = $1 AND provider = $2
+		WHERE lower(repo) = lower($1) AND provider = $2
 		ORDER BY (webhook_secret_enc IS NOT NULL) DESC, created_at LIMIT 1`, repo, provider))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrRepoNotFound

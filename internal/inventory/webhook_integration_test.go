@@ -60,6 +60,14 @@ func TestGitRepoWebhookColumns(t *testing.T) {
 		t.Error("want ErrRepoNotFound for unknown slug")
 	}
 
+	// Case-insensitive match: GitHub full names are unique
+	// case-insensitively, but deliveries preserve creation case while
+	// registration stores the user-typed casing — an exact-match lookup
+	// would 404 every delivery on a casing slip.
+	if _, err := s.FindGitRepoByRepo(ctx, database.Pool, "ACME/STATE", types.GitRepoProviderGitHub); err != nil {
+		t.Errorf("case-variant lookup: %v", err)
+	}
+
 	// The reconcile sweep's source query: provisioned rows drop out,
 	// unprovisioned rows (any org) stay listed.
 	missing, err := s.ListGitReposWithoutWebhook(ctx, database.Pool)

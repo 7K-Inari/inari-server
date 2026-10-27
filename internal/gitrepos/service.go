@@ -321,19 +321,44 @@ func (s *Service) register(ctx context.Context, orgID string, in RegisterInput, 
 	return row, nil
 }
 
+// provisionLocked serializes provisioning per repo (advisory xact lock,
+// same convention as SetDefaultGitRepo): the provider hook patch and the
+// vault write are two non-atomic steps, and an interleave of two
+// concurrent provisions would leave the hook signing with one secret
+// while the vault holds another — every delivery 401s until re-rotation.
+// The lock spans the external EnsureWebhook call; acceptable for this
+// rare operation. Unit tests without a DB run unlocked (q == nil).
+func (s *Service) provisionLocked(ctx context.Context, row *types.TenantGitRepo) (string, error) {
+	var hookURL string
+	err := s.inTx(ctx, func(q db.Querier) error {
+		if q != nil {
+			if _, err := q.Exec(ctx,
+				`SELECT pg_advisory_xact_lock(hashtext('tenant_git_repos/webhook/' || $1))`, row.ID); err != nil {
+				return err
+			}
+		}
+		git, _, err := s.git.ResolveRow(ctx, row)
+		if err != nil {
+			return err
+		}
+		url, err := s.webhooks.Provision(ctx, q, git, row)
+		if err != nil {
+			return err
+		}
+		hookURL = url
+		return nil
+	})
+	return hookURL, err
+}
+
 // provisionWebhookBestEffort registers the repo's webhook, logging (never
 // failing) on error.
 func (s *Service) provisionWebhookBestEffort(ctx context.Context, row *types.TenantGitRepo) {
 	if s.webhooks == nil {
 		return
 	}
-	git, _, err := s.git.ResolveRow(ctx, row)
-	if err != nil {
-		slog.Warn("gitrepos: webhook provisioning skipped: resolve credentials", "repo", row.ID, "error", err)
-		return
-	}
-	if _, err := s.webhooks.Provision(ctx, s.querier(), git, row); err != nil {
-		slog.Warn("gitrepos: webhook provisioning failed (retry via POST .../git-repos/{id}/webhook)",
+	if _, err := s.provisionLocked(ctx, row); err != nil {
+		slog.Warn("gitrepos: webhook provisioning failed (retry via POST .../git-repos/{id}/webhook or the reconcile sweep)",
 			"repo", row.ID, "error", err)
 	}
 }
@@ -355,12 +380,7 @@ func (s *Service) ReconcileWebhooks(ctx context.Context) (int, error) {
 	}
 	provisioned := 0
 	for _, row := range rows {
-		git, _, err := s.git.ResolveRow(ctx, row)
-		if err != nil {
-			slog.Warn("gitrepos: webhook reconcile: resolve credentials", "repo", row.ID, "error", err)
-			continue
-		}
-		if _, err := s.webhooks.Provision(ctx, s.querier(), git, row); err != nil {
+		if _, err := s.provisionLocked(ctx, row); err != nil {
 			slog.Warn("gitrepos: webhook reconcile: provision", "repo", row.ID, "error", err)
 			continue
 		}
@@ -406,11 +426,7 @@ func (s *Service) EnsureWebhook(ctx context.Context, orgID, id, actor string) (*
 	if err != nil {
 		return nil, err
 	}
-	git, _, err := s.git.ResolveRow(ctx, row)
-	if err != nil {
-		return nil, err
-	}
-	url, err := s.webhooks.Provision(ctx, s.querier(), git, row)
+	url, err := s.provisionLocked(ctx, row)
 	if err != nil {
 		return nil, err
 	}

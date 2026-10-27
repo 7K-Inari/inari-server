@@ -242,6 +242,17 @@ type addonView struct {
 	AvailableVersions []string `json:"availableVersions"`
 }
 
+// teamRepoID resolves the fixture's team-a repo row ID.
+func (f *itFixture) teamRepoID(t *testing.T) string {
+	t.Helper()
+	var id string
+	if err := f.database.Pool.QueryRow(t.Context(),
+		`SELECT id FROM tenant_git_repos WHERE org_id = 'org:1' AND name = 'team-a'`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
 func TestAddonsHTTPEndToEnd(t *testing.T) {
 	f := newITServer(t, types.CommitPolicyDirect)
 	defer f.srv.Close()

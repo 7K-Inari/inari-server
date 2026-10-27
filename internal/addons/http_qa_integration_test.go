@@ -168,3 +168,69 @@ func TestQAInputValidation(t *testing.T) {
 		t.Errorf("empty patch: got %d (%s), want 422", code, body)
 	}
 }
+
+// Delete (orphan mode): managed rows and stranded adopting rows are
+// deletable by a writer of the addon's repo; the row disappears from
+// listings, an audit row is written, and git is untouched.
+func TestQADeleteAddon(t *testing.T) {
+	f := newITServer(t, types.CommitPolicyDirect)
+	defer f.srv.Close()
+	base := "/api/v1/tenants/acme/clusters/cluster-1/addons"
+
+	// Managed addon on the team repo — only team-a members / admins may
+	// mutate it (decision 5b).
+	code, body := f.req(t, http.MethodPost, base+"/platform:cert-manager/adopt", "dev-a",
+		`{"version":"v1.16.1","repoId":"`+f.teamRepoID(t)+`"}`)
+	if code != http.StatusOK {
+		t.Fatalf("adopt: %d %s", code, body)
+	}
+	var out struct {
+		Addon struct {
+			ID string `json:"id"`
+		} `json:"addon"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	id := out.Addon.ID
+
+	if code, body := f.req(t, http.MethodDelete, "/api/v1/tenants/acme/addons/"+id, "dev-b", ""); code != http.StatusForbidden {
+		t.Errorf("dev-b delete of team-a addon: got %d (%s), want 403", code, body)
+	}
+	if code, _ := f.req(t, http.MethodDelete, "/api/v1/tenants/acme/addons/"+id, "", ""); code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated delete: got %d, want 401", code)
+	}
+
+	code, body = f.req(t, http.MethodDelete, "/api/v1/tenants/acme/addons/"+id, "dev-a", "")
+	if code != http.StatusOK && code != http.StatusNoContent {
+		t.Fatalf("delete: got %d (%s), want 200/204", code, body)
+	}
+	code, body = f.req(t, http.MethodGet, base, "admin", "")
+	if code != http.StatusOK || !strings.Contains(body, `"addons":[]`) {
+		t.Errorf("list after delete: got %d %s, want 200 empty", code, body)
+	}
+	// Audit trail carries the orphan record.
+	var n int
+	if err := f.database.Pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM audit_events WHERE action = 'addon.deleted' AND object_id = $1`, id).Scan(&n); err != nil || n != 1 {
+		t.Errorf("addon.deleted audit rows = %d, %v", n, err)
+	}
+	// Orphan semantics: nothing was deleted from git.
+	if len(f.git.Files("acme/team-a-gitops", "main")) == 0 {
+		t.Error("orphan delete must leave git files in place")
+	}
+	// Second delete → 404.
+	if code, _ := f.req(t, http.MethodDelete, "/api/v1/tenants/acme/addons/"+id, "dev-a", ""); code != http.StatusNotFound {
+		t.Errorf("re-delete: got %d, want 404", code)
+	}
+
+	// The stranded-adopting escape hatch over HTTP.
+	if _, err := f.database.Pool.Exec(t.Context(), `
+		INSERT INTO cluster_addons (id, org_id, cluster_id, catalog_item, state, source)
+		VALUES ('addon-stuck', 'org:1', 'cluster-1', 'platform:external-secrets', 'adopting', '{"kind":"helm","helm":{"repoURL":"r","chart":"c","version":"v0"}}')`); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := f.req(t, http.MethodDelete, "/api/v1/tenants/acme/addons/addon-stuck", "admin", ""); code != http.StatusOK && code != http.StatusNoContent {
+		t.Errorf("delete stranded adopting row: got %d (%s)", code, body)
+	}
+}

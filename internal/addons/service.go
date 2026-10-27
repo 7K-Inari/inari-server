@@ -103,6 +103,8 @@ type Store interface {
 	ListClusterAddons(ctx context.Context, q db.Querier, orgID, clusterID string) ([]*types.ClusterAddon, error)
 	UpsertClusterAddon(ctx context.Context, q db.Querier, a *types.ClusterAddon) error
 	UpsertDiscoveredAddon(ctx context.Context, q db.Querier, a *types.ClusterAddon) error
+	// DeleteClusterAddon removes the row (orphan-mode delete endpoint).
+	DeleteClusterAddon(ctx context.Context, q db.Querier, orgID, id string) error
 	// ClaimClusterAddonForAdoption atomically claims the (cluster, item)
 	// slot for adopt (concurrent adopts: exactly one winner); a claimed
 	// discovered row keeps its ID. ok=false maps to ErrAlreadyManaged.
@@ -775,6 +777,35 @@ func (s *Service) rerender(ctx context.Context, row *types.ClusterAddon, desc ty
 		return nil, fmt.Errorf("addons: record %s: %w", action, err)
 	}
 	return &AdoptResult{Addon: &updated, CommitSHA: gitResult.CommitSHA, PRURL: gitResult.PRURL}, nil
+}
+
+// Delete orphans an addon (decision 6's orphan mode applied per addon):
+// the cluster_addons row is removed and Inari stops managing it; the
+// rendered files stay in git and the ArgoCD Application/ApplicationSet
+// keeps running untouched. Any state is deletable — this is also the
+// escape hatch for a stranded adopting row (a crashed adopt before the
+// store's staleness window would otherwise block retries).
+func (s *Service) Delete(ctx context.Context, orgID, addonID, actor string) error {
+	row, err := s.store.GetClusterAddonByID(ctx, s.querier(), orgID, addonID)
+	if err != nil {
+		return err
+	}
+	return s.inTx(ctx, func(q db.Querier) error {
+		if err := s.store.DeleteClusterAddon(ctx, q, orgID, addonID); err != nil {
+			return err
+		}
+		if err := s.recordAudit(ctx, q, orgID, actor, "addon.deleted", row.ID, map[string]any{
+			"catalogItem": row.CatalogItem, "cluster": row.ClusterID,
+			"state": string(row.State), "deployMode": string(row.DeployMode),
+			"repo": row.RepoID, "repoPath": row.RepoPath, "argocdApp": row.ArgoCDApp,
+		}); err != nil {
+			return err
+		}
+		return s.appendOutbox(ctx, q, orgID, types.EventAddonDeleted, types.AddonPayload{
+			OrgID: orgID, AddonID: row.ID, CatalogItem: row.CatalogItem, ClusterID: row.ClusterID,
+			RepoID: row.RepoID,
+		})
+	})
 }
 
 // markUpdateFailed flips the row to update_failed after a failed update so

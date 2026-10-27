@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/structpb"
 
@@ -150,6 +151,18 @@ func (f *fakeStore) ReleaseClusterAddonClaim(_ context.Context, _ db.Querier, or
 		}
 	}
 	return nil
+}
+
+func (f *fakeStore) DeleteClusterAddon(_ context.Context, _ db.Querier, orgID, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for k, a := range f.addons {
+		if a.ID == id && a.OrgID == orgID {
+			delete(f.addons, k)
+			return nil
+		}
+	}
+	return inventory.ErrAddonNotFound
 }
 
 func (f *fakeStore) BaselineRepoSelector(_ context.Context, _ db.Querier, _, clusterID string) (string, error) {
@@ -539,8 +552,23 @@ func TestAdoptApplicationSet(t *testing.T) {
 	if queue.cmds[0].ClusterID != "c1" {
 		t.Errorf("appset registration anchors on the adopting cluster, got %q", queue.cmds[0].ClusterID)
 	}
-	if !strings.Contains(string(queue.cmds[0].Payload), "manifest") {
-		t.Error("appset command carries the full manifest")
+	// The structpb bridge payload carries the rendered manifest verbatim.
+	var cmdAny anypb.Any
+	if err := protojson.Unmarshal(queue.cmds[0].Payload, &cmdAny); err != nil {
+		t.Fatalf("command payload is not protojson Any: %v", err)
+	}
+	var bridge structpb.Struct
+	if err := cmdAny.UnmarshalTo(&bridge); err != nil {
+		t.Fatalf("appset bridge payload: %v", err)
+	}
+	if got := bridge.Fields["name"].GetStringValue(); got != "inari-addonset-"+row.ID {
+		t.Errorf("bridge name = %q", got)
+	}
+	if got := bridge.Fields["namespace"].GetStringValue(); got != "argocd" {
+		t.Errorf("bridge namespace = %q", got)
+	}
+	if got := bridge.Fields["manifest"].GetStringValue(); got != appset {
+		t.Error("bridge manifest must be the committed applicationset.yaml verbatim")
 	}
 
 	// Empty selector fleet: no match → 422-class error.
@@ -1075,5 +1103,52 @@ func TestConcurrentAdoptClaimsOnce(t *testing.T) {
 	}
 	if wins != 1 {
 		t.Errorf("concurrent adopts: %d winners, want exactly 1 (errs %v)", wins, errs)
+	}
+}
+
+// Delete orphans the row in ANY state — including a stranded adopting
+// placeholder (the escape hatch for a crashed adopt).
+func TestDeleteAddon(t *testing.T) {
+	store, cat := newFakeStore(), newFakeCatalog()
+	clusters := &fakeClusters{clusters: []types.Cluster{activeCluster("c1", "org:1", "prod", nil)}}
+	git, queue := gitprovider.NewFake(), &fakeQueue{}
+	seedBaselineRepo(store, git, "org:1", "acme/state", types.CommitPolicyDirect)
+	svc := newTestService(store, cat, clusters, git, queue)
+	ctx := context.Background()
+
+	res, err := svc.Adopt(ctx, "org:1", "c1", "platform:cert-manager", AdoptInput{Version: "v1.16.1"}, "user:u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Delete(ctx, "org:1", res.Addon.ID, "user:u1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetClusterAddonByID(ctx, nil, "org:1", res.Addon.ID); !errors.Is(err, inventory.ErrAddonNotFound) {
+		t.Errorf("deleted row still present: %v", err)
+	}
+	// Orphan semantics: the git files and the registration stay untouched.
+	if len(git.Files("acme/state", "main")) == 0 {
+		t.Error("orphan delete must not touch git")
+	}
+
+	// A stranded adopting row is deletable (crashed-adopt escape hatch).
+	store.addons[addonKey("c1", "platform:external-secrets")] = &types.ClusterAddon{
+		ID: "addon-stuck", OrgID: "org:1", ClusterID: "c1", CatalogItem: "platform:external-secrets",
+		State: types.AddonStateAdopting,
+	}
+	if err := svc.Delete(ctx, "org:1", "addon-stuck", "user:u1"); err != nil {
+		t.Errorf("delete stranded adopting row: %v", err)
+	}
+
+	// Unknown IDs and foreign orgs 404.
+	if err := svc.Delete(ctx, "org:1", "addon-nope", "user:u1"); !errors.Is(err, inventory.ErrAddonNotFound) {
+		t.Errorf("unknown: want ErrAddonNotFound, got %v", err)
+	}
+	store.addons[addonKey("c9", "platform:cert-manager")] = &types.ClusterAddon{
+		ID: "addon-other-org", OrgID: "org:2", ClusterID: "c9", CatalogItem: "platform:cert-manager",
+		State: types.AddonStateManaged,
+	}
+	if err := svc.Delete(ctx, "org:1", "addon-other-org", "user:u1"); !errors.Is(err, inventory.ErrAddonNotFound) {
+		t.Errorf("cross-org delete: want ErrAddonNotFound, got %v", err)
 	}
 }

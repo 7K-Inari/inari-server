@@ -342,3 +342,63 @@ func TestFleetReconcileIntegration(t *testing.T) {
 		t.Errorf("baseline selector = %q, %v", sel, err)
 	}
 }
+
+// PR-policy fleet reconcile: the adopt opens a PR instead of committing,
+// so the base branch keeps showing drift and each membership change opens
+// a follow-up PR carrying the expanded fleet. This pins the current
+// behavior as the regression baseline for the planned PR-merge webhook
+// finalizer (documented duplicate-PR gap).
+func TestFleetReconcilePullRequestPolicy(t *testing.T) {
+	database, ctx := setupAddonTest(t)
+	e := newEnv(t, database, types.CommitPolicyPullRequest)
+	seedClusterRow(t, database, ctx, "c1", "org:1", "prod-eu", map[string]string{"env": "prod"})
+
+	if _, err := e.svc.Adopt(ctx, "org:1", "c1", "platform:cert-manager", AdoptInput{
+		Version: "v1.16.1", DeployMode: types.AddonDeployModeApplicationSet,
+		ClusterSelector: map[string]string{"env": "prod"},
+	}, "user:u1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.git.PRs) != 1 {
+		t.Fatalf("adopt PRs = %d, want 1", len(e.git.PRs))
+	}
+	if len(e.queue.cmds) != 0 {
+		t.Errorf("PR policy must not register pre-merge: %+v", e.queue.cmds)
+	}
+
+	seedClusterRow(t, database, ctx, "c2", "org:1", "prod-us", map[string]string{"env": "prod"})
+	reconciler := NewFleetReconciler(e.svc, nil)
+	if err := reconciler.Handle(ctx, &types.OutboxEvent{
+		Payload: json.RawMessage(`{"orgId":"org:1","clusterId":"c2","name":"prod-us"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.git.PRs) != 2 {
+		t.Fatalf("reconcile PRs = %d, want 2 (documented duplicate-PR gap)", len(e.git.PRs))
+	}
+	var expanded bool
+	for _, f := range e.git.PRs[1].Files {
+		if f.Path == "addons/cert-manager/applicationset.yaml" &&
+			strings.Contains(string(f.Content), "cluster: prod-us") &&
+			strings.Contains(string(f.Content), "cluster: prod-eu") {
+			expanded = true
+		}
+	}
+	if !expanded {
+		t.Errorf("reconcile PR must carry the expanded fleet: %+v", e.git.PRs[1].Files)
+	}
+
+	// Redelivery under PR policy is NOT idempotent: drift is measured
+	// against the base branch, which only gains the files at merge time —
+	// every event opens another PR until then. This is the documented
+	// duplicate-PR gap the webhook finalizer will close; the assertion
+	// pins the baseline so the fix flips it deliberately.
+	if err := reconciler.Handle(ctx, &types.OutboxEvent{
+		Payload: json.RawMessage(`{"orgId":"org:1","clusterId":"c2","name":"prod-us"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.git.PRs) != 3 {
+		t.Errorf("pre-finalizer baseline: redelivery opens another PR, got %d PRs", len(e.git.PRs))
+	}
+}

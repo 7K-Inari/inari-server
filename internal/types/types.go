@@ -138,6 +138,7 @@ const (
 	EventAddonAdopted      = "addon.adopted"
 	EventAddonUpdated      = "addon.updated"
 	EventAddonPruneEnabled = "addon.prune_enabled"
+	EventAddonDeleted      = "addon.deleted"
 	EventAddonStatus       = "addon.status"
 
 	EventCloudAccountRegistered   = "cloud_account.registered"

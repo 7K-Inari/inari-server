@@ -99,6 +99,14 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Summary:     "Explicitly enable prune on an adopted addon (audit-logged, one-directional)",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.enablePrune)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "deleteAddon",
+		Method:      http.MethodDelete,
+		Path:        "/api/v1/tenants/{org}/addons/{id}",
+		Summary:     "Orphan an addon: stop managing it (row removed; git files and the ArgoCD app keep running)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.delete)
 }
 
 func (h *Handler) authorizeOrg(ctx context.Context, slug, relation string) (*types.Organization, *authn.Identity, error) {
@@ -339,6 +347,25 @@ func (h *Handler) update(ctx context.Context, in *updateAddonInput) (*adoptOutpu
 	out.Body.CommitSHA = res.CommitSHA
 	out.Body.PRURL = res.PRURL
 	return out, nil
+}
+
+type deleteAddonInput struct {
+	Org string `path:"org"`
+	ID  string `path:"id"`
+}
+
+func (h *Handler) delete(ctx context.Context, in *deleteAddonInput) (*struct{}, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeploymentsCreate)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.enforceAddonRepoWrite(ctx, id, org.ID, in.ID); err != nil {
+		return nil, err
+	}
+	if err := h.svc.Delete(ctx, org.ID, in.ID, "user:"+id.Subject); err != nil {
+		return nil, addonError(err)
+	}
+	return nil, nil
 }
 
 type enablePruneInput struct {

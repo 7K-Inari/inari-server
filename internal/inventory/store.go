@@ -1033,6 +1033,7 @@ func (s *Store) AbsorbDiscoveredAddons(ctx context.Context, q db.Querier, orgID,
 //     not wedge the slot forever);
 //   - managed / update_failed / fresh adopting: ok=false, the caller maps
 //     that to ErrAlreadyManaged.
+//
 // inserted tells the release path whether the row pre-existed.
 func (s *Store) ClaimClusterAddonForAdoption(ctx context.Context, q db.Querier, a *types.ClusterAddon) (id string, meta json.RawMessage, inserted, ok bool, err error) {
 	source, err := json.Marshal(a.Source)

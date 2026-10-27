@@ -147,6 +147,12 @@ type Config struct {
 	GitHubAllowedAPIBases []string
 	// TenantGitKeyMountRoot is where ESO renders tenant BYO app keys.
 	TenantGitKeyMountRoot string
+	// WebhookBaseURL is the server's public base URL used when registering
+	// per-repo provider webhooks (M4; deliveries POST to
+	// <base>/api/v1/webhooks/git/{provider}). Empty disables hook
+	// provisioning (local dev); the ingress itself stays enabled as long
+	// as the credential KEK is set.
+	WebhookBaseURL string
 
 	// User git connections (W4: per-user git social login). UserGitEnabled
 	// gates the whole module; the dedicated GitHub user-OAuth app (client
@@ -425,6 +431,7 @@ func Load() (*Config, error) {
 		GitHubInstallCacheTTL:   durEnv("INARI_GITHUB_INSTALL_CACHE_TTL", 5*time.Minute),
 		GitHubAllowedAPIBases:   listEnv("INARI_GITHUB_ALLOWED_API_BASES", nil),
 		TenantGitKeyMountRoot:   env("INARI_TENANT_GIT_KEY_MOUNT_ROOT", "/var/run/inari/tenant-git-keys"),
+		WebhookBaseURL:          env("INARI_WEBHOOK_BASE_URL", ""),
 
 		UserGitEnabled:                boolEnv("INARI_USERGIT_ENABLED", false),
 		UserGitGitHubClientID:         env("INARI_USERGIT_GITHUB_CLIENT_ID", ""),

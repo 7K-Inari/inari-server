@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/google/uuid"
@@ -114,13 +115,25 @@ type PatchInput struct {
 	ClearGitHubApp bool
 }
 
+// WebhookProvisioner is the gitwebhook seam: per-repo hook registration
+// with vault-stored secrets. nil = provisioning disabled (e.g. no public
+// base URL configured).
+type WebhookProvisioner interface {
+	Provision(ctx context.Context, q db.Querier, git gitprovider.Provider, repo *types.TenantGitRepo) (hookURL string, err error)
+}
+
+// ErrWebhookDisabled: webhook provisioning is not configured
+// (INARI_WEBHOOK_BASE_URL unset or no credential KEK) — 501-class.
+var ErrWebhookDisabled = errors.New("gitrepos: webhook provisioning disabled")
+
 // Service is the repo-registry module.
 type Service struct {
-	db    *db.DB
-	store Store
-	git   *gitprovider.RepoResolver
-	queue Queue
-	audit *audit.Store
+	db       *db.DB
+	store    Store
+	git      *gitprovider.RepoResolver
+	queue    Queue
+	audit    *audit.Store
+	webhooks WebhookProvisioner
 }
 
 // NewService wires the module. db may be nil in unit tests (audit/outbox
@@ -133,6 +146,9 @@ func NewService(store Store, git *gitprovider.RepoResolver, queue Queue, auditSt
 	}
 	return s
 }
+
+// WithWebhookProvisioner attaches the per-repo webhook provisioner (M4).
+func (s *Service) WithWebhookProvisioner(p WebhookProvisioner) *Service { s.webhooks = p; return s }
 
 var repoSlugPattern = func(repo string) bool {
 	parts := strings.Split(repo, "/")
@@ -293,7 +309,63 @@ func (s *Service) register(ctx context.Context, orgID string, in RegisterInput, 
 			return nil, err
 		}
 	}
+	// Best-effort webhook provisioning (M4): the repo works without its
+	// hook (the status stream is the merge fallback), so a failure here is
+	// logged, not fatal — the explicit EnsureWebhook endpoint retries.
+	s.provisionWebhookBestEffort(ctx, row)
 	return row, nil
+}
+
+// provisionWebhookBestEffort registers the repo's webhook, logging (never
+// failing) on error.
+func (s *Service) provisionWebhookBestEffort(ctx context.Context, row *types.TenantGitRepo) {
+	if s.webhooks == nil {
+		return
+	}
+	git, _, err := s.git.ResolveRow(ctx, row)
+	if err != nil {
+		slog.Warn("gitrepos: webhook provisioning skipped: resolve credentials", "repo", row.ID, "error", err)
+		return
+	}
+	if _, err := s.webhooks.Provision(ctx, s.querier(), git, row); err != nil {
+		slog.Warn("gitrepos: webhook provisioning failed (retry via POST .../git-repos/{id}/webhook)",
+			"repo", row.ID, "error", err)
+	}
+}
+
+// WebhookStatus reports the outcome of an explicit webhook (re)provision.
+type WebhookStatus struct {
+	Provisioned bool   `json:"provisioned"`
+	HookURL     string `json:"hookUrl,omitempty"`
+}
+
+// EnsureWebhook (re)provisions the repo's webhook: generates (rotating)
+// the vault secret, registers/updates the provider hook, audits. Use it to
+// repair a failed registration-time provision or to rotate the secret.
+func (s *Service) EnsureWebhook(ctx context.Context, orgID, id, actor string) (*WebhookStatus, error) {
+	if s.webhooks == nil {
+		return nil, ErrWebhookDisabled
+	}
+	row, err := s.store.GetGitRepo(ctx, s.querier(), orgID, id)
+	if err != nil {
+		return nil, err
+	}
+	git, _, err := s.git.ResolveRow(ctx, row)
+	if err != nil {
+		return nil, err
+	}
+	url, err := s.webhooks.Provision(ctx, s.querier(), git, row)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.inTx(ctx, func(q db.Querier) error {
+		return s.recordAudit(ctx, q, orgID, actor, "gitrepo.webhook_provisioned", id, map[string]any{
+			"repo": row.Repo, "hookUrl": url,
+		})
+	}); err != nil {
+		return nil, err
+	}
+	return &WebhookStatus{Provisioned: true, HookURL: url}, nil
 }
 
 // Update applies a partial update; IsDefault=true promotes the repo and

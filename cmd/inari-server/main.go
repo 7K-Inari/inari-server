@@ -39,6 +39,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/featureflags"
 	"github.com/7K-Inari/inari-server/internal/fleetmanager"
 	"github.com/7K-Inari/inari-server/internal/gitrepos"
+	"github.com/7K-Inari/inari-server/internal/gitwebhook"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/kubeproxy"
@@ -196,6 +197,14 @@ type instanceGetterAdapter struct {
 
 func (a instanceGetterAdapter) GetInstance(ctx context.Context, id string) (*types.ResourceInstance, error) {
 	return a.store.Get(ctx, a.db.Pool, id)
+}
+
+// outboxAppender binds audit.AppendOutbox to the gitwebhook.OutboxAppender
+// seam (the ingress appends deliveries outside an explicit TX).
+type outboxAppender struct{}
+
+func (outboxAppender) AppendOutbox(ctx context.Context, q db.Querier, orgID, eventType string, payload any) error {
+	return audit.AppendOutbox(ctx, q, orgID, eventType, payload)
 }
 
 // baselineReposAdapter registers the zone's state repo in the
@@ -815,6 +824,29 @@ func run() error {
 	// resolver (per-repo BYO → org-wide app → platform app precedence).
 	repoResolver := gitprovider.NewRepoResolver(repoStoreAdapter{invStore, database}, orgGitConfigsAdapter{invStore, database}, git)
 	gitReposSvc := gitrepos.NewService(invStore, repoResolver, gateway.Queue(), auditStore, database)
+
+	// M4 git webhook ingress (parent plan §9 risk #1): per-repo hook
+	// secrets live in the credential vault (0028 envelope); registration
+	// provisions the provider hook (EnsureWebhook) when a public base URL
+	// is configured; signed deliveries are verified, normalized, and
+	// appended to the outbox. The ingress works without the base URL
+	// (hooks may predate it); provisioning does not. KEK unset disables
+	// both, matching the other vault consumers.
+	var webhookIngress *gitwebhook.Ingress
+	if kek, err := cryptoenvelope.LoadKEK(); err != nil {
+		log.Warn("credential KEK unset: git webhook ingress disabled", "reason", err)
+	} else {
+		secretStore, err := gitwebhook.NewSecretStore(kek, invStore)
+		if err != nil {
+			return err
+		}
+		if cfg.WebhookBaseURL != "" {
+			gitReposSvc.WithWebhookProvisioner(gitwebhook.NewProvisioner(secretStore, cfg.WebhookBaseURL))
+		} else {
+			log.Warn("INARI_WEBHOOK_BASE_URL unset: webhook hook provisioning disabled (ingress still active)")
+		}
+		webhookIngress = gitwebhook.NewIngress(database.Pool, invStore, secretStore, outboxAppender{})
+	}
 	// Writers resolve their target repo through the registry (Feature A):
 	// deploy/update/delete honor the repoId selector / recorded repo.
 	orchestratorSvc.WithRepoResolver(repoResolver)
@@ -989,6 +1021,10 @@ func run() error {
 			// re-render managed ApplicationSet addons whose server-side
 			// selector membership changed.
 			audit.Named("addons-fleet-reconcile", addons.NewFleetReconciler(addonsSvc, log)),
+			// M4: normalized git webhook events (git.webhook.pr_merged) —
+			// completes the ArgoCD registration that pull_request-policy
+			// deploys/addons deferred until the PR merged.
+			audit.Named("git-webhook-finalizer", gitwebhook.NewMergeFinalizer(orchestratorSvc, addonsSvc, log)),
 			// RBAC mapping materialization (plan §7.1): renders the tenant's
 			// anchor ClusterRoles + Keycloak-group bindings into the tenant
 			// state repo on rbac.mappings.updated / tenant & team lifecycle
@@ -1031,6 +1067,7 @@ func run() error {
 		PlatformResources: platformResourcesSvc,
 		Orchestrator:      orchestratorSvc,
 		GitRepos:          gitReposSvc,
+		GitWebhook:        webhookIngress,
 		Addons:            addonsSvc,
 		CloudAccounts:     cloudAccountsSvc,
 		Notifications:     notificationsSvc,

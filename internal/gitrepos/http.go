@@ -79,6 +79,14 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Summary:     "Unregister a repo (guarded; force with mode=orphan|teardown)",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.unregister)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "ensureGitRepoWebhook",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/tenants/{org}/git-repos/{id}/webhook",
+		Summary:     "(Re)provision the repo's webhook (rotates the secret)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.ensureWebhook)
 }
 
 func (h *Handler) authorizeOrg(ctx context.Context, slug, relation string) (*types.Organization, *authn.Identity, error) {
@@ -189,6 +197,9 @@ func repoError(err error) error {
 	}
 	if errors.Is(err, inventory.ErrTeamNotInOrg) {
 		return huma.Error422UnprocessableEntity(err.Error())
+	}
+	if errors.Is(err, ErrWebhookDisabled) {
+		return huma.Error501NotImplemented(err.Error())
 	}
 	if errors.Is(err, ErrInvalidInput) {
 		return huma.Error422UnprocessableEntity(err.Error())
@@ -369,5 +380,27 @@ func (h *Handler) unregister(ctx context.Context, in *unregisterInput) (*unregis
 	out := &unregisterOutput{}
 	out.Body.Unregistered = true
 	out.Body.Mode = in.Mode
+	return out, nil
+}
+
+type webhookOutput struct {
+	Body struct {
+		Provisioned bool   `json:"provisioned"`
+		HookURL     string `json:"hookUrl,omitempty"`
+	}
+}
+
+func (h *Handler) ensureWebhook(ctx context.Context, in *getInput) (*webhookOutput, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantSettingsWrite)
+	if err != nil {
+		return nil, err
+	}
+	st, err := h.svc.EnsureWebhook(ctx, org.ID, in.ID, "user:"+id.Subject)
+	if err != nil {
+		return nil, repoError(err)
+	}
+	out := &webhookOutput{}
+	out.Body.Provisioned = st.Provisioned
+	out.Body.HookURL = st.HookURL
 	return out, nil
 }

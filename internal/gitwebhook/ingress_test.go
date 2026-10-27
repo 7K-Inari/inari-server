@@ -239,6 +239,21 @@ func TestIngressPingIgnored(t *testing.T) {
 	}
 }
 
+// Oversized deliveries are rejected before any DB/HMAC work (the route
+// is unauthenticated).
+func TestIngressDeliveryTooLarge(t *testing.T) {
+	e := newIngressEnv(t, true)
+	body := make([]byte, maxDeliverySize+1)
+	resp := e.post(t, "github", "push", body, e.secret(t), false)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413", resp.StatusCode)
+	}
+	if len(e.outbox.events) != 0 {
+		t.Error("oversized deliveries must not reach the outbox")
+	}
+}
+
 func TestIngressMalformedBody(t *testing.T) {
 	e := newIngressEnv(t, true)
 	resp := e.post(t, "github", "pull_request", []byte(`{"action":`), e.secret(t), false)

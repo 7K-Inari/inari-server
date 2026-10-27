@@ -26,7 +26,7 @@ type Adapter interface {
 	VerifySignature(h http.Header, body, secret []byte) error
 	// ParseEvent normalizes the delivery. A nil event (with nil error)
 	// means "valid but not actionable" — ping, unsupported event type,
-	// non-merge PR actions — answered 204 by the ingress.
+	// non-merge PR actions — answered 202 accepted:false by the ingress.
 	ParseEvent(h http.Header, body []byte) (*Event, error)
 }
 

@@ -41,6 +41,13 @@ func NewIngress(q db.Querier, repos RepoLookup, secrets *SecretStore, outbox Out
 	return &Ingress{q: q, repos: repos, secrets: secrets, outbox: outbox}
 }
 
+// maxDeliverySize bounds one delivery body (4 MiB — GitHub PR/push
+// deliveries are kilobytes; the route is unauthenticated, so nothing
+// larger may reach the DB/HMAC path). huma has already buffered the body
+// by the time this runs; a transport-level byte cap is a separate
+// hardening layer.
+const maxDeliverySize = 4 << 20
+
 // Receive processes one delivery. The error return carries huma errors
 // (401/404/400); accepted=false means a verified but non-actionable
 // delivery (ping, unsupported event, non-merge PR action).
@@ -48,6 +55,9 @@ func (i *Ingress) Receive(ctx context.Context, provider string, hdr http.Header,
 	adapter, ok := i.registry.For(provider)
 	if !ok {
 		return "", false, huma.Error404NotFound("unknown git provider")
+	}
+	if len(body) > maxDeliverySize {
+		return "", false, huma.NewError(http.StatusRequestEntityTooLarge, "delivery too large")
 	}
 	repoSlug, err := adapter.RepoHint(hdr, body)
 	if err != nil {

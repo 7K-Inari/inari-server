@@ -20,6 +20,6 @@ ALTER TABLE tenant_git_repos
 ALTER TABLE tenant_git_repos
     DROP CONSTRAINT IF EXISTS tenant_git_repo_webhook_secret_all_or_none,
     DROP COLUMN IF EXISTS webhook_secret_enc,
-    DROP COLUMN webhook_dek_enc,
-    DROP COLUMN webhook_external_id,
-    DROP COLUMN webhook_url;
+    DROP COLUMN IF EXISTS webhook_dek_enc,
+    DROP COLUMN IF EXISTS webhook_external_id,
+    DROP COLUMN IF EXISTS webhook_url;

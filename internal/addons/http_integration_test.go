@@ -90,6 +90,9 @@ type itFixture struct {
 	database *db.DB
 	git      *gitprovider.Fake
 	queue    *itQueue
+	svc      *addons.Service
+	inv      *inventory.Service
+	audit    *audit.Store
 }
 
 func newITServer(t *testing.T, policy types.CommitPolicy) *itFixture {
@@ -160,7 +163,10 @@ func newITServer(t *testing.T, policy types.CommitPolicy) *itFixture {
 	addons.NewHandler(svc, tenancySvc, itAuthorizer{}).
 		WithRepoWriteEnforcement(tenancySvc, repoGetterAdapter{invStore, database}).
 		RegisterRoutes(api)
-	return &itFixture{srv: httptest.NewServer(router), database: database, git: fake, queue: queue}
+	return &itFixture{
+		srv: httptest.NewServer(router), database: database, git: fake, queue: queue,
+		svc: svc, inv: inventory.NewService(database, invStore, auditStore, nil), audit: auditStore,
+	}
 }
 
 // clusterListerAdapter serves the addons ClusterLister seam from the DB.

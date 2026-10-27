@@ -825,6 +825,63 @@ func TestUpdateVersionAndValues(t *testing.T) {
 	}
 }
 
+// Version bumps re-validate the STORED values against the new chart
+// version's schema (decision 4): values legal under v1.16.1 but illegal
+// under v1.16.2 reject the bump with field-level errors, before any git
+// write.
+func TestVersionBumpRevalidatesStoredValues(t *testing.T) {
+	store, cat := newFakeStore(), newFakeCatalog()
+	// v1.16.2 tightens the schema: replicaCount minimum moves 1 → 2.
+	strictSchema := json.RawMessage(`{"type":"object","properties":{"replicaCount":{"type":"integer","minimum":2}}}`)
+	cat.versions["platform:cert-manager"][1].Schema = strictSchema
+
+	clusters := &fakeClusters{clusters: []types.Cluster{activeCluster("c1", "org:1", "prod", nil)}}
+	git, queue := gitprovider.NewFake(), &fakeQueue{}
+	seedBaselineRepo(store, git, "org:1", "acme/state", types.CommitPolicyDirect)
+	svc := newTestService(store, cat, clusters, git, queue)
+	ctx := context.Background()
+
+	res, err := svc.Adopt(ctx, "org:1", "c1", "platform:cert-manager", AdoptInput{
+		Version: "v1.16.1", Values: json.RawMessage(`{"replicaCount":1}`),
+	}, "user:u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := res.Addon.ID
+
+	bump := "v1.16.2"
+	_, err = svc.Update(ctx, "org:1", id, UpdateInput{ChartVersion: &bump}, "user:u1")
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("bump with now-invalid stored values: want ValidationError, got %v", err)
+	}
+	if len(ve.Fields) == 0 || ve.Fields[0].Path == "" {
+		t.Errorf("field-level errors required, got %+v", ve)
+	}
+	// The rejection is pre-commit: git and the row stay on the old version.
+	app := git.Files("acme/state", "main")["addons/cert-manager/application.yaml"]
+	if !strings.Contains(app, "targetRevision: v1.16.1") {
+		t.Error("rejected bump must not rewrite the committed application")
+	}
+	row, err := store.GetClusterAddonByID(ctx, nil, "org:1", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.ChartVersion != "v1.16.1" {
+		t.Errorf("row version = %q, want unchanged v1.16.1", row.ChartVersion)
+	}
+
+	// Supplying conforming values with the bump succeeds.
+	okValues := json.RawMessage(`{"replicaCount":2}`)
+	upd, err := svc.Update(ctx, "org:1", id, UpdateInput{ChartVersion: &bump, Values: &okValues}, "user:u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upd.Addon.ChartVersion != "v1.16.2" {
+		t.Errorf("version = %q", upd.Addon.ChartVersion)
+	}
+}
+
 func TestEnablePrune(t *testing.T) {
 	store, cat := newFakeStore(), newFakeCatalog()
 	clusters := &fakeClusters{clusters: []types.Cluster{activeCluster("c1", "org:1", "prod", nil)}}

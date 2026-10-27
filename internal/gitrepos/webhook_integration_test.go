@@ -143,6 +143,37 @@ func TestRepoWebhookStatusResponses(t *testing.T) {
 	}
 }
 
+// The rotation endpoint is settings-write only (it rotates a signing
+// secret): unauthenticated → 401, non-member → 403, team deployer without
+// settings-write → 403; an authorized caller reaches the service (501
+// here because the fixture wires no provisioner).
+func TestEnsureWebhookEndpointAuthz(t *testing.T) {
+	f := newITServer(t)
+	defer f.srv.Close()
+	base := "/api/v1/tenants/acme/git-repos"
+	code, body := f.req(t, "POST", base, "admin", `{"name":"baseline","repo":"acme/state","scope":"platform","isDefault":true}`)
+	if code != http.StatusOK && code != http.StatusCreated {
+		t.Fatalf("register: %d %s", code, body)
+	}
+	var out repoStatusView
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	url := base + "/" + out.Repo.ID + "/webhook"
+	if code, _ := f.req(t, "POST", url, "", ""); code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated = %d, want 401", code)
+	}
+	if code, _ := f.req(t, "POST", url, "outsider", ""); code != http.StatusForbidden {
+		t.Errorf("outsider = %d, want 403", code)
+	}
+	if code, _ := f.req(t, "POST", url, "dev-a", ""); code != http.StatusForbidden {
+		t.Errorf("team deployer without settings-write = %d, want 403", code)
+	}
+	if code, body := f.req(t, "POST", url, "admin", ""); code != http.StatusNotImplemented {
+		t.Errorf("admin without provisioner wiring = %d %s, want 501", code, body)
+	}
+}
+
 // Concurrent (re)provisions of the SAME repo must be serialized by the
 // per-repo advisory lock — otherwise the provider hook and the vault can
 // end up holding different secrets (interleaved patch/put) and every

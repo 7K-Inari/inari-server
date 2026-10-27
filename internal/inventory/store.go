@@ -976,6 +976,20 @@ func (s *Store) SetClusterAddonPrune(ctx context.Context, q db.Querier, orgID, i
 	return nil
 }
 
+// SetClusterAddonState forces the row's lifecycle state (the update_failed
+// flip must bypass UpsertClusterAddon's never-downgrade-managed guard).
+func (s *Store) SetClusterAddonState(ctx context.Context, q db.Querier, orgID, id string, state types.AddonState) error {
+	tag, err := q.Exec(ctx, `UPDATE cluster_addons SET state = $3, updated_at = now()
+		WHERE org_id = $1 AND id = $2`, orgID, id, state)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrAddonNotFound
+	}
+	return nil
+}
+
 // ApplyAddonAppStatus folds an ArgoCD Application(/ApplicationSet) status
 // into the addon row's health/sync columns.
 func (s *Store) ApplyAddonAppStatus(ctx context.Context, q db.Querier, id, health, syncState string) error {

@@ -101,6 +101,16 @@ func (f *fakeStore) BaselineRepoSelector(_ context.Context, _ db.Querier, _, clu
 	return f.baselines[clusterID], nil
 }
 
+func (f *fakeStore) SetClusterAddonState(_ context.Context, _ db.Querier, orgID, id string, state types.AddonState) error {
+	for _, a := range f.addons {
+		if a.ID == id && a.OrgID == orgID {
+			a.State = state
+			return nil
+		}
+	}
+	return inventory.ErrAddonNotFound
+}
+
 func (f *fakeStore) GetGitRepo(_ context.Context, _ db.Querier, orgID, id string) (*types.TenantGitRepo, error) {
 	r, ok := f.repos[id]
 	if !ok || r.OrgID != orgID {
@@ -768,6 +778,39 @@ func TestFleetReconcilerRerendersOnMembershipChange(t *testing.T) {
 	other := &types.OutboxEvent{Payload: json.RawMessage(`{"orgId":"org:2","clusterId":"c9"}`)}
 	if err := reconciler.Handle(ctx, other); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestUpdateFailureMarksUpdateFailed(t *testing.T) {
+	store, cat := newFakeStore(), newFakeCatalog()
+	clusters := &fakeClusters{clusters: []types.Cluster{activeCluster("c1", "org:1", "prod", nil)}}
+	git, queue := gitprovider.NewFake(), &fakeQueue{}
+	repo := seedBaselineRepo(store, git, "org:1", "acme/state", types.CommitPolicyDirect)
+	svc := newTestService(store, cat, clusters, git, queue)
+	ctx := context.Background()
+
+	res, err := svc.Adopt(ctx, "org:1", "c1", "platform:cert-manager", AdoptInput{Version: "v1.16.1"}, "user:u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Break the git target (repo vanished from the host): the update must
+	// fail AND flip the row to update_failed.
+	repo.Repo = "acme/gone"
+	if _, err := svc.Update(ctx, "org:1", res.Addon.ID, UpdateInput{Values: rawMsg(`{"crds":{"enabled":false}}`)}, "user:u1"); err == nil {
+		t.Fatal("expected git write failure")
+	}
+	got, _ := store.GetClusterAddonByID(ctx, nil, "org:1", res.Addon.ID)
+	if got.State != types.AddonStateUpdateFailed {
+		t.Errorf("state = %q, want update_failed", got.State)
+	}
+	// A subsequent fixed update recovers to managed.
+	repo.Repo = "acme/state"
+	if _, err := svc.Update(ctx, "org:1", res.Addon.ID, UpdateInput{Values: rawMsg(`{"crds":{"enabled":true}}`)}, "user:u1"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = store.GetClusterAddonByID(ctx, nil, "org:1", res.Addon.ID)
+	if got.State != types.AddonStateManaged {
+		t.Errorf("recovered state = %q", got.State)
 	}
 }
 

@@ -107,6 +107,8 @@ type Store interface {
 	// BaselineRepoSelector resolves the repo an adopt defaults to for one
 	// cluster (bound baseline, else org default; "" = none registered).
 	BaselineRepoSelector(ctx context.Context, q db.Querier, orgID, clusterID string) (string, error)
+	// SetClusterAddonState forces the lifecycle state (update_failed flip).
+	SetClusterAddonState(ctx context.Context, q db.Querier, orgID, id string, state types.AddonState) error
 	// GetGitRepo feeds team filtering on list responses.
 	GetGitRepo(ctx context.Context, q db.Querier, orgID, id string) (*types.TenantGitRepo, error)
 }
@@ -724,10 +726,8 @@ func bumpVersion(desc types.SourceDescriptor, itemID, version string) types.Sour
 // markUpdateFailed flips the row to update_failed after a failed update so
 // the UI surfaces the failure instead of a silently stale managed row.
 func (s *Service) markUpdateFailed(ctx context.Context, orgID string, row *types.ClusterAddon) {
-	failed := *row
-	failed.State = types.AddonStateUpdateFailed
 	if err := s.inTx(ctx, func(q db.Querier) error {
-		return s.store.UpsertClusterAddon(ctx, q, &failed)
+		return s.store.SetClusterAddonState(ctx, q, orgID, row.ID, types.AddonStateUpdateFailed)
 	}); err != nil {
 		slog.Warn("addons: mark update_failed", "addon", row.ID, "error", err)
 	}

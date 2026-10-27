@@ -7,9 +7,11 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
 
+	"github.com/7K-Inari/inari-server/internal/addons"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -136,6 +138,72 @@ func TestSessionHandshakeAdvertisesDesiredAgentVersion(t *testing.T) {
 	}
 	if resp.DesiredAgentVersion != "" {
 		t.Errorf("DesiredAgentVersion = %q, want empty", resp.DesiredAgentVersion)
+	}
+}
+
+// reportAddonsSink captures ingested discovery batches.
+type reportAddonsSink struct {
+	calls []reportAddonsCall
+	err   error
+}
+
+type reportAddonsCall struct {
+	orgID, clusterID string
+	items            []addons.DiscoveredAddon
+}
+
+func (s *reportAddonsSink) IngestDiscovery(_ context.Context, orgID, clusterID string, items []addons.DiscoveredAddon) error {
+	s.calls = append(s.calls, reportAddonsCall{orgID, clusterID, items})
+	return s.err
+}
+
+// ReportAddons events (Feature C bridge contract) decode the structpb
+// payload and reach the discovery sink; malformed payloads drop-and-log.
+func TestSessionReportAddonsIngest(t *testing.T) {
+	s := testSession("")
+	sink := &reportAddonsSink{}
+	s.gw.addonDiscovery = sink
+
+	doc, err := structpb.NewStruct(map[string]any{
+		"addons": []any{map[string]any{"catalogItem": "platform:cert-manager", "detectedVersion": "v1.16.2"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := anypb.New(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := s.handleEvent(context.Background(), &agentv1.Event{
+		EventId: "e1", Type: addons.ReportAddonsEventType, Payload: payload,
+	})
+	if err != nil || len(out) != 0 {
+		t.Fatalf("report-addons: out=%v err=%v", out, err)
+	}
+	if len(sink.calls) != 1 || sink.calls[0].clusterID != "cluster:test" || sink.calls[0].orgID != "org:test" {
+		t.Fatalf("sink calls: %+v", sink.calls)
+	}
+	if len(sink.calls[0].items) != 1 || sink.calls[0].items[0].CatalogItem != "platform:cert-manager" {
+		t.Errorf("items: %+v", sink.calls[0].items)
+	}
+
+	// Malformed payload: drop-and-log, no sink call, no error.
+	bad, _ := anypb.New(&agentv1.Ping{})
+	if _, err := s.handleEvent(context.Background(), &agentv1.Event{
+		EventId: "e2", Type: addons.ReportAddonsEventType, Payload: bad,
+	}); err != nil {
+		t.Fatalf("malformed payload must be dropped, got %v", err)
+	}
+	if len(sink.calls) != 1 {
+		t.Errorf("malformed payload reached the sink: %+v", sink.calls)
+	}
+
+	// Unwired sink: silently ignored.
+	s2 := testSession("")
+	if _, err := s2.handleEvent(context.Background(), &agentv1.Event{
+		EventId: "e3", Type: addons.ReportAddonsEventType, Payload: payload,
+	}); err != nil {
+		t.Fatalf("unwired sink must not error, got %v", err)
 	}
 }
 

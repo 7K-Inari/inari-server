@@ -1,0 +1,7 @@
+{
+  "zen": "Design for failure.",
+  "hook_id": 42,
+  "repository": {
+    "full_name": "acme/team-a-gitops"
+  }
+}

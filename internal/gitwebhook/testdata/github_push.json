@@ -1,0 +1,8 @@
+{
+  "ref": "refs/heads/main",
+  "before": "6113728f27ae82c7b1a177c8d03f9e96e0adf246",
+  "after": "827efc6d56897b048c772eb4087f854f46256132",
+  "repository": {
+    "full_name": "acme/team-a-gitops"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "action": "closed",
+  "number": 18,
+  "pull_request": {
+    "html_url": "https://github.com/acme/team-a-gitops/pull/18",
+    "merged": false,
+    "merge_commit_sha": null,
+    "base": {
+      "ref": "main"
+    }
+  },
+  "repository": {
+    "full_name": "acme/team-a-gitops"
+  }
+}

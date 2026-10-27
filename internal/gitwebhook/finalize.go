@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/7K-Inari/inari-server/internal/impersonation"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -52,9 +51,6 @@ func (h *MergeFinalizer) Handle(ctx context.Context, ev *types.OutboxEvent) erro
 		// Nothing can match without the PR URL — ack.
 		return nil
 	}
-	// Automation acts via the tenant-scoped virtual user (plan §5.4):
-	// audit stamping requires an impersonated identity for system actors.
-	ctx = impersonation.WithImpersonator(ctx, impersonation.VirtualUser(ev.OrgID))
 	if h.instances != nil {
 		found, err := h.instances.FinalizePRMerge(ctx, ev.OrgID, p.PRURL, p.MergeSHA)
 		if err != nil {

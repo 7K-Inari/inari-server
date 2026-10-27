@@ -564,6 +564,9 @@ func (s *Service) enqueueAppRegistration(ctx context.Context, clusterID, instanc
 // URL (already finalized, superseded, or not ours) — the caller treats it
 // as an idempotent ack.
 func (s *Service) FinalizePRMerge(ctx context.Context, orgID, prURL, mergeSHA string) (bool, error) {
+	// Automation acts via the tenant-scoped virtual user (plan §5.4):
+	// audit stamping requires an impersonated identity for system actors.
+	ctx = impersonation.WithImpersonator(ctx, impersonation.VirtualUser(orgID))
 	inst, err := s.instances.FindInstanceByPRURL(ctx, s.db.Pool, orgID, prURL)
 	if errors.Is(err, inventory.ErrInstanceNotFound) {
 		return false, nil

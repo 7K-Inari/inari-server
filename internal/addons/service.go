@@ -797,6 +797,9 @@ func (s *Service) rerender(ctx context.Context, row *types.ClusterAddon, desc ty
 // read back from git at the merge SHA). found=false means no addon awaits
 // that PR URL — the caller treats it as an idempotent ack.
 func (s *Service) FinalizePRMerge(ctx context.Context, orgID, prURL, mergeSHA string) (bool, error) {
+	// Automation acts via the tenant-scoped virtual user (plan §5.4):
+	// audit stamping requires an impersonated identity for system actors.
+	ctx = impersonation.WithImpersonator(ctx, impersonation.VirtualUser(orgID))
 	row, err := s.store.FindAddonByPRURL(ctx, s.querier(), orgID, prURL)
 	if errors.Is(err, inventory.ErrAddonNotFound) {
 		return false, nil

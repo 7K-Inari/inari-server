@@ -557,6 +557,48 @@ func (s *Service) enqueueAppRegistration(ctx context.Context, clusterID, instanc
 	})
 }
 
+// FinalizePRMerge completes a pull_request-policy deploy whose PR merged
+// (gitwebhook.MergeFinalizer, closing the gap noted in applyWithEvent):
+// the merge SHA becomes the instance's commit and the deferred ArgoCD
+// registration is enqueued. found=false means no instance awaits that PR
+// URL (already finalized, superseded, or not ours) — the caller treats it
+// as an idempotent ack.
+func (s *Service) FinalizePRMerge(ctx context.Context, orgID, prURL, mergeSHA string) (bool, error) {
+	inst, err := s.instances.FindInstanceByPRURL(ctx, s.db.Pool, orgID, prURL)
+	if errors.Is(err, inventory.ErrInstanceNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	target, err := s.resolveTarget(ctx, orgID, inst.RepoID)
+	if err != nil {
+		return false, err
+	}
+	// Enqueue before marking: the command ID is deterministic
+	// (register-argocd-app:<instanceID>), so a crash after enqueue but
+	// before the mark redelivers and re-enqueues idempotently — the
+	// reverse order could lose the registration entirely.
+	if err := s.enqueueAppRegistration(ctx, inst.ClusterID, inst.ID, target,
+		RepoPath(inst.ClusterID, inst.CatalogItemID, inst.ID), inst.ResourceRef.Namespace); err != nil {
+		return false, err
+	}
+	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		if _, err := s.instances.MarkInstancePRMerged(ctx, tx, orgID, inst.ID, mergeSHA); err != nil {
+			return err
+		}
+		return s.audit.Record(ctx, tx, &types.AuditEvent{
+			OrgID: orgID, Actor: "system:git-webhook", Action: "deploy.pr_merged",
+			ObjectType: "resource_instance", ObjectID: inst.ID,
+			Payload: json.RawMessage(fmt.Sprintf(`{"prUrl":%q,"mergeSha":%q}`, prURL, mergeSHA)),
+		})
+	})
+	if err != nil {
+		return false, fmt.Errorf("orchestrator: finalize PR merge: %w", err)
+	}
+	return true, nil
+}
+
 // ErrSameVersion rejects a rollback to the version the instance already runs.
 var ErrSameVersion = fmt.Errorf("orchestrator: target version is the current version")
 

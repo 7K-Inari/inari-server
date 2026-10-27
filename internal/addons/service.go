@@ -107,6 +107,11 @@ type Store interface {
 	GetClusterAddonByID(ctx context.Context, q db.Querier, orgID, id string) (*types.ClusterAddon, error)
 	ListClusterAddons(ctx context.Context, q db.Querier, orgID, clusterID string) ([]*types.ClusterAddon, error)
 	UpsertClusterAddon(ctx context.Context, q db.Querier, a *types.ClusterAddon) error
+	// FindAddonByPRURL returns the managed addon awaiting one PR's merge.
+	FindAddonByPRURL(ctx context.Context, q db.Querier, orgID, prURL string) (*types.ClusterAddon, error)
+	// MarkAddonPRMerged records the merge SHA and clears pr_url
+	// (idempotent via the pr_url guard).
+	MarkAddonPRMerged(ctx context.Context, q db.Querier, orgID, id, mergeSHA string) (bool, error)
 	UpsertDiscoveredAddon(ctx context.Context, q db.Querier, a *types.ClusterAddon) error
 	// DeleteClusterAddon removes the row (orphan-mode delete endpoint).
 	DeleteClusterAddon(ctx context.Context, q db.Querier, orgID, id string) error
@@ -782,6 +787,64 @@ func (s *Service) rerender(ctx context.Context, row *types.ClusterAddon, desc ty
 		return nil, fmt.Errorf("addons: record %s: %w", action, err)
 	}
 	return &AdoptResult{Addon: &updated, CommitSHA: gitResult.CommitSHA, PRURL: gitResult.PRURL}, nil
+}
+
+// FinalizePRMerge completes a pull_request-policy adopt/update whose PR
+// merged (gitwebhook.MergeFinalizer — the same deferred-registration gap
+// as instance deploys): the merge SHA becomes the addon's commit and the
+// deferred ArgoCD registration is enqueued with the manifest AS MERGED
+// (the PR may have been edited after Inari opened it, so the manifest is
+// read back from git at the merge SHA). found=false means no addon awaits
+// that PR URL — the caller treats it as an idempotent ack.
+func (s *Service) FinalizePRMerge(ctx context.Context, orgID, prURL, mergeSHA string) (bool, error) {
+	row, err := s.store.FindAddonByPRURL(ctx, s.querier(), orgID, prURL)
+	if errors.Is(err, inventory.ErrAddonNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	repo, provider, _, err := s.git.ResolveRepo(ctx, orgID, row.RepoID)
+	if err != nil {
+		return false, err
+	}
+	suffix := "/application.yaml"
+	if row.DeployMode == types.AddonDeployModeApplicationSet {
+		suffix = "/applicationset.yaml"
+	}
+	manifest, err := provider.ReadFile(ctx, repo.Repo, mergeSHA, row.RepoPath+suffix)
+	if err != nil {
+		return false, fmt.Errorf("addons: read merged manifest: %w", err)
+	}
+	if manifest == "" {
+		return false, fmt.Errorf("addons: %s missing at merge SHA %s", row.RepoPath+suffix, mergeSHA)
+	}
+	anchor := row.ClusterID
+	if row.DeployMode == types.AddonDeployModeApplicationSet {
+		targets, err := s.targetsForRow(ctx, row)
+		if err != nil {
+			return false, err
+		}
+		anchor = targets[0].ID
+	}
+	// Enqueue before marking (deterministic command ID — see the
+	// orchestrator's FinalizePRMerge for the crash-ordering rationale).
+	files := []renderer.RenderedFile{{Path: row.RepoPath + suffix, Content: []byte(manifest)}}
+	if err := s.enqueueRegistration(ctx, anchor, row.ID, row.DeployMode, files); err != nil {
+		return false, err
+	}
+	err = s.inTx(ctx, func(q db.Querier) error {
+		if _, err := s.store.MarkAddonPRMerged(ctx, q, orgID, row.ID, mergeSHA); err != nil {
+			return err
+		}
+		return s.recordAudit(ctx, q, orgID, "system:git-webhook", "addon.pr_merged", row.ID, map[string]any{
+			"catalogItem": row.CatalogItem, "cluster": row.ClusterID, "prUrl": prURL, "mergeSha": mergeSHA,
+		})
+	})
+	if err != nil {
+		return false, fmt.Errorf("addons: finalize PR merge: %w", err)
+	}
+	return true, nil
 }
 
 // Delete orphans an addon (decision 6's orphan mode applied per addon):

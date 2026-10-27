@@ -76,6 +76,30 @@ func (f *fakeStore) UpsertClusterAddon(_ context.Context, _ db.Querier, a *types
 	return nil
 }
 
+func (f *fakeStore) FindAddonByPRURL(_ context.Context, _ db.Querier, orgID, prURL string) (*types.ClusterAddon, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, a := range f.addons {
+		if a.OrgID == orgID && a.PRURL == prURL {
+			return a, nil
+		}
+	}
+	return nil, inventory.ErrAddonNotFound
+}
+
+func (f *fakeStore) MarkAddonPRMerged(_ context.Context, _ db.Querier, orgID, id, mergeSHA string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, a := range f.addons {
+		if a.OrgID == orgID && a.ID == id && a.PRURL != "" {
+			a.CommitSHA = mergeSHA
+			a.PRURL = ""
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (f *fakeStore) UpsertDiscoveredAddon(_ context.Context, _ db.Querier, a *types.ClusterAddon) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

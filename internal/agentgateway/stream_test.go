@@ -7,9 +7,11 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
 
+	"github.com/7K-Inari/inari-server/internal/addons"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -139,6 +141,72 @@ func TestSessionHandshakeAdvertisesDesiredAgentVersion(t *testing.T) {
 	}
 }
 
+// reportAddonsSink captures ingested discovery batches.
+type reportAddonsSink struct {
+	calls []reportAddonsCall
+	err   error
+}
+
+type reportAddonsCall struct {
+	orgID, clusterID string
+	items            []addons.DiscoveredAddon
+}
+
+func (s *reportAddonsSink) IngestDiscovery(_ context.Context, orgID, clusterID string, items []addons.DiscoveredAddon) error {
+	s.calls = append(s.calls, reportAddonsCall{orgID, clusterID, items})
+	return s.err
+}
+
+// ReportAddons events (Feature C bridge contract) decode the structpb
+// payload and reach the discovery sink; malformed payloads drop-and-log.
+func TestSessionReportAddonsIngest(t *testing.T) {
+	s := testSession("")
+	sink := &reportAddonsSink{}
+	s.gw.addonDiscovery = sink
+
+	doc, err := structpb.NewStruct(map[string]any{
+		"addons": []any{map[string]any{"catalogItem": "platform:cert-manager", "detectedVersion": "v1.16.2"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := anypb.New(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := s.handleEvent(context.Background(), &agentv1.Event{
+		EventId: "e1", Type: addons.ReportAddonsEventType, Payload: payload,
+	})
+	if err != nil || len(out) != 0 {
+		t.Fatalf("report-addons: out=%v err=%v", out, err)
+	}
+	if len(sink.calls) != 1 || sink.calls[0].clusterID != "cluster:test" || sink.calls[0].orgID != "org:test" {
+		t.Fatalf("sink calls: %+v", sink.calls)
+	}
+	if len(sink.calls[0].items) != 1 || sink.calls[0].items[0].CatalogItem != "platform:cert-manager" {
+		t.Errorf("items: %+v", sink.calls[0].items)
+	}
+
+	// Malformed payload: drop-and-log, no sink call, no error.
+	bad, _ := anypb.New(&agentv1.Ping{})
+	if _, err := s.handleEvent(context.Background(), &agentv1.Event{
+		EventId: "e2", Type: addons.ReportAddonsEventType, Payload: bad,
+	}); err != nil {
+		t.Fatalf("malformed payload must be dropped, got %v", err)
+	}
+	if len(sink.calls) != 1 {
+		t.Errorf("malformed payload reached the sink: %+v", sink.calls)
+	}
+
+	// Unwired sink: silently ignored.
+	s2 := testSession("")
+	if _, err := s2.handleEvent(context.Background(), &agentv1.Event{
+		EventId: "e3", Type: addons.ReportAddonsEventType, Payload: payload,
+	}); err != nil {
+		t.Fatalf("unwired sink must not error, got %v", err)
+	}
+}
+
 func TestSessionUnknownTypeDropped(t *testing.T) {
 	s := testSession("")
 	out, err := s.handleEvent(context.Background(), &agentv1.Event{EventId: "x", Type: "inari.agent.future-thing.v9"})
@@ -213,6 +281,32 @@ func TestAckResolvesNamespacedQueueID(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(q.completed) != 1 || q.completed[0] != "register-argocd-app:web-1" {
+		t.Fatalf("completed = %v", q.completed)
+	}
+}
+
+// Addon bridge registrations (Feature C) queue under
+// register-argocd-appset:<name> / register-argocd-app-manifest:<name>;
+// the agent echoes the bare bridge commandId. Acks must retire them.
+func TestAckResolvesBridgeQueueIDs(t *testing.T) {
+	q := &fakeQueue{rows: map[string]*types.AgentCommand{
+		"register-argocd-appset:inari-addonset-a1":    {ID: "register-argocd-appset:inari-addonset-a1"},
+		"register-argocd-app-manifest:inari-addon-b2": {ID: "register-argocd-app-manifest:inari-addon-b2"},
+	}}
+	gw := &Gateway{}
+	gw.queue = q
+	gw.instanceFailures = &fakeFailureSink{}
+	s := gw.newSession(&types.Cluster{ID: "cluster:test", OrgID: "org:test"})
+
+	if _, err := s.handleEvent(context.Background(), ackEvent(t, "inari-addonset-a1", agentv1.CommandResult_COMMAND_RESULT_APPLIED)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.handleEvent(context.Background(), ackEvent(t, "inari-addon-b2", agentv1.CommandResult_COMMAND_RESULT_APPLIED)); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.completed) != 2 ||
+		q.completed[0] != "register-argocd-appset:inari-addonset-a1" ||
+		q.completed[1] != "register-argocd-app-manifest:inari-addon-b2" {
 		t.Fatalf("completed = %v", q.completed)
 	}
 }

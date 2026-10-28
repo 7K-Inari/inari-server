@@ -11,7 +11,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -36,6 +38,13 @@ var ErrInvalidInput = errors.New("gitrepos: invalid input")
 // ErrRepoConflict is a 409-class failure: the repo slug is already
 // registered under a different name in this org.
 var ErrRepoConflict = errors.New("gitrepos: repo already registered")
+
+// ErrRepoRegisteredElsewhere is a 409-class failure: the repo slug is
+// registered by ANOTHER org. Webhook deliveries are routed per
+// (lower(repo), provider) to a single row whose secret verifies the
+// signature — a slug can therefore live in exactly one org (migration
+// 0039 enforces it against races).
+var ErrRepoRegisteredElsewhere = errors.New("gitrepos: repo is registered by another organization")
 
 // UnregisterMode selects the forced-delete semantics (decision 6).
 type UnregisterMode string
@@ -75,6 +84,14 @@ func (e *RepoInUseError) Error() string {
 // Store is the inventory seam the service needs.
 type Store interface {
 	ListGitRepos(ctx context.Context, q db.Querier, orgID string, teamIDs []string) ([]*types.TenantGitRepo, error)
+	// ListGitReposWithoutWebhook feeds the webhook reconcile loop
+	// (cross-org: repos created outside Register, pre-webhook rows, and
+	// failed registration-time provisions).
+	ListGitReposWithoutWebhook(ctx context.Context, q db.Querier) ([]*types.TenantGitRepo, error)
+	// FindGitRepoByRepo resolves a repo slug ACROSS orgs, case-
+	// insensitively (the webhook ingress's lookup): registration uses it
+	// to reject cross-org duplicates (ErrRepoRegisteredElsewhere).
+	FindGitRepoByRepo(ctx context.Context, q db.Querier, repo string, provider types.GitRepoProvider) (*types.TenantGitRepo, error)
 	GetGitRepo(ctx context.Context, q db.Querier, orgID, id string) (*types.TenantGitRepo, error)
 	GetDefaultGitRepo(ctx context.Context, q db.Querier, orgID string) (*types.TenantGitRepo, error)
 	UpsertGitRepo(ctx context.Context, q db.Querier, r *types.TenantGitRepo) error
@@ -114,13 +131,25 @@ type PatchInput struct {
 	ClearGitHubApp bool
 }
 
+// WebhookProvisioner is the gitwebhook seam: per-repo hook registration
+// with vault-stored secrets. nil = provisioning disabled (e.g. no public
+// base URL configured).
+type WebhookProvisioner interface {
+	Provision(ctx context.Context, q db.Querier, git gitprovider.Provider, repo *types.TenantGitRepo) (hookURL string, err error)
+}
+
+// ErrWebhookDisabled: webhook provisioning is not configured
+// (INARI_WEBHOOK_BASE_URL unset or no credential KEK) — 501-class.
+var ErrWebhookDisabled = errors.New("gitrepos: webhook provisioning disabled")
+
 // Service is the repo-registry module.
 type Service struct {
-	db    *db.DB
-	store Store
-	git   *gitprovider.RepoResolver
-	queue Queue
-	audit *audit.Store
+	db       *db.DB
+	store    Store
+	git      *gitprovider.RepoResolver
+	queue    Queue
+	audit    *audit.Store
+	webhooks WebhookProvisioner
 }
 
 // NewService wires the module. db may be nil in unit tests (audit/outbox
@@ -132,6 +161,24 @@ func NewService(store Store, git *gitprovider.RepoResolver, queue Queue, auditSt
 		s.db = dbs[0]
 	}
 	return s
+}
+
+// WithWebhookProvisioner attaches the per-repo webhook provisioner (M4).
+func (s *Service) WithWebhookProvisioner(p WebhookProvisioner) *Service { s.webhooks = p; return s }
+
+// WebhookProvisioningStatus reports the repo's webhook registration state
+// for API responses: "disabled" when no provisioner is wired (credential
+// KEK or INARI_WEBHOOK_BASE_URL unset), "provisioned" once the hook URL is
+// recorded, otherwise "unprovisioned" (the reconcile sweeper retries;
+// repair immediately via POST .../git-repos/{id}/webhook).
+func (s *Service) WebhookProvisioningStatus(row *types.TenantGitRepo) string {
+	if s.webhooks == nil {
+		return "disabled"
+	}
+	if row.WebhookURL != "" {
+		return "provisioned"
+	}
+	return "unprovisioned"
 }
 
 var repoSlugPattern = func(repo string) bool {
@@ -254,6 +301,21 @@ func (s *Service) register(ctx context.Context, orgID string, in RegisterInput, 
 		}
 	}
 
+	// Cross-org duplicate ban (M4 webhook routing): deliveries are
+	// resolved to ONE row by (lower(repo), provider) and verified with
+	// that row's secret — a second org holding the same slug would
+	// deterministically 401 every delivery. Migration 0039's unique
+	// index is the race backstop; this pre-check gives the precise
+	// error. Same-org duplicates fall through to the existing
+	// ErrRepoConflict path below.
+	if existing, err := s.store.FindGitRepoByRepo(ctx, s.querier(), row.Repo, row.Provider); err == nil {
+		if existing.OrgID != orgID {
+			return nil, ErrRepoRegisteredElsewhere
+		}
+	} else if !errors.Is(err, inventory.ErrRepoNotFound) {
+		return nil, err
+	}
+
 	// Fail fast: the app must be installed in the repo's git org before we
 	// register (decision 3c). Resolution itself performs installation
 	// discovery with the effective credentials (per-repo BYO → org app →
@@ -293,11 +355,137 @@ func (s *Service) register(ctx context.Context, orgID string, in RegisterInput, 
 			return nil, err
 		}
 	}
+	// Best-effort webhook provisioning (M4): the repo works without its
+	// hook (the status stream is the merge fallback), so a failure here is
+	// logged, not fatal — the explicit EnsureWebhook endpoint retries.
+	s.provisionWebhookBestEffort(ctx, row)
 	return row, nil
+}
+
+// provisionLocked serializes provisioning per repo (advisory xact lock,
+// same convention as SetDefaultGitRepo): the provider hook patch and the
+// vault write are two non-atomic steps, and an interleave of two
+// concurrent provisions would leave the hook signing with one secret
+// while the vault holds another — every delivery 401s until re-rotation.
+// The lock spans the external EnsureWebhook call; acceptable for this
+// rare operation. Unit tests without a DB run unlocked (q == nil).
+func (s *Service) provisionLocked(ctx context.Context, row *types.TenantGitRepo) (string, error) {
+	var hookURL string
+	err := s.inTx(ctx, func(q db.Querier) error {
+		if q != nil {
+			if _, err := q.Exec(ctx,
+				`SELECT pg_advisory_xact_lock(hashtext('tenant_git_repos/webhook/' || $1))`, row.ID); err != nil {
+				return err
+			}
+		}
+		git, _, err := s.git.ResolveRow(ctx, row)
+		if err != nil {
+			return err
+		}
+		url, err := s.webhooks.Provision(ctx, q, git, row)
+		if err != nil {
+			return err
+		}
+		hookURL = url
+		return nil
+	})
+	return hookURL, err
+}
+
+// provisionWebhookBestEffort registers the repo's webhook, logging (never
+// failing) on error.
+func (s *Service) provisionWebhookBestEffort(ctx context.Context, row *types.TenantGitRepo) {
+	if s.webhooks == nil {
+		return
+	}
+	if _, err := s.provisionLocked(ctx, row); err != nil {
+		slog.Warn("gitrepos: webhook provisioning failed (retry via POST .../git-repos/{id}/webhook or the reconcile sweep)",
+			"repo", row.ID, "error", err)
+	}
+}
+
+// ReconcileWebhooks provisions webhooks for every registered repo missing
+// one: rows created outside Register (TZF baseline upsert, legacy
+// git-config mirror), rows predating the webhook milestone, and rows whose
+// registration-time provisioning failed. Without this, PR-policy workloads
+// on those repos could never be finalized post-merge — the merge webhook
+// would never arrive. Best-effort per repo (failures are logged and
+// retried on the next sweep); returns the count provisioned.
+func (s *Service) ReconcileWebhooks(ctx context.Context) (int, error) {
+	if s.webhooks == nil {
+		return 0, nil
+	}
+	rows, err := s.store.ListGitReposWithoutWebhook(ctx, s.querier())
+	if err != nil {
+		return 0, err
+	}
+	provisioned := 0
+	for _, row := range rows {
+		if _, err := s.provisionLocked(ctx, row); err != nil {
+			slog.Warn("gitrepos: webhook reconcile: provision", "repo", row.ID, "error", err)
+			continue
+		}
+		provisioned++
+	}
+	return provisioned, nil
+}
+
+// RunWebhookReconcileLoop sweeps for unprovisioned repos on an interval
+// (leader-leased in main, mirroring the other singleton loops).
+func (s *Service) RunWebhookReconcileLoop(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+	for {
+		if _, err := s.ReconcileWebhooks(ctx); err != nil && ctx.Err() == nil {
+			slog.Warn("gitrepos: webhook reconcile sweep failed", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+// WebhookStatus reports the outcome of an explicit webhook (re)provision.
+type WebhookStatus struct {
+	Provisioned bool   `json:"provisioned"`
+	HookURL     string `json:"hookUrl,omitempty"`
+}
+
+// EnsureWebhook (re)provisions the repo's webhook: generates (rotating)
+// the vault secret, registers/updates the provider hook, audits. Use it to
+// repair a failed registration-time provision or to rotate the secret.
+func (s *Service) EnsureWebhook(ctx context.Context, orgID, id, actor string) (*WebhookStatus, error) {
+	if s.webhooks == nil {
+		return nil, ErrWebhookDisabled
+	}
+	row, err := s.store.GetGitRepo(ctx, s.querier(), orgID, id)
+	if err != nil {
+		return nil, err
+	}
+	url, err := s.provisionLocked(ctx, row)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.inTx(ctx, func(q db.Querier) error {
+		return s.recordAudit(ctx, q, orgID, actor, "gitrepo.webhook_provisioned", id, map[string]any{
+			"repo": row.Repo, "hookUrl": url,
+		})
+	}); err != nil {
+		return nil, err
+	}
+	return &WebhookStatus{Provisioned: true, HookURL: url}, nil
 }
 
 // Update applies a partial update; IsDefault=true promotes the repo and
 // demotes the previous default atomically (baseline replacement flow).
+// Webhook note (M4): Update deliberately never re-provisions the repo's
+// webhook — the hook's target (repo slug + provider) is immutable here,
+// and the reconcile sweeper provisions any row missing a hook.
 func (s *Service) Update(ctx context.Context, orgID, id string, in PatchInput, actor string) (*types.TenantGitRepo, error) {
 	row, err := s.store.GetGitRepo(ctx, s.querier(), orgID, id)
 	if err != nil {

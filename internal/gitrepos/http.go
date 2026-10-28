@@ -79,6 +79,14 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Summary:     "Unregister a repo (guarded; force with mode=orphan|teardown)",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.unregister)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "ensureGitRepoWebhook",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/tenants/{org}/git-repos/{id}/webhook",
+		Summary:     "(Re)provision the repo's webhook (rotates the secret)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.ensureWebhook)
 }
 
 func (h *Handler) authorizeOrg(ctx context.Context, slug, relation string) (*types.Organization, *authn.Identity, error) {
@@ -187,8 +195,14 @@ func repoError(err error) error {
 	if errors.Is(err, ErrRepoConflict) {
 		return huma.Error409Conflict(err.Error())
 	}
+	if errors.Is(err, ErrRepoRegisteredElsewhere) {
+		return huma.Error409Conflict(err.Error())
+	}
 	if errors.Is(err, inventory.ErrTeamNotInOrg) {
 		return huma.Error422UnprocessableEntity(err.Error())
+	}
+	if errors.Is(err, ErrWebhookDisabled) {
+		return huma.Error501NotImplemented(err.Error())
 	}
 	if errors.Is(err, ErrInvalidInput) {
 		return huma.Error422UnprocessableEntity(err.Error())
@@ -245,6 +259,9 @@ type repoOutput struct {
 	Body struct {
 		Repo   *types.TenantGitRepo     `json:"repo"`
 		Status *types.GitProviderStatus `json:"gitProviderStatus,omitempty"`
+		// WebhookStatus surfaces the M4 webhook registration state on
+		// repo detail/register/update responses.
+		WebhookStatus string `json:"webhookStatus" enum:"provisioned,unprovisioned,disabled" doc:"webhook registration state: provisioned (provider hook live), unprovisioned (reconcile sweeper retries; repair via POST .../git-repos/{id}/webhook), disabled (provisioning not configured)"`
 	}
 }
 
@@ -264,6 +281,7 @@ func (h *Handler) register(ctx context.Context, in *registerInput) (*repoOutput,
 	}
 	out := &repoOutput{}
 	out.Body.Repo = row
+	out.Body.WebhookStatus = h.svc.WebhookProvisioningStatus(row)
 	return out, nil
 }
 
@@ -293,6 +311,7 @@ func (h *Handler) get(ctx context.Context, in *getInput) (*repoOutput, error) {
 	out.Body.Repo = row
 	// Best-effort health probe; failures degrade to "unknown", never 5xx.
 	out.Body.Status = h.svc.Probe(ctx, row)
+	out.Body.WebhookStatus = h.svc.WebhookProvisioningStatus(row)
 	return out, nil
 }
 
@@ -341,6 +360,7 @@ func (h *Handler) update(ctx context.Context, in *updateInput) (*repoOutput, err
 	}
 	out := &repoOutput{}
 	out.Body.Repo = updated
+	out.Body.WebhookStatus = h.svc.WebhookProvisioningStatus(updated)
 	return out, nil
 }
 
@@ -369,5 +389,27 @@ func (h *Handler) unregister(ctx context.Context, in *unregisterInput) (*unregis
 	out := &unregisterOutput{}
 	out.Body.Unregistered = true
 	out.Body.Mode = in.Mode
+	return out, nil
+}
+
+type webhookOutput struct {
+	Body struct {
+		Provisioned bool   `json:"provisioned"`
+		HookURL     string `json:"hookUrl,omitempty"`
+	}
+}
+
+func (h *Handler) ensureWebhook(ctx context.Context, in *getInput) (*webhookOutput, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationTenantSettingsWrite)
+	if err != nil {
+		return nil, err
+	}
+	st, err := h.svc.EnsureWebhook(ctx, org.ID, in.ID, "user:"+id.Subject)
+	if err != nil {
+		return nil, repoError(err)
+	}
+	out := &webhookOutput{}
+	out.Body.Provisioned = st.Provisioned
+	out.Body.HookURL = st.HookURL
 	return out, nil
 }

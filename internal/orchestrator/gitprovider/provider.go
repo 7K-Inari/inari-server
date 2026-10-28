@@ -23,6 +23,18 @@ type Result struct {
 	PRURL     string // set for pull-request writes
 }
 
+// WebhookConfig describes one provider-side webhook registration (parent
+// plan §9 risk #1: the ingress endpoint that closes the PR-merge gap).
+type WebhookConfig struct {
+	// URL is the public ingress endpoint deliveries POST to.
+	URL string
+	// Secret is the per-repo HMAC shared secret (write-only on the
+	// provider side; the server keeps the envelope-encrypted copy).
+	Secret string
+	// Events are the provider's event names, e.g. "pull_request", "push".
+	Events []string
+}
+
 // Provider writes desired state to a git host.
 type Provider interface {
 	// EnsureRepo makes sure the state repository exists and returns its
@@ -40,6 +52,13 @@ type Provider interface {
 	// ReadFile returns the file content at path on branch, or
 	// ("", nil) when it does not exist.
 	ReadFile(ctx context.Context, repo, branch, path string) (string, error)
+	// EnsureWebhook idempotently registers (or updates) the repo's webhook
+	// pointing at cfg.URL, returning the provider-side hook ID ("" when
+	// the provider has no hook concept). Idempotency means "no duplicate
+	// hooks for the same URL", not "no API writes": hook secrets are
+	// write-only, so an existing hook is always re-configured (which is
+	// also what makes secret rotation work).
+	EnsureWebhook(ctx context.Context, repo string, cfg WebhookConfig) (hookID string, err error)
 }
 
 // Fake is an in-memory Provider for tests and local dev (no git host).
@@ -50,6 +69,14 @@ type Fake struct {
 	PRs []PRRecord
 	// Deletions records every DeleteFiles call for assertions.
 	Deletions []DeleteRecord
+	// Webhooks records every EnsureWebhook call for assertions.
+	Webhooks []WebhookRecord
+}
+
+// WebhookRecord captures one EnsureWebhook invocation.
+type WebhookRecord struct {
+	Repo   string
+	Config WebhookConfig
 }
 
 // DeleteRecord captures one DeleteFiles invocation.
@@ -123,6 +150,21 @@ func (f *Fake) DeleteFiles(_ context.Context, repo, branch string, paths []strin
 	}
 	f.Deletions = append(f.Deletions, DeleteRecord{Repo: repo, Branch: branch, Message: message, Paths: paths})
 	return &Result{CommitSHA: fakeSHA(repo, branch, len(r.branches[branch]))}, nil
+}
+
+// EnsureWebhook records the call and returns a stable per-(repo,URL) hook
+// ID (idempotent re-registration keeps the same hook).
+func (f *Fake) EnsureWebhook(_ context.Context, repo string, cfg WebhookConfig) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, w := range f.Webhooks {
+		if w.Repo == repo && w.Config.URL == cfg.URL {
+			f.Webhooks = append(f.Webhooks, WebhookRecord{Repo: repo, Config: cfg})
+			return fmt.Sprintf("fake-hook-%s-%x", repo, fnv(repo, cfg.URL)), nil
+		}
+	}
+	f.Webhooks = append(f.Webhooks, WebhookRecord{Repo: repo, Config: cfg})
+	return fmt.Sprintf("fake-hook-%s-%x", repo, fnv(repo, cfg.URL)), nil
 }
 
 func (f *Fake) ReadFile(_ context.Context, repo, branch, path string) (string, error) {

@@ -6,6 +6,7 @@ package inventory
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -66,14 +67,22 @@ func deriveState(health string) types.InstanceState {
 }
 
 // ApplyStatus folds one agent status-update into the matching instance.
-// Unknown resources (not Inari-managed) are ignored without error.
-func (s *Service) ApplyStatus(ctx context.Context, clusterID string, upd StatusUpdate) (bool, error) {
+// orgID/clusterID come from the authenticated agent session (never the
+// payload) and scope every lookup; unknown resources (not Inari-managed)
+// and rows belonging to another org/cluster are ignored without error.
+func (s *Service) ApplyStatus(ctx context.Context, orgID, clusterID string, upd StatusUpdate) (bool, error) {
+	// Addon ArgoCD apps are checked BEFORE the instance prefix: addon app
+	// names (inari-addon-<id> / inari-addonset-<id>) also carry the inari-
+	// prefix, so the instance branch would misroute them otherwise.
+	if addonID, ok := addonIDForAppRef(upd.Resource); ok {
+		return s.applyAddonAppStatus(ctx, orgID, clusterID, addonID, upd)
+	}
 	// ArgoCD Applications backing an instance are named inari-<instanceID>:
 	// their health/sync (incl. render failures like a missing CRD or an
 	// unreadable repo) report against the instance itself, so a broken
 	// delivery surfaces a message instead of sitting silent in deploying.
 	if instanceID, ok := instanceIDForAppRef(upd.Resource); ok {
-		return s.applyAppStatus(ctx, clusterID, instanceID, upd)
+		return s.applyAppStatus(ctx, orgID, clusterID, instanceID, upd)
 	}
 	state := deriveState(upd.Health)
 	var matched bool
@@ -113,6 +122,65 @@ func instanceIDForAppRef(ref types.ResourceRef) (string, bool) {
 	return strings.CutPrefix(ref.Name, "inari-")
 }
 
+// addonIDForAppRef maps an ArgoCD Application/ApplicationSet resource ref to
+// the backing cluster_addons row ID (Feature C naming contract):
+//   - inari-addonset-<id>          — the fleet ApplicationSet itself
+//   - inari-addon-<id>             — a single-cluster addon Application
+//   - inari-addon-<id>-<cluster>   — an ApplicationSet child Application
+//     (the renderer's template name; addon IDs are dashless ULIDs, so the
+//     cluster suffix splits off cleanly)
+func addonIDForAppRef(ref types.ResourceRef) (string, bool) {
+	if ref.Kind != "Application" && ref.Kind != "ApplicationSet" {
+		return "", false
+	}
+	if rest, ok := strings.CutPrefix(ref.Name, "inari-addonset-"); ok {
+		id, _, _ := strings.Cut(rest, "-")
+		// On-cluster names are lowercased (RFC 1123); normalize back to the
+		// canonical uppercase ULID for the row lookup.
+		return strings.ToUpper(id), id != ""
+	}
+	if rest, ok := strings.CutPrefix(ref.Name, "inari-addon-"); ok {
+		id, _, _ := strings.Cut(rest, "-")
+		return strings.ToUpper(id), id != ""
+	}
+	return "", false
+}
+
+// applyAddonAppStatus folds the backing ArgoCD app's health/sync into the
+// addon row. The lookup is org-scoped to the reporting agent's session org,
+// so a fleet row ('*') accepts reports from any of ITS org's clusters but
+// never from another tenant's agent; single-cluster rows additionally must
+// belong to the reporting cluster. Unknown IDs drop-and-log, mirroring
+// applyAppStatus.
+func (s *Service) applyAddonAppStatus(ctx context.Context, orgID, clusterID, addonID string, upd StatusUpdate) (bool, error) {
+	addon, err := s.store.GetClusterAddonByID(ctx, s.db.Pool, orgID, addonID)
+	if err != nil {
+		return false, nil
+	}
+	if addon.ClusterID != "*" && addon.ClusterID != clusterID {
+		return false, nil
+	}
+	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		if err := s.store.ApplyAddonAppStatus(ctx, tx, addonID, upd.Health, upd.Sync); err != nil {
+			return err
+		}
+		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
+			OrgID: addon.OrgID, Actor: "agent:" + clusterID, Action: "addon.app_status",
+			ObjectType: "cluster_addon", ObjectID: addonID,
+		}); err != nil {
+			return err
+		}
+		return audit.AppendOutbox(ctx, tx, addon.OrgID, types.EventAddonStatus, types.AddonPayload{
+			OrgID: addon.OrgID, AddonID: addonID, CatalogItem: addon.CatalogItem,
+			ClusterID: addon.ClusterID, Health: upd.Health, Sync: upd.Sync,
+		})
+	})
+	if err != nil {
+		return false, fmt.Errorf("inventory: apply addon app status: %w", err)
+	}
+	return true, nil
+}
+
 // appInstanceState folds Application health+sync into an instance state: an
 // app can read Healthy without ever having synced (or with a broken source),
 // so only synced+healthy marks the instance running.
@@ -124,14 +192,23 @@ func appInstanceState(health, sync string) types.InstanceState {
 	return state
 }
 
-func (s *Service) applyAppStatus(ctx context.Context, clusterID, instanceID string, upd StatusUpdate) (bool, error) {
+func (s *Service) applyAppStatus(ctx context.Context, orgID, clusterID, instanceID string, upd StatusUpdate) (bool, error) {
 	state := appInstanceState(upd.Health, upd.Sync)
 	inst, err := s.store.Get(ctx, s.db.Pool, instanceID)
-	if err != nil {
-		// Not an Inari-managed instance (or wrong cluster): drop-and-log.
+	if errors.Is(err, ErrInstanceNotFound) {
+		// ULID instance IDs are lowercased in the on-cluster app name
+		// (RFC 1123, renderer appName); retry the canonical uppercase form.
+		if inst, err = s.store.Get(ctx, s.db.Pool, strings.ToUpper(instanceID)); err != nil {
+			// Not an Inari-managed instance (or wrong cluster): drop-and-log.
+			return false, nil
+		}
+		instanceID = strings.ToUpper(instanceID)
+	} else if err != nil {
+		// Preserve the stream's drop-and-log contract for transient store
+		// errors (a hard error would restart the agent session).
 		return false, nil
 	}
-	if inst.ClusterID != clusterID {
+	if inst.OrgID != orgID || inst.ClusterID != clusterID {
 		return false, nil
 	}
 	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {

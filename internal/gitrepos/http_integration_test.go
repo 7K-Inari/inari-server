@@ -74,6 +74,7 @@ type itFixture struct {
 	database *db.DB
 	git      *gitprovider.Fake
 	queue    *itQueue
+	svc      *gitrepos.Service
 }
 
 func newITServer(t *testing.T) *itFixture {
@@ -111,7 +112,7 @@ func newITServer(t *testing.T) *itFixture {
 
 	router, api := httpserver.NewRouter(slog.Default(), itValidator{}, database)
 	gitrepos.NewHandler(svc, tenancySvc, itAuthorizer{}).RegisterRoutes(api)
-	return &itFixture{srv: httptest.NewServer(router), database: database, git: fake, queue: queue}
+	return &itFixture{srv: httptest.NewServer(router), database: database, git: fake, queue: queue, svc: svc}
 }
 
 func (f *itFixture) req(t *testing.T, method, path, token, body string) (int, string) {
@@ -146,6 +147,32 @@ type repoView struct {
 	CommitPolicy string `json:"commitPolicy"`
 	BaseBranch   string `json:"baseBranch"`
 	IsDefault    bool   `json:"isDefault"`
+}
+
+// A repo slug already registered by ANOTHER org is rejected with 409
+// (ErrRepoRegisteredElsewhere): webhook deliveries are routed per
+// (lower(repo), provider) to a single row's secret — a slug lives in
+// exactly one org.
+func TestRegisterCrossOrgDuplicateConflict(t *testing.T) {
+	f := newITServer(t)
+	defer f.srv.Close()
+	ctx := context.Background()
+	if _, err := f.database.Pool.Exec(ctx,
+		`INSERT INTO organizations (id, slug, display_name, keycloak_org_id) VALUES ('org:2','other','Other','kc-2')`); err != nil {
+		t.Fatal(err)
+	}
+	foreign := &types.TenantGitRepo{
+		OrgID: "org:2", Name: "baseline", Repo: "acme/shared",
+		Provider: types.GitRepoProviderGitHub, Scope: types.GitRepoScopePlatform, IsDefault: true,
+	}
+	if err := inventory.NewStore().UpsertGitRepo(ctx, f.database.Pool, foreign); err != nil {
+		t.Fatal(err)
+	}
+	code, body := f.req(t, "POST", "/api/v1/tenants/acme/git-repos", "admin",
+		`{"name":"shared","repo":"ACME/shared","scope":"platform"}`)
+	if code != http.StatusConflict {
+		t.Fatalf("cross-org duplicate = %d %s, want 409", code, body)
+	}
 }
 
 func TestGitReposEndToEnd(t *testing.T) {

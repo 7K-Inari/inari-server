@@ -133,6 +133,14 @@ const (
 	EventInstanceDeleted          = "instance.deleted"
 	EventInstanceRolledBack       = "instance.rolled_back"
 
+	// First-class addons (Feature C): lifecycle events from the addons
+	// service plus health/sync folded from the status stream.
+	EventAddonAdopted      = "addon.adopted"
+	EventAddonUpdated      = "addon.updated"
+	EventAddonPruneEnabled = "addon.prune_enabled"
+	EventAddonDeleted      = "addon.deleted"
+	EventAddonStatus       = "addon.status"
+
 	EventCloudAccountRegistered   = "cloud_account.registered"
 	EventCloudAccountValidated    = "cloud_account.validated"
 	EventCloudAccountDeregistered = "cloud_account.deregistered"
@@ -745,9 +753,17 @@ type TenantGitRepo struct {
 	// ClearGitHubApp is a transient write-time signal (never persisted or
 	// serialized): remove this repo's BYO override. Plain nil GitHubApp
 	// keeps the stored reference.
-	ClearGitHubApp bool      `json:"-"`
-	CreatedAt      time.Time `json:"createdAt"`
-	UpdatedAt      time.Time `json:"updatedAt"`
+	ClearGitHubApp bool `json:"-"`
+	// WebhookURL is the ingress URL registered with the provider
+	// (EnsureWebhook); empty when no hook is provisioned. The per-repo
+	// webhook secret is envelope-encrypted on the row and never leaves
+	// the server.
+	WebhookURL string `json:"webhookUrl,omitempty"`
+	// WebhookExternalID is the provider-side hook ID (patch/delete
+	// target); empty when no hook is provisioned.
+	WebhookExternalID string    `json:"-"`
+	CreatedAt         time.Time `json:"createdAt"`
+	UpdatedAt         time.Time `json:"updatedAt"`
 }
 
 // GitRepoRefCounts reports how many live workloads reference a repo row;
@@ -862,6 +878,20 @@ type ClusterAddon struct {
 	ArgoCDApp    string          `json:"argocdApp,omitempty"`
 	Health       string          `json:"health,omitempty"`
 	Sync         string          `json:"sync,omitempty"`
+	// CommitSHA/PRURL record the latest git write per the repo's commit
+	// policy (PR URL for pull_request policy, commit SHA otherwise).
+	CommitSHA string `json:"commitSha,omitempty"`
+	PRURL     string `json:"prUrl,omitempty"`
+	// PruneEnabled flips only via the explicit human enable-prune action
+	// (decision 2): adoption registers with prune OFF + take-ownership.
+	PruneEnabled bool `json:"pruneEnabled"`
+	// Namespace is the ArgoCD destination namespace (persisted so
+	// update/enable-prune/fleet re-renders reproduce the adopt-time choice).
+	Namespace string `json:"namespace,omitempty"`
+	// ClusterSelector is the server-side label query (equality match) for
+	// ApplicationSet fleet rows; nil/empty selects all of the org's
+	// clusters. Membership is evaluated by Inari, never ArgoCD (decision 8).
+	ClusterSelector map[string]string `json:"clusterSelector,omitempty"`
 	// DiscoveredMeta holds what the scanner saw (release name, namespace,
 	// detected version).
 	DiscoveredMeta json.RawMessage `json:"discoveredMeta,omitempty"`
@@ -920,6 +950,22 @@ type InstancePayload struct {
 	ClusterID  string `json:"clusterId"`
 	Version    string `json:"version,omitempty"`
 	Health     string `json:"health,omitempty"`
+}
+
+// AddonPayload is the outbox payload for addon lifecycle/status events
+// (Feature C). ClusterID is the owning cluster, or "*" for fleet-wide
+// ApplicationSet rows.
+type AddonPayload struct {
+	OrgID       string `json:"orgId"`
+	AddonID     string `json:"addonId"`
+	CatalogItem string `json:"catalogItem"`
+	ClusterID   string `json:"clusterId"`
+	Version     string `json:"version,omitempty"`
+	CommitSHA   string `json:"commitSha,omitempty"`
+	PRURL       string `json:"prUrl,omitempty"`
+	RepoID      string `json:"repoId,omitempty"`
+	Health      string `json:"health,omitempty"`
+	Sync        string `json:"sync,omitempty"`
 }
 
 // PlatformResourceKind is one control-plane-owned platform object kind

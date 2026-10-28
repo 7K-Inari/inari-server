@@ -23,9 +23,9 @@ cd "$(dirname "$0")/.."
 # audit, authz, orchestrator, approvals, inventory store). Long tail balanced
 # by integration test file count.
 CRITICAL="internal/db internal/leaderlease internal/eventbus internal/audit internal/authz internal/orchestrator internal/approvals internal/inventory"
-CORE_SERVICES="internal/tenancy internal/scaffold internal/gitrepos"
+CORE_SERVICES="internal/tenancy internal/scaffold internal/gitrepos internal/gitwebhook"
 MODULES_A="internal/policyservice internal/platformresources internal/extensionhost internal/agentgateway internal/kubeproxy internal/usergit internal/featureflags"
-MODULES_B="internal/tenantzonefactory internal/secretstores internal/rbacmaterialize internal/notifications internal/fleetmanager internal/clusterregistry internal/cloudaccounts internal/catalog internal/cache"
+MODULES_B="internal/tenantzonefactory internal/secretstores internal/rbacmaterialize internal/notifications internal/fleetmanager internal/clusterregistry internal/cloudaccounts internal/catalog internal/cache internal/addons"
 
 all_shards() {
   echo "critical core-services modules-a modules-b"

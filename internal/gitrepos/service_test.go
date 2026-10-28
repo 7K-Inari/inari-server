@@ -51,6 +51,25 @@ func contains(xs []string, v string) bool {
 	return false
 }
 
+func (f *fakeStore) ListGitReposWithoutWebhook(_ context.Context, _ db.Querier) ([]*types.TenantGitRepo, error) {
+	var out []*types.TenantGitRepo
+	for _, r := range f.repos {
+		if r.WebhookURL == "" {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) FindGitRepoByRepo(_ context.Context, _ db.Querier, repo string, provider types.GitRepoProvider) (*types.TenantGitRepo, error) {
+	for _, r := range f.repos {
+		if strings.EqualFold(r.Repo, repo) && r.Provider == provider {
+			return r, nil
+		}
+	}
+	return nil, inventory.ErrRepoNotFound
+}
+
 func (f *fakeStore) GetGitRepo(_ context.Context, _ db.Querier, orgID, id string) (*types.TenantGitRepo, error) {
 	r, ok := f.repos[id]
 	if !ok || r.OrgID != orgID {
@@ -119,6 +138,40 @@ func (f *fakeStore) ListGitRepoInstances(_ context.Context, _ db.Querier, _, rep
 
 func (f *fakeStore) ListGitRepoAddons(_ context.Context, _ db.Querier, _, repoID string) ([]inventory.GitRepoAddonRef, error) {
 	return f.addons[repoID], nil
+}
+
+// Registering a repo slug already held by ANOTHER org is rejected
+// (ErrRepoRegisteredElsewhere): webhook deliveries are routed per
+// (lower(repo), provider) to one row's secret, so a slug lives in exactly
+// one org. Same-org duplicates keep the existing ErrRepoConflict path.
+func TestRegisterRejectsCrossOrgDuplicate(t *testing.T) {
+	store := newFakeStore()
+	store.repos["repo-foreign"] = &types.TenantGitRepo{
+		ID: "repo-foreign", OrgID: "org:2", Name: "baseline", Repo: "acme/shared",
+		Provider: types.GitRepoProviderGitHub, Scope: types.GitRepoScopePlatform,
+	}
+	svc := NewService(store, repoResolver(&fakeResolver{provider: gitprovider.NewFake()}), nil, nil)
+
+	_, err := svc.Register(context.Background(), "org:1", RegisterInput{
+		Name: "shared", Repo: "acme/shared", Scope: types.GitRepoScopePlatform,
+	}, "user:u1")
+	if !errors.Is(err, ErrRepoRegisteredElsewhere) {
+		t.Fatalf("cross-org duplicate err = %v, want ErrRepoRegisteredElsewhere", err)
+	}
+	// Case variants address the same git-host repo.
+	_, err = svc.Register(context.Background(), "org:1", RegisterInput{
+		Name: "shared2", Repo: "ACME/SHARED", Scope: types.GitRepoScopePlatform,
+	}, "user:u1")
+	if !errors.Is(err, ErrRepoRegisteredElsewhere) {
+		t.Fatalf("case-variant err = %v, want ErrRepoRegisteredElsewhere", err)
+	}
+	// Same-org duplicate: ErrRepoConflict, NOT the elsewhere sentinel.
+	_, err = svc.Register(context.Background(), "org:2", RegisterInput{
+		Name: "again", Repo: "acme/shared", Scope: types.GitRepoScopePlatform,
+	}, "user:u1")
+	if !errors.Is(err, ErrRepoConflict) || errors.Is(err, ErrRepoRegisteredElsewhere) {
+		t.Fatalf("same-org duplicate err = %v, want ErrRepoConflict (not ErrRepoRegisteredElsewhere)", err)
+	}
 }
 
 // fakeResolver returns a configured provider or error.

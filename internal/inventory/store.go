@@ -446,16 +446,17 @@ func (s *Store) syncDefaultRepoFromConfig(ctx context.Context, q db.Querier, c *
 
 const gitRepoCols = `id, org_id, name, repo, provider, scope, team_id, commit_policy, base_branch,
 	is_default, github_app_id, github_app_installation_id, github_app_key_secret,
-	github_app_key_key, github_app_api_base, created_at, updated_at`
+	github_app_key_key, github_app_api_base, webhook_external_id, webhook_url, created_at, updated_at`
 
 func scanGitRepo(row pgx.Row) (*types.TenantGitRepo, error) {
 	var r types.TenantGitRepo
 	var teamID *string
 	var appID, installationID *int64
 	var keySecret, keyKey, apiBase *string
+	var hookID, hookURL *string
 	err := row.Scan(&r.ID, &r.OrgID, &r.Name, &r.Repo, &r.Provider, &r.Scope, &teamID,
 		&r.CommitPolicy, &r.BaseBranch, &r.IsDefault,
-		&appID, &installationID, &keySecret, &keyKey, &apiBase, &r.CreatedAt, &r.UpdatedAt)
+		&appID, &installationID, &keySecret, &keyKey, &apiBase, &hookID, &hookURL, &r.CreatedAt, &r.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -464,6 +465,12 @@ func scanGitRepo(row pgx.Row) (*types.TenantGitRepo, error) {
 	}
 	if appID != nil {
 		r.GitHubApp = gitAppFromColumns(*appID, installationID, keySecret, keyKey, apiBase)
+	}
+	if hookID != nil {
+		r.WebhookExternalID = *hookID
+	}
+	if hookURL != nil {
+		r.WebhookURL = *hookURL
 	}
 	return &r, nil
 }
@@ -661,6 +668,129 @@ func (s *Store) SetDefaultGitRepo(ctx context.Context, q db.Querier, orgID, id s
 	return nil
 }
 
+// ListGitReposWithoutWebhook returns every repo (all orgs) with no
+// provisioned webhook — rows created outside gitrepos.Register (TZF
+// baseline upsert, legacy git-config mirror), rows predating the webhook
+// milestone, and rows whose registration-time provisioning failed. The
+// webhook reconcile loop reprovisions them.
+func (s *Store) ListGitReposWithoutWebhook(ctx context.Context, q db.Querier) ([]*types.TenantGitRepo, error) {
+	rows, err := q.Query(ctx, `SELECT `+gitRepoCols+` FROM tenant_git_repos WHERE webhook_url IS NULL ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*types.TenantGitRepo
+	for rows.Next() {
+		r, err := scanGitRepo(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// FindGitRepoByRepo resolves a webhook delivery's repo slug to its registry
+// row, ACROSS orgs (the ingress authenticates via the row's webhook secret,
+// not a bearer token, so no org context exists yet). Rows with a
+// provisioned webhook sort first; duplicates (the same slug registered in
+// two orgs) break ties by creation order — a legacy safeguard only:
+// migration 0039's unique index plus the ErrRepoRegisteredElsewhere
+// rejection in gitrepos.Register make cross-org duplicates impossible for
+// new rows. Matching is case-insensitive:
+// git hosts treat owner/repo as case-insensitive, but deliveries preserve
+// creation case while registration stores the user-typed casing — an exact
+// match would 404 every delivery on a casing slip.
+func (s *Store) FindGitRepoByRepo(ctx context.Context, q db.Querier, repo string, provider types.GitRepoProvider) (*types.TenantGitRepo, error) {
+	r, err := scanGitRepo(q.QueryRow(ctx, `SELECT `+gitRepoCols+` FROM tenant_git_repos
+		WHERE lower(repo) = lower($1) AND provider = $2
+		ORDER BY (webhook_secret_enc IS NOT NULL) DESC, created_at LIMIT 1`, repo, provider))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrRepoNotFound
+	}
+	return r, err
+}
+
+// SetGitRepoWebhook persists the provider hook registration and the
+// envelope-encrypted per-repo webhook secret (migration 0038; ciphertext
+// only — the vault layer owns encrypt/decrypt).
+func (s *Store) SetGitRepoWebhook(ctx context.Context, q db.Querier, id string, secretEnc, dekEnc []byte, externalID, url string) error {
+	tag, err := q.Exec(ctx, `UPDATE tenant_git_repos
+		SET webhook_secret_enc = $2, webhook_dek_enc = $3, webhook_external_id = NULLIF($4, ''),
+		    webhook_url = NULLIF($5, ''), updated_at = now()
+		WHERE id = $1`, id, secretEnc, dekEnc, externalID, url)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrRepoNotFound
+	}
+	return nil
+}
+
+// GitRepoWebhookSecret loads the envelope-encrypted webhook secret for a
+// repo row. found=false means no hook is provisioned (the ingress 404s —
+// deliveries to an unprovisioned repo cannot be authenticated).
+func (s *Store) GitRepoWebhookSecret(ctx context.Context, q db.Querier, id string) (secretEnc, dekEnc []byte, found bool, err error) {
+	err = q.QueryRow(ctx, `SELECT webhook_secret_enc, webhook_dek_enc FROM tenant_git_repos WHERE id = $1`, id).
+		Scan(&secretEnc, &dekEnc)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil, false, ErrRepoNotFound
+	}
+	if err != nil {
+		return nil, nil, false, err
+	}
+	return secretEnc, dekEnc, secretEnc != nil, nil
+}
+
+// FindInstanceByPRURL returns the instance awaiting one pull request's
+// merge (PR-policy deploys defer ArgoCD registration until then).
+func (s *Store) FindInstanceByPRURL(ctx context.Context, q db.Querier, orgID, prURL string) (*types.ResourceInstance, error) {
+	it, err := scanInstance(q.QueryRow(ctx, `SELECT `+instanceCols+`
+		FROM resource_instances WHERE org_id = $1 AND pr_url = $2`, orgID, prURL))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrInstanceNotFound
+	}
+	return it, err
+}
+
+// MarkInstancePRMerged records the merge: the merge SHA becomes the
+// instance's commit and the pr_url is cleared so a redelivered webhook is
+// a no-op (idempotent finalization). applied=false means the row was
+// already finalized (or the PR was superseded by a newer one).
+func (s *Store) MarkInstancePRMerged(ctx context.Context, q db.Querier, orgID, id, mergeSHA string) (applied bool, err error) {
+	tag, err := q.Exec(ctx, `UPDATE resource_instances
+		SET commit_sha = $3, pr_url = '', updated_at = now()
+		WHERE org_id = $1 AND id = $2 AND pr_url <> ''`, orgID, id, mergeSHA)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// FindAddonByPRURL returns the managed addon awaiting one pull request's
+// merge (same deferred-registration rule as instances).
+func (s *Store) FindAddonByPRURL(ctx context.Context, q db.Querier, orgID, prURL string) (*types.ClusterAddon, error) {
+	a, err := scanClusterAddon(q.QueryRow(ctx, `SELECT `+clusterAddonCols+`
+		FROM cluster_addons WHERE org_id = $1 AND pr_url = $2`, orgID, prURL))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrAddonNotFound
+	}
+	return a, err
+}
+
+// MarkAddonPRMerged is the addon twin of MarkInstancePRMerged (idempotent
+// via the pr_url guard).
+func (s *Store) MarkAddonPRMerged(ctx context.Context, q db.Querier, orgID, id, mergeSHA string) (applied bool, err error) {
+	tag, err := q.Exec(ctx, `UPDATE cluster_addons
+		SET commit_sha = $3, pr_url = '', updated_at = now()
+		WHERE org_id = $1 AND id = $2 AND pr_url <> ''`, orgID, id, mergeSHA)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // BindClusterBaseline binds a cluster to a platform-scope repo of the same
 // org. Returns ErrRepoNotFound when the repo is missing, not platform-scope,
 // or belongs to another org.
@@ -792,15 +922,16 @@ func (s *Store) ListGitRepoAddons(ctx context.Context, q db.Querier, orgID, repo
 // Cluster addons (Feature C schema)
 
 const clusterAddonCols = `id, org_id, cluster_id, catalog_item, state, deploy_mode, repo_id, repo_path,
-	source, chart_version, values, argocd_app, health, sync, discovered_meta, created_at, updated_at`
+	source, chart_version, values, argocd_app, health, sync, discovered_meta,
+	commit_sha, pr_url, prune_enabled, namespace, cluster_selector, created_at, updated_at`
 
 func scanClusterAddon(row pgx.Row) (*types.ClusterAddon, error) {
 	var a types.ClusterAddon
 	var repoID *string
-	var source []byte
+	var source, selector []byte
 	err := row.Scan(&a.ID, &a.OrgID, &a.ClusterID, &a.CatalogItem, &a.State, &a.DeployMode,
 		&repoID, &a.RepoPath, &source, &a.ChartVersion, &a.Values, &a.ArgoCDApp, &a.Health, &a.Sync,
-		&a.DiscoveredMeta, &a.CreatedAt, &a.UpdatedAt)
+		&a.DiscoveredMeta, &a.CommitSHA, &a.PRURL, &a.PruneEnabled, &a.Namespace, &selector, &a.CreatedAt, &a.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -810,17 +941,24 @@ func scanClusterAddon(row pgx.Row) (*types.ClusterAddon, error) {
 	if err := json.Unmarshal(source, &a.Source); err != nil {
 		return nil, fmt.Errorf("inventory: addon %s source: %w", a.ID, err)
 	}
+	if len(selector) > 0 {
+		if err := json.Unmarshal(selector, &a.ClusterSelector); err != nil {
+			return nil, fmt.Errorf("inventory: addon %s cluster selector: %w", a.ID, err)
+		}
+	}
 	return &a, nil
 }
 
-// ListClusterAddons returns addons for one cluster, or the whole org when
-// clusterID is empty.
+// ListClusterAddons returns addons for one cluster — including fleet-wide
+// ('*') ApplicationSet rows, which potentially manage it — or the whole org
+// when clusterID is empty. Callers that need exact targeting re-evaluate
+// the fleet row's selector against the cluster's labels (addons.Service).
 func (s *Store) ListClusterAddons(ctx context.Context, q db.Querier, orgID, clusterID string) ([]*types.ClusterAddon, error) {
 	sql := `SELECT ` + clusterAddonCols + ` FROM cluster_addons WHERE org_id = $1`
 	args := []any{orgID}
 	if clusterID != "" {
 		args = append(args, clusterID)
-		sql += fmt.Sprintf(` AND cluster_id = $%d`, len(args))
+		sql += fmt.Sprintf(` AND (cluster_id = $%d OR cluster_id = '*')`, len(args))
 	}
 	sql += ` ORDER BY created_at`
 	rows, err := q.Query(ctx, sql, args...)
@@ -874,10 +1012,17 @@ func (s *Store) UpsertClusterAddon(ctx context.Context, q db.Querier, a *types.C
 	if a.RepoID != "" {
 		repoID = &a.RepoID
 	}
+	var selector []byte
+	if a.ClusterSelector != nil {
+		if selector, err = json.Marshal(a.ClusterSelector); err != nil {
+			return err
+		}
+	}
 	const sql = `INSERT INTO cluster_addons
 		(id, org_id, cluster_id, catalog_item, state, deploy_mode, repo_id, repo_path,
-		 source, chart_version, values, argocd_app, health, sync, discovered_meta)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+		 source, chart_version, values, argocd_app, health, sync, discovered_meta,
+		 commit_sha, pr_url, prune_enabled, namespace, cluster_selector)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
 		ON CONFLICT (cluster_id, catalog_item) DO UPDATE SET
 		  state = CASE WHEN cluster_addons.state = 'managed' THEN cluster_addons.state ELSE EXCLUDED.state END,
 		  deploy_mode = EXCLUDED.deploy_mode,
@@ -890,9 +1035,169 @@ func (s *Store) UpsertClusterAddon(ctx context.Context, q db.Querier, a *types.C
 		  health = CASE WHEN EXCLUDED.health = '' THEN cluster_addons.health ELSE EXCLUDED.health END,
 		  sync = CASE WHEN EXCLUDED.sync = '' THEN cluster_addons.sync ELSE EXCLUDED.sync END,
 		  discovered_meta = COALESCE(EXCLUDED.discovered_meta, cluster_addons.discovered_meta),
+		  commit_sha = CASE WHEN EXCLUDED.commit_sha = '' THEN cluster_addons.commit_sha ELSE EXCLUDED.commit_sha END,
+		  pr_url = CASE WHEN EXCLUDED.pr_url = '' THEN cluster_addons.pr_url ELSE EXCLUDED.pr_url END,
+		  prune_enabled = cluster_addons.prune_enabled OR EXCLUDED.prune_enabled,
+		  namespace = CASE WHEN EXCLUDED.namespace = '' THEN cluster_addons.namespace ELSE EXCLUDED.namespace END,
+		  cluster_selector = COALESCE(EXCLUDED.cluster_selector, cluster_addons.cluster_selector),
 		  updated_at = now()`
 	_, err = q.Exec(ctx, sql, a.ID, a.OrgID, a.ClusterID, a.CatalogItem, a.State, a.DeployMode,
-		repoID, a.RepoPath, source, a.ChartVersion, values, a.ArgoCDApp, a.Health, a.Sync, a.DiscoveredMeta)
+		repoID, a.RepoPath, source, a.ChartVersion, values, a.ArgoCDApp, a.Health, a.Sync, a.DiscoveredMeta,
+		a.CommitSHA, a.PRURL, a.PruneEnabled, a.Namespace, selector)
+	return err
+}
+
+// GetClusterAddonByID returns one addon by primary key, scoped to the org.
+func (s *Store) GetClusterAddonByID(ctx context.Context, q db.Querier, orgID, id string) (*types.ClusterAddon, error) {
+	a, err := scanClusterAddon(q.QueryRow(ctx, `SELECT `+clusterAddonCols+`
+		FROM cluster_addons WHERE org_id = $1 AND id = $2`, orgID, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrAddonNotFound
+	}
+	return a, err
+}
+
+// UpsertDiscoveredAddon is the scanner-ingest variant: it inserts new rows
+// as state=discovered and refreshes discovered_meta (+ the detected version)
+// on existing DISCOVERED rows only. Managed/adopting/update_failed rows are
+// owned by the adopt/update flow — discovery never overwrites them
+// (plan §6: "never overwriting managed rows").
+func (s *Store) UpsertDiscoveredAddon(ctx context.Context, q db.Querier, a *types.ClusterAddon) error {
+	if a.ID == "" {
+		a.ID = newULID()
+	}
+	source, err := json.Marshal(a.Source)
+	if err != nil {
+		return err
+	}
+	const sql = `INSERT INTO cluster_addons
+		(id, org_id, cluster_id, catalog_item, state, deploy_mode, source, chart_version, discovered_meta)
+		VALUES ($1,$2,$3,$4,'discovered','application',$5,$6,$7)
+		ON CONFLICT (cluster_id, catalog_item) DO UPDATE SET
+		  discovered_meta = EXCLUDED.discovered_meta,
+		  chart_version = CASE WHEN EXCLUDED.chart_version = '' THEN cluster_addons.chart_version ELSE EXCLUDED.chart_version END,
+		  updated_at = now()
+		WHERE cluster_addons.state = 'discovered'`
+	_, err = q.Exec(ctx, sql, a.ID, a.OrgID, a.ClusterID, a.CatalogItem, source, a.ChartVersion, a.DiscoveredMeta)
+	return err
+}
+
+// SetClusterAddonState forces the row's lifecycle state (the update_failed
+// flip must bypass UpsertClusterAddon's never-downgrade-managed guard).
+func (s *Store) SetClusterAddonState(ctx context.Context, q db.Querier, orgID, id string, state types.AddonState) error {
+	tag, err := q.Exec(ctx, `UPDATE cluster_addons SET state = $3, updated_at = now()
+		WHERE org_id = $1 AND id = $2`, orgID, id, state)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrAddonNotFound
+	}
+	return nil
+}
+
+// ApplyAddonAppStatus folds an ArgoCD Application(/ApplicationSet) status
+// into the addon row's health/sync columns.
+func (s *Store) ApplyAddonAppStatus(ctx context.Context, q db.Querier, id, health, syncState string) error {
+	tag, err := q.Exec(ctx, `UPDATE cluster_addons SET health = $2, sync = $3, updated_at = now()
+		WHERE id = $1`, id, health, syncState)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrAddonNotFound
+	}
+	return nil
+}
+
+// BaselineRepoSelector resolves the repo selector an addon deploy should
+// default to for one cluster: the cluster's bound baseline row, else the
+// org's default repo row. "" means no registry row exists yet (callers map
+// that to the no-git-config conflict, mirroring the orchestrator).
+func (s *Store) BaselineRepoSelector(ctx context.Context, q db.Querier, orgID, clusterID string) (string, error) {
+	var id *string
+	err := q.QueryRow(ctx, `SELECT COALESCE(
+		(SELECT baseline_repo_id FROM clusters WHERE org_id = $1 AND id = $2),
+		(SELECT id FROM tenant_git_repos WHERE org_id = $1 AND is_default))`, orgID, clusterID).Scan(&id)
+	if err != nil {
+		return "", err
+	}
+	if id == nil {
+		return "", nil
+	}
+	return *id, nil
+}
+
+// AbsorbDiscoveredAddons deletes one catalog item's per-cluster
+// state=discovered rows (a fleet-wide adoption supersedes them) and
+// returns the absorbed rows' sightings (discovered_meta), so the adopt
+// flow can merge the scan evidence into the fleet row.
+func (s *Store) AbsorbDiscoveredAddons(ctx context.Context, q db.Querier, orgID, catalogItem string) ([]json.RawMessage, error) {
+	rows, err := q.Query(ctx, `DELETE FROM cluster_addons
+		WHERE org_id = $1 AND catalog_item = $2 AND state = 'discovered' AND cluster_id <> '*'
+		RETURNING discovered_meta`, orgID, catalogItem)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []json.RawMessage
+	for rows.Next() {
+		var meta []byte
+		if err := rows.Scan(&meta); err != nil {
+			return nil, err
+		}
+		if len(meta) > 0 {
+			out = append(out, meta)
+		}
+	}
+	return out, rows.Err()
+}
+
+// ClaimClusterAddonForAdoption atomically claims the (cluster, catalog
+// item) slot for an adopt (concurrency: the check-then-act read in Adopt
+// is not sufficient on its own). One statement covers all cases:
+//   - no row: inserts a state=adopting placeholder with the given ID;
+//   - state=discovered: flips to adopting, KEEPING the row ID (status
+//     folding and UI deep links stay stable across adoption);
+//   - state=adopting older than 10 min: reclaimed (a crashed adopt must
+//     not wedge the slot forever);
+//   - managed / update_failed / fresh adopting: ok=false, the caller maps
+//     that to ErrAlreadyManaged.
+//
+// inserted tells the release path whether the row pre-existed.
+func (s *Store) ClaimClusterAddonForAdoption(ctx context.Context, q db.Querier, a *types.ClusterAddon) (id string, meta json.RawMessage, inserted, ok bool, err error) {
+	source, err := json.Marshal(a.Source)
+	if err != nil {
+		return "", nil, false, false, err
+	}
+	const sql = `INSERT INTO cluster_addons (id, org_id, cluster_id, catalog_item, state, deploy_mode, source)
+		VALUES ($1,$2,$3,$4,'adopting',$5,$6)
+		ON CONFLICT (cluster_id, catalog_item) DO UPDATE SET state = 'adopting', updated_at = now()
+		WHERE cluster_addons.state = 'discovered'
+		   OR (cluster_addons.state = 'adopting' AND cluster_addons.updated_at < now() - interval '10 minutes')
+		RETURNING id, discovered_meta, (xmax = 0)`
+	err = q.QueryRow(ctx, sql, a.ID, a.OrgID, a.ClusterID, a.CatalogItem, a.DeployMode, source).
+		Scan(&id, &meta, &inserted)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil, false, false, nil
+	}
+	if err != nil {
+		return "", nil, false, false, err
+	}
+	return id, meta, inserted, true, nil
+}
+
+// ReleaseClusterAddonClaim rolls back a failed adopt's claim: inserted
+// placeholder rows are deleted; claimed discovered rows flip back to
+// discovered. Best-effort — a stranded adopting row becomes reclaimable
+// after the 10-minute staleness window.
+func (s *Store) ReleaseClusterAddonClaim(ctx context.Context, q db.Querier, orgID, id string, inserted bool) error {
+	if inserted {
+		_, err := q.Exec(ctx, `DELETE FROM cluster_addons WHERE org_id = $1 AND id = $2 AND state = 'adopting'`, orgID, id)
+		return err
+	}
+	_, err := q.Exec(ctx, `UPDATE cluster_addons SET state = 'discovered', updated_at = now()
+		WHERE org_id = $1 AND id = $2 AND state = 'adopting'`, orgID, id)
 	return err
 }
 

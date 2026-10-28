@@ -11,10 +11,14 @@ import (
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
-type fakeInventorySink struct{ calls int }
+type fakeInventorySink struct {
+	calls int
+	org   string
+}
 
-func (f *fakeInventorySink) ApplyStatus(context.Context, string, inventory.StatusUpdate) (bool, error) {
+func (f *fakeInventorySink) ApplyStatus(_ context.Context, orgID, _ string, _ inventory.StatusUpdate) (bool, error) {
 	f.calls++
+	f.org = orgID
 	return true, nil
 }
 
@@ -44,7 +48,7 @@ func TestStatusSinkRouterRouting(t *testing.T) {
 		"TenantNamespace.platform.inari.io",
 	}
 	for _, kind := range platformKinds {
-		if _, err := r.ApplyStatus(ctx, "cluster-1", agentgateway.StatusUpdate{
+		if _, err := r.ApplyStatus(ctx, "org:1", "cluster-1", agentgateway.StatusUpdate{
 			Resource:   types.ResourceRef{Kind: kind, Name: "acme"},
 			Health:     "healthy",
 			Message:    "ok",
@@ -64,8 +68,9 @@ func TestStatusSinkRouterRouting(t *testing.T) {
 		t.Errorf("platform update = %+v, want resource/health/message/observedAt forwarded", plat.got)
 	}
 
-	// Inventory kinds still route to the inventory sink only.
-	if _, err := r.ApplyStatus(ctx, "cluster-1", agentgateway.StatusUpdate{
+	// Inventory kinds still route to the inventory sink only, with the
+	// session org threaded through (tenant scoping for the status fold).
+	if _, err := r.ApplyStatus(ctx, "org:1", "cluster-1", agentgateway.StatusUpdate{
 		Resource: types.ResourceRef{Kind: "Deployment", Name: "web", Namespace: "default"},
 		Health:   "degraded",
 	}); err != nil {
@@ -73,6 +78,9 @@ func TestStatusSinkRouterRouting(t *testing.T) {
 	}
 	if inv.calls != 1 {
 		t.Errorf("inventory sink calls = %d, want 1", inv.calls)
+	}
+	if inv.org != "org:1" {
+		t.Errorf("inventory sink org = %q, want org:1", inv.org)
 	}
 	if plat.calls != len(platformKinds) {
 		t.Errorf("platform sink calls = %d, want still %d", plat.calls, len(platformKinds))

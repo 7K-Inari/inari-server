@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -193,13 +194,17 @@ func (p RenderParams) project() string {
 
 // appName computes the Application/ApplicationSet name. In applicationset
 // mode the ApplicationSet itself is inari-addonset-<id>; empty prefix
-// yields ID verbatim (orchestrator back-compat wrappers).
+// yields ID verbatim (orchestrator back-compat wrappers). The ID portion
+// is lowercased: ULIDs are uppercase Crockford base32, which is not a
+// valid RFC 1123 name segment on a real apiserver; the status fold-back
+// parsing normalizes back to the canonical uppercase form.
 func (p RenderParams) appName() string {
+	id := strings.ToLower(p.ID)
 	if p.DeployMode == types.AddonDeployModeApplicationSet {
-		return PrefixAddonSet + "-" + p.ID
+		return PrefixAddonSet + "-" + id
 	}
 	if p.AppPrefix == "" {
-		return p.ID
+		return id
 	}
-	return p.AppPrefix + "-" + p.ID
+	return p.AppPrefix + "-" + id
 }

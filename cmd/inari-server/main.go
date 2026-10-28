@@ -20,6 +20,7 @@ import (
 	"github.com/open-feature/go-sdk-contrib/providers/ofrep"
 	"github.com/open-feature/go-sdk/openfeature"
 
+	"github.com/7K-Inari/inari-server/internal/addons"
 	"github.com/7K-Inari/inari-server/internal/agentgateway"
 	"github.com/7K-Inari/inari-server/internal/approvals"
 	"github.com/7K-Inari/inari-server/internal/audit"
@@ -38,6 +39,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/featureflags"
 	"github.com/7K-Inari/inari-server/internal/fleetmanager"
 	"github.com/7K-Inari/inari-server/internal/gitrepos"
+	"github.com/7K-Inari/inari-server/internal/gitwebhook"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/kubeproxy"
@@ -75,7 +77,7 @@ func main() {
 
 // Narrow seams so the router is unit-testable without a database.
 type inventoryStatusSink interface {
-	ApplyStatus(ctx context.Context, clusterID string, upd inventory.StatusUpdate) (bool, error)
+	ApplyStatus(ctx context.Context, orgID, clusterID string, upd inventory.StatusUpdate) (bool, error)
 }
 
 type platformStatusSink interface {
@@ -90,13 +92,13 @@ type statusSinkRouter struct {
 	plat platformStatusSink
 }
 
-func (r statusSinkRouter) ApplyStatus(ctx context.Context, clusterID string, upd agentgateway.StatusUpdate) (bool, error) {
+func (r statusSinkRouter) ApplyStatus(ctx context.Context, orgID, clusterID string, upd agentgateway.StatusUpdate) (bool, error) {
 	if platformresources.IsPlatformKind(upd.Resource.Kind) {
 		return r.plat.ApplyStatus(ctx, clusterID, platformresources.StatusUpdate{
 			Resource: upd.Resource, Health: upd.Health, Message: upd.Message, ObservedAt: upd.ObservedAt,
 		})
 	}
-	return r.inv.ApplyStatus(ctx, clusterID, inventory.StatusUpdate{
+	return r.inv.ApplyStatus(ctx, orgID, clusterID, inventory.StatusUpdate{
 		Resource: upd.Resource, Health: upd.Health, Sync: upd.Sync, Message: upd.Message,
 	})
 }
@@ -195,6 +197,14 @@ type instanceGetterAdapter struct {
 
 func (a instanceGetterAdapter) GetInstance(ctx context.Context, id string) (*types.ResourceInstance, error) {
 	return a.store.Get(ctx, a.db.Pool, id)
+}
+
+// outboxAppender binds audit.AppendOutbox to the gitwebhook.OutboxAppender
+// seam (the ingress appends deliveries outside an explicit TX).
+type outboxAppender struct{}
+
+func (outboxAppender) AppendOutbox(ctx context.Context, q db.Querier, orgID, eventType string, payload any) error {
+	return audit.AppendOutbox(ctx, q, orgID, eventType, payload)
 }
 
 // baselineReposAdapter registers the zone's state repo in the
@@ -814,9 +824,46 @@ func run() error {
 	// resolver (per-repo BYO → org-wide app → platform app precedence).
 	repoResolver := gitprovider.NewRepoResolver(repoStoreAdapter{invStore, database}, orgGitConfigsAdapter{invStore, database}, git)
 	gitReposSvc := gitrepos.NewService(invStore, repoResolver, gateway.Queue(), auditStore, database)
+
+	// M4 git webhook ingress (parent plan §9 risk #1): per-repo hook
+	// secrets live in the credential vault (0028 envelope); registration
+	// provisions the provider hook (EnsureWebhook) when a public base URL
+	// is configured; signed deliveries are verified, normalized, and
+	// appended to the outbox. The ingress works without the base URL
+	// (hooks may predate it); provisioning does not. KEK unset disables
+	// both, matching the other vault consumers.
+	var webhookIngress *gitwebhook.Ingress
+	if kek, err := cryptoenvelope.LoadKEK(); err != nil {
+		log.Warn("credential KEK unset: git webhook ingress disabled", "reason", err)
+	} else {
+		secretStore, err := gitwebhook.NewSecretStore(kek, invStore)
+		if err != nil {
+			return err
+		}
+		if cfg.WebhookBaseURL != "" {
+			gitReposSvc.WithWebhookProvisioner(gitwebhook.NewProvisioner(secretStore, cfg.WebhookBaseURL))
+			// Repos created outside gitrepos.Register (TZF baseline upsert,
+			// legacy git-config mirror), pre-webhook rows, and failed
+			// registration-time provisions get their hooks from the
+			// leader-leased sweeper — without one, PR-policy workloads on
+			// those repos could never be finalized post-merge.
+			go leaderlease.Run(ctx, leaser, "git-webhook-reconcile", func(lctx context.Context) {
+				gitReposSvc.RunWebhookReconcileLoop(lctx, cfg.WebhookReconcileInterval)
+			}, log)
+		} else {
+			log.Warn("INARI_WEBHOOK_BASE_URL unset: webhook hook provisioning disabled (ingress still active)")
+		}
+		webhookIngress = gitwebhook.NewIngress(database.Pool, invStore, secretStore, outboxAppender{})
+	}
 	// Writers resolve their target repo through the registry (Feature A):
 	// deploy/update/delete honor the repoId selector / recorded repo.
 	orchestratorSvc.WithRepoResolver(repoResolver)
+
+	// First-class addons (Feature C): discover → adopt → update over the
+	// source-agnostic renderer, committed per repo policy and registered
+	// with the tenant ArgoCD via the agent queue.
+	addonsSvc := addons.NewService(database, invStore, catalogSvc, registry, repoResolver, gateway.Queue(), auditStore)
+	gateway.SetAddonDiscoverySink(addonsSvc)
 
 	cloudAccountsSvc := cloudaccounts.NewService(database, cloudaccounts.NewStore(), auditStore, cloudaccounts.NewSTSValidator())
 
@@ -978,6 +1025,14 @@ func run() error {
 			audit.Named("tenant-deletion-resume", tenancy.NewDeletionResumeHandler(svc, tenantDeleter, approvalsSvc, log)),
 			audit.Named("fleet-resume", fleetmanager.NewResumeHandler(fleetSvc, approvalsSvc, log)),
 			audit.Named("scaffold-resume", scaffold.NewResumeHandler(scaffoldSvc, approvalsSvc, log)),
+			// Feature C decision 8: cluster register/delete events
+			// re-render managed ApplicationSet addons whose server-side
+			// selector membership changed.
+			audit.Named("addons-fleet-reconcile", addons.NewFleetReconciler(addonsSvc, log)),
+			// M4: normalized git webhook events (git.webhook.pr_merged) —
+			// completes the ArgoCD registration that pull_request-policy
+			// deploys/addons deferred until the PR merged.
+			audit.Named("git-webhook-finalizer", gitwebhook.NewMergeFinalizer(orchestratorSvc, addonsSvc, log)),
 			// RBAC mapping materialization (plan §7.1): renders the tenant's
 			// anchor ClusterRoles + Keycloak-group bindings into the tenant
 			// state repo on rbac.mappings.updated / tenant & team lifecycle
@@ -1020,6 +1075,8 @@ func run() error {
 		PlatformResources: platformResourcesSvc,
 		Orchestrator:      orchestratorSvc,
 		GitRepos:          gitReposSvc,
+		GitWebhook:        webhookIngress,
+		Addons:            addonsSvc,
 		CloudAccounts:     cloudAccountsSvc,
 		Notifications:     notificationsSvc,
 		Policies:          policySvc,

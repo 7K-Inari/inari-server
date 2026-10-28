@@ -1,0 +1,18 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+    name: inari-my-db
+    namespace: argocd
+spec:
+    destination:
+        namespace: apps
+        server: https://kubernetes.default.svc
+    project: default
+    source:
+        path: clusters/c1/postgres-aws/my-db
+        repoURL: https://github.com/acme/acme-inari-state
+        targetRevision: main
+    syncPolicy:
+        automated:
+            prune: true
+            selfHeal: true

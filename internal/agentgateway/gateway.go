@@ -108,6 +108,10 @@ type Gateway struct {
 	// platform records per-cluster keycloak-client desired state (M7.W2);
 	// nil means platform-resource tracking is disabled.
 	platform PlatformResourceEnsurer
+	// baselineRepos resolves a cluster's bound baseline repo from the
+	// tenant_git_repos registry (Feature A); nil means the field is
+	// omitted from registration responses.
+	baselineRepos BaselineRepoLookup
 	// sessions fences duplicate agent streams: at most one live session per
 	// cluster identity (last-writer-wins eviction, see session_registry.go).
 	sessionsMu sync.Mutex
@@ -115,6 +119,20 @@ type Gateway struct {
 	// vault mints/redeems per-user credential refs for InvokeAction (W3);
 	// nil means raw user tokens on the extension hop fail closed.
 	vault *CredentialVault
+}
+
+// BaselineRepoLookup resolves a cluster's bound baseline repo from the
+// tenant_git_repos registry (Feature A).
+type BaselineRepoLookup interface {
+	// BaselineRepo returns the repo slug ("owner/name") for the cluster's
+	// bound baseline, or empty when unbound.
+	BaselineRepo(ctx context.Context, clusterID string) (string, error)
+}
+
+// WithBaselineRepoLookup wires the baseline repo registry lookup (nil-safe).
+func (g *Gateway) WithBaselineRepoLookup(l BaselineRepoLookup) *Gateway {
+	g.baselineRepos = l
+	return g
 }
 
 // WithCredentialVault wires the W3 credential vault (nil-safe).

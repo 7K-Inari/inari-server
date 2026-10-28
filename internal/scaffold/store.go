@@ -189,7 +189,7 @@ func (s *Store) ListSteps(ctx context.Context, q db.Querier, runID string) ([]ty
 	const sql = `SELECT run_id, name, state, attempts, max_attempts, error, result, updated_at
 	             FROM scaffold_run_steps WHERE run_id = $1
 	             ORDER BY array_position($2::text[], name)`
-	rows, err := q.Query(ctx, sql, runID, stepNames)
+	rows, err := q.Query(ctx, sql, runID, allStepNames)
 	if err != nil {
 		return nil, err
 	}

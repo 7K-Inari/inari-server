@@ -192,11 +192,15 @@ func (s *Service) driveRun(ctx context.Context, run *types.ScaffoldRun) error {
 	}
 	// Two passes (W6): rendering first, then the approval hold, then the
 	// remaining phases — the gate sits between rendering and the external
-	// side effects (repo/pipeline/catalog/rbac), never mid-phase.
+	// side effects (repo/pipeline/catalog/rbac), never mid-phase. The
+	// pipeline order is the template kind's (Feature B), falling back to
+	// the run's seeded step rows when the template no longer resolves so
+	// in-flight runs never gain/lose steps mid-flight.
+	order := s.stepOrderForRun(ctx, run, steps)
 	var complete bool
 	var runErr error
 	if st := stepMap["rendering"]; st == nil || st.State != types.ScaffoldStepCompleted {
-		_, runErr = RunSteps(ctx, s.execEnv(), rc, stepNames[:1], stepFuncs, onUpdate, isCancelled)
+		_, runErr = RunSteps(ctx, s.execEnv(), rc, order[:1], stepFuncs, onUpdate, isCancelled)
 	}
 	gated := false
 	if runErr == nil && !isCancelled() {
@@ -207,13 +211,13 @@ func (s *Service) driveRun(ctx context.Context, run *types.ScaffoldRun) error {
 		}
 	}
 	if runErr == nil && !gated {
-		complete, runErr = RunSteps(ctx, s.execEnv(), rc, stepNames[1:], stepFuncs, onUpdate, isCancelled)
+		complete, runErr = RunSteps(ctx, s.execEnv(), rc, order[1:], stepFuncs, onUpdate, isCancelled)
 	}
 	switch {
 	case errors.Is(runErr, ErrCancelled):
 		return s.finalize(ctx, run, types.ScaffoldPhaseFailed, "cancelled", types.EventScaffoldRunFailed, actor)
 	case runErr != nil:
-		if st := failedStep(stepMap, stepNames); st != nil && st.Attempts > maxAttemptsOf(st, s.cfg.MaxAttempts) {
+		if st := failedStep(stepMap, order); st != nil && st.Attempts > maxAttemptsOf(st, s.cfg.MaxAttempts) {
 			return s.finalize(ctx, run, types.ScaffoldPhaseFailed,
 				fmt.Sprintf("manual_intervention: step %s exhausted %d attempts: %s", st.Name, st.MaxAttempts, st.Error),
 				types.EventScaffoldRunFailed, actor)
@@ -336,6 +340,20 @@ func outputValue(raw json.RawMessage, key string) string {
 	}
 	s, _ := outputs[key].(string)
 	return s
+}
+
+// stepOrderForRun resolves the run's pipeline order: the template kind's
+// step list when the catalog version resolves (Feature B), else the run's
+// seeded step rows in ListSteps order (legacy/in-flight safety).
+func (s *Service) stepOrderForRun(ctx context.Context, run *types.ScaffoldRun, steps []types.ScaffoldRunStep) []string {
+	if ver, err := s.catalog.GetVersion(ctx, run.TemplateItemID, run.TemplateVersion); err == nil {
+		return stepOrderForKind(payloadKind(ver.Payload))
+	}
+	order := make([]string, 0, len(steps))
+	for _, st := range steps {
+		order = append(order, st.Name)
+	}
+	return order
 }
 
 // nextPhaseForRun computes the phase a resumed run re-enters: the first

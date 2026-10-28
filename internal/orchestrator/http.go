@@ -29,11 +29,36 @@ type TenantResolver interface {
 	GetTenant(ctx context.Context, slug string) (*types.Organization, error)
 }
 
+// TeamLister resolves an org's teams for the repo-write enforcement check
+// (tenancy.Service seam).
+type TeamLister interface {
+	ListTeams(ctx context.Context, orgID string) ([]types.Team, error)
+}
+
+// RepoGetter resolves one registry repo row for the enforcement check
+// (inventory.Store seam via adapter).
+type RepoGetter interface {
+	GetGitRepo(ctx context.Context, orgID, id string) (*types.TenantGitRepo, error)
+}
+
+// InstanceGetter loads an instance for the recorded-repo enforcement check
+// on mutations (inventory.Store seam via adapter).
+type InstanceGetter interface {
+	GetInstance(ctx context.Context, id string) (*types.ResourceInstance, error)
+}
+
 // Handler exposes the orchestrator REST surface.
 type Handler struct {
 	svc     *Service
 	tenants TenantResolver
 	authz   authz.Authorizer
+	// teams/repos enable the team-repo write enforcement (Feature A,
+	// decision 5b). nil teams/repos = enforcement disabled (legacy wiring,
+	// single-repo orgs behave exactly as before).
+	teams TeamLister
+	repos RepoGetter
+	// instances feeds the recorded-repo enforcement on mutations.
+	instances InstanceGetter
 	// allowedAPIBases allowlists tenant BYO GitHub Enterprise apiBase hosts
 	// (empty: any https host).
 	allowedAPIBases []string
@@ -41,6 +66,12 @@ type Handler struct {
 
 func NewHandler(svc *Service, tenants TenantResolver, az authz.Authorizer) *Handler {
 	return &Handler{svc: svc, tenants: tenants, authz: az}
+}
+
+// WithRepoWriteEnforcement wires the team-repo write check (decision 5b).
+func (h *Handler) WithRepoWriteEnforcement(teams TeamLister, repos RepoGetter, instances InstanceGetter) *Handler {
+	h.teams, h.repos, h.instances = teams, repos, instances
+	return h
 }
 
 // WithAllowedAPIBases pins the GHE hosts tenants may point BYO apps at.
@@ -141,17 +172,79 @@ func (h *Handler) authorizeOrg(ctx context.Context, slug, relation string) (*typ
 	return org, id, nil
 }
 
+// enforceRepoWrite implements the team-repo write check (Feature A,
+// decision 5b): platform repos are writable by any org member with
+// deployments_create (already checked); team repos require settings-write
+// (platform team / org admins) or membership in the owning team. An empty
+// repoID (org default) skips the check — identical to pre-Feature-A
+// behavior. Unknown rows read as 404.
+func (h *Handler) enforceRepoWrite(ctx context.Context, id *authn.Identity, orgID, repoID string) error {
+	if repoID == "" || h.teams == nil || h.repos == nil {
+		return nil
+	}
+	row, err := h.repos.GetGitRepo(ctx, orgID, repoID)
+	if errors.Is(err, inventory.ErrRepoNotFound) {
+		return huma.Error404NotFound("git repo not found")
+	}
+	if err != nil {
+		return err
+	}
+	if row.Scope == types.GitRepoScopePlatform {
+		return nil
+	}
+	ok, err := h.authz.Check(ctx, authz.UserObject(id.Subject), authz.RelationTenantSettingsWrite, authz.OrgObject(orgID))
+	if err != nil {
+		return err
+	}
+	if ok {
+		return nil
+	}
+	teams, err := h.teams.ListTeams(ctx, orgID)
+	if err != nil {
+		return err
+	}
+	for _, t := range authn.CallerTeamIDs(id, teams) {
+		if t == row.TeamID {
+			return nil
+		}
+	}
+	return huma.Error403Forbidden("not a member of the team that owns this repo")
+}
+
+// enforceRecordedRepoWrite runs the repo-write check against the repo the
+// instance was recorded against (mutations: upgrade/rollback/update/delete).
+// Unknown instances defer to the service's own 404.
+func (h *Handler) enforceRecordedRepoWrite(ctx context.Context, id *authn.Identity, orgID, instanceID string) error {
+	if h.instances == nil {
+		return nil
+	}
+	inst, err := h.instances.GetInstance(ctx, instanceID)
+	if errors.Is(err, inventory.ErrInstanceNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if inst.OrgID != orgID {
+		return nil
+	}
+	return h.enforceRepoWrite(ctx, id, orgID, inst.RepoID)
+}
+
 type deployInput struct {
 	Org  string `path:"org"`
 	Body struct {
-		ItemID    string          `json:"itemId" minLength:"1"`
-		ClusterID string          `json:"clusterId" minLength:"1"`
-		Version   string          `json:"version,omitempty"`
-		Channel   string          `json:"channel,omitempty"`
-		Name      string          `json:"name,omitempty" pattern:"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" maxLength:"63" doc:"Instance name (DNS-1123 label); becomes the instance ID and repo path segment"`
-		Namespace string          `json:"namespace,omitempty" pattern:"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" maxLength:"63"`
-		OwnerTeam string          `json:"ownerTeam,omitempty"`
-		Spec      json.RawMessage `json:"spec"`
+		ItemID    string `json:"itemId" minLength:"1"`
+		ClusterID string `json:"clusterId" minLength:"1"`
+		Version   string `json:"version,omitempty"`
+		Channel   string `json:"channel,omitempty"`
+		Name      string `json:"name,omitempty" pattern:"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" maxLength:"63" doc:"Instance name (DNS-1123 label); becomes the instance ID and repo path segment"`
+		Namespace string `json:"namespace,omitempty" pattern:"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" maxLength:"63"`
+		OwnerTeam string `json:"ownerTeam,omitempty"`
+		// RepoID selects the GitOps state repo (tenant_git_repos row id);
+		// empty = the org's default repo.
+		RepoID string          `json:"repoId,omitempty"`
+		Spec   json.RawMessage `json:"spec"`
 	}
 }
 
@@ -166,11 +259,14 @@ func (h *Handler) deploy(ctx context.Context, in *deployInput) (*deployOutput, e
 	if err != nil {
 		return nil, err
 	}
+	if err := h.enforceRepoWrite(ctx, id, org.ID, in.Body.RepoID); err != nil {
+		return nil, err
+	}
 	res, err := h.svc.Deploy(ctx, DeployRequest{
 		OrgID: org.ID, ClusterID: in.Body.ClusterID, ItemID: in.Body.ItemID,
 		Version: in.Body.Version, Channel: in.Body.Channel, Name: in.Body.Name,
 		Namespace: in.Body.Namespace, OwnerTeam: in.Body.OwnerTeam,
-		Spec: in.Body.Spec, Requester: "user:" + id.Subject,
+		Spec: in.Body.Spec, Requester: "user:" + id.Subject, RepoID: in.Body.RepoID,
 	})
 	var pve *PolicyViolationError
 	if errors.As(err, &pve) {
@@ -186,6 +282,12 @@ func (h *Handler) deploy(ctx context.Context, in *deployInput) (*deployOutput, e
 	}
 	if errors.Is(err, ErrNoGitConfig) {
 		return nil, huma.Error409Conflict(err.Error())
+	}
+	// The repo can vanish between the enforcement check and resolution
+	// (TOCTOU), or the check can be unwired (export-openapi): read the
+	// store's sentinel as a 404, never a bare 500.
+	if errors.Is(err, inventory.ErrRepoNotFound) {
+		return nil, huma.Error404NotFound("git repo not found")
 	}
 	if errors.Is(err, ErrClusterNotActive) {
 		return nil, huma.Error409Conflict(err.Error())
@@ -215,6 +317,9 @@ type upgradeInput struct {
 	ID   string `path:"id"`
 	Body struct {
 		ToVersion string `json:"toVersion" minLength:"1"`
+		// RepoID, when set, must equal the instance's recorded repo (422
+		// otherwise); empty = use the recorded repo.
+		RepoID string `json:"repoId,omitempty"`
 	}
 }
 
@@ -223,10 +328,16 @@ func (h *Handler) upgrade(ctx context.Context, in *upgradeInput) (*deployOutput,
 	if err != nil {
 		return nil, err
 	}
-	res, err := h.svc.Upgrade(ctx, org.ID, in.ID, in.Body.ToVersion, "user:"+id.Subject)
+	if err := h.enforceRecordedRepoWrite(ctx, id, org.ID, in.ID); err != nil {
+		return nil, err
+	}
+	res, err := h.svc.Upgrade(ctx, org.ID, in.ID, in.Body.ToVersion, in.Body.RepoID, "user:"+id.Subject)
 	var pve *PolicyViolationError
 	if errors.As(err, &pve) {
 		return nil, huma.Error422UnprocessableEntity(pve.Error())
+	}
+	if errors.Is(err, ErrRepoMismatch) {
+		return nil, huma.Error422UnprocessableEntity(err.Error())
 	}
 	if errors.Is(err, inventory.ErrInstanceNotFound) {
 		return nil, huma.Error404NotFound("instance not found")
@@ -264,8 +375,16 @@ func instanceMutationError(err error) error {
 	if errors.Is(err, ErrNoGitConfig) {
 		return huma.Error409Conflict(err.Error())
 	}
+	// The recorded repo can vanish mid-request (unregister racing a
+	// mutation): read the store's sentinel as a 404, never a bare 500.
+	if errors.Is(err, inventory.ErrRepoNotFound) {
+		return huma.Error404NotFound("git repo not found")
+	}
 	if errors.Is(err, ErrSameVersion) {
 		return huma.Error409Conflict(err.Error())
+	}
+	if errors.Is(err, ErrRepoMismatch) {
+		return huma.Error422UnprocessableEntity(err.Error())
 	}
 	if errors.Is(err, clusterregistry.ErrClusterNotFound) || errors.Is(err, ErrClusterMismatch) {
 		return huma.Error404NotFound("cluster not found")
@@ -284,6 +403,9 @@ type updateInstanceInput struct {
 	ID   string `path:"id"`
 	Body struct {
 		Spec json.RawMessage `json:"spec"`
+		// RepoID, when set, must equal the instance's recorded repo (422
+		// otherwise); empty = use the recorded repo.
+		RepoID string `json:"repoId,omitempty"`
 	}
 }
 
@@ -295,7 +417,10 @@ func (h *Handler) updateInstance(ctx context.Context, in *updateInstanceInput) (
 	if len(in.Body.Spec) == 0 {
 		return nil, huma.Error422UnprocessableEntity("spec is required")
 	}
-	res, err := h.svc.UpdateSpec(ctx, org.ID, in.ID, in.Body.Spec, "user:"+id.Subject)
+	if err := h.enforceRecordedRepoWrite(ctx, id, org.ID, in.ID); err != nil {
+		return nil, err
+	}
+	res, err := h.svc.UpdateSpec(ctx, org.ID, in.ID, in.Body.Spec, in.Body.RepoID, "user:"+id.Subject)
 	if err != nil {
 		return nil, instanceMutationError(err)
 	}
@@ -314,6 +439,9 @@ func (h *Handler) deleteInstance(ctx context.Context, in *deleteInstanceInput) (
 	if err != nil {
 		return nil, err
 	}
+	if err := h.enforceRecordedRepoWrite(ctx, id, org.ID, in.ID); err != nil {
+		return nil, err
+	}
 	res, err := h.svc.DeleteInstance(ctx, org.ID, in.ID, "user:"+id.Subject)
 	if err != nil {
 		return nil, instanceMutationError(err)
@@ -328,6 +456,9 @@ type rollbackInput struct {
 	ID   string `path:"id"`
 	Body struct {
 		ToVersion string `json:"toVersion" minLength:"1"`
+		// RepoID, when set, must equal the instance's recorded repo (422
+		// otherwise); empty = use the recorded repo.
+		RepoID string `json:"repoId,omitempty"`
 	}
 }
 
@@ -336,7 +467,10 @@ func (h *Handler) rollback(ctx context.Context, in *rollbackInput) (*deployOutpu
 	if err != nil {
 		return nil, err
 	}
-	res, err := h.svc.Rollback(ctx, org.ID, in.ID, in.Body.ToVersion, "user:"+id.Subject)
+	if err := h.enforceRecordedRepoWrite(ctx, id, org.ID, in.ID); err != nil {
+		return nil, err
+	}
+	res, err := h.svc.Rollback(ctx, org.ID, in.ID, in.Body.ToVersion, in.Body.RepoID, "user:"+id.Subject)
 	if err != nil {
 		return nil, instanceMutationError(err)
 	}

@@ -81,6 +81,26 @@ func (c *ScaffoldConfig) requiresApproval() bool {
 	return c != nil && c.RequiresApproval
 }
 
+// Template kinds (manifest kind:). The kind selects the run pipeline
+// (stepNamesForKind): component templates provision application repos;
+// gitops-repo templates provision team-scoped GitOps state repos
+// (Feature B, parent plan §5).
+const (
+	// KindComponent is the default when the manifest omits kind
+	// (backward compatible): the run creates an application component repo.
+	KindComponent = "component"
+	// KindGitOpsRepo provisions a team-scoped GitOps state repo: the
+	// creating-pipeline/registering-catalog steps are replaced by
+	// registering-repo/attaching-root-app.
+	KindGitOpsRepo = "gitops-repo"
+)
+
+// validKind reports whether raw is an acceptable manifest kind (empty
+// defaults to component).
+func validKind(raw string) bool {
+	return raw == "" || raw == KindComponent || raw == KindGitOpsRepo
+}
+
 // TemplateManifest mirrors <template>/template.yaml.
 type TemplateManifest struct {
 	Name        string   `yaml:"name" json:"name"`
@@ -89,8 +109,18 @@ type TemplateManifest struct {
 	Tags        []string `yaml:"tags" json:"tags,omitempty"`
 	Version     string   `yaml:"version" json:"version"`
 	Channel     string   `yaml:"channel" json:"channel,omitempty"`
+	// Kind selects the run pipeline (empty → component).
+	Kind string `yaml:"kind" json:"kind,omitempty"`
 	// Scaffold holds the per-phase params + the approval gate flag.
 	Scaffold *ScaffoldConfig `yaml:"scaffold" json:"scaffold,omitempty"`
+}
+
+// kind reports the effective template kind (empty → component).
+func (m *TemplateManifest) kind() string {
+	if m == nil || m.Kind == "" {
+		return KindComponent
+	}
+	return m.Kind
 }
 
 // TemplatePackage is one parsed software-template package pulled from the
@@ -201,8 +231,16 @@ func readTemplateDir(dir, dirName string) (*TemplatePackage, error) {
 	if m.Channel == "" {
 		m.Channel = "stable"
 	}
+	if !validKind(m.Kind) {
+		return nil, fmt.Errorf("scaffold: %s: template.yaml: invalid kind %q (want %q or %q)", dirName, m.Kind, KindComponent, KindGitOpsRepo)
+	}
 	if m.Scaffold != nil && !validScope(m.Scaffold.Scope) {
 		return nil, fmt.Errorf("scaffold: %s: template.yaml: invalid scaffold.scope %q (want %q or %q)", dirName, m.Scaffold.Scope, ScopePlatform, ScopeUser)
+	}
+	// gitops-repo runs provision team state repos through the platform app
+	// (Feature B): user-scope git writes are meaningless there.
+	if m.kind() == KindGitOpsRepo && m.Scaffold.scope() == ScopeUser {
+		return nil, fmt.Errorf("scaffold: %s: template.yaml: kind %q does not support scaffold.scope %q (team repos are platform-app writes)", dirName, KindGitOpsRepo, ScopeUser)
 	}
 	schema, err := readJSONFile(dir, "schema.json", true)
 	if err != nil {

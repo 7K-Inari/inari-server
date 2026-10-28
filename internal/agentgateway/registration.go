@@ -125,6 +125,15 @@ func (g *Gateway) RegisterCluster(ctx context.Context, req *agentv1.RegisterClus
 		},
 		CredentialsExpireHint: timestamppb.Now(),
 	}
+	// Feature A: resolve the cluster's bound baseline repo from the
+	// tenant_git_repos registry. Empty when unbound (pre-Feature-A orgs).
+	if g.baselineRepos != nil {
+		if repo, err := g.baselineRepos.BaselineRepo(ctx, cluster.ID); err == nil {
+			res.BaselineRepo = repo
+		} else {
+			slog.Warn("agentgateway: baseline repo lookup failed", "cluster", cluster.ID, "error", err)
+		}
+	}
 	return res, nil
 }
 

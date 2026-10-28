@@ -125,7 +125,14 @@ func (s *Store) CreateCluster(ctx context.Context, q db.Querier, c *types.Cluste
 	if err != nil {
 		return err
 	}
-	const sql = `INSERT INTO clusters (id, org_id, name, labels, state) VALUES ($1,$2,$3,$4,$5)
+	// baseline_repo_id defaults to the org's default platform repo (Feature
+	// A, plan §4: each cluster binds to exactly one baseline at
+	// registration). NULL when the org has no registry row yet (cluster
+	// created before the zone's repo); readers fall back to the org
+	// default. Re-binding is an explicit BindClusterBaseline call.
+	const sql = `INSERT INTO clusters (id, org_id, name, labels, state, baseline_repo_id)
+	             SELECT $1,$2,$3,$4,$5,
+	                (SELECT id FROM tenant_git_repos WHERE org_id = $2 AND is_default)
 	             RETURNING ` + clusterCols
 	row := q.QueryRow(ctx, sql, c.ID, c.OrgID, c.Name, labels, c.State)
 	out, err := scanCluster(row)
@@ -356,9 +363,24 @@ type Service struct {
 	store            *Store
 	audit            *audit.Store
 	instances        InstanceLister
+	inventory        InventoryStore
+	commands         CommandEnqueuer
 	tokenTTL         time.Duration
 	approvalRequired bool
 	now              func() time.Time
+}
+
+// InventoryStore is the inventory module seam for baseline repo operations
+// (Feature A).
+type InventoryStore interface {
+	BindClusterBaseline(ctx context.Context, q db.Querier, clusterID, repoID string) error
+	// BaselineRepo returns the repo slug for a repo ID.
+	BaselineRepo(ctx context.Context, q db.Querier, clusterID string) (string, error)
+}
+
+// CommandEnqueuer enqueues an agent command (Feature A rebind).
+type CommandEnqueuer interface {
+	Enqueue(ctx context.Context, cmd *types.AgentCommand) error
 }
 
 func NewService(d *db.DB, clients ClientManager, store *Store, auditStore *audit.Store, tokenTTL time.Duration, approvalRequired bool) *Service {
@@ -382,6 +404,68 @@ func NewService(d *db.DB, clients ClientManager, store *Store, auditStore *audit
 func (s *Service) WithInstanceLister(l InstanceLister) *Service {
 	s.instances = l
 	return s
+}
+
+// WithInventoryStore attaches the inventory store seam used by RebindBaseline
+// (Feature A). Nil-safe: rebind without it fails with an explicit error.
+func (s *Service) WithInventoryStore(inv InventoryStore) *Service {
+	s.inventory = inv
+	return s
+}
+
+// WithCommandEnqueuer attaches the agent command queue seam used by
+// RebindBaseline to push gitops-config-update to the agent (Feature A).
+func (s *Service) WithCommandEnqueuer(q CommandEnqueuer) *Service {
+	s.commands = q
+	return s
+}
+
+// RebindBaseline binds a cluster to a different platform-scope baseline repo.
+// The repo must exist in the org's tenant_git_repos registry.
+func (s *Service) RebindBaseline(ctx context.Context, actor, clusterID, repoID string) (*types.Cluster, error) {
+	if s.inventory == nil {
+		return nil, fmt.Errorf("clusterregistry: inventory store not configured")
+	}
+	c, err := s.store.GetCluster(ctx, s.db.Pool, clusterID)
+	if err != nil {
+		return nil, err
+	}
+	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		if err := s.inventory.BindClusterBaseline(ctx, tx, clusterID, repoID); err != nil {
+			return err
+		}
+		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
+			OrgID: c.OrgID, Actor: actor, Action: "cluster.baseline_rebound", ObjectType: "cluster", ObjectID: clusterID,
+		}); err != nil {
+			return err
+		}
+		return audit.AppendOutbox(ctx, tx, c.OrgID, types.EventClusterRegistered, types.ClusterPayload{
+			OrgID: c.OrgID, ClusterID: clusterID, Name: c.Name,
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Enqueue the gitops-config-update command so the agent rebinds without
+	// reinstall. Best-effort: the command queue is durable and retries.
+	if s.commands != nil {
+		repo, err := s.inventory.BaselineRepo(ctx, s.db.Pool, clusterID)
+		if err != nil {
+			return nil, fmt.Errorf("clusterregistry: resolve baseline repo: %w", err)
+		}
+		if repo != "" {
+			payload, _ := json.Marshal(map[string]string{"command_id": "rebind-" + clusterID, "baseline_repo": repo})
+			if err := s.commands.Enqueue(ctx, &types.AgentCommand{
+				ID:        "rebind-" + clusterID,
+				ClusterID: clusterID,
+				Type:      "inari.agent.gitops-config-update.v1",
+				Payload:   payload,
+			}); err != nil {
+				return nil, fmt.Errorf("clusterregistry: enqueue rebind command: %w", err)
+			}
+		}
+	}
+	return s.store.GetCluster(ctx, s.db.Pool, clusterID)
 }
 
 // CreateCluster registers a new cluster record. With enrollment approval

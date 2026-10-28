@@ -201,6 +201,69 @@ func TestScaffoldScopeParsing(t *testing.T) {
 	}
 }
 
+// TestTemplateKindParsing covers the Feature B manifest kind: empty kind
+// defaults to component (backward compat), gitops-repo parses, unknown
+// kinds are rejected at pull time, and kind: gitops-repo combined with
+// scope: user is invalid (team repos are always platform-app writes).
+func TestTemplateKindParsing(t *testing.T) {
+	root := t.TempDir()
+	writeTemplate(t, root, "plain", nil)
+	writeTemplate(t, root, "repo", func(dir string) {
+		_ = os.WriteFile(filepath.Join(dir, "template.yaml"), []byte(
+			"name: repo\nversion: 0.1.0\nkind: gitops-repo\n"), 0o644)
+	})
+	pkgs, err := (&FilePuller{Root: root}).Pull(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]*TemplatePackage{}
+	for i := range pkgs {
+		byName[pkgs[i].Manifest.Name] = &pkgs[i]
+	}
+	if k := byName["plain"].Manifest.kind(); k != KindComponent {
+		t.Errorf("empty kind = %q, want component", k)
+	}
+	if k := byName["repo"].Manifest.kind(); k != KindGitOpsRepo {
+		t.Errorf("kind = %q, want gitops-repo", k)
+	}
+	// kind must survive the sync payload round trip (CreateRun reads it).
+	_, versions, err := templateSyncPlan(pkgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range versions {
+		want := KindComponent
+		if v.ItemID == "template:repo" {
+			want = KindGitOpsRepo
+		}
+		if got := payloadKind(v.Payload); got != want {
+			t.Errorf("payloadKind(%s) = %q, want %q", v.ItemID, got, want)
+		}
+	}
+}
+
+func TestFilePullerKindValidation(t *testing.T) {
+	cases := map[string]string{
+		"unknown kind":                "name: svc\nversion: 0.1.0\nkind: banana\n",
+		"gitops-repo with user scope": "name: svc\nversion: 0.1.0\nkind: gitops-repo\nscaffold:\n  scope: user\n",
+	}
+	for name, manifest := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			writeTemplate(t, root, "svc", func(dir string) {
+				_ = os.WriteFile(filepath.Join(dir, "template.yaml"), []byte(manifest), 0o644)
+			})
+			_, err := (&FilePuller{Root: root}).Pull(context.Background())
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), "svc") {
+				t.Errorf("error should name the template dir: %v", err)
+			}
+		})
+	}
+}
+
 func TestFilePullerMissingRoot(t *testing.T) {
 	_, err := (&FilePuller{Root: filepath.Join(t.TempDir(), "nope")}).Pull(context.Background())
 	if err == nil {

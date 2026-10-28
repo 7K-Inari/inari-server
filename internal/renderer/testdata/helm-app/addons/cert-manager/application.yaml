@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+    name: inari-addon-addon-01
+    namespace: argocd
+spec:
+    destination:
+        namespace: cert-manager
+        server: https://kubernetes.default.svc
+    project: default
+    sources:
+        - chart: cert-manager
+          helm:
+            releaseName: cert-manager
+            valueFiles:
+                - $values/addons/cert-manager/values.yaml
+          repoURL: https://charts.jetstack.io
+          targetRevision: v1.16.2
+        - ref: values
+          repoURL: https://github.com/acme/acme-inari-state
+          targetRevision: main
+    syncPolicy:
+        automated:
+            prune: false
+            selfHeal: true
+        syncOptions:
+            - TakeOwnership=true

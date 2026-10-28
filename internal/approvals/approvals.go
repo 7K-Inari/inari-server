@@ -81,26 +81,34 @@ type Store struct {
 func NewStore(d *db.DB) *Store { return &Store{db: d} }
 
 const approvalCols = `id, org_id, COALESCE(item_id, ''), version, cluster_id, spec, requester, approver, state, reason,
-	name, namespace, owner_team, channel, instance_id, action, created_at, decided_at, expires_at, cancelled_by`
+	name, namespace, owner_team, channel, instance_id, action, repo_id, created_at, decided_at, expires_at, cancelled_by`
 
 func scanApproval(row interface{ Scan(...any) error }) (*types.ApprovalRequest, error) {
 	var r types.ApprovalRequest
+	var repoID *string
 	err := row.Scan(&r.ID, &r.OrgID, &r.ItemID, &r.Version, &r.ClusterID,
 		&r.Spec, &r.Requester, &r.Approver, &r.State, &r.Reason,
-		&r.Name, &r.Namespace, &r.OwnerTeam, &r.Channel, &r.InstanceID, &r.Action,
+		&r.Name, &r.Namespace, &r.OwnerTeam, &r.Channel, &r.InstanceID, &r.Action, &repoID,
 		&r.CreatedAt, &r.DecidedAt, &r.ExpiresAt, &r.CancelledBy)
 	if err != nil {
 		return nil, err
+	}
+	if repoID != nil {
+		r.RepoID = *repoID
 	}
 	return &r, nil
 }
 
 func (s *Store) create(ctx context.Context, q db.Querier, req *types.ApprovalRequest) error {
+	var repoID *string
+	if req.RepoID != "" {
+		repoID = &req.RepoID
+	}
 	const sql = `INSERT INTO approval_requests (org_id, item_id, version, cluster_id, spec, requester,
-	             name, namespace, owner_team, channel, instance_id, action, expires_at)
-	             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id, state, created_at`
+	             name, namespace, owner_team, channel, instance_id, action, repo_id, expires_at)
+	             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id, state, created_at`
 	return q.QueryRow(ctx, sql, req.OrgID, req.ItemID, req.Version, req.ClusterID, req.Spec, req.Requester,
-		req.Name, req.Namespace, req.OwnerTeam, req.Channel, req.InstanceID, req.Action, req.ExpiresAt).
+		req.Name, req.Namespace, req.OwnerTeam, req.Channel, req.InstanceID, req.Action, repoID, req.ExpiresAt).
 		Scan(&req.ID, &req.State, &req.CreatedAt)
 }
 
@@ -245,6 +253,10 @@ type GateInput struct {
 	// "instance.delete") so resume handlers dispatch to the right path
 	// instead of resuming a deploy.
 	Action string
+	// RepoID is the deploy-time repo selector (Feature A); empty = org
+	// default repo. Persisted so the resumed deploy commits to the same
+	// repo the requester picked.
+	RepoID string
 }
 
 // Gate evaluates the item's approval policy. auto → approved; otherwise an
@@ -258,7 +270,7 @@ func (s *Service) Gate(ctx context.Context, in GateInput) (*GateResult, error) {
 		OrgID: in.OrgID, ItemID: in.Item.ID, Version: in.Version, ClusterID: in.ClusterID,
 		Spec: in.Spec, Requester: in.Requester, Name: in.Name, Namespace: in.Namespace,
 		OwnerTeam: in.OwnerTeam, Channel: in.Channel, InstanceID: in.InstanceID,
-		Action: in.Action, ExpiresAt: &expires,
+		Action: in.Action, RepoID: in.RepoID, ExpiresAt: &expires,
 	}
 	err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		if err := s.store.create(ctx, tx, req); err != nil {

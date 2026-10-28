@@ -1,0 +1,13 @@
+{
+  "ui:order": ["repoName", "team", "gitOrg", "commitPolicy", "baseBranch"],
+  "repoName": {
+    "ui:placeholder": "team-a-gitops"
+  },
+  "team": {
+    "ui:widget": "select",
+    "ui:placeholder": "Select a team"
+  },
+  "gitOrg": {
+    "ui:placeholder": "my-org"
+  }
+}

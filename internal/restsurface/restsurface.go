@@ -27,6 +27,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/extensionhost"
 	"github.com/7K-Inari/inari-server/internal/featureflags"
 	"github.com/7K-Inari/inari-server/internal/fleetmanager"
+	"github.com/7K-Inari/inari-server/internal/gitrepos"
 	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/notifications"
 	"github.com/7K-Inari/inari-server/internal/orchestrator"
@@ -53,6 +54,7 @@ type Deps struct {
 	Inventory          *inventory.Service
 	PlatformResources  *platformresources.Service
 	Orchestrator       *orchestrator.Service
+	GitRepos           *gitrepos.Service
 	CloudAccounts      *cloudaccounts.Service
 	Notifications      *notifications.Service
 	Policies           *policyservice.Service
@@ -94,6 +96,13 @@ type Deps struct {
 	FeatureFlags            *featureflags.Service
 	FeatureFlagsResolver    *featureflags.Resolver
 	FeatureFlagEnvOverrides map[string]bool
+
+	// Repo-write enforcement seams for the orchestrator handler (Feature
+	// A, decision 5b). Nil-safe: a zero Deps (export-openapi) leaves the
+	// check disabled.
+	OrchestratorTeams     orchestrator.TeamLister
+	OrchestratorRepos     orchestrator.RepoGetter
+	OrchestratorInstances orchestrator.InstanceGetter
 }
 
 // Register mounts every module's REST routes on the huma API. The call order
@@ -112,7 +121,10 @@ func Register(api huma.API, d Deps) {
 	inventory.NewHandler(d.Inventory, d.Tenancy, d.Authz).RegisterRoutes(api)
 	platformresources.NewHandler(d.PlatformResources, d.Tenancy, d.Authz).RegisterRoutes(api)
 	orchestrator.NewHandler(d.Orchestrator, d.Tenancy, d.Authz).
-		WithAllowedAPIBases(d.AllowedAPIBases).RegisterRoutes(api)
+		WithAllowedAPIBases(d.AllowedAPIBases).
+		WithRepoWriteEnforcement(d.OrchestratorTeams, d.OrchestratorRepos, d.OrchestratorInstances).
+		RegisterRoutes(api)
+	gitrepos.NewHandler(d.GitRepos, d.Tenancy, d.Authz).RegisterRoutes(api)
 	cloudaccounts.NewHandler(d.CloudAccounts, d.Tenancy, d.Clusters, d.Authz).RegisterRoutes(api)
 	notifications.NewHandler(d.Notifications, d.Tenancy, d.Authz).RegisterRoutes(api)
 	policyservice.NewHandler(d.Policies, d.Tenancy, d.Authz).RegisterRoutes(api)

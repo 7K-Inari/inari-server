@@ -3,8 +3,8 @@ module github.com/7K-Inari/inari-server
 go 1.26.3
 
 require (
-	connectrpc.com/connect/v2 v2.0.1
-	github.com/7K-Inari/inari-api v0.7.0-d1dc5a2
+	connectrpc.com/connect/v2 v2.0.2
+	github.com/7K-Inari/inari-api v0.7.0-d1dc5a2.0.20261026085445-0464651127cd
 	github.com/aws/aws-sdk-go-v2 v1.47.3
 	github.com/aws/aws-sdk-go-v2/config v1.33.9
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.9
@@ -22,6 +22,7 @@ require (
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/nats-io/nats-server/v2 v2.15.1
 	github.com/nats-io/nats.go v1.54.0
+	github.com/oklog/ulid/v2 v2.1.1
 	github.com/open-feature/go-sdk v1.19.0
 	github.com/open-feature/go-sdk-contrib/providers/ofrep v0.1.7
 	github.com/open-policy-agent/opa v1.21.2
@@ -160,7 +161,6 @@ require (
 	github.com/nats-io/nkeys v0.4.16 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/nozzle/throttler v0.0.0-20180817012639-2ea982251481 // indirect
-	github.com/oklog/ulid/v2 v2.1.1 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/pjbgf/sha1cd v0.7.0 // indirect

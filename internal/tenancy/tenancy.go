@@ -751,6 +751,16 @@ func (s *Service) ListTeams(ctx context.Context, orgID string) ([]types.Team, er
 	return s.store.ListTeams(ctx, s.db.Pool, orgID)
 }
 
+// GetTeamByName resolves a team within an org addressed by slug (Feature B
+// scaffold seam: gitops-repo runs pick an existing owning team by name).
+func (s *Service) GetTeamByName(ctx context.Context, slug, name string) (*types.Team, error) {
+	org, err := s.GetTenant(ctx, slug)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.GetTeamByName(ctx, s.db.Pool, org.ID, name)
+}
+
 // ListAllTeams returns every team across all orgs (authz.OrgTeamSync seam).
 func (s *Service) ListAllTeams(ctx context.Context) ([]types.Team, error) {
 	return s.store.ListAllTeams(ctx, s.db.Pool)

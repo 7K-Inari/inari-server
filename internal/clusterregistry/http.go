@@ -12,6 +12,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/fleetmanager"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
+	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/kubeproxy"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -244,6 +245,14 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Summary:     "List the live discovered capabilities of a cluster",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.listCapabilities)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "rebindClusterBaseline",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/tenants/{org}/clusters/{id}/rebind-baseline",
+		Summary:     "Rebind a cluster to a different baseline repo (Feature A)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.rebindBaseline)
 }
 
 type createClusterInput struct {
@@ -630,6 +639,34 @@ func (h *Handler) lifecycle(ctx context.Context, in *clusterPathInput, fn func(c
 	c, err := fn(ctx, id.Subject, in.ID)
 	if errors.Is(err, ErrInvalidTransition) {
 		return nil, huma.Error409Conflict(err.Error())
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := &clusterOutput{}
+	out.Body.Cluster = *c
+	return out, nil
+}
+
+type rebindBaselineInput struct {
+	Org  string `path:"org"`
+	ID   string `path:"id"`
+	Body struct {
+		RepoID string `json:"repoId" minLength:"1"`
+	}
+}
+
+func (h *Handler) rebindBaseline(ctx context.Context, in *rebindBaselineInput) (*clusterOutput, error) {
+	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationClustersRegister)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.requireOrgCluster(ctx, org.ID, in.ID); err != nil {
+		return nil, err
+	}
+	c, err := h.svc.RebindBaseline(ctx, id.Subject, in.ID, in.Body.RepoID)
+	if errors.Is(err, inventory.ErrRepoNotFound) {
+		return nil, huma.Error404NotFound("repo not found in tenant registry")
 	}
 	if err != nil {
 		return nil, err

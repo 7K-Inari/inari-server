@@ -19,6 +19,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
+	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/kubeproxy"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/testutil"
@@ -128,7 +129,8 @@ func itServerDB(t *testing.T, az authz.Authorizer) (*httptest.Server, *Service, 
 		 ('org:1','acme','Acme','kc-1'), ('org:2','acme2','Acme2','kc-2')`); err != nil {
 		t.Fatal(err)
 	}
-	svc := NewService(database, itClients{}, NewStore(), audit.NewStore(), time.Hour, false)
+	svc := NewService(database, itClients{}, NewStore(), audit.NewStore(), time.Hour, false).
+		WithInventoryStore(inventory.NewStore())
 	h := NewHandler(svc, itTenants{
 		"acme":  {ID: "org:1", Slug: "acme"},
 		"acme2": {ID: "org:2", Slug: "acme2"},
@@ -741,5 +743,88 @@ func TestClusterKubeconfigFlagOff410(t *testing.T) {
 	id := itCreate(t, srv, "acme", "prod-1")
 	if code, _ := itReq(t, srv, "GET", "/api/v1/tenants/acme/clusters/"+id+"/kubeconfig", "good", ""); code != 410 {
 		t.Errorf("kubeconfig with flag off = %d, want 410", code)
+	}
+}
+
+// TestClusterCreateBindsDefaultBaseline pins the Feature A registration
+// binding (plan §4): a new cluster binds to the org's default platform
+// repo when one exists at create time; without a registry row the column
+// stays NULL (readers fall back to the org default).
+func TestClusterRebindBaseline(t *testing.T) {
+	srv, _, database := itServerDB(t, itAuthorizer{allow: true})
+	defer srv.Close()
+	ctx := context.Background()
+
+	// Seed two platform repos.
+	repo1 := "01JTESTBASELINEREPO000000001"
+	repo2 := "01JTESTBASELINEREPO000000002"
+	for _, id := range []string{repo1, repo2} {
+		if _, err := database.Pool.Exec(ctx, `INSERT INTO tenant_git_repos
+			(id, org_id, name, repo, provider, scope, commit_policy, base_branch, is_default)
+			VALUES ($1, 'org:1', $2, $3, 'github', 'platform', 'direct', 'main', false)`, id, "repo-"+id, "acme/state-"+id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Make repo1 the default.
+	if _, err := database.Pool.Exec(ctx, `UPDATE tenant_git_repos SET is_default = true WHERE id = $1`, repo1); err != nil {
+		t.Fatal(err)
+	}
+
+	clusterID := itCreate(t, srv, "acme", "rebind-me")
+
+	// Initially bound to repo1 (default).
+	var bound string
+	if err := database.Pool.QueryRow(ctx, `SELECT baseline_repo_id FROM clusters WHERE id = $1`, clusterID).Scan(&bound); err != nil {
+		t.Fatal(err)
+	}
+	if bound != repo1 {
+		t.Fatalf("initial binding = %q, want %q", bound, repo1)
+	}
+
+	// Rebind to repo2.
+	code, body := itReq(t, srv, "POST", "/api/v1/tenants/acme/clusters/"+clusterID+"/rebind-baseline", "good", `{"repoId":"`+repo2+`"}`)
+	if code != http.StatusOK {
+		t.Fatalf("rebind status = %d, want %d; body: %s", code, http.StatusOK, body)
+	}
+
+	// Verify binding updated.
+	if err := database.Pool.QueryRow(ctx, `SELECT baseline_repo_id FROM clusters WHERE id = $1`, clusterID).Scan(&bound); err != nil {
+		t.Fatal(err)
+	}
+	if bound != repo2 {
+		t.Errorf("rebound binding = %q, want %q", bound, repo2)
+	}
+}
+
+func TestClusterCreateBindsDefaultBaseline(t *testing.T) {
+	srv, _, database := itServerDB(t, itAuthorizer{allow: true})
+	defer srv.Close()
+	ctx := context.Background()
+
+	// No registry rows: NULL binding.
+	unbound := itCreate(t, srv, "acme", "unbound")
+	var baselineRepoID *string
+	if err := database.Pool.QueryRow(ctx,
+		`SELECT baseline_repo_id FROM clusters WHERE id = $1`, unbound).Scan(&baselineRepoID); err != nil {
+		t.Fatal(err)
+	}
+	if baselineRepoID != nil {
+		t.Errorf("unbound cluster baseline_repo_id = %v, want NULL", *baselineRepoID)
+	}
+
+	// Register a default platform repo, then create: bound at insert.
+	repoID := "01JTESTBASELINEREPO000000000"
+	if _, err := database.Pool.Exec(ctx, `INSERT INTO tenant_git_repos
+		(id, org_id, name, repo, provider, scope, commit_policy, base_branch, is_default)
+		VALUES ($1, 'org:1', 'baseline', 'acme/state', 'github', 'platform', 'direct', 'main', true)`, repoID); err != nil {
+		t.Fatal(err)
+	}
+	bound := itCreate(t, srv, "acme", "bound")
+	if err := database.Pool.QueryRow(ctx,
+		`SELECT baseline_repo_id FROM clusters WHERE id = $1`, bound).Scan(&baselineRepoID); err != nil {
+		t.Fatal(err)
+	}
+	if baselineRepoID == nil || *baselineRepoID != repoID {
+		t.Errorf("bound cluster baseline_repo_id = %v, want %q", baselineRepoID, repoID)
 	}
 }

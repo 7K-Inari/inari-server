@@ -228,6 +228,12 @@ type Config struct {
 	// Empty keeps the bare name (fake/local providers).
 	GitStateRepoOrg string
 
+	// RBACTeamRepoWrites opts into per-team RBAC repo writes (Feature A):
+	// when true, the rbacmaterialize handler additionally commits each
+	// team's bindings to teams/<team>/rbac/ in that team's repo. Default
+	// false keeps the baseline-only behavior.
+	RBACTeamRepoWrites bool
+
 	// M4: Extension Host + Fleet Manager (plan §5.8, §5.11).
 	// CurrentAgentVersion is the supported agent version (N); agents at N
 	// and N−1 are admitted (§11/5). Legacy fallback policy, superseded by
@@ -462,6 +468,7 @@ func Load() (*Config, error) {
 
 		PlatformGitOpsRepo: env("INARI_PLATFORM_GITOPS_REPO", ""),
 		GitStateRepoOrg:    env("INARI_GIT_STATE_REPO_ORG", ""),
+		RBACTeamRepoWrites: boolEnv("INARI_RBAC_TEAM_REPO_WRITES", false),
 
 		CurrentAgentVersion:     env("INARI_AGENT_VERSION", ""),
 		AgentSupportedRange:     env("INARI_AGENT_SUPPORTED_RANGE", ""),

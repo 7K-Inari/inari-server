@@ -173,6 +173,10 @@ func targetDiff(oldIDs, newIDs []string) []string {
 // ArgoCD root app (tenantzonefactory.RenderBaseline) syncs only path
 // "baseline" — anything committed elsewhere in the repo is never applied
 // to the cluster.
+//
+// Feature A invariant: the server never picks a repo here — the agent
+// writes the cluster's bound baseline repo (clusters.baseline_repo_id,
+// defaulting to the org default), so multi-repo orgs need no server change.
 const stateRepoPath = "baseline/secretstores"
 
 // applyProto builds the contract message for one apply command. Credential

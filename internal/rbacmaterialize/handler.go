@@ -27,6 +27,14 @@ type GitConfigs interface {
 	GitConfig(ctx context.Context, orgID string) (*types.TenantGitConfig, error)
 }
 
+// GitRepos is the registry seam (Feature A): the org's default repo row is
+// the authoritative baseline target when present; team rows feed the
+// optional per-team writes.
+type GitRepos interface {
+	GetDefaultGitRepo(ctx context.Context, orgID string) (*types.TenantGitRepo, error)
+	ListTeamGitRepos(ctx context.Context, orgID string) ([]*types.TenantGitRepo, error)
+}
+
 // Handler implements audit.Handler for RBAC-relevant lifecycle events
 // (plan §7.1): every event triggers a full desired-state re-render and
 // commit of the tenant's anchor ClusterRoles + group bindings into the
@@ -44,6 +52,11 @@ type Handler struct {
 	// owner-qualified repo names (github). Empty keeps the bare
 	// convention (fake/local providers).
 	stateRepoOrg string
+	// repos is the registry seam; nil = legacy targeting (git-config only).
+	repos GitRepos
+	// teamWrites enables the opt-in per-team repo path
+	// (teams/<team>/rbac/ in each team-scope repo). Default off.
+	teamWrites bool
 }
 
 // NewHandler wires the outbox consumer; a nil logger uses slog.Default.
@@ -58,6 +71,20 @@ func NewHandler(ten Tenancy, configs GitConfigs, git gitprovider.Provider, log *
 // (INARI_GIT_STATE_REPO_ORG).
 func (h *Handler) WithStateRepoOrg(org string) *Handler {
 	h.stateRepoOrg = org
+	return h
+}
+
+// WithGitRepos attaches the registry seam (Feature A): the default repo row
+// becomes the authoritative baseline target.
+func (h *Handler) WithGitRepos(repos GitRepos) *Handler {
+	h.repos = repos
+	return h
+}
+
+// WithTeamRepoWrites opts into per-team repo writes (teams/<team>/rbac/ in
+// each team-scope repo). Requires WithGitRepos.
+func (h *Handler) WithTeamRepoWrites() *Handler {
+	h.teamWrites = true
 	return h
 }
 
@@ -122,21 +149,83 @@ func (h *Handler) Handle(ctx context.Context, ev *types.OutboxEvent) error {
 		if _, err := h.git.OpenPR(ctx, repo, branch, message, "", files); err != nil {
 			return fmt.Errorf("rbacmaterialize: open PR on %s: %w", repo, err)
 		}
-		return nil
-	}
-	if _, err := h.git.CommitFiles(ctx, repo, branch, files, message); err != nil {
+	} else if _, err := h.git.CommitFiles(ctx, repo, branch, files, message); err != nil {
 		return fmt.Errorf("rbacmaterialize: commit to %s: %w", repo, err)
+	}
+	if h.teamWrites && h.repos != nil {
+		if err := h.writeTeamRepos(ctx, org, teams); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-// target resolves repo/branch/policy from the tenant git-config, falling
-// back to the platform convention (<slug>-inari-state, main, direct;
-// owner-qualified with stateRepoOrg when configured).
+// writeTeamRepos commits each team-scope repo's own bindings to
+// teams/<team>/rbac/ (opt-in, Feature A). Only teams that own a repo row
+// get a write; the commit policy follows the row.
+func (h *Handler) writeTeamRepos(ctx context.Context, org *types.Organization, teams []types.Team) error {
+	rows, err := h.repos.ListTeamGitRepos(ctx, org.ID)
+	if err != nil {
+		return fmt.Errorf("rbacmaterialize: list team repos: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	byID := map[string]types.Team{}
+	for _, t := range teams {
+		byID[t.ID] = t
+	}
+	for _, row := range rows {
+		team, ok := byID[row.TeamID]
+		if !ok {
+			// Repo without a matching team (deleted team → SET NULL) —
+			// nothing to render for it.
+			continue
+		}
+		if _, err := h.git.EnsureRepo(ctx, row.Repo); err != nil {
+			return fmt.Errorf("rbacmaterialize: ensure team repo %s: %w", row.Repo, err)
+		}
+		files := RenderTeamRBAC(org.Slug, team)
+		message := "chore(rbac): tenant " + org.Slug + " team " + team.Name + " bindings"
+		if row.CommitPolicy == types.CommitPolicyPullRequest {
+			if _, err := h.git.OpenPR(ctx, row.Repo, row.BaseBranch, message, "", files); err != nil {
+				return fmt.Errorf("rbacmaterialize: open PR on %s: %w", row.Repo, err)
+			}
+			continue
+		}
+		if _, err := h.git.CommitFiles(ctx, row.Repo, row.BaseBranch, files, message); err != nil {
+			return fmt.Errorf("rbacmaterialize: commit to %s: %w", row.Repo, err)
+		}
+	}
+	return nil
+}
+
+// target resolves repo/branch/policy for the baseline write: the registry's
+// default repo row wins when present (Feature A); otherwise the tenant
+// git-config; otherwise the platform convention (<slug>-inari-state, main,
+// direct; owner-qualified with stateRepoOrg when configured).
 func (h *Handler) target(ctx context.Context, org *types.Organization) (repo, branch string, policy types.CommitPolicy) {
 	repo, branch, policy = org.Slug+"-inari-state", "main", types.CommitPolicyDirect
 	if h.stateRepoOrg != "" {
 		repo = h.stateRepoOrg + "/" + repo
+	}
+	if h.repos != nil {
+		row, err := h.repos.GetDefaultGitRepo(ctx, org.ID)
+		if err == nil && row != nil {
+			if row.Repo != "" {
+				repo = row.Repo
+			}
+			if row.BaseBranch != "" {
+				branch = row.BaseBranch
+			}
+			if row.CommitPolicy != "" {
+				policy = row.CommitPolicy
+			}
+			return repo, branch, policy
+		}
+		if err != nil {
+			h.log.Warn("rbacmaterialize: default repo lookup failed, falling back", "org", org.ID, "error", err)
+		}
 	}
 	cfg, err := h.configs.GitConfig(ctx, org.ID)
 	if err != nil {

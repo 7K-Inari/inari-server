@@ -33,6 +33,7 @@ type fakeGitHub struct {
 	probeStatus   atomic.Int32 // force status on /installation/repositories
 	repoSelection string
 	repoNames     []string
+	repoPages     int // >0: paginate /installation/repositories
 }
 
 func (f *fakeGitHub) handler() http.Handler {
@@ -100,8 +101,25 @@ func (f *fakeGitHub) handler() http.Handler {
 				if names == nil {
 					names = []string{"acme-inari-state"}
 				}
+				// Paginate when repoPages > 1 (scopeCheck pagination test).
+				page := 1
+				if p := r.URL.Query().Get("page"); p != "" {
+					_, _ = fmt.Sscanf(p, "%d", &page)
+				}
+				perPage := len(names)
+				if f.repoPages > 1 {
+					perPage = (len(names) + f.repoPages - 1) / f.repoPages
+				}
+				start := (page - 1) * perPage
+				end := start + perPage
+				if start > len(names) {
+					start = len(names)
+				}
+				if end > len(names) {
+					end = len(names)
+				}
 				repos := []map[string]any{}
-				for _, n := range names {
+				for _, n := range names[start:end] {
 					repos = append(repos, map[string]any{"name": n})
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"repository_selection": sel, "repositories": repos})
@@ -499,7 +517,8 @@ func TestResolverGHEBaseSeparation(t *testing.T) {
 func TestResolverScopeWarningEvent(t *testing.T) {
 	gh := &fakeGitHub{
 		installations: []map[string]any{inst(2, "acme")},
-		repoSelection: "all",
+		repoSelection: "selected",
+		repoNames:     []string{"some-other-repo"},
 	}
 	var events []ResolvedEvent
 	r, _ := newTestResolver(t, gh, func(c *ResolverConfig) {
@@ -577,5 +596,278 @@ func TestProbeCached(t *testing.T) {
 	st3 := r.Probe(ctx, cfg)
 	if st3.State != "unknown" {
 		t.Errorf("probe after cache expiry = %q, want unknown", st3.State)
+	}
+}
+
+// Two repos in the same org with different BYO apps must not share a probe
+// cache entry — the first probe's result must not leak into the second.
+func TestProbeCacheIsolationPerRepo(t *testing.T) {
+	gh := &fakeGitHub{installations: []map[string]any{inst(2, "acme"), inst(3, "acme")}}
+	_, keyA := writePlatformKey(t)
+	_, keyB := writePlatformKey(t)
+	r, srv := newTestResolver(t, gh, func(c *ResolverConfig) {
+		c.KeyLoader = func(_ context.Context, ref *types.GitHubAppSecretRef) (*rsa.PrivateKey, error) {
+			switch ref.SecretName {
+			case "key-a":
+				return keyA, nil
+			case "key-b":
+				return keyB, nil
+			}
+			return nil, fmt.Errorf("unknown secret %q", ref.SecretName)
+		}
+	})
+	ctx := context.Background()
+
+	cfgA := gitCfg("org:1", "acme/team-a-gitops")
+	cfgA.GitHubApp = &types.GitHubAppConfig{
+		AppID: 91, InstallationID: 2, APIBase: srv.URL,
+		KeyRef: &types.GitHubAppSecretRef{SecretName: "key-a", Namespace: "ns", Key: "k"},
+	}
+	cfgB := gitCfg("org:1", "acme/team-b-gitops")
+	cfgB.GitHubApp = &types.GitHubAppConfig{
+		AppID: 92, InstallationID: 3, APIBase: srv.URL,
+		KeyRef: &types.GitHubAppSecretRef{SecretName: "key-b", Namespace: "ns", Key: "k"},
+	}
+
+	stA := r.Probe(ctx, cfgA)
+	stB := r.Probe(ctx, cfgB)
+	if stA.InstallationID == stB.InstallationID && stA.InstallationID != 0 {
+		t.Errorf("probe cache leaked across repos: both got installation %d", stA.InstallationID)
+	}
+	if stA.InstallationID != 2 || stB.InstallationID != 3 {
+		t.Errorf("probe installations = %d, %d; want 2 and 3", stA.InstallationID, stB.InstallationID)
+	}
+}
+
+// Two repos in the same org with different per-repo BYO apps must resolve
+// to distinct providers (the cache key is per-credential, not per-org).
+func TestResolverBYOCacheIsolationPerRepo(t *testing.T) {
+	gh := &fakeGitHub{installations: []map[string]any{inst(2, "acme"), inst(3, "acme")}}
+	_, keyA := writePlatformKey(t)
+	_, keyB := writePlatformKey(t)
+	r, srv := newTestResolver(t, gh, func(c *ResolverConfig) {
+		c.KeyLoader = func(_ context.Context, ref *types.GitHubAppSecretRef) (*rsa.PrivateKey, error) {
+			switch ref.SecretName {
+			case "key-a":
+				return keyA, nil
+			case "key-b":
+				return keyB, nil
+			}
+			return nil, fmt.Errorf("unknown secret %q", ref.SecretName)
+		}
+	})
+	ctx := context.Background()
+	cfgA := gitCfg("org:1", "acme/team-a-gitops")
+	cfgA.GitHubApp = &types.GitHubAppConfig{
+		AppID: 91, InstallationID: 2, APIBase: srv.URL,
+		KeyRef: &types.GitHubAppSecretRef{SecretName: "key-a", Namespace: "ns", Key: "k"},
+	}
+	cfgB := gitCfg("org:1", "acme/team-b-gitops")
+	cfgB.GitHubApp = &types.GitHubAppConfig{
+		AppID: 92, InstallationID: 3, APIBase: srv.URL,
+		KeyRef: &types.GitHubAppSecretRef{SecretName: "key-b", Namespace: "ns", Key: "k"},
+	}
+	_, infoA, err := r.ForTenant(ctx, cfgA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, infoB, err := r.ForTenant(ctx, cfgB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if infoA.AppID != 91 || infoB.AppID != 92 {
+		t.Fatalf("resolved apps = %d, %d; want 91 and 92 (no cross-repo cache collision)", infoA.AppID, infoB.AppID)
+	}
+}
+
+// EvictTenant drops every BYO provider cached for the org (all repos), but
+// leaves platform (i:) entries alone.
+func TestResolverEvictTenantAllRepos(t *testing.T) {
+	gh := &fakeGitHub{installations: []map[string]any{inst(2, "acme"), inst(3, "acme")}}
+	_, key := writePlatformKey(t)
+	var loads atomic.Int32
+	r, srv := newTestResolver(t, gh, func(c *ResolverConfig) {
+		c.KeyLoader = func(_ context.Context, _ *types.GitHubAppSecretRef) (*rsa.PrivateKey, error) {
+			loads.Add(1)
+			return key, nil
+		}
+	})
+	ctx := context.Background()
+	mk := func(repo string, appID, instID int64) *types.TenantGitConfig {
+		cfg := gitCfg("org:1", repo)
+		cfg.GitHubApp = &types.GitHubAppConfig{
+			AppID: appID, InstallationID: instID, APIBase: srv.URL,
+			KeyRef: &types.GitHubAppSecretRef{SecretName: "k", Namespace: "ns", Key: "k"},
+		}
+		return cfg
+	}
+	if _, _, err := r.ForTenant(ctx, mk("acme/team-a-gitops", 91, 2)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.ForTenant(ctx, mk("acme/team-b-gitops", 92, 3)); err != nil {
+		t.Fatal(err)
+	}
+	// A platform resolution for another org must survive the eviction.
+	if _, _, err := r.ForTenant(ctx, gitCfg("org:2", "acme/acme-inari-state")); err != nil {
+		t.Fatal(err)
+	}
+	r.EvictTenant("org:1")
+	if _, _, err := r.ForTenant(ctx, mk("acme/team-a-gitops", 91, 2)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.ForTenant(ctx, mk("acme/team-b-gitops", 92, 3)); err != nil {
+		t.Fatal(err)
+	}
+	if n := loads.Load(); n != 4 {
+		t.Errorf("key loads = %d, want 4 (both repos reloaded after eviction)", n)
+	}
+	// Platform provider for org:2 still works without re-discovery.
+	if _, _, err := r.ForTenant(ctx, gitCfg("org:2", "acme/acme-inari-state")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Multiple git orgs (decision 3a): the installation cache is keyed by
+// git-org (repo owner). A negative entry for one git-org must not affect
+// another, and one discovery call warms every org seen.
+func TestResolverGitOrgCacheIsolation(t *testing.T) {
+	gh := &fakeGitHub{installations: []map[string]any{inst(2, "acme"), inst(3, "globex")}}
+	r, _ := newTestResolver(t, gh, nil)
+	ctx := context.Background()
+
+	// Missing git-org: typed error + negative cache entry.
+	if _, _, err := r.ForTenant(ctx, gitCfg("org:9", "missing/missing-inari-state")); err == nil {
+		t.Fatal("want not-installed error")
+	} else {
+		var ni *ErrAppNotInstalled
+		if !errors.As(err, &ni) {
+			t.Fatalf("err = %v, want ErrAppNotInstalled", err)
+		}
+	}
+	// The negative entry must not shadow the installed git-orgs, and both
+	// resolve from the same discovery warm (no extra list calls).
+	before := gh.listCalls.Load()
+	if _, info, err := r.ForTenant(ctx, gitCfg("org:1", "acme/acme-inari-state")); err != nil || info.InstallationID != 2 {
+		t.Fatalf("acme: info=%+v err=%v", info, err)
+	}
+	if _, info, err := r.ForTenant(ctx, gitCfg("org:2", "globex/globex-inari-state")); err != nil || info.InstallationID != 3 {
+		t.Fatalf("globex: info=%+v err=%v", info, err)
+	}
+	if n := gh.listCalls.Load() - before; n != 0 {
+		t.Errorf("list calls after warm = %d, want 0 (discovery warms all git-orgs)", n)
+	}
+}
+
+// A 401 invalidates only the affected git-org's installation entry; other
+// git-orgs keep their cached installations.
+func TestResolver401InvalidatesOnlyAffectedGitOrg(t *testing.T) {
+	gh := &fakeGitHub{installations: []map[string]any{inst(2, "acme"), inst(3, "globex")}}
+	r, _ := newTestResolver(t, gh, nil)
+	ctx := context.Background()
+
+	p1, _, err := r.ForTenant(ctx, gitCfg("org:1", "acme/acme-inari-state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.ForTenant(ctx, gitCfg("org:2", "globex/globex-inari-state")); err != nil {
+		t.Fatal(err)
+	}
+	// Suspend acme's installation: 401 on data routes for acme only.
+	gh.failData.Store(true)
+	if _, err := p1.EnsureRepo(ctx, "acme/acme-inari-state"); err == nil {
+		t.Fatal("want 401 error")
+	} else {
+		var revoked *ErrAppCredentialsRevoked
+		if !errors.As(err, &revoked) {
+			t.Fatalf("err = %v, want ErrAppCredentialsRevoked", err)
+		}
+	}
+	gh.failData.Store(false)
+	// globex resolves from cache without a new discovery list call...
+	before := gh.listCalls.Load()
+	if _, _, err := r.ForTenant(ctx, gitCfg("org:2", "globex/globex-inari-state")); err != nil {
+		t.Fatal(err)
+	}
+	if n := gh.listCalls.Load() - before; n != 0 {
+		t.Errorf("list calls = %d, want 0 (globex cache survived acme invalidation)", n)
+	}
+	// ...while acme re-discovers.
+	if _, _, err := r.ForTenant(ctx, gitCfg("org:1", "acme/acme-inari-state")); err != nil {
+		t.Fatal(err)
+	}
+	if n := gh.listCalls.Load() - before; n != 1 {
+		t.Errorf("list calls = %d, want 1 (acme re-discovered)", n)
+	}
+}
+
+// Repo-aware scope check (Feature A): the advisory warning fires only when
+// the installation is "selected"-scoped AND does not cover the target repo
+// — arbitrary team repo names must not trigger it.
+// scopeCheck paginates through all installation repos: a target on page 2+
+// must not trigger a false scope_warning.
+func TestResolverScopeCheckPaginates(t *testing.T) {
+	// 150 repos across 2 pages; the target is on page 2.
+	names := make([]string, 150)
+	for i := range names {
+		names[i] = fmt.Sprintf("repo-%03d", i)
+	}
+	names[149] = "team-a-gitops" // target on the last page
+	gh := &fakeGitHub{
+		installations: []map[string]any{inst(2, "acme")},
+		repoSelection: "selected",
+		repoNames:     names,
+		repoPages:     2,
+	}
+	var events []ResolvedEvent
+	r, _ := newTestResolver(t, gh, func(c *ResolverConfig) {
+		c.OnResolved = func(_ context.Context, ev ResolvedEvent) { events = append(events, ev) }
+	})
+	if _, _, err := r.ForTenant(context.Background(), gitCfg("org:1", "acme/team-a-gitops")); err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range events {
+		if ev.Result == "scope_warning" {
+			t.Fatalf("false scope_warning for paginated target (events=%+v)", events)
+		}
+	}
+}
+
+func TestResolverScopeCheckRepoAware(t *testing.T) {
+	cases := []struct {
+		name      string
+		selection string
+		repos     []string
+		repo      string
+		wantWarn  bool
+	}{
+		{"selected covers target", "selected", []string{"team-a-gitops"}, "acme/team-a-gitops", false},
+		{"selected misses target", "selected", []string{"other-repo"}, "acme/team-a-gitops", true},
+		{"all is broad but functional", "all", nil, "acme/team-a-gitops", false},
+		{"selected empty list", "selected", nil, "acme/team-a-gitops", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gh := &fakeGitHub{
+				installations: []map[string]any{inst(2, "acme")},
+				repoSelection: tc.selection,
+				repoNames:     tc.repos,
+			}
+			var events []ResolvedEvent
+			r, _ := newTestResolver(t, gh, func(c *ResolverConfig) {
+				c.OnResolved = func(_ context.Context, ev ResolvedEvent) { events = append(events, ev) }
+			})
+			if _, _, err := r.ForTenant(context.Background(), gitCfg("org:1", tc.repo)); err != nil {
+				t.Fatal(err)
+			}
+			var found bool
+			for _, ev := range events {
+				if ev.Result == "scope_warning" {
+					found = true
+				}
+			}
+			if found != tc.wantWarn {
+				t.Errorf("scope_warning = %v, want %v (events=%+v)", found, tc.wantWarn, events)
+			}
+		})
 	}
 }

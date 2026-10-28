@@ -1,0 +1,8 @@
+apiVersion: kro.run/v1alpha1
+kind: PostgresAWS
+metadata:
+    name: my-db
+    namespace: apps
+spec:
+    engineVersion: "16"
+    storageGB: 50

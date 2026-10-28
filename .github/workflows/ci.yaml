@@ -75,7 +75,7 @@ jobs:
         shard: [critical, core-services, modules-a, modules-b]
     env:
       # Race-detect the critical shard only (db, leaderlease, eventbus, audit,
-      # authz, orchestrator, approvals) — empty for the other shards.
+      # authz, orchestrator, approvals, inventory) — empty for the other shards.
       RACE: ${{ matrix.shard == 'critical' && '-race' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

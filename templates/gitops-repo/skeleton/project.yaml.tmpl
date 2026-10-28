@@ -1,0 +1,18 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: {{ .Values.team }}
+  namespace: argocd
+  labels:
+    inari.io/org-id: {{ .Tenant.OrgID }}
+    inari.io/tenant: {{ .Tenant.Slug }}
+spec:
+  description: "Team {{ .Values.team }} GitOps project"
+  sourceRepos:
+    - '*'
+  destinations:
+    - namespace: '{{ .Tenant.Slug }}--*'
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: '*'
+      kind: '*'

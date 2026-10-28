@@ -213,7 +213,7 @@ func (r *Resolver) forTenantPlatform(ctx context.Context, cfg *types.TenantGitCo
 		if inst.notFound {
 			return nil, nil, r.notInstalledErr(owner)
 		}
-		return r.platformProvider(ctx, cfg.OrgID, owner, inst.id)
+		return r.platformProvider(ctx, cfg.OrgID, owner, cfg.Repo, inst.id)
 	}
 
 	// Cold/stale: rediscover (single-flight per org).
@@ -234,7 +234,7 @@ func (r *Resolver) forTenantPlatform(ctx context.Context, cfg *types.TenantGitCo
 		r.emit(ctx, ResolvedEvent{OrgID: cfg.OrgID, AuthModel: gitprovider.AuthModelPlatform, AppID: r.cfg.PlatformAppID, APIBase: r.apiBase, Result: "not_installed"})
 		return nil, nil, r.notInstalledErr(owner)
 	}
-	return r.platformProvider(ctx, cfg.OrgID, owner, inst.id)
+	return r.platformProvider(ctx, cfg.OrgID, owner, cfg.Repo, inst.id)
 }
 
 func (r *Resolver) notInstalledErr(org string) *ErrAppNotInstalled {
@@ -242,7 +242,7 @@ func (r *Resolver) notInstalledErr(org string) *ErrAppNotInstalled {
 }
 
 // platformProvider returns the cached provider for one installation.
-func (r *Resolver) platformProvider(ctx context.Context, orgID, owner string, installationID int64) (gitprovider.Provider, *gitprovider.AuthInfo, error) {
+func (r *Resolver) platformProvider(ctx context.Context, orgID, owner, repo string, installationID int64) (gitprovider.Provider, *gitprovider.AuthInfo, error) {
 	key := fmt.Sprintf("i:%d", installationID)
 	r.mu.Lock()
 	cp, ok := r.providers[key]
@@ -260,7 +260,7 @@ func (r *Resolver) platformProvider(ctx context.Context, orgID, owner string, in
 	r.providers[key] = &cachedProvider{provider: wrapped, info: info, owner: owner}
 	r.mu.Unlock()
 	r.emit(ctx, ResolvedEvent{OrgID: orgID, AuthModel: info.Model, AppID: info.AppID, InstallationID: installationID, APIBase: r.apiBase, Result: "resolved"})
-	r.scopeCheck(ctx, inner, orgID, info)
+	r.scopeCheck(ctx, inner, orgID, repo, info)
 	return wrapped, info, nil
 }
 
@@ -296,38 +296,58 @@ func (r *Resolver) forTenantBYO(ctx context.Context, cfg *types.TenantGitConfig)
 	if r.cfg.KeyLoader == nil {
 		return nil, nil, fmt.Errorf("gitprovider github: tenant BYO git app configured but no key loader is wired (INARI_TENANT_GIT_KEY_MOUNT_ROOT)")
 	}
-	key := "t:" + cfg.OrgID
+	key := byoCacheKey(cfg)
 	r.mu.Lock()
 	cp, ok := r.providers[key]
 	r.mu.Unlock()
 	if ok {
 		return cp.provider, cp.info, nil
 	}
-	keyBytes, err := r.cfg.KeyLoader(ctx, cfg.GitHubApp.KeyRef)
+	// Single-flight the key load + provider construction: concurrent
+	// resolutions for the same credential share one KeyLoader call.
+	v, err, _ := r.sf.Do("byo:"+key, func() (any, error) {
+		// Re-check inside the flight: another goroutine may have completed
+		// while we waited.
+		r.mu.Lock()
+		cp, ok := r.providers[key]
+		r.mu.Unlock()
+		if ok {
+			return cp, nil
+		}
+		keyBytes, err := r.cfg.KeyLoader(ctx, cfg.GitHubApp.KeyRef)
+		if err != nil {
+			return nil, fmt.Errorf("gitprovider github: load tenant app key: %w", err)
+		}
+		base := strings.TrimSuffix(cfg.GitHubApp.APIBase, "/")
+		if base == "" {
+			base = "https://api.github.com"
+		}
+		info := &gitprovider.AuthInfo{
+			Model: gitprovider.AuthModelBYO, AppID: cfg.GitHubApp.AppID,
+			InstallationID: cfg.GitHubApp.InstallationID, APIBase: base,
+		}
+		inner := NewWithKey(cfg.GitHubApp.AppID, cfg.GitHubApp.InstallationID, keyBytes, base)
+		wrapped := r.wrapBYO(inner, cfg.OrgID, key, info)
+		entry := &cachedProvider{provider: wrapped, info: info}
+		r.mu.Lock()
+		r.providers[key] = entry
+		r.mu.Unlock()
+		r.emit(ctx, ResolvedEvent{OrgID: cfg.OrgID, AuthModel: info.Model, AppID: info.AppID, InstallationID: info.InstallationID, APIBase: base, Result: "resolved"})
+		r.scopeCheck(ctx, inner, cfg.OrgID, cfg.Repo, info)
+		return entry, nil
+	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("gitprovider github: load tenant app key: %w", err)
+		return nil, nil, err
 	}
-	base := strings.TrimSuffix(cfg.GitHubApp.APIBase, "/")
-	if base == "" {
-		base = "https://api.github.com"
-	}
-	info := &gitprovider.AuthInfo{
-		Model: gitprovider.AuthModelBYO, AppID: cfg.GitHubApp.AppID,
-		InstallationID: cfg.GitHubApp.InstallationID, APIBase: base,
-	}
-	inner := NewWithKey(cfg.GitHubApp.AppID, cfg.GitHubApp.InstallationID, keyBytes, base)
-	wrapped := r.wrapBYO(inner, cfg.OrgID, info)
-	r.mu.Lock()
-	r.providers[key] = &cachedProvider{provider: wrapped, info: info}
-	r.mu.Unlock()
-	r.emit(ctx, ResolvedEvent{OrgID: cfg.OrgID, AuthModel: info.Model, AppID: info.AppID, InstallationID: info.InstallationID, APIBase: base, Result: "resolved"})
-	r.scopeCheck(ctx, inner, cfg.OrgID, info)
-	return wrapped, info, nil
+	cp = v.(*cachedProvider)
+	return cp.provider, cp.info, nil
 }
 
-// wrapBYO maps auth failures to typed errors and evicts the tenant provider
-// so the next resolution reloads the key (rotation pickup, model B).
-func (r *Resolver) wrapBYO(inner *Provider, orgID string, info *gitprovider.AuthInfo) gitprovider.Provider {
+// wrapBYO maps auth failures to typed errors and evicts the failed BYO
+// provider so the next resolution reloads the key (rotation pickup, model
+// B). Only the affected credential is evicted — other repos' BYO apps in
+// the same org keep their cached providers.
+func (r *Resolver) wrapBYO(inner *Provider, orgID, cacheKey string, info *gitprovider.AuthInfo) gitprovider.Provider {
 	return &resolvingProvider{inner: inner, mapErr: func(err error) error {
 		apiErr := asAPIError(err)
 		if apiErr == nil {
@@ -338,23 +358,50 @@ func (r *Resolver) wrapBYO(inner *Provider, orgID string, info *gitprovider.Auth
 			if apiErr.Status == http.StatusForbidden && !apiErr.indicatesRevoked() {
 				return fmt.Errorf("gitprovider github: %s %s: %s", apiErr.Method, apiErr.Path, apiErr.Body)
 			}
-			r.EvictTenant(orgID)
+			r.evictBYO(cacheKey)
 			return &ErrAppCredentialsRevoked{OrgID: orgID, AppID: info.AppID, InstallationID: info.InstallationID, APIBase: info.APIBase}
 		case apiErr.Status == http.StatusNotFound && strings.Contains(apiErr.Path, "/access_tokens"):
-			r.EvictTenant(orgID)
+			r.evictBYO(cacheKey)
 			return &ErrAppCredentialsRevoked{OrgID: orgID, AppID: info.AppID, InstallationID: info.InstallationID, APIBase: info.APIBase}
 		}
 		return err
 	}}
 }
 
-// EvictTenant drops the cached BYO provider (and status) for a tenant —
-// called after git-config changes so the next deploy picks up new creds.
+// evictBYO drops one cached BYO provider by its credential-scoped key.
+func (r *Resolver) evictBYO(cacheKey string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.providers, cacheKey)
+}
+
+// byoCacheKey scopes a cached BYO provider to its credential identity, not
+// just the org: two repos in one org may carry different per-repo BYO apps
+// (Feature A), and a per-org key would silently cross-use credentials.
+func byoCacheKey(cfg *types.TenantGitConfig) string {
+	app := cfg.GitHubApp
+	return fmt.Sprintf("t:%s:%d:%d:%s", cfg.OrgID, app.AppID, app.InstallationID, strings.TrimSuffix(app.APIBase, "/"))
+}
+
+// EvictTenant drops every cached BYO provider (and the status) for a
+// tenant — called after git-config changes so the next deploy picks up new
+// creds. Platform (i:) entries belong to installations, not tenants, and
+// are left alone.
 func (r *Resolver) EvictTenant(orgID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.providers, "t:"+orgID)
-	delete(r.status, orgID)
+	prefix := "t:" + orgID + ":"
+	for k := range r.providers {
+		if strings.HasPrefix(k, prefix) {
+			delete(r.providers, k)
+		}
+	}
+	// Clear probe statuses: BYO entries (t:orgID:...) and the platform entry.
+	for k := range r.status {
+		if strings.HasPrefix(k, prefix) || k == "p:"+orgID {
+			delete(r.status, k)
+		}
+	}
 }
 
 func (r *Resolver) invalidate(owner string) {
@@ -467,45 +514,70 @@ func (r *Resolver) appGetURL(ctx context.Context, url string, out any) (string, 
 	return resp.Header.Get("Link"), json.NewDecoder(resp.Body).Decode(out)
 }
 
-// scopeCheck records a (non-blocking) warning when an installation is
-// scoped broader than the *-inari-state repos. Tolerates GHE skew (404/405).
-func (r *Resolver) scopeCheck(ctx context.Context, p *Provider, orgID string, info *gitprovider.AuthInfo) {
-	var out struct {
-		Selection string `json:"repository_selection"`
-		Repos     []struct {
-			Name string `json:"name"`
-		} `json:"repositories"`
-	}
-	if _, err := p.do(ctx, http.MethodGet, "/installation/repositories?per_page=100", nil, &out); err != nil {
+// scopeCheck records a (non-blocking) warning when a "selected"-scoped
+// installation does not cover the target repo — the classic
+// installed-but-not-granted misconfiguration. "all"-scoped installations
+// are broad but functional: no warning. Repo names are arbitrary (Feature
+// A team repos), so the check is repo-aware, not name-pattern-based.
+// Paginates through all installation repos (100 per page). Tolerates GHE
+// skew (404/405).
+func (r *Resolver) scopeCheck(ctx context.Context, p *Provider, orgID, repo string, info *gitprovider.AuthInfo) {
+	_, name, err := splitRepo(repo)
+	if err != nil {
 		return // advisory only
 	}
-	broad := out.Selection != "selected"
-	if !broad {
-		for _, repo := range out.Repos {
-			if !strings.HasSuffix(repo.Name, "-inari-state") {
-				broad = true
-				break
+	for page := 1; page <= 50; page++ { // 5000-repo safety cap
+		var out struct {
+			Selection string `json:"repository_selection"`
+			Repos     []struct {
+				Name string `json:"name"`
+			} `json:"repositories"`
+		}
+		path := fmt.Sprintf("/installation/repositories?per_page=100&page=%d", page)
+		if _, err := p.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+			return // advisory only
+		}
+		if page == 1 && out.Selection != "selected" {
+			return
+		}
+		for _, rp := range out.Repos {
+			if strings.EqualFold(rp.Name, name) {
+				return
 			}
 		}
+		if len(out.Repos) == 0 {
+			break
+		}
 	}
-	if broad {
-		r.emit(ctx, ResolvedEvent{OrgID: orgID, AuthModel: info.Model, AppID: info.AppID, InstallationID: info.InstallationID, APIBase: info.APIBase, Result: "scope_warning"})
-	}
+	r.emit(ctx, ResolvedEvent{OrgID: orgID, AuthModel: info.Model, AppID: info.AppID, InstallationID: info.InstallationID, APIBase: info.APIBase, Result: "scope_warning"})
 }
 
-// Probe health-checks a tenant's git provider auth (cached 60s).
+// Probe health-checks a tenant's git provider auth (cached 60s). The cache
+// key includes the credential identity so per-repo BYO apps within one org
+// don't collide (Feature A).
 func (r *Resolver) Probe(ctx context.Context, cfg *types.TenantGitConfig) *types.GitProviderStatus {
+	key := probeCacheKey(cfg)
 	r.mu.Lock()
-	entry, ok := r.status[cfg.OrgID]
+	entry, ok := r.status[key]
 	r.mu.Unlock()
 	if ok && r.now().Sub(entry.checkedAt) < time.Minute {
 		return entry.status
 	}
 	st := r.probe(ctx, cfg)
 	r.mu.Lock()
-	r.status[cfg.OrgID] = statusEntry{status: st, checkedAt: r.now()}
+	r.status[key] = statusEntry{status: st, checkedAt: r.now()}
 	r.mu.Unlock()
 	return st
+}
+
+// probeCacheKey scopes the probe cache to the credential identity: BYO apps
+// key by their app+installation; the platform app keys by org (one platform
+// installation per git-org).
+func probeCacheKey(cfg *types.TenantGitConfig) string {
+	if cfg.GitHubApp != nil {
+		return byoCacheKey(cfg)
+	}
+	return "p:" + cfg.OrgID
 }
 
 func (r *Resolver) probe(ctx context.Context, cfg *types.TenantGitConfig) *types.GitProviderStatus {

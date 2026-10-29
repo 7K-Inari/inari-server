@@ -609,7 +609,10 @@ func mustCluster(t *testing.T, r *rig, id string) *types.Cluster {
 }
 
 type fakePlatformEnsurer struct {
-	calls []platformEnsureCall
+	calls         []platformEnsureCall
+	claimCalls    []string
+	claimRendered bool
+	claimErr      error
 }
 
 type platformEnsureCall struct {
@@ -620,6 +623,17 @@ type platformEnsureCall struct {
 
 func (f *fakePlatformEnsurer) MarkProvisioned(context.Context, string, types.PlatformResourceKind, string, string) error {
 	return nil
+}
+
+// RenderKeycloakClientClaim reports the claim render as disabled
+// (rendered=false) unless claimRendered is set, so the registration tests
+// exercise the legacy desired-state path by default.
+func (f *fakePlatformEnsurer) RenderKeycloakClientClaim(_ context.Context, orgID, clusterID, clientID, _ string) (bool, error) {
+	f.claimCalls = append(f.claimCalls, clientID)
+	if f.claimErr != nil {
+		return false, f.claimErr
+	}
+	return f.claimRendered, nil
 }
 
 func (f *fakePlatformEnsurer) EnsureDesired(_ context.Context, orgID string, kind types.PlatformResourceKind, name string, _ json.RawMessage) (*types.PlatformResource, error) {
@@ -647,5 +661,60 @@ func TestRegistrationEnsuresKeycloakClientResource(t *testing.T) {
 	want := platformEnsureCall{orgID: "org:1", kind: types.PlatformKindKeycloakClient, name: "cluster-" + cluster.ID}
 	if len(ensurer.calls) != 1 || ensurer.calls[0] != want {
 		t.Errorf("EnsureDesired calls = %+v, want [%+v]", ensurer.calls, want)
+	}
+}
+
+// Render cutover: when the claim render is live (rendered=true), it
+// replaces the desired-state row for the keycloak-client resource.
+func TestRegistrationRendersKeycloakClientClaim(t *testing.T) {
+	r := newRig(t, false)
+	ensurer := &fakePlatformEnsurer{claimRendered: true}
+	r.gw.WithPlatformResources(ensurer)
+	ctx := context.Background()
+
+	cluster, err := r.registry.CreateCluster(ctx, "user-1", "org:1", "kind-dev", nil)
+	if err != nil {
+		t.Fatalf("CreateCluster: %v", err)
+	}
+	token, _, err := r.registry.IssueToken(ctx, "user-1", cluster.ID)
+	if err != nil {
+		t.Fatalf("IssueToken: %v", err)
+	}
+	if _, err := r.gw.RegisterCluster(ctx, registerReq(token)); err != nil {
+		t.Fatalf("RegisterCluster: %v", err)
+	}
+	if len(ensurer.calls) != 0 {
+		t.Errorf("EnsureDesired calls = %+v, want none (claim render replaced it)", ensurer.calls)
+	}
+	want := "cluster-" + cluster.ID
+	if len(ensurer.claimCalls) != 1 || ensurer.claimCalls[0] != want {
+		t.Errorf("claim renders = %v, want [%s]", ensurer.claimCalls, want)
+	}
+}
+
+// Retry-safe: a claim-render failure aborts registration BEFORE the token
+// is burned, so the agent can retry with the same token.
+func TestRegistrationClaimRenderErrorKeepsTokenConsumable(t *testing.T) {
+	r := newRig(t, false)
+	ensurer := &fakePlatformEnsurer{claimErr: errors.New("git commit failed")}
+	r.gw.WithPlatformResources(ensurer)
+	ctx := context.Background()
+
+	cluster, err := r.registry.CreateCluster(ctx, "user-1", "org:1", "kind-dev", nil)
+	if err != nil {
+		t.Fatalf("CreateCluster: %v", err)
+	}
+	token, _, err := r.registry.IssueToken(ctx, "user-1", cluster.ID)
+	if err != nil {
+		t.Fatalf("IssueToken: %v", err)
+	}
+	if _, err := r.gw.RegisterCluster(ctx, registerReq(token)); err == nil {
+		t.Fatal("RegisterCluster: expected claim render error")
+	}
+	// The token survived: fixing the render and retrying with the SAME
+	// token succeeds.
+	ensurer.claimErr = nil
+	if _, err := r.gw.RegisterCluster(ctx, registerReq(token)); err != nil {
+		t.Fatalf("RegisterCluster retry: %v", err)
 	}
 }

@@ -162,6 +162,13 @@ type PlatformResourceEnsurer interface {
 	// MarkProvisioned records a server-provisioned resource as ready (no
 	// operator CR exists for it; the control plane is the source of truth).
 	MarkProvisioned(ctx context.Context, orgID string, kind types.PlatformResourceKind, name, detail string) error
+	// RenderKeycloakClientClaim renders the provider-keycloak TenantClient
+	// claim (+ ESO secret-delivery plumbing) into the hub-facing platform
+	// repo (operator sunset Phase 1, decision D3). rendered=false means the
+	// render cutover is off/unwired and the caller keeps the legacy
+	// desired-state row. issuerURL is the platform OIDC issuer (the tenant
+	// realm issuer is derived from it).
+	RenderKeycloakClientClaim(ctx context.Context, orgID, clusterID, clientID, issuerURL string) (rendered bool, err error)
 }
 
 // WithPlatformResources wires the platform-resources module so cluster

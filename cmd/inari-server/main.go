@@ -532,6 +532,10 @@ func run() error {
 		WithIdentityProviderManager(idp).
 		WithPlatformResources(platformResourcesSvc).
 		WithOrgCache(orgCache)
+	// Render-cutover wiring (operator sunset Phase 1): the feature flag
+	// gates legacy CR render vs. renderer descriptors; the tenant lookup
+	// resolves org slugs for the registration-time keycloak client claim.
+	platformResourcesSvc.WithFlags(flagResolver).WithTenantLookup(svc)
 	// Platform pseudo-org (ADR-0005, D1): seed the reserved "platform" org so
 	// the 7kgroup platform cluster registers through the standard org-scoped
 	// cluster registry flow. Idempotent; mirrors SeedPlatformApps below.

@@ -22,6 +22,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
+	"github.com/7K-Inari/inari-server/internal/renderer"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -40,6 +41,13 @@ type Service struct {
 	// GitOps repo on ops reconcile; empty repo disables the commit.
 	git                gitprovider.Provider
 	platformGitOpsRepo string
+
+	// renders is the source-agnostic render pipeline (descriptor render
+	// path); flags gates the cutover; tenantLookup resolves orgs by ID for
+	// the keycloak client claim render.
+	renders      *renderer.Registry
+	flags        FlagEvaluator
+	tenantLookup TenantLookupByID
 }
 
 // CommandQueue is the agentgateway command-queue seam (at-least-once agent
@@ -54,7 +62,7 @@ type ClusterLister interface {
 }
 
 func NewService(d *db.DB, store *Store, auditStore *audit.Store) *Service {
-	return &Service{db: d, store: store, audit: auditStore}
+	return &Service{db: d, store: store, audit: auditStore, renders: renderer.New(resolvePlatformRGD)}
 }
 
 // WithCommandQueue wires the agent command queue used to request resyncs.
@@ -150,11 +158,16 @@ func (s *Service) RequestReconcile(ctx context.Context, actor string, org *types
 	// Re-render + commit the tenant's CR manifests to the platform GitOps
 	// repo so the ArgoCD sync can actually materialize them (idempotent:
 	// unchanged content is a no-op commit the provider may still record).
+	// RenderTenantFiles is flag-aware: legacy CRs vs. renderer descriptors.
 	if s.git != nil && s.platformGitOpsRepo != "" {
-		if _, err := s.git.EnsureRepo(ctx, s.platformGitOpsRepo); err != nil {
+		repoURL, err := s.git.EnsureRepo(ctx, s.platformGitOpsRepo)
+		if err != nil {
 			return 0, 0, fmt.Errorf("platformresources: ensure platform gitops repo: %w", err)
 		}
-		files := RenderTenantManifests(org)
+		files, err := s.RenderTenantFiles(ctx, org, repoURL)
+		if err != nil {
+			return 0, 0, fmt.Errorf("platformresources: render tenant manifests: %w", err)
+		}
 		if _, err := s.git.CommitFiles(ctx, s.platformGitOpsRepo, "main", files,
 			"chore: re-render tenant platform resources for "+org.Slug); err != nil {
 			return 0, 0, fmt.Errorf("platformresources: commit tenant manifests: %w", err)
@@ -244,17 +257,38 @@ type StatusUpdate struct {
 	ObservedAt time.Time
 }
 
+// renderedKindMap folds agent-reported status for the resources the
+// descriptor render path (platform_resources.gitops_render) commits —
+// native DNSEndpoint, the tenantnamespace KRO instance, provider-keycloak
+// claims — into the same platform-resource rows the legacy CRs reported
+// against. Keys are the agent's group-qualified kinds ("<Kind>.<group>").
+var renderedKindMap = map[string]types.PlatformResourceKind{
+	"TenantRealm.identity.inari.io":   types.PlatformKindKeycloakRealm,
+	"TenantClient.identity.inari.io":  types.PlatformKindKeycloakClient,
+	"DNSEndpoint.externaldns.k8s.io":  types.PlatformKindDNSZone,
+	"TenantNamespace.stacks.inari.io": types.PlatformKindTenantNamespace,
+}
+
 // IsPlatformKind reports whether an agent resource kind belongs to the
-// platform CRD group (routing predicate for the status sink).
+// platform-tracked set (routing predicate for the status sink): the legacy
+// platform.inari.io CRDs plus the rendered replacement kinds.
 func IsPlatformKind(kind string) bool {
+	if _, ok := renderedKindMap[kind]; ok {
+		return true
+	}
 	return strings.HasSuffix(kind, platformKindSuffix) && len(kind) > len(platformKindSuffix)
 }
 
 // KindForCRD maps an agent CRD kind to the platform resource kind recorded
 // at EnsureDesired time. DNSZone and DNSRecord both report against the
-// dns-zone row (records live under their zone's name).
+// dns-zone row (records live under their zone's name); the rendered
+// DNSEndpoint carries the same name. Rendered replacement kinds map to the
+// same rows their legacy counterparts reported against.
 func KindForCRD(crd string) (types.PlatformResourceKind, bool) {
-	if !IsPlatformKind(crd) {
+	if kind, ok := renderedKindMap[crd]; ok {
+		return kind, true
+	}
+	if !strings.HasSuffix(crd, platformKindSuffix) || len(crd) <= len(platformKindSuffix) {
 		return "", false
 	}
 	switch strings.TrimSuffix(crd, platformKindSuffix) {

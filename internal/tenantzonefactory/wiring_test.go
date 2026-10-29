@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
+	"github.com/7K-Inari/inari-server/internal/platformresources"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -15,6 +16,16 @@ type fakePlatformEnsurer struct{ orgs []string }
 func (f *fakePlatformEnsurer) EnsureBaseResources(_ context.Context, org *types.Organization) error {
 	f.orgs = append(f.orgs, org.ID)
 	return nil
+}
+
+// RenderTenantFiles mirrors the legacy (flag-off) render so the wiring test
+// keeps asserting the CR manifest layout.
+func (f *fakePlatformEnsurer) RenderTenantFiles(_ context.Context, org *types.Organization, _ string) ([]gitprovider.File, error) {
+	return platformresources.RenderTenantManifests(org), nil
+}
+
+func (f *fakePlatformEnsurer) TenantRenderPaths(_ context.Context, slug string) ([]string, error) {
+	return platformresources.TenantManifestPaths(slug), nil
 }
 
 func TestWireZoneEnsuresPlatformResourcesAndCommitsManifests(t *testing.T) {

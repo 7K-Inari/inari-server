@@ -234,3 +234,80 @@ func TestQADeleteAddon(t *testing.T) {
 		t.Errorf("delete stranded adopting row: got %d (%s)", code, body)
 	}
 }
+
+// Version-bump re-validation (operator-sunset addons track, decision 4):
+// moving a managed addon to a new catalog version re-validates the STORED
+// values against the NEW version's schema before anything is committed. A
+// values-free bump whose stored values violate the new schema is a 422 with
+// no git side effects and no state flip; supplying corrected values in the
+// same PATCH succeeds.
+func TestQAVersionBumpRevalidatesStoredValues(t *testing.T) {
+	f := newITServer(t, types.CommitPolicyDirect)
+	defer f.srv.Close()
+	base := "/api/v1/tenants/acme/clusters/cluster-1/addons"
+
+	// A stricter follow-up chart version: policy "sync" (valid at 1.15.2)
+	// is dropped from the enum at 1.16.0.
+	if _, err := f.database.Pool.Exec(t.Context(), `
+		INSERT INTO catalog_item_versions (item_id, version, channel, schema, payload) VALUES
+		('platform:external-dns', '1.16.0', 'stable',
+		 '{"type":"object","properties":{"policy":{"type":"string","enum":["upsert-only"]}}}',
+		 '{"chart":{"repoURL":"https://kubernetes-sigs.github.io/external-dns/","chart":"external-dns","namespace":"external-dns"}}')`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Adopt at 1.15.2 with policy "sync" (valid under the 1.15.2 schema).
+	code, body := f.req(t, http.MethodPost, base+"/platform:external-dns/adopt", "admin",
+		`{"version":"1.15.2","values":{"policy":"sync"}}`)
+	if code != http.StatusOK && code != http.StatusCreated {
+		t.Fatalf("adopt: %d %s", code, body)
+	}
+	var out struct {
+		Addon addonView `json:"addon"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	appFile := "addons/external-dns/application.yaml"
+	if app := f.git.Files("acme/acme-inari-state", "main")[appFile]; !strings.Contains(app, "targetRevision: 1.15.2") {
+		t.Fatalf("adopt must pin 1.15.2:\n%s", app)
+	}
+
+	// Values-free bump to 1.16.0: the stored {"policy":"sync"} violates the
+	// new schema → 422 with the field path, no commit, no state flip.
+	code, body = f.req(t, http.MethodPatch, "/api/v1/tenants/acme/addons/"+out.Addon.ID, "admin",
+		`{"chartVersion":"1.16.0"}`)
+	if code != http.StatusUnprocessableEntity {
+		t.Fatalf("bump with stale values: got %d (%s), want 422", code, body)
+	}
+	if !strings.Contains(body, "/policy") {
+		t.Errorf("422 body %s lacks field path /policy", body)
+	}
+	if app := f.git.Files("acme/acme-inari-state", "main")[appFile]; !strings.Contains(app, "targetRevision: 1.15.2") {
+		t.Errorf("rejected bump must not commit; app now:\n%s", app)
+	}
+	code, body = f.req(t, http.MethodGet, base, "admin", "")
+	if code != http.StatusOK || !strings.Contains(body, `"chartVersion":"1.15.2"`) || !strings.Contains(body, `"state":"managed"`) {
+		t.Errorf("after rejected bump, row must stay managed at 1.15.2: %d %s", code, body)
+	}
+
+	// Bump to a version that does not exist → 404, state preserved.
+	if code, body := f.req(t, http.MethodPatch, "/api/v1/tenants/acme/addons/"+out.Addon.ID, "admin",
+		`{"chartVersion":"9.9.9"}`); code != http.StatusNotFound {
+		t.Errorf("bump to unknown version: got %d (%s), want 404", code, body)
+	}
+
+	// Bump with corrected values in the same PATCH → 200, new pin committed.
+	code, body = f.req(t, http.MethodPatch, "/api/v1/tenants/acme/addons/"+out.Addon.ID, "admin",
+		`{"chartVersion":"1.16.0","values":{"policy":"upsert-only"}}`)
+	if code != http.StatusOK {
+		t.Fatalf("bump with fixed values: %d %s", code, body)
+	}
+	files := f.git.Files("acme/acme-inari-state", "main")
+	if app := files[appFile]; !strings.Contains(app, "targetRevision: 1.16.0") {
+		t.Errorf("bump must pin 1.16.0:\n%s", app)
+	}
+	if vals := files["addons/external-dns/values.yaml"]; !strings.Contains(vals, "policy: upsert-only") {
+		t.Errorf("bump must commit corrected values:\n%s", vals)
+	}
+}

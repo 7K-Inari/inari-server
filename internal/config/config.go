@@ -262,6 +262,11 @@ type Config struct {
 	// cluster registry API, and used to pin Tenant Zone Factory install
 	// manifests. Empty means "no recommendation" (installs float latest).
 	AgentRecommendedVersion string
+	// AgentStreamMaxRecvBytes is the per-message read limit on the
+	// agent-facing Connect mounts. The connect default (4MiB) is too small
+	// for capability full-sync replays from CRD-rich clusters (the agent
+	// embeds CRD openAPIV3 schemas); see agentgateway.DefaultStreamMaxRecvBytes.
+	AgentStreamMaxRecvBytes int
 	// AgentFloatLatest is the dev escape hatch: even with
 	// AgentRecommendedVersion set, TZF install manifests float on
 	// "targetRevision: *" / "image.tag: latest".
@@ -485,6 +490,7 @@ func Load() (*Config, error) {
 		CurrentAgentVersion:     env("INARI_AGENT_VERSION", ""),
 		AgentSupportedRange:     env("INARI_AGENT_SUPPORTED_RANGE", ""),
 		AgentRecommendedVersion: env("INARI_AGENT_RECOMMENDED_VERSION", ""),
+		AgentStreamMaxRecvBytes: int(intEnv("INARI_AGENT_STREAM_MAX_RECV_BYTES", 64<<20)),
 		AgentFloatLatest:        boolEnv("INARI_AGENT_FLOAT_LATEST", false),
 		FleetAdvanceInterval:    durEnv("INARI_FLEET_ADVANCE_INTERVAL", 10*time.Second),
 		DriftSweepInterval:      durEnv("INARI_DRIFT_SWEEP_INTERVAL", time.Minute),

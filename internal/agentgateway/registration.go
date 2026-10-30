@@ -43,7 +43,14 @@ func (g *Gateway) RegisterCluster(ctx context.Context, req *agentv1.RegisterClus
 	}
 	// Track the client's desired state as a platform resource. Pre-token-burn
 	// so a failure keeps the token consumable and the agent retries.
+	// Render cutover (operator sunset Phase 1): when live, the
+	// provider-keycloak TenantClient claim is ALSO rendered + committed to
+	// the hub-facing platform repo (dual-run: the desired-state row stays so
+	// the resources view keeps listing the client and W2-4 can compare).
 	if g.platform != nil {
+		if _, err := g.platform.RenderKeycloakClientClaim(ctx, cluster.OrgID, cluster.ID, clientID, g.cfg.OIDCIssuerURL); err != nil {
+			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("render client claim: %w", err).Error())
+		}
 		desired, _ := json.Marshal(map[string]string{"clientId": clientID, "clusterId": cluster.ID})
 		if _, err := g.platform.EnsureDesired(ctx, cluster.OrgID, types.PlatformKindKeycloakClient, clientID, desired); err != nil {
 			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("track client platform resource: %w", err).Error())

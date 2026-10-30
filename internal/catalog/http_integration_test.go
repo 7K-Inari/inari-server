@@ -190,8 +190,8 @@ func TestListCatalogFiltering(t *testing.T) {
 	}
 
 	// Source and category facets.
-	if got := itListCatalog(t, srv, "?source=curated"); got.Total != 2 {
-		t.Errorf("source=curated total = %d, want 2 (both fixture packages)", got.Total)
+	if got := itListCatalog(t, srv, "?source=curated"); got.Total != 3 {
+		t.Errorf("source=curated total = %d, want 3 (all fixture packages)", got.Total)
 	}
 	got = itListCatalog(t, srv, "?category=database")
 	if got.Total != 1 || got.Items[0].Category != "database" {

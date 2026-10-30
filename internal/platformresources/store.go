@@ -86,8 +86,6 @@ func (s *Store) UpsertDesired(ctx context.Context, q db.Querier, r *types.Platfo
 	return got, false, nil
 }
 
-// ApplyStatus records the agent-reported status for the (kind, name) row.
-// Returns the updated resource and whether it matched an existing row.
 // MarkProvisioned sets a terminal ready status for server-provisioned
 // resources (e.g. the per-cluster keycloak client, which the control plane
 // creates directly via the Keycloak Admin API — no operator CR exists).
@@ -99,11 +97,19 @@ func (s *Store) MarkProvisioned(ctx context.Context, q db.Querier, kind types.Pl
 	return err
 }
 
+// ApplyStatus records the agent-reported status for the (kind, name) row.
+// Returns the updated resource and whether it matched an existing row.
+// Name matching is case-insensitive: the rendered provider-keycloak
+// TenantClient claim lowercases the client ID (RFC 1123 — uppercase ULIDs
+// are invalid object names) while the row is keyed by the original client
+// ID, so agent status for the claim must still fold back onto the row.
+// (Legacy row names — slugs, tenant-<slug> — are already lowercase, so
+// this changes nothing for them.)
 func (s *Store) ApplyStatus(ctx context.Context, q db.Querier, kind types.PlatformResourceKind, name string,
 	status types.PlatformResourceStatus, detail string, reportedAt *time.Time) (*types.PlatformResource, bool, error) {
 	const sql = `UPDATE platform_resources
 	             SET status = $3, detail = $4, reported_at = COALESCE($5, now()), updated_at = now()
-	             WHERE kind = $1 AND name = $2
+	             WHERE kind = $1 AND lower(name) = lower($2)
 	             RETURNING ` + resourceCols
 	r, err := scanResource(q.QueryRow(ctx, sql, kind, name, status, detail, reportedAt))
 	if errors.Is(err, pgx.ErrNoRows) {

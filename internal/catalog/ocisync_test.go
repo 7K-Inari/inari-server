@@ -3,6 +3,7 @@ package catalog
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -19,8 +20,8 @@ func TestFixturePuller(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pkgs) != 3 {
-		t.Fatalf("pulled %d packages, want 3", len(pkgs))
+	if len(pkgs) != 4 {
+		t.Fatalf("pulled %d packages, want 4", len(pkgs))
 	}
 	byKey := map[string]Package{}
 	for _, pkg := range pkgs {
@@ -51,6 +52,45 @@ func TestFixturePuller(t *testing.T) {
 	}
 	if ws.Category != "compute" {
 		t.Errorf("category = %q, want compute", ws.Category)
+	}
+	// Platform-app fixture: no schema.json, so the vendored
+	// values.schema.json becomes the version's values schema (decision 4).
+	ed, ok := byKey["external-dns@1.15.2"]
+	if !ok {
+		t.Fatal("external-dns@1.15.2 missing")
+	}
+	if !strings.Contains(string(ed.Schema), `"upsert-only"`) {
+		t.Errorf("external-dns schema = %s, want vendored values.schema.json", ed.Schema)
+	}
+}
+
+// TestPackageFromFilesSchemaPrecedence pins the schema layering: an explicit
+// schema.json wins over the vendored values.schema.json.
+func TestPackageFromFilesSchemaPrecedence(t *testing.T) {
+	files := map[string][]byte{
+		"package.yaml":       []byte("version: 1.0.0\nchannel: stable\ntype: platform-app\n"),
+		"chart.yaml":         []byte("repoURL: https://example.com\nchart: demo\nnamespace: demo\nchannels:\n  stable: \"1.0.0\"\n"),
+		"schema.json":        []byte(`{"type":"object","properties":{"fromSchemaJson":{"type":"boolean"}}}`),
+		"values.schema.json": []byte(`{"type":"object","properties":{"fromValuesSchema":{"type":"boolean"}}}`),
+	}
+	pkgs, err := packageFromFiles("demo", "platform-app", "", "demo:1.0.0", files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range pkgs {
+		if !strings.Contains(string(p.Schema), "fromSchemaJson") {
+			t.Errorf("schema = %s, want schema.json to win", p.Schema)
+		}
+	}
+	delete(files, "schema.json")
+	pkgs, err = packageFromFiles("demo", "platform-app", "", "demo:1.0.0", files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range pkgs {
+		if !strings.Contains(string(p.Schema), "fromValuesSchema") {
+			t.Errorf("schema = %s, want values.schema.json fallback", p.Schema)
+		}
 	}
 }
 

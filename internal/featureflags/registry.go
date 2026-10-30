@@ -88,6 +88,15 @@ func (d Definition) AllowsScope(scope Scope) bool {
 // 410 on proxy/kubeconfig and tunnel-stream rejection (kill-switch v2).
 const KeyKubectlAccessEnabled = "kubectl_access.enabled"
 
+// KeyPlatformResourcesGitOpsRender gates the platformresources render
+// cutover (operator sunset Phase 1, parent-plan D2): off renders the legacy
+// platform.inari.io/v1alpha1 CRs, on renders source descriptors via
+// internal/renderer (native DNSEndpoint/AppProject manifests, the
+// tenantnamespace KRO instance, provider-keycloak TenantRealm/TenantClient
+// claims) into the hub-facing platform repo. Dual-run lever while the new
+// render path is validated.
+const KeyPlatformResourcesGitOpsRender = "platform_resources.gitops_render"
+
 // registry is the single source of truth for runtime flags. Add new flags
 // here; the REST catalog endpoint serves this list.
 var registry = []Definition{
@@ -100,6 +109,17 @@ var registry = []Definition{
 		Default:     true,
 		Description: "kubectl access via inari-kubeproxy (410 proxy/kubeconfig + tunnel rejection when off)",
 		// Kill-switch: DB-authoritative even with an external provider.
+		Authority: AuthorityDB,
+	},
+	{
+		Key:    KeyPlatformResourcesGitOpsRender,
+		Type:   FlagTypeBoolean,
+		Scopes: []Scope{ScopePlatform},
+		// false preserves the legacy platform.inari.io CR render until the
+		// descriptor render path is validated (dual-run).
+		Default:     false,
+		Description: "render tenant platform resources as renderer source descriptors (native manifests/KRO/Crossplane claims) instead of platform.inari.io CRs",
+		// Render cutover: DB-authoritative even with an external provider.
 		Authority: AuthorityDB,
 	},
 }

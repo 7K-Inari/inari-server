@@ -93,7 +93,6 @@ func TestStubHandlersReturnNotSupported(t *testing.T) {
 		kind types.SourceKind
 		desc types.SourceDescriptor
 	}{
-		{types.SourceKindCrossplane, types.SourceDescriptor{Kind: types.SourceKindCrossplane, Crossplane: &types.XPSource{}}},
 		{types.SourceKindKustomize, types.SourceDescriptor{Kind: types.SourceKindKustomize, Kustomize: &types.KustomizeSource{Path: "base"}}},
 	} {
 		_, err := r.Render(context.Background(), tc.desc, p)

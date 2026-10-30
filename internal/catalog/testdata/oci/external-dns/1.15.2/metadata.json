@@ -1,0 +1,1 @@
+{"name": "external-dns", "displayName": "ExternalDNS", "description": "Sync Services and Ingresses with DNS providers", "channel": "stable", "category": "platform"}

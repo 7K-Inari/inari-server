@@ -349,6 +349,7 @@ var PlatformApps = []types.CatalogItem{
 	{ID: "platform:keycloak", Source: types.CatalogSourcePlatform, Name: "keycloak", DisplayName: "Keycloak", Description: "Identity and access management"},
 	{ID: "platform:cert-manager", Source: types.CatalogSourcePlatform, Name: "cert-manager", DisplayName: "cert-manager", Description: "X.509 certificate management"},
 	{ID: "platform:external-secrets", Source: types.CatalogSourcePlatform, Name: "external-secrets", DisplayName: "External Secrets Operator", Description: "Synchronize secrets from external backends"},
+	{ID: "platform:external-dns", Source: types.CatalogSourcePlatform, Name: "external-dns", DisplayName: "ExternalDNS", Description: "Synchronize Services and Ingresses with DNS providers"},
 	{ID: "platform:argocd", Source: types.CatalogSourcePlatform, Name: "argocd", DisplayName: "ArgoCD", Description: "GitOps continuous delivery"},
 }
 
@@ -357,7 +358,8 @@ var PlatformApps = []types.CatalogItem{
 // ("chart" key, the ocisync platform-app convention) so the addons service
 // can render helm source descriptors, and Schema vendors a (minimal) values
 // schema for the adopt/update 422 validation (decision 4). The OCI catalog
-// sync overwrites these with the full upstream documents when configured.
+// sync overwrites these with the full upstream documents when configured
+// (inari-catalog packages ship the complete vendored values.schema.json).
 var PlatformAppVersions = map[string][]types.CatalogItemVersion{
 	"platform:cert-manager": {
 		{
@@ -376,6 +378,23 @@ var PlatformAppVersions = map[string][]types.CatalogItemVersion{
 			// No schema: exercises the lenient "no schema = allow" fallback.
 			ItemID: "platform:external-secrets", Version: "v0.12.1", Channel: "stable",
 			Payload: json.RawMessage(`{"chart":{"repoURL":"https://charts.external-secrets.io","chart":"external-secrets","namespace":"external-secrets"}}`),
+		},
+	},
+	"platform:external-dns": {
+		{
+			ItemID: "platform:external-dns", Version: "1.15.2", Channel: "stable",
+			Schema:  json.RawMessage(`{"type":"object","properties":{"provider":{"type":"object","properties":{"name":{"type":"string"}}},"policy":{"type":"string","enum":["sync","upsert-only"]},"registry":{"type":"string","enum":["txt","aws-sd","dynamodb","noop"]},"serviceMonitor":{"type":"object","properties":{"enabled":{"type":"boolean"}}}}}`),
+			Payload: json.RawMessage(`{"chart":{"repoURL":"https://kubernetes-sigs.github.io/external-dns/","chart":"external-dns","namespace":"external-dns"}}`),
+		},
+	},
+	"platform:argocd": {
+		{
+			// The upstream argo-cd chart ships no values.schema.json; the
+			// curated inari-catalog schema covers the managed surface, this
+			// seed carries its core subset.
+			ItemID: "platform:argocd", Version: "7.6.12", Channel: "stable",
+			Schema:  json.RawMessage(`{"type":"object","properties":{"server":{"type":"object","properties":{"replicas":{"type":"integer","minimum":1},"ingress":{"type":"object","properties":{"enabled":{"type":"boolean"}}}}},"redis-ha":{"type":"object","properties":{"enabled":{"type":"boolean"}}},"dex":{"type":"object","properties":{"enabled":{"type":"boolean"}}}}}`),
+			Payload: json.RawMessage(`{"chart":{"repoURL":"https://argoproj.github.io/argo-helm","chart":"argo-cd","namespace":"argocd"}}`),
 		},
 	},
 }

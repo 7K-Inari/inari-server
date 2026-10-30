@@ -21,7 +21,7 @@ import (
 )
 
 // ErrNotSupported is returned (wrapped) by handlers for source kinds that
-// are registered but not yet implemented (crossplane, kustomize).
+// are registered but not yet implemented (kustomize).
 var ErrNotSupported = errors.New("renderer: source kind not yet supported")
 
 // App-name prefixes (parent plan §6): instances render inari-<id>, addons
@@ -90,15 +90,15 @@ type Registry struct {
 }
 
 // New returns a Registry with all known kinds registered: helm, kro (with
-// resolveRGD, which may be nil for callers that never render kro), and
-// manifests fully implemented; crossplane and kustomize as stubs so
-// enabling them later is purely additive.
+// resolveRGD, which may be nil for callers that never render kro),
+// manifests, and crossplane fully implemented; kustomize remains a stub so
+// enabling it later is purely additive.
 func New(resolveRGD ResolveRGDFunc) *Registry {
 	r := &Registry{handlers: map[types.SourceKind]Handler{}}
 	r.Register(types.SourceKindHelm, helmHandler{})
 	r.Register(types.SourceKindKRO, &kroHandler{resolve: resolveRGD})
 	r.Register(types.SourceKindManifests, manifestsHandler{})
-	r.Register(types.SourceKindCrossplane, stubHandler{kind: types.SourceKindCrossplane})
+	r.Register(types.SourceKindCrossplane, xpHandler{})
 	r.Register(types.SourceKindKustomize, stubHandler{kind: types.SourceKindKustomize})
 	return r
 }

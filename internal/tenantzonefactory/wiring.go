@@ -63,9 +63,18 @@ type BaselineRepos interface {
 }
 
 // PlatformResourceEnsurer upserts the tenant's base platform resources
-// (platformresources.Service seam, M7.W2).
+// (platformresources.Service seam, M7.W2) and renders the tenant's platform
+// manifests for the hub-facing platform repo (render-cutover aware: legacy
+// platform.inari.io CRs vs. renderer descriptors, per the
+// platform_resources.gitops_render flag).
 type PlatformResourceEnsurer interface {
 	EnsureBaseResources(ctx context.Context, org *types.Organization) error
+	// RenderTenantFiles renders the tenant's platform manifests (flag-aware);
+	// repoURL is the platform repo's clone URL (Application source).
+	RenderTenantFiles(ctx context.Context, org *types.Organization, repoURL string) ([]gitprovider.File, error)
+	// TenantRenderPaths lists the tenant's rendered paths in the platform
+	// repo (teardown delete set; flag-aware).
+	TenantRenderPaths(ctx context.Context, slug string) ([]string, error)
 }
 
 // ModuleWiring is the production Wiring implementation.
@@ -111,11 +120,15 @@ func (w *ModuleWiring) WireZone(ctx context.Context, zone *types.TenantZone, rol
 			return nil, fmt.Errorf("tzf: wiring platform resources: %w", err)
 		}
 	}
-	if w.PlatformGitOpsRepo != "" {
-		if _, err := w.Git.EnsureRepo(ctx, w.PlatformGitOpsRepo); err != nil {
+	if w.PlatformGitOpsRepo != "" && w.PlatformResources != nil {
+		repoURL, err := w.Git.EnsureRepo(ctx, w.PlatformGitOpsRepo)
+		if err != nil {
 			return nil, fmt.Errorf("tzf: wiring platform gitops repo: %w", err)
 		}
-		files := platformresources.RenderTenantManifests(org)
+		files, err := w.PlatformResources.RenderTenantFiles(ctx, org, repoURL)
+		if err != nil {
+			return nil, fmt.Errorf("tzf: wiring platform gitops render: %w", err)
+		}
 		if _, err := w.Git.CommitFiles(ctx, w.PlatformGitOpsRepo, "main", files,
 			"feat: tenant platform resources for "+org.Slug); err != nil {
 			return nil, fmt.Errorf("tzf: wiring platform gitops commit: %w", err)
@@ -202,15 +215,24 @@ func (w *ModuleWiring) WireZone(ctx context.Context, zone *types.TenantZone, rol
 	}, nil
 }
 
-// DeleteTenantManifests removes the tenant's platform CR manifests
+// DeleteTenantManifests removes the tenant's platform manifests
 // (tenants/<slug>/) from the platform GitOps repo (M7.W4 teardown step).
-// Idempotent: deleting paths that no longer exist is a no-op.
+// Idempotent: deleting paths that no longer exist is a no-op. The delete
+// set comes from the platform-resources module so it tracks the active
+// render path (legacy CRs vs. renderer descriptors).
 func (w *ModuleWiring) DeleteTenantManifests(ctx context.Context, orgSlug string) error {
 	if w.Git == nil || w.PlatformGitOpsRepo == "" {
 		return nil
 	}
-	if _, err := w.Git.DeleteFiles(ctx, w.PlatformGitOpsRepo, "main",
-		platformresources.TenantManifestPaths(orgSlug),
+	paths := platformresources.TenantManifestPaths(orgSlug)
+	if w.PlatformResources != nil {
+		p, err := w.PlatformResources.TenantRenderPaths(ctx, orgSlug)
+		if err != nil {
+			return fmt.Errorf("tzf: list tenant render paths: %w", err)
+		}
+		paths = p
+	}
+	if _, err := w.Git.DeleteFiles(ctx, w.PlatformGitOpsRepo, "main", paths,
 		"chore: remove tenant platform resources for "+orgSlug); err != nil {
 		return fmt.Errorf("tzf: delete tenant platform manifests: %w", err)
 	}

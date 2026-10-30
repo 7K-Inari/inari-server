@@ -71,3 +71,15 @@ the `inari-agent-discovery` ClusterRole — it deliberately contains **no**
 `platform.inari.io` rules. Read access to the platform CRDs is added by the
 inari-agent repo under a **separate ClusterRole name** so the two RBAC
 sources never conflict; do not reuse `inari-agent-discovery` agent-side.
+
+## Operator sunset note (render cutover)
+
+The `platform.inari.io` CRDs above are being phased out (operator sunset
+plan). With the `platform_resources.gitops_render` runtime flag on, the
+control plane renders native ExternalDNS/ArgoCD manifests, a `tenantnamespace`
+KRO instance, and provider-keycloak `TenantRealm`/`TenantClient` claims into
+the hub-facing platform repo instead of operator CRs (see
+`docs/platform-gitops.md` → "Render cutover"). The platform cluster
+registered by this document is the hub whose ArgoCD applies that repo;
+KRO, Crossplane + provider-keycloak, and ESO are hub prerequisites installed
+by the release-bundle gitops (`gitops/operators/`, `gitops/platform/`).

@@ -13,6 +13,7 @@ import (
 
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
 	"github.com/7K-Inari/inari-server/internal/platformresources"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/testutil"
@@ -391,5 +392,95 @@ func TestApplyStatusAndGet(t *testing.T) {
 	}
 	if len(list) != 1 || list[0].ID != r.ID {
 		t.Errorf("list = %+v, want single row %q", list, r.ID)
+	}
+}
+
+// Teardown completeness (render cutover): TenantRenderPaths must cover the
+// per-cluster TenantClient claim files committed at registration — not just
+// the tenant-level descriptor set — or deleting a tenant leaves orphaned
+// claims/Applications in the platform repo.
+func TestTenantRenderPathsCoverCommittedClientClaims(t *testing.T) {
+	svc, _ := itSetup(t)
+	git := gitprovider.NewFake()
+	svc.WithFlags(itFlagsOn{}).
+		WithTenantResolver(itTenantResolver{}).
+		WithTenantLookup(itTenantLookup{}).
+		WithGitOps("inari/platform", git)
+	ctx := context.Background()
+
+	// Registration-path claim render (flag on) + the dual-run row.
+	const clientID = "cluster-01JFXM6E8BM0G52GQPMNWP2ZC0"
+	rendered, err := svc.RenderKeycloakClientClaim(ctx, "org:1", "01JFXM6E8BM0G52GQPMNWP2ZC0", clientID,
+		"http://keycloak/realms/inari")
+	if err != nil || !rendered {
+		t.Fatalf("RenderKeycloakClientClaim: rendered=%v err=%v", rendered, err)
+	}
+	if _, err := svc.EnsureDesired(ctx, "org:1", types.PlatformKindKeycloakClient, clientID, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	paths, err := svc.TenantRenderPaths(ctx, "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inDeleteSet := map[string]bool{}
+	for _, p := range paths {
+		inDeleteSet[p] = true
+	}
+	committed := git.Files("inari/platform", "main")
+	if len(committed) == 0 {
+		t.Fatal("claim render committed nothing")
+	}
+	for p := range committed {
+		if strings.HasPrefix(p, "tenants/acme/") && !inDeleteSet[p] {
+			t.Errorf("committed claim file %q missing from the teardown delete set", p)
+		}
+	}
+}
+
+type itFlagsOn struct{}
+
+func (itFlagsOn) Bool(context.Context, string, string) bool { return true }
+
+type itTenantResolver struct{}
+
+func (itTenantResolver) GetTenant(_ context.Context, slug string) (*types.Organization, error) {
+	if slug != "acme" {
+		return nil, tenancy.ErrOrgNotFound
+	}
+	return &types.Organization{ID: "org:1", Slug: "acme", DisplayName: "Acme"}, nil
+}
+
+type itTenantLookup struct{}
+
+func (itTenantLookup) GetTenantByID(_ context.Context, id string) (*types.Organization, error) {
+	if id != "org:1" {
+		return nil, tenancy.ErrOrgNotFound
+	}
+	return &types.Organization{ID: "org:1", Slug: "acme", DisplayName: "Acme"}, nil
+}
+
+// Render-cutover fold-back: the provider-keycloak TenantClient claim
+// lowercases the client ID (RFC 1123) while the keycloak-client row is keyed
+// by the original (uppercase-ULID) client ID — agent status for the claim
+// must still match the row (case-insensitive name match).
+func TestApplyStatusMatchesLowercasedClaimName(t *testing.T) {
+	svc, _ := itSetup(t)
+	ctx := context.Background()
+
+	const clientID = "cluster-01JFXM6E8BM0G52GQPMNWP2ZC0"
+	if _, err := svc.EnsureDesired(ctx, "org:1", types.PlatformKindKeycloakClient, clientID, nil); err != nil {
+		t.Fatal(err)
+	}
+	matched, err := svc.ApplyStatus(ctx, "cluster-1", platformresources.StatusUpdate{
+		Resource: types.ResourceRef{Kind: "TenantClient.identity.inari.io", Name: "cluster-01jfxm6e8bm0g52gqpmnwp2zc0"},
+		Health:   "healthy",
+		Message:  "claim ready",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matched {
+		t.Fatal("lowercased TenantClient claim status must match the clientID-keyed row")
 	}
 }

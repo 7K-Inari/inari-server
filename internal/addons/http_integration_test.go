@@ -436,6 +436,138 @@ func TestAddonsHTTPPullRequestPolicy(t *testing.T) {
 	}
 }
 
+// TestAddonsHTTPSupportedAddonsCDLoop is the operator-sunset Phase 1
+// addons-track exit criterion: cert-manager, ExternalDNS, and ArgoCD are
+// registered first-class addons — the adopt → update CD loop works for all
+// three across both deploy modes, and schema-invalid values are rejected
+// with 422 field-level errors before anything is committed or registered.
+func TestAddonsHTTPSupportedAddonsCDLoop(t *testing.T) {
+	f := newITServer(t, types.CommitPolicyDirect)
+	defer f.srv.Close()
+	base := "/api/v1/tenants/acme/clusters/cluster-1/addons"
+
+	// Schema rejection (decision 4): bad values for each addon fail with 422
+	// field-level errors and no side effects.
+	rejections := []struct {
+		item, version, values, wantPath string
+	}{
+		{"platform:cert-manager", "v1.16.2", `{"replicaCount":0}`, "/replicaCount"},
+		{"platform:external-dns", "1.15.2", `{"policy":"delete-everything"}`, "/policy"},
+		{"platform:argocd", "7.6.12", `{"server":{"replicas":0}}`, "/server/replicas"},
+	}
+	for _, r := range rejections {
+		code, body := f.req(t, "POST", base+"/"+r.item+"/adopt", "admin",
+			`{"version":"`+r.version+`","values":`+r.values+`}`)
+		if code != http.StatusUnprocessableEntity {
+			t.Errorf("%s adopt with bad values: got %d (%s), want 422", r.item, code, body)
+			continue
+		}
+		if !strings.Contains(body, r.wantPath) {
+			t.Errorf("%s 422 body %s lacks field path %s", r.item, body, r.wantPath)
+		}
+	}
+	if files := f.git.Files("acme/acme-inari-state", "main"); len(files) != 0 {
+		t.Fatalf("rejected adopts committed files: %v", files)
+	}
+
+	// Adopt + update CD loop: external-dns as a single-cluster Application,
+	// argocd fleet-wide as an ApplicationSet (cert-manager is covered by
+	// TestAddonsHTTPEndToEnd).
+	cases := []struct {
+		item       string
+		version    string
+		values     string
+		newValues  string
+		wantInFile string
+		deployMode string
+		wantPath   string
+		wantFile   string
+	}{
+		{
+			item: "platform:external-dns", version: "1.15.2",
+			values: `{"policy":"upsert-only"}`, newValues: `{"policy":"sync"}`,
+			wantInFile: "policy: sync",
+			deployMode: "application", wantPath: "addons/external-dns",
+			wantFile: "addons/external-dns/application.yaml",
+		},
+		{
+			item: "platform:argocd", version: "7.6.12",
+			values: `{"server":{"replicas":2}}`, newValues: `{"server":{"replicas":3}}`,
+			wantInFile: "replicas: 3",
+			deployMode: "applicationset", wantPath: "addons/argocd",
+			wantFile: "addons/argocd/applicationset.yaml",
+		},
+	}
+	for _, c := range cases {
+		body := `{"version":"` + c.version + `","values":` + c.values
+		if c.deployMode == "applicationset" {
+			body += `,"deployMode":"applicationset","clusterSelector":{"env":"prod"}`
+		}
+		body += `}`
+		code, respBody := f.req(t, "POST", base+"/"+c.item+"/adopt", "admin", body)
+		if code != http.StatusOK && code != http.StatusCreated {
+			t.Fatalf("%s adopt: %d %s", c.item, code, respBody)
+		}
+		var out struct {
+			Addon     addonView `json:"addon"`
+			CommitSHA string    `json:"commitSha"`
+		}
+		if err := json.Unmarshal([]byte(respBody), &out); err != nil {
+			t.Fatal(err)
+		}
+		if out.Addon.State != "managed" || out.CommitSHA == "" {
+			t.Errorf("%s adopt result: %s", c.item, respBody)
+		}
+		if out.Addon.DeployMode != c.deployMode {
+			t.Errorf("%s deployMode = %q, want %q", c.item, out.Addon.DeployMode, c.deployMode)
+		}
+		if !strings.Contains(out.Addon.RepoPath, c.wantPath) {
+			t.Errorf("%s repoPath = %q, want under %s", c.item, out.Addon.RepoPath, c.wantPath)
+		}
+		appFile := f.git.Files("acme/acme-inari-state", "main")[c.wantFile]
+		if !strings.Contains(appFile, "targetRevision: "+c.version) {
+			t.Errorf("%s committed app must pin %s:\n%s", c.item, c.version, appFile)
+		}
+
+		// Update: values change re-renders and commits (the CD loop); a
+		// schema-invalid update is rejected 422 with state preserved.
+		code, respBody = f.req(t, "PATCH", "/api/v1/tenants/acme/addons/"+out.Addon.ID, "admin",
+			`{"values":`+c.newValues+`}`)
+		if code != http.StatusOK {
+			t.Fatalf("%s update: %d %s", c.item, code, respBody)
+		}
+		// The fake provider's SHA is file-count-derived, so assert the CD
+		// loop on the committed content instead.
+		valuesFile := f.git.Files("acme/acme-inari-state", "main")[c.wantPath+"/values.yaml"]
+		if !strings.Contains(valuesFile, c.wantInFile) {
+			t.Errorf("%s update did not commit the new values (%q missing):\n%s", c.item, c.wantInFile, valuesFile)
+		}
+		bad := `{"policy":"bogus"}`
+		if c.item == "platform:argocd" {
+			bad = `{"server":{"replicas":-1}}`
+		}
+		if code, respBody := f.req(t, "PATCH", "/api/v1/tenants/acme/addons/"+out.Addon.ID, "admin",
+			`{"values":`+bad+`}`); code != http.StatusUnprocessableEntity {
+			t.Errorf("%s update with bad values: got %d (%s), want 422", c.item, code, respBody)
+		}
+	}
+
+	// Fleet row: visible from both matched clusters, ApplicationSet rendered
+	// with the list generator targeting cluster-1 and cluster-2.
+	for _, cluster := range []string{"cluster-1", "cluster-2"} {
+		_, body := f.req(t, "GET", "/api/v1/tenants/acme/clusters/"+cluster+"/addons", "admin", "")
+		if !strings.Contains(body, "platform:argocd") {
+			t.Errorf("%s list lacks the fleet argocd addon: %s", cluster, body)
+		}
+	}
+	appSet := f.git.Files("acme/acme-inari-state", "main")["addons/argocd/applicationset.yaml"]
+	for _, cluster := range []string{"prod-eu", "prod-us"} {
+		if !strings.Contains(appSet, cluster) {
+			t.Errorf("ApplicationSet list generator must target %s:\n%s", cluster, appSet)
+		}
+	}
+}
+
 func repoIDOf(t *testing.T, f *itFixture, name string) string {
 	t.Helper()
 	var id string

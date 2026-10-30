@@ -118,6 +118,7 @@ type catalogIndex struct {
 //	<root>/<package>/<version>/metadata.json   (name, displayName, channel)
 //	<root>/<package>/<version>/rgd.yaml        (KRO RGD)
 //	<root>/<package>/<version>/schema.json     (optional OpenAPI v3 schema)
+//	<root>/<package>/<version>/values.schema.json (optional vendored chart values schema)
 //	<root>/<package>/<version>/ui-hints.json   (optional)
 type FixturePuller struct {
 	Root string
@@ -178,6 +179,12 @@ func readPackageDir(dir string) (*Package, error) {
 		return nil, fmt.Errorf("catalog: %s: rgd.yaml: %w", dir, err)
 	}
 	pkg.Schema, _ = os.ReadFile(filepath.Join(dir, "schema.json"))
+	// Platform-app packages vendor the upstream chart's values.schema.json
+	// (day-one adopt/update validation, decision 4); use it when no
+	// schema.json instance schema exists.
+	if len(pkg.Schema) == 0 {
+		pkg.Schema, _ = os.ReadFile(filepath.Join(dir, "values.schema.json"))
+	}
 	pkg.UIHints, _ = os.ReadFile(filepath.Join(dir, "ui-hints.json"))
 	return &pkg, nil
 }
@@ -272,6 +279,12 @@ func packageFromFiles(name, typ, indexDesc, ref string, files map[string][]byte)
 		base.Category = py.Category
 	}
 	base.Schema = files["schema.json"]
+	// Platform-app packages vendor the upstream chart's values.schema.json
+	// (day-one adopt/update validation, decision 4); use it when no
+	// schema.json layer exists.
+	if len(base.Schema) == 0 {
+		base.Schema = files["values.schema.json"]
+	}
 	// Packages ship no schema.json layer; fall back to deriving the instance
 	// schema from the RGD's spec.schema so item previews/deploy forms render.
 	if len(base.Schema) == 0 {

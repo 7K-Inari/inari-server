@@ -91,6 +91,9 @@ func setupFakeCatalog(t *testing.T) *RegistryPuller {
 	pushArtifact(t, host, "catalog/external-secrets", "stable", map[string]string{
 		"package.yaml": testPackageYAML,
 		"chart.yaml":   testChartYAML,
+		// Platform-app packages vendor the upstream chart's values schema
+		// under this layer name (no schema.json instance schema exists).
+		"values.schema.json": `{"type":"object","properties":{"installCRDs":{"type":"boolean"}}}`,
 	})
 	pushArtifact(t, host, "catalog/web-service", "incubating", map[string]string{
 		"package.yaml":  "version: 0.1.0\nchannel: incubating\ntype: kro-rgd\n",
@@ -137,6 +140,11 @@ func TestRegistryPuller(t *testing.T) {
 		}
 		if pkg.Type != "platform-app" {
 			t.Errorf("external-secrets[%s].Type = %q", pkg.Channel, pkg.Type)
+		}
+		// The vendored values.schema.json layer surfaces as the version's
+		// values schema (day-one adopt/update 422 validation, decision 4).
+		if !strings.Contains(string(pkg.Schema), `"installCRDs"`) {
+			t.Errorf("external-secrets[%s].Schema = %s, want vendored values.schema.json", pkg.Channel, pkg.Schema)
 		}
 	}
 	if len(ws) != 1 {
@@ -256,6 +264,7 @@ func TestAllPlatformAppsResolveAfterSync(t *testing.T) {
 		"keycloak":         {"https://charts.bitnami.com/bitnami", "keycloak", "keycloak", "24.4.2"},
 		"cert-manager":     {"https://charts.jetstack.io", "cert-manager", "cert-manager", "1.16.2"},
 		"external-secrets": {"https://charts.external-secrets.io", "external-secrets", "external-secrets", "0.10.5"},
+		"external-dns":     {"https://kubernetes-sigs.github.io/external-dns/", "external-dns", "external-dns", "1.15.2"},
 		"argocd":           {"https://argoproj.github.io/argo-helm", "argo-cd", "argocd", "7.7.3"},
 	}
 	var indexEntries strings.Builder
@@ -294,6 +303,7 @@ func TestAllPlatformAppsResolveAfterSync(t *testing.T) {
 		"platform:keycloak":         "24.4.2",
 		"platform:cert-manager":     "1.16.2",
 		"platform:external-secrets": "0.10.5",
+		"platform:external-dns":     "1.15.2",
 		"platform:argocd":           "7.7.3",
 	}
 	for _, seeded := range PlatformApps {

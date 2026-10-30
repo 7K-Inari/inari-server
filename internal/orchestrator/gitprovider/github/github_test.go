@@ -131,6 +131,61 @@ func TestCommitFilesWritesTreeAndAdvancesRef(t *testing.T) {
 	}
 }
 
+// Ref advances are compare-and-swap: a racing commit (422 non-fast-forward)
+// rebuilds on the fresh base and retries instead of force-pushing over the
+// other writer's files.
+func TestCommitFilesRetriesOnRefConflict(t *testing.T) {
+	var refReads, patchCalls int32
+	var sawForce bool
+	p := testProvider(t, mux(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/acme/state/git/ref/heads/"):
+			atomic.AddInt32(&refReads, 1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": map[string]string{"sha": "base123"}})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git/blobs"):
+			_ = json.NewEncoder(w).Encode(map[string]string{"sha": "blob1"})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git/trees"):
+			_ = json.NewEncoder(w).Encode(map[string]string{"sha": "tree1"})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git/commits"):
+			_ = json.NewEncoder(w).Encode(map[string]string{"sha": "commit1"})
+		case r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/git/refs/heads/"):
+			var body struct {
+				Force bool `json:"force"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body.Force {
+				sawForce = true
+			}
+			if atomic.AddInt32(&patchCalls, 1) == 1 {
+				// First attempt loses the race.
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				_ = json.NewEncoder(w).Encode(map[string]string{"message": "Update is not a fast forward"})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	res, err := p.CommitFiles(context.Background(), "acme/state", "main",
+		[]gitprovider.File{{Path: "a/b.yaml", Content: []byte("x")}}, "msg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.CommitSHA != "commit1" {
+		t.Errorf("sha = %q", res.CommitSHA)
+	}
+	if got := atomic.LoadInt32(&patchCalls); got != 2 {
+		t.Errorf("ref updates = %d, want 2 (conflict then retry)", got)
+	}
+	if got := atomic.LoadInt32(&refReads); got != 2 {
+		t.Errorf("ref reads = %d, want 2 (fresh base after conflict)", got)
+	}
+	if sawForce {
+		t.Error("ref update must never force (lost-update hazard)")
+	}
+}
+
 func TestCommitFilesSeedsEmptyRepo(t *testing.T) {
 	var createdRef, seeded bool
 	p := testProvider(t, mux(t, nil, func(w http.ResponseWriter, r *http.Request) {

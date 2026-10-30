@@ -380,22 +380,66 @@ func (p *Provider) OpenPR(ctx context.Context, repo, base, title, body string, f
 	return &gitprovider.Result{CommitSHA: sha, PRURL: pr.HTMLURL}, nil
 }
 
+// maxCommitAttempts bounds the compare-and-swap retry when a concurrent
+// committer advances the branch between our ref read and ref update.
+const maxCommitAttempts = 4
+
+// advanceRef points branch at commitSHA — never with force. create is the
+// empty-repo first-commit path (POST refs instead of PATCH).
+func (p *Provider) advanceRef(ctx context.Context, base, branch, commitSHA string, create bool) error {
+	if create {
+		_, err := p.do(ctx, http.MethodPost, base+"/git/refs", map[string]string{
+			"ref": "refs/heads/" + branch, "sha": commitSHA,
+		}, nil)
+		return err
+	}
+	_, err := p.do(ctx, http.MethodPatch, base+"/git/refs/heads/"+branch, map[string]any{
+		"sha": commitSHA, "force": false,
+	}, nil)
+	return err
+}
+
+// isRefConflict reports whether err is a raced ref update/creation (422:
+// non-fast-forward, or reference-already-exists on the create path) — the
+// branch moved under us; the caller retries on the fresh base. A bad-SHA
+// 422 cannot occur here (the commit was just created).
+func isRefConflict(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Status == http.StatusUnprocessableEntity
+}
+
 // DeleteFiles removes paths via a tree whose entries carry a null SHA
 // (GitHub tree API deletion semantics). Missing paths are silently ignored
-// by the API, so retries are idempotent.
+// by the API, so retries are idempotent. The ref advance is compare-and-swap
+// (no force) with bounded retry, same as commitTree.
 func (p *Provider) DeleteFiles(ctx context.Context, repo, branch string, paths []string, message string) (*gitprovider.Result, error) {
 	owner, name, err := splitRepo(repo)
 	if err != nil {
 		return nil, err
 	}
 	base := fmt.Sprintf("/repos/%s/%s", owner, name)
+	var lastErr error
+	for range maxCommitAttempts {
+		sha, conflict, err := p.deleteFilesOnce(ctx, base, branch, paths, message)
+		if err == nil {
+			return &gitprovider.Result{CommitSHA: sha}, nil
+		}
+		if !conflict {
+			return nil, err
+		}
+		lastErr = err
+	}
+	return nil, fmt.Errorf("gitprovider github: delete on %s branch %s keeps conflicting: %w", base, branch, lastErr)
+}
+
+func (p *Provider) deleteFilesOnce(ctx context.Context, base, branch string, paths []string, message string) (string, bool, error) {
 	var ref struct {
 		Object struct {
 			SHA string `json:"sha"`
 		} `json:"object"`
 	}
 	if _, err := p.do(ctx, http.MethodGet, base+"/git/ref/heads/"+branch, nil, &ref); err != nil {
-		return nil, err
+		return "", false, err
 	}
 	type treeEntry struct {
 		Path string  `json:"path"`
@@ -413,7 +457,7 @@ func (p *Provider) DeleteFiles(ctx context.Context, repo, branch string, paths [
 	if _, err := p.do(ctx, http.MethodPost, base+"/git/trees", map[string]any{
 		"base_tree": ref.Object.SHA, "tree": entries,
 	}, &tree); err != nil {
-		return nil, err
+		return "", false, err
 	}
 	var commit struct {
 		SHA string `json:"sha"`
@@ -423,14 +467,12 @@ func (p *Provider) DeleteFiles(ctx context.Context, repo, branch string, paths [
 		commitReq[k] = v
 	}
 	if _, err := p.do(ctx, http.MethodPost, base+"/git/commits", commitReq, &commit); err != nil {
-		return nil, err
+		return "", false, err
 	}
-	if _, err := p.do(ctx, http.MethodPatch, base+"/git/refs/heads/"+branch, map[string]any{
-		"sha": commit.SHA, "force": true,
-	}, nil); err != nil {
-		return nil, err
+	if err := p.advanceRef(ctx, base, branch, commit.SHA, false); err != nil {
+		return "", isRefConflict(err), err
 	}
-	return &gitprovider.Result{CommitSHA: commit.SHA}, nil
+	return commit.SHA, false, nil
 }
 
 func (p *Provider) ReadFile(ctx context.Context, repo, branch, path string) (string, error) {
@@ -467,8 +509,30 @@ func (p *Provider) attribution() map[string]any {
 	return map[string]any{"author": id, "committer": id}
 }
 
-// commitTree creates blobs → tree → commit → ref update on branch.
+// commitTree creates blobs → tree → commit → ref update on branch, with
+// compare-and-swap semantics: the ref update never forces, so a racing
+// commit (concurrent cluster registrations, or an ops reconcile racing a
+// TZF write on the platform repo) surfaces as a 422 conflict retried on
+// the fresh base instead of silently discarding the other writer's files
+// (lost update via force-push). Callers upsert disjoint paths and render
+// deterministically, so re-applying the same file set atop the moved base
+// is safe.
 func (p *Provider) commitTree(ctx context.Context, owner, name, branch string, files []gitprovider.File, message string) (string, error) {
+	var lastErr error
+	for range maxCommitAttempts {
+		sha, conflict, err := p.commitTreeOnce(ctx, owner, name, branch, files, message)
+		if err == nil {
+			return sha, nil
+		}
+		if !conflict {
+			return "", err
+		}
+		lastErr = err
+	}
+	return "", fmt.Errorf("gitprovider github: commit to %s/%s branch %s keeps conflicting: %w", owner, name, branch, lastErr)
+}
+
+func (p *Provider) commitTreeOnce(ctx context.Context, owner, name, branch string, files []gitprovider.File, message string) (string, bool, error) {
 	base := fmt.Sprintf("/repos/%s/%s", owner, name)
 
 	var baseSHA string
@@ -479,7 +543,7 @@ func (p *Provider) commitTree(ctx context.Context, owner, name, branch string, f
 	}
 	status, err := p.do(ctx, http.MethodGet, base+"/git/ref/heads/"+branch, nil, &ref)
 	if err != nil && status != http.StatusNotFound && status != http.StatusConflict {
-		return "", err
+		return "", false, err
 	}
 	if status == http.StatusNotFound || status == http.StatusConflict {
 		// Empty repo: GitHub answers 404 (missing ref) or 409 ("Git
@@ -488,13 +552,13 @@ func (p *Provider) commitTree(ctx context.Context, owner, name, branch string, f
 		// (which accepts the first commit) and then take the normal path.
 		if s, err := p.do(ctx, http.MethodPut, base+"/contents/.inari-init", map[string]any{
 			"message": "chore: initialize repository",
-			"content":  base64.StdEncoding.EncodeToString([]byte("initialized by inari\n")),
-			"branch":   branch,
+			"content": base64.StdEncoding.EncodeToString([]byte("initialized by inari\n")),
+			"branch":  branch,
 		}, nil); err != nil && s != http.StatusUnprocessableEntity {
-			return "", fmt.Errorf("gitprovider github: seed empty repo: %w", err)
+			return "", false, fmt.Errorf("gitprovider github: seed empty repo: %w", err)
 		}
 		if _, err := p.do(ctx, http.MethodGet, base+"/git/ref/heads/"+branch, nil, &ref); err != nil {
-			return "", err
+			return "", false, err
 		}
 		baseSHA = ref.Object.SHA
 	} else {
@@ -516,7 +580,7 @@ func (p *Provider) commitTree(ctx context.Context, owner, name, branch string, f
 			"content":  base64.StdEncoding.EncodeToString(f.Content),
 			"encoding": "base64",
 		}, &blob); err != nil {
-			return "", err
+			return "", false, err
 		}
 		entries = append(entries, treeEntry{Path: f.Path, Mode: "100644", Type: "blob", SHA: blob.SHA})
 	}
@@ -529,7 +593,7 @@ func (p *Provider) commitTree(ctx context.Context, owner, name, branch string, f
 		SHA string `json:"sha"`
 	}
 	if _, err := p.do(ctx, http.MethodPost, base+"/git/trees", treeReq, &tree); err != nil {
-		return "", err
+		return "", false, err
 	}
 
 	commitReq := map[string]any{"message": message, "tree": tree.SHA}
@@ -543,20 +607,11 @@ func (p *Provider) commitTree(ctx context.Context, owner, name, branch string, f
 		SHA string `json:"sha"`
 	}
 	if _, err := p.do(ctx, http.MethodPost, base+"/git/commits", commitReq, &commit); err != nil {
-		return "", err
+		return "", false, err
 	}
 
-	if baseSHA == "" {
-		_, err = p.do(ctx, http.MethodPost, base+"/git/refs", map[string]string{
-			"ref": "refs/heads/" + branch, "sha": commit.SHA,
-		}, nil)
-	} else {
-		_, err = p.do(ctx, http.MethodPatch, base+"/git/refs/heads/"+branch, map[string]any{
-			"sha": commit.SHA, "force": true,
-		}, nil)
+	if err := p.advanceRef(ctx, base, branch, commit.SHA, baseSHA == ""); err != nil {
+		return "", isRefConflict(err), err
 	}
-	if err != nil {
-		return "", err
-	}
-	return commit.SHA, nil
+	return commit.SHA, false, nil
 }

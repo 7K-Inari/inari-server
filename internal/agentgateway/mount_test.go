@@ -2,8 +2,6 @@ package agentgateway
 
 import (
 	"context"
-	"crypto/tls"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,8 +9,6 @@ import (
 
 	connect "connectrpc.com/connect/v2"
 	"connectrpc.com/connect/v2/connecthttp"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 	"google.golang.org/protobuf/types/known/anypb"
 
 	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
@@ -63,15 +59,19 @@ func bigHandshake(t *testing.T) *agentv1.ConnectRequest {
 
 // mountStub wires the stub stream the way cmd/inari-server mounts the real
 // gateway: same server constructor, same options list. Bidi streaming
-// requires HTTP/2 — h2c via x/net/http2 (the in-cluster path is plaintext
-// h2c behind the service mesh boundary too).
+// requires HTTP/2 — unencrypted HTTP/2 via the stdlib Protocols field (the
+// in-cluster path is plaintext h2c behind the service mesh boundary too;
+// same mechanism as cmd/inari-server's listener).
 func mountStub(t *testing.T, opts ...connecthttp.Option) *httptest.Server {
 	t.Helper()
 	srv := connect.NewServer()
 	agentv1connect.RegisterEventStreamServiceHandler(srv, readAllStream{t})
 	mux := http.NewServeMux()
 	connecthttp.Mount(mux, srv, opts...)
-	ts := httptest.NewUnstartedServer(h2c.NewHandler(mux, &http2.Server{}))
+	ts := httptest.NewUnstartedServer(mux)
+	protocols := new(http.Protocols)
+	protocols.SetUnencryptedHTTP2(true)
+	ts.Config.Protocols = protocols
 	ts.Start()
 	t.Cleanup(ts.Close)
 	return ts
@@ -79,13 +79,11 @@ func mountStub(t *testing.T, opts ...connecthttp.Option) *httptest.Server {
 
 func streamClient(ts *httptest.Server) agentv1connect.EventStreamServiceClient {
 	// h2c client (bidi streaming requires HTTP/2): prior-knowledge h2 over
-	// plaintext, mirroring the in-cluster agent→server path.
-	h2cClient := &http.Client{Transport: &http2.Transport{
-		AllowHTTP: true,
-		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, network, addr)
-		},
-	}}
+	// plaintext via the stdlib Protocols field, mirroring the in-cluster
+	// agent→server path.
+	clientProtocols := new(http.Protocols)
+	clientProtocols.SetUnencryptedHTTP2(true)
+	h2cClient := &http.Client{Transport: &http.Transport{Protocols: clientProtocols}}
 	return agentv1connect.NewEventStreamServiceClient(
 		connect.NewClient(connecthttp.NewTransport(h2cClient, ts.URL, connecthttp.WithReadMaxBytes(0))))
 }

@@ -20,6 +20,7 @@ package platformresources
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -29,6 +30,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/featureflags"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
 	"github.com/7K-Inari/inari-server/internal/renderer"
+	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -518,23 +520,93 @@ func (s *Service) renderTenantDescriptors(ctx context.Context, org *types.Organi
 
 // TenantRenderPaths returns the repo-relative paths of the tenant's
 // rendered files in the hub-facing platform repo — the teardown delete
-// set. Flag off: the legacy CR paths. Flag on: the union of legacy and
-// descriptor paths, so teardown removes both generations (D7: dev/staging
-// tenants may have been rendered by either path).
+// set. The union always covers the legacy CR paths; with the flag on it
+// adds the tenant descriptor paths (D7: dev/staging tenants may have been
+// rendered by either generation). Per-cluster TenantClient claims are
+// committed at registration, not by the tenant render, so their paths are
+// enumerated from the keycloak-client rows — regardless of the flag,
+// which may have flipped between registration and teardown (deleting
+// paths that were never committed is a no-op).
 func (s *Service) TenantRenderPaths(ctx context.Context, slug string) ([]string, error) {
-	if !s.gitopsRenderEnabled(ctx) {
-		return TenantManifestPaths(slug), nil
+	paths := TenantManifestPaths(slug)
+	if s.gitopsRenderEnabled(ctx) {
+		// Paths are slug-derived only; a synthetic org reproduces them exactly.
+		files, err := s.renderTenantDescriptors(ctx, &types.Organization{Slug: slug}, "https://invalid/platform.git")
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range files {
+			paths = append(paths, f.Path)
+		}
 	}
-	// Paths are slug-derived only; a synthetic org reproduces them exactly.
-	files, err := s.renderTenantDescriptors(ctx, &types.Organization{Slug: slug}, "https://invalid/platform.git")
+	clientPaths, err := s.clientClaimRenderPaths(ctx, slug)
 	if err != nil {
 		return nil, err
 	}
-	paths := TenantManifestPaths(slug)
-	for _, f := range files {
-		paths = append(paths, f.Path)
+	return append(paths, clientPaths...), nil
+}
+
+// clientClaimRenderPaths enumerates the committed per-cluster claim paths
+// from the tenant's keycloak-client rows. Best-effort when the tenant
+// resolver or store is unwired (legacy construction): the claim render
+// requires the same wiring, so nothing could have been committed. A
+// deleted org likewise leaves nothing to enumerate.
+func (s *Service) clientClaimRenderPaths(ctx context.Context, slug string) ([]string, error) {
+	if s.tenants == nil || s.store == nil || s.db == nil {
+		return nil, nil
+	}
+	org, err := s.tenants.GetTenant(ctx, slug)
+	if errors.Is(err, tenancy.ErrOrgNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("platformresources: resolve org for teardown paths: %w", err)
+	}
+	rows, err := s.store.List(ctx, s.db.Pool, org.ID)
+	if err != nil {
+		return nil, fmt.Errorf("platformresources: list client rows for teardown: %w", err)
+	}
+	var paths []string
+	synthetic := &types.Organization{Slug: slug}
+	for _, r := range rows {
+		if r.Kind != types.PlatformKindKeycloakClient {
+			continue
+		}
+		files, err := s.renderClientClaim(ctx, synthetic, r.Name, "", "https://invalid/platform.git")
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range files {
+			paths = append(paths, f.Path)
+		}
 	}
 	return paths, nil
+}
+
+// renderClientClaim renders the per-client claim file set (the
+// TenantClient claim + ESO plumbing) — shared by RenderKeycloakClientClaim
+// (commit) and TenantRenderPaths (teardown delete set) so the two layouts
+// can never drift.
+func (s *Service) renderClientClaim(ctx context.Context, org *types.Organization, clientID, issuerURL, repoURL string) ([]gitprovider.File, error) {
+	// Claim name must be RFC 1123: client IDs embed uppercase ULIDs, so the
+	// claim lowercases and spec.clientID carries the real identifier (the
+	// AGENTS.md ULID rule for ArgoCD object names).
+	claimName := strings.ToLower(clientID)
+	docs := clientClaimDocs(org, claimName, clientID, tenantIssuerURL(issuerURL, org.Slug))
+	desc, err := crossplaneDescriptor(docs...)
+	if err != nil {
+		return nil, err
+	}
+	return s.renderDescriptor(ctx, desc, renderer.RenderParams{
+		ID:         "tenant-" + org.Slug + "-client-" + claimName,
+		Name:       claimName,
+		Namespace:  tenantNamespaceName(org.Slug),
+		Path:       "tenants/" + org.Slug + "/keycloak/client-" + claimName,
+		Project:    tenantNamespaceName(org.Slug),
+		RepoURL:    repoURL,
+		BaseBranch: "main",
+		DeployMode: types.AddonDeployModeApplication,
+	})
 }
 
 // RenderKeycloakClientClaim renders the provider-keycloak TenantClient
@@ -562,25 +634,7 @@ func (s *Service) RenderKeycloakClientClaim(ctx context.Context, orgID, clusterI
 	if err != nil {
 		return false, fmt.Errorf("platformresources: ensure platform gitops repo: %w", err)
 	}
-	// Claim name must be RFC 1123: client IDs embed uppercase ULIDs, so the
-	// claim lowercases and spec.clientID carries the real identifier (the
-	// AGENTS.md ULID rule for ArgoCD object names).
-	claimName := strings.ToLower(clientID)
-	docs := clientClaimDocs(org, claimName, clientID, tenantIssuerURL(issuerURL, org.Slug))
-	desc, err := crossplaneDescriptor(docs...)
-	if err != nil {
-		return false, err
-	}
-	files, err := s.renderDescriptor(ctx, desc, renderer.RenderParams{
-		ID:         "tenant-" + org.Slug + "-client-" + claimName,
-		Name:       claimName,
-		Namespace:  tenantNamespaceName(org.Slug),
-		Path:       "tenants/" + org.Slug + "/keycloak/client-" + claimName,
-		Project:    tenantNamespaceName(org.Slug),
-		RepoURL:    repoURL,
-		BaseBranch: "main",
-		DeployMode: types.AddonDeployModeApplication,
-	})
+	files, err := s.renderClientClaim(ctx, org, clientID, issuerURL, repoURL)
 	if err != nil {
 		return false, fmt.Errorf("platformresources: render tenantclient claim: %w", err)
 	}

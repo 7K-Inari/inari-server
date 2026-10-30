@@ -122,8 +122,9 @@ Key differences from the legacy render:
   same `platform_resources` rows the legacy CRs reported against.
 
 Teardown (`tenantzonefactory.DeleteTenantManifests`) deletes the union of
-legacy and descriptor paths, so tenants rendered by either generation are
-removed cleanly.
+legacy, descriptor, and per-cluster client-claim paths (the latter
+enumerated from the tenant's `keycloak-client` rows), so tenants rendered
+by either generation are removed cleanly.
 
 **Cutover procedure.** The tenant-scoped Applications rendered at cluster
 registration (TenantClient claims) run under the per-tenant AppProject

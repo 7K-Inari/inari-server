@@ -343,6 +343,17 @@ func itReq(t *testing.T, srv *httptest.Server, method, path, token, body string)
 	return resp.StatusCode, string(b)
 }
 
+// flagViewByKey finds one flag view in a catalog listing (the registry
+// carries several flags; never index by position).
+func flagViewByKey(flags []FlagView, key string) *FlagView {
+	for i := range flags {
+		if flags[i].Key == key {
+			return &flags[i]
+		}
+	}
+	return nil
+}
+
 func TestHTTPPlatformFlagLifecycle(t *testing.T) {
 	srv, _, _ := itHTTPServer(t, itAuthorizer{}, nil)
 
@@ -356,7 +367,8 @@ func TestHTTPPlatformFlagLifecycle(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &out); err != nil {
 		t.Fatal(err)
 	}
-	if len(out.Flags) != 1 || out.Flags[0].Key != KeyKubectlAccessEnabled || !out.Flags[0].Value || out.Flags[0].Overridden {
+	kubectl := flagViewByKey(out.Flags, KeyKubectlAccessEnabled)
+	if kubectl == nil || !kubectl.Value || kubectl.Overridden {
 		t.Fatalf("catalog = %+v, want kubectl_access.enabled effective true not overridden", out.Flags)
 	}
 
@@ -371,8 +383,8 @@ func TestHTTPPlatformFlagLifecycle(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.Flags[0].Value || !out.Flags[0].Overridden {
-		t.Errorf("after set: %+v, want value false overridden", out.Flags[0])
+	if kubectl = flagViewByKey(out.Flags, KeyKubectlAccessEnabled); kubectl.Value || !kubectl.Overridden {
+		t.Errorf("after set: %+v, want value false overridden", kubectl)
 	}
 
 	code, body = itReq(t, srv, "DELETE", "/api/v1/platform/feature-flags/"+KeyKubectlAccessEnabled, "platform-admin", "")
@@ -383,8 +395,8 @@ func TestHTTPPlatformFlagLifecycle(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &out); err != nil {
 		t.Fatal(err)
 	}
-	if !out.Flags[0].Value || out.Flags[0].Overridden {
-		t.Errorf("after clear: %+v, want default true not overridden", out.Flags[0])
+	if kubectl = flagViewByKey(out.Flags, KeyKubectlAccessEnabled); !kubectl.Value || kubectl.Overridden {
+		t.Errorf("after clear: %+v, want default true not overridden", kubectl)
 	}
 
 	// Unknown flag 404; non-admin denied.
@@ -411,7 +423,8 @@ func TestHTTPEnvPinnedSurfaces(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &out); err != nil {
 		t.Fatal(err)
 	}
-	if !out.Flags[0].EnvPinned {
+	kubectl := flagViewByKey(out.Flags, KeyKubectlAccessEnabled)
+	if kubectl == nil || !kubectl.EnvPinned {
 		t.Errorf("envPinned = false with INARI_KUBECTL_ACCESS_ENABLED explicitly set")
 	}
 }

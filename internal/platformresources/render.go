@@ -524,8 +524,10 @@ func (s *Service) TenantRenderPaths(ctx context.Context, slug string) ([]string,
 // RenderKeycloakClientClaim renders the provider-keycloak TenantClient
 // claim (+ ESO secret-delivery plumbing) for a per-cluster OIDC client into
 // the hub-facing platform repo under tenants/<slug>/keycloak/client-<id>/
-// and commits it (decision D3: never to team repos). It replaces the
-// keycloak-client desired-state row when the render cutover is live.
+// and commits it (decision D3: never to team repos). Dual-run: the caller
+// keeps upserting the keycloak-client desired-state row alongside, so the
+// resources view and status tracking are unchanged until the Phase 3
+// provider cutover.
 //
 // Returns rendered=false (no error) when the cutover flag is off or the
 // platform GitOps repo is unwired — the caller falls back to the legacy

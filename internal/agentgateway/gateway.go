@@ -165,9 +165,10 @@ type PlatformResourceEnsurer interface {
 	// RenderKeycloakClientClaim renders the provider-keycloak TenantClient
 	// claim (+ ESO secret-delivery plumbing) into the hub-facing platform
 	// repo (operator sunset Phase 1, decision D3). rendered=false means the
-	// render cutover is off/unwired and the caller keeps the legacy
-	// desired-state row. issuerURL is the platform OIDC issuer (the tenant
-	// realm issuer is derived from it).
+	// render cutover is off/unwired. Dual-run: the caller keeps upserting
+	// the desired-state row either way so the resources view keeps listing
+	// the client. issuerURL is the platform OIDC issuer (the tenant realm
+	// issuer is derived from it).
 	RenderKeycloakClientClaim(ctx context.Context, orgID, clusterID, clientID, issuerURL string) (rendered bool, err error)
 }
 

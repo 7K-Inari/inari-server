@@ -111,9 +111,10 @@ Key differences from the legacy render:
   Secret in the tenant namespace) into
   `tenants/<slug>/keycloak/client-<id>/`, before the registration token is
   burned (failures keep the token consumable; retries re-commit identical
-  content). The claim replaces the `keycloak-client` desired-state row; the
-  Admin API provisioning and ESO secret delivery for the agent bootstrap are
-  unchanged until the provider-keycloak cutover (Phase 3).
+  content). During dual-run the `keycloak-client` desired-state row is
+  upserted alongside the claim so the resources view is unchanged; the
+  Admin API provisioning and ESO secret delivery for the agent bootstrap
+  are likewise unchanged until the provider-keycloak cutover (Phase 3).
 - **Status fold-back.** The agent's configurable GVR watches report the new
   kinds (`TenantRealm.identity.inari.io`,
   `TenantClient.identity.inari.io`, `DNSEndpoint.externaldns.k8s.io`,

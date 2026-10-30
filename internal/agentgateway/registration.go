@@ -44,20 +44,16 @@ func (g *Gateway) RegisterCluster(ctx context.Context, req *agentv1.RegisterClus
 	// Track the client's desired state as a platform resource. Pre-token-burn
 	// so a failure keeps the token consumable and the agent retries.
 	// Render cutover (operator sunset Phase 1): when live, the
-	// provider-keycloak TenantClient claim is rendered + committed to the
-	// hub-facing platform repo instead of the desired-state row.
-	claimRendered := false
+	// provider-keycloak TenantClient claim is ALSO rendered + committed to
+	// the hub-facing platform repo (dual-run: the desired-state row stays so
+	// the resources view keeps listing the client and W2-4 can compare).
 	if g.platform != nil {
-		rendered, err := g.platform.RenderKeycloakClientClaim(ctx, cluster.OrgID, cluster.ID, clientID, g.cfg.OIDCIssuerURL)
-		if err != nil {
+		if _, err := g.platform.RenderKeycloakClientClaim(ctx, cluster.OrgID, cluster.ID, clientID, g.cfg.OIDCIssuerURL); err != nil {
 			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("render client claim: %w", err).Error())
 		}
-		claimRendered = rendered
-		if !rendered {
-			desired, _ := json.Marshal(map[string]string{"clientId": clientID, "clusterId": cluster.ID})
-			if _, err := g.platform.EnsureDesired(ctx, cluster.OrgID, types.PlatformKindKeycloakClient, clientID, desired); err != nil {
-				return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("track client platform resource: %w", err).Error())
-			}
+		desired, _ := json.Marshal(map[string]string{"clientId": clientID, "clusterId": cluster.ID})
+		if _, err := g.platform.EnsureDesired(ctx, cluster.OrgID, types.PlatformKindKeycloakClient, clientID, desired); err != nil {
+			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("track client platform resource: %w", err).Error())
 		}
 	}
 	if g.secrets == nil {
@@ -88,10 +84,8 @@ func (g *Gateway) RegisterCluster(ctx context.Context, req *agentv1.RegisterClus
 	}
 	// The client is provisioned + its secret delivered: the control plane is
 	// the source of truth for this resource (no operator CR is rendered for
-	// keycloak-client rows), so mark it ready here. Under the render cutover
-	// no row exists (the claim replaced it) — status folds back from the
-	// TenantClient claim via the agent's status stream instead.
-	if g.platform != nil && !claimRendered {
+	// keycloak-client rows), so mark it ready here.
+	if g.platform != nil {
 		if err := g.platform.MarkProvisioned(ctx, cluster.OrgID, types.PlatformKindKeycloakClient, clientID,
 			"oidc client provisioned via keycloak admin api"); err != nil {
 			slog.Warn("agentgateway: mark keycloak-client provisioned", "cluster", cluster.ID, "error", err)

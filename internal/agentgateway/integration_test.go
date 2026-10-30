@@ -664,8 +664,9 @@ func TestRegistrationEnsuresKeycloakClientResource(t *testing.T) {
 	}
 }
 
-// Render cutover: when the claim render is live (rendered=true), it
-// replaces the desired-state row for the keycloak-client resource.
+// Render cutover: when the claim render is live (rendered=true), the claim
+// is rendered ALONGSIDE the desired-state row (dual-run — the resources
+// view keeps listing the client).
 func TestRegistrationRendersKeycloakClientClaim(t *testing.T) {
 	r := newRig(t, false)
 	ensurer := &fakePlatformEnsurer{claimRendered: true}
@@ -683,12 +684,13 @@ func TestRegistrationRendersKeycloakClientClaim(t *testing.T) {
 	if _, err := r.gw.RegisterCluster(ctx, registerReq(token)); err != nil {
 		t.Fatalf("RegisterCluster: %v", err)
 	}
-	if len(ensurer.calls) != 0 {
-		t.Errorf("EnsureDesired calls = %+v, want none (claim render replaced it)", ensurer.calls)
+	wantClient := "cluster-" + cluster.ID
+	if len(ensurer.claimCalls) != 1 || ensurer.claimCalls[0] != wantClient {
+		t.Errorf("claim renders = %v, want [%s]", ensurer.claimCalls, wantClient)
 	}
-	want := "cluster-" + cluster.ID
-	if len(ensurer.claimCalls) != 1 || ensurer.claimCalls[0] != want {
-		t.Errorf("claim renders = %v, want [%s]", ensurer.claimCalls, want)
+	want := platformEnsureCall{orgID: "org:1", kind: types.PlatformKindKeycloakClient, name: wantClient}
+	if len(ensurer.calls) != 1 || ensurer.calls[0] != want {
+		t.Errorf("EnsureDesired calls = %+v, want [%+v] (dual-run keeps the row)", ensurer.calls, want)
 	}
 }
 

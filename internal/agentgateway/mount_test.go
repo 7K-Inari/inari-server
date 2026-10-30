@@ -137,3 +137,21 @@ func TestStreamMaxRecvBytesDefault(t *testing.T) {
 	}
 }
 
+// TestStreamReadLimitRawConfigLiteral pins the production call pattern:
+// cmd/inari-server calls MountOptions on the RAW (pre-withDefaults) Config
+// literal, so a zero StreamMaxRecvBytes must self-default at the transport
+// (not just inside withDefaults).
+func TestStreamReadLimitRawConfigLiteral(t *testing.T) {
+	ts := mountStub(t, Config{}.MountOptions()...)
+	stream, err := streamClient(ts).Connect(context.Background())
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if err := stream.Send(bigHandshake(t)); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if _, err := stream.Receive(); err != nil {
+		t.Fatalf("raw Config{}.MountOptions() must admit oversize messages, got %v", err)
+	}
+}
+

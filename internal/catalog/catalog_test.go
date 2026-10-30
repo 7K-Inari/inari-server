@@ -1,11 +1,65 @@
 package catalog
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/7K-Inari/inari-server/internal/types"
 )
+
+// TestPlatformAppAddonSeeds pins the first-class addon registration
+// (operator-sunset Phase 1): cert-manager, ExternalDNS, and ArgoCD must be
+// adoptable/updatable out of the box — a catalog item plus at least one
+// version carrying chart coordinates and a values schema (decision 4).
+func TestPlatformAppAddonSeeds(t *testing.T) {
+	items := map[string]types.CatalogItem{}
+	for _, it := range PlatformApps {
+		items[it.ID] = it
+	}
+	for _, id := range []string{"platform:cert-manager", "platform:external-dns", "platform:argocd"} {
+		it, ok := items[id]
+		if !ok {
+			t.Errorf("%s missing from PlatformApps", id)
+			continue
+		}
+		if it.Source != types.CatalogSourcePlatform {
+			t.Errorf("%s source = %q, want platform", id, it.Source)
+		}
+		versions := PlatformAppVersions[id]
+		if len(versions) == 0 {
+			t.Errorf("%s has no seeded versions (not adoptable)", id)
+			continue
+		}
+		for _, v := range versions {
+			if v.ItemID != id {
+				t.Errorf("%s version %s has ItemID %q", id, v.Version, v.ItemID)
+			}
+			var payload struct {
+				Chart *struct {
+					RepoURL   string `json:"repoURL"`
+					Chart     string `json:"chart"`
+					Namespace string `json:"namespace"`
+				} `json:"chart"`
+			}
+			if err := json.Unmarshal(v.Payload, &payload); err != nil {
+				t.Errorf("%s@%s payload: %v", id, v.Version, err)
+				continue
+			}
+			if payload.Chart == nil || payload.Chart.RepoURL == "" || payload.Chart.Chart == "" {
+				t.Errorf("%s@%s payload has no chart coordinates (not addon-deployable)", id, v.Version)
+			}
+			if len(v.Schema) == 0 {
+				t.Errorf("%s@%s has no values schema (day-one validation, decision 4)", id, v.Version)
+				continue
+			}
+			var schema map[string]any
+			if err := json.Unmarshal(v.Schema, &schema); err != nil {
+				t.Errorf("%s@%s schema is not valid JSON: %v", id, v.Version, err)
+			}
+		}
+	}
+}
 
 func TestCompareVersions(t *testing.T) {
 	cases := []struct {

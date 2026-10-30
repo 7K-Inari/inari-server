@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -244,13 +245,27 @@ func realmClaimDoc(org *types.Organization) map[string]any {
 }
 
 // tenantIssuerURL derives the tenant realm's issuer URL from the platform
-// issuer (…/realms/<platform-realm> → …/realms/<tenant realm>).
+// issuer (…/realms/<platform-realm> → …/realms/<tenant realm>). The
+// platform issuer is always a Keycloak realm URL; a path-less issuer gets
+// the /realms/<realm> suffix rather than a mangled host.
 func tenantIssuerURL(issuerURL, realm string) string {
-	base := strings.TrimSuffix(issuerURL, "/")
-	if i := strings.LastIndex(base, "/"); i >= 0 {
-		return base[:i+1] + realm
+	u, err := url.Parse(issuerURL)
+	if err != nil || u.Host == "" {
+		// Not a URL — treat it as an opaque realm-URL prefix.
+		base := strings.TrimSuffix(issuerURL, "/")
+		if i := strings.LastIndex(base, "/"); i >= 0 {
+			return base[:i+1] + realm
+		}
+		return base + "/realms/" + realm
 	}
-	return base + "/realms/" + realm
+	path := strings.TrimSuffix(u.Path, "/")
+	if i := strings.LastIndex(path, "/"); i > 0 {
+		path = path[:i]
+	} else {
+		path = "/realms"
+	}
+	u.Path = path + "/" + realm
+	return u.String()
 }
 
 // clientClaimDocs renders the per-client document set (W1-2 contract,

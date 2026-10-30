@@ -393,3 +393,28 @@ func TestApplyStatusAndGet(t *testing.T) {
 		t.Errorf("list = %+v, want single row %q", list, r.ID)
 	}
 }
+
+// Render-cutover fold-back: the provider-keycloak TenantClient claim
+// lowercases the client ID (RFC 1123) while the keycloak-client row is keyed
+// by the original (uppercase-ULID) client ID — agent status for the claim
+// must still match the row (case-insensitive name match).
+func TestApplyStatusMatchesLowercasedClaimName(t *testing.T) {
+	svc, _ := itSetup(t)
+	ctx := context.Background()
+
+	const clientID = "cluster-01JFXM6E8BM0G52GQPMNWP2ZC0"
+	if _, err := svc.EnsureDesired(ctx, "org:1", types.PlatformKindKeycloakClient, clientID, nil); err != nil {
+		t.Fatal(err)
+	}
+	matched, err := svc.ApplyStatus(ctx, "cluster-1", platformresources.StatusUpdate{
+		Resource: types.ResourceRef{Kind: "TenantClient.identity.inari.io", Name: "cluster-01jfxm6e8bm0g52gqpmnwp2zc0"},
+		Health:   "healthy",
+		Message:  "claim ready",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matched {
+		t.Fatal("lowercased TenantClient claim status must match the clientID-keyed row")
+	}
+}

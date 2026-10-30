@@ -124,3 +124,12 @@ Key differences from the legacy render:
 Teardown (`tenantzonefactory.DeleteTenantManifests`) deletes the union of
 legacy and descriptor paths, so tenants rendered by either generation are
 removed cleanly.
+
+**Cutover procedure.** The tenant-scoped Applications rendered at cluster
+registration (TenantClient claims) run under the per-tenant AppProject
+`tenant-<slug>`, which is only committed by the tenant render above. Flip
+order therefore matters: enable the flag, then re-render every existing
+tenant (the ops reconcile endpoint commits the descriptor set) before new
+cluster registrations rely on the claim path — a registration in between
+commits a claim Application whose AppProject does not exist yet (ArgoCD
+sync error until the tenant render lands; self-healing, but noisy).

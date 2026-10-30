@@ -210,6 +210,10 @@ func TestTenantIssuerURL(t *testing.T) {
 	if got := tenantIssuerURL("http://keycloak/realms/inari/", "acme"); got != "http://keycloak/realms/acme" {
 		t.Errorf("trailing slash: issuer = %q", got)
 	}
+	// Path-less issuer gets the realms suffix (not a mangled host).
+	if got := tenantIssuerURL("https://keycloak.example.com", "acme"); got != "https://keycloak.example.com/realms/acme" {
+		t.Errorf("path-less issuer = %q", got)
+	}
 }
 
 func TestTenantRenderPaths(t *testing.T) {

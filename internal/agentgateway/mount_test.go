@@ -154,4 +154,3 @@ func TestStreamReadLimitRawConfigLiteral(t *testing.T) {
 		t.Fatalf("raw Config{}.MountOptions() must admit oversize messages, got %v", err)
 	}
 }
-

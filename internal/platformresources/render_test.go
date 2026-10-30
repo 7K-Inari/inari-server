@@ -122,7 +122,7 @@ func TestRenderTenantFilesDescriptorsWhenFlagOn(t *testing.T) {
 
 	// KRO instance: coordinates come from the RGD (stacks.inari.io/v1alpha1).
 	inst := parseYAML(t, byPath["tenants/acme/namespace/instance.yaml"])
-	if inst["apiVersion"] != "kro.run/v1alpha1" || inst["kind"] != "TenantNamespace" {
+	if inst["apiVersion"] != "stacks.inari.io/v1alpha1" || inst["kind"] != "TenantNamespace" {
 		t.Errorf("instance = %v/%v", inst["apiVersion"], inst["kind"])
 	}
 	ispec := inst["spec"].(map[string]any)

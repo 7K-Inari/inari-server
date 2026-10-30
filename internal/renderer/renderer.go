@@ -21,7 +21,7 @@ import (
 )
 
 // ErrNotSupported is returned (wrapped) by handlers for source kinds that
-// are registered but not yet implemented (crossplane, kustomize).
+// are registered but not yet implemented (kustomize).
 var ErrNotSupported = errors.New("renderer: source kind not yet supported")
 
 // App-name prefixes (parent plan §6): instances render inari-<id>, addons

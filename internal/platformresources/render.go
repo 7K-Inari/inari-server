@@ -481,6 +481,7 @@ func (s *Service) renderTenantDescriptors(ctx context.Context, org *types.Organi
 				org.Slug, tenantNamespaceName(org.Slug))),
 		},
 	}
+	p = base
 	p.ID, p.Name, p.Namespace, p.Project, p.Path = "tenant-"+org.Slug+"-namespace", "tenant-"+org.Slug, "default", "default",
 		"tenants/"+org.Slug+"/namespace"
 	if err := appendFiles(s.renderDescriptor(ctx, nsDesc, p)); err != nil {

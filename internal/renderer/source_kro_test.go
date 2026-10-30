@@ -125,6 +125,37 @@ func TestKROHandlerApplicationSetMode(t *testing.T) {
 	}
 }
 
+// The generated CRD's apiVersion is schema.group + "/" + schema.apiVersion;
+// a group-less RGD keeps KRO's kro.run default (catalog back-compat), a
+// groupful RGD (platform tenantnamespace, stacks.inari.io) is honored.
+func TestRenderKROInstanceHonorsSchemaGroup(t *testing.T) {
+	groupful := `apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: tenantnamespace
+spec:
+  schema:
+    group: stacks.inari.io
+    apiVersion: v1alpha1
+    kind: TenantNamespace
+  resources: []
+`
+	out, err := RenderKROInstance([]byte(groupful), "tenant-acme", "default", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "apiVersion: stacks.inari.io/v1alpha1") {
+		t.Errorf("groupful RGD must stamp its schema group:\n%s", out)
+	}
+	out, err = RenderKROInstance([]byte(testRGD), "my-db", "apps", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "apiVersion: kro.run/v1alpha1") {
+		t.Errorf("group-less RGD must keep the kro.run default:\n%s", out)
+	}
+}
+
 func TestKROHandlerRequiresResolver(t *testing.T) {
 	r := New(nil)
 	_, err := r.Render(context.Background(), kroDesc(), kroParams())

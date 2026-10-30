@@ -50,6 +50,7 @@ func (h *kroHandler) Render(ctx context.Context, desc types.SourceDescriptor, p 
 type rgdDocument struct {
 	Spec struct {
 		Schema struct {
+			Group      string `yaml:"group"`
 			APIVersion string `yaml:"apiVersion"`
 			Kind       string `yaml:"kind"`
 		} `yaml:"schema"`
@@ -57,10 +58,11 @@ type rgdDocument struct {
 }
 
 // RenderKROInstance renders a deploy spec into a KRO instance manifest:
-// apiVersion/kind come from the RGD's generated CRD (kro.run/<apiVersion>,
-// schema.kind), metadata from the request, spec from the user form.
-// Migrated from orchestrator.RenderInstanceManifest; exported so the
-// back-compat wrapper can delegate.
+// apiVersion/kind come from the RGD's generated CRD (schema.group +
+// schema.apiVersion, defaulting to kro.run when the RGD omits the group —
+// KRO's own default; schema.kind), metadata from the request, spec from
+// the user form. Migrated from orchestrator.RenderInstanceManifest;
+// exported so the back-compat wrapper can delegate.
 func RenderKROInstance(rgdYAML []byte, name, namespace string, spec json.RawMessage) ([]byte, error) {
 	var rgd rgdDocument
 	if err := yaml.Unmarshal(rgdYAML, &rgd); err != nil {
@@ -69,6 +71,10 @@ func RenderKROInstance(rgdYAML []byte, name, namespace string, spec json.RawMess
 	if rgd.Spec.Schema.Kind == "" {
 		return nil, errors.New("renderer: RGD has no spec.schema.kind")
 	}
+	group := rgd.Spec.Schema.Group
+	if group == "" {
+		group = "kro.run"
+	}
 	var specMap map[string]any
 	if len(spec) > 0 {
 		if err := json.Unmarshal(spec, &specMap); err != nil {
@@ -76,7 +82,7 @@ func RenderKROInstance(rgdYAML []byte, name, namespace string, spec json.RawMess
 		}
 	}
 	doc := map[string]any{
-		"apiVersion": "kro.run/" + rgd.Spec.Schema.APIVersion,
+		"apiVersion": group + "/" + rgd.Spec.Schema.APIVersion,
 		"kind":       rgd.Spec.Schema.Kind,
 		"metadata": map[string]any{
 			"name":      name,

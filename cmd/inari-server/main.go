@@ -663,13 +663,15 @@ func run() error {
 		ESOSecretName:  "inari-agent-oidc-client",
 	}
 	caps := capabilities.NewService(database, capsStore, auditStore)
-	gateway := agentgateway.NewGateway(database, registry, idp, caps, auditStore, agentgateway.Config{
+	agentGWCfg := agentgateway.Config{
 		OIDCIssuerURL:           cfg.OIDCIssuerURL,
 		ESOSecretStore:          cfg.ESOSecretStore,
 		CurrentAgentVersion:     cfg.CurrentAgentVersion,
 		AgentSupportedRange:     cfg.AgentSupportedRange,
 		AgentRecommendedVersion: cfg.AgentRecommendedVersion,
-	}).WithSecretWriter(secretWriter).WithPlatformResources(platformResourcesSvc).
+		StreamMaxRecvBytes:      cfg.AgentStreamMaxRecvBytes,
+	}
+	gateway := agentgateway.NewGateway(database, registry, idp, caps, auditStore, agentGWCfg).WithSecretWriter(secretWriter).WithPlatformResources(platformResourcesSvc).
 		WithBaselineRepoLookup(baselineRepoLookupAdapter{store: inventory.NewStore(), db: database})
 
 	// W3 credential vault (plan §5.8): envelope-encrypted per-user tokens
@@ -1136,8 +1138,8 @@ func run() error {
 	// the final path segment, and connecthttp.Mount registers exact
 	// procedure patterns plus service-prefix unknown-method handlers.
 	rpcMux := http.NewServeMux()
-	connecthttp.Mount(rpcMux, agentRPC)
-	connecthttp.Mount(rpcMux, authedAgentRPC)
+	connecthttp.Mount(rpcMux, agentRPC, agentGWCfg.MountOptions()...)
+	connecthttp.Mount(rpcMux, authedAgentRPC, agentGWCfg.MountOptions()...)
 	router.Handle("/"+agentv1connect.RegistrationServiceName+"/*", rpcMux)
 	router.Handle("/"+agentv1connect.EventStreamServiceName+"/*", rpcMux)
 	router.Handle("/"+agentv1connect.AgentCredentialsServiceName+"/*", rpcMux)

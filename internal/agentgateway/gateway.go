@@ -49,6 +49,9 @@ type Config struct {
 	ESOSecretName      string
 	ESOSecretNamespace string
 	ESOSecretKey       string
+	// StreamMaxRecvBytes is the per-message read limit on the agent-facing
+	// Connect mounts (see DefaultStreamMaxRecvBytes).
+	StreamMaxRecvBytes int
 }
 
 func (c *Config) withDefaults() Config {
@@ -70,6 +73,9 @@ func (c *Config) withDefaults() Config {
 	}
 	if out.ESOSecretKey == "" {
 		out.ESOSecretKey = "client-secret"
+	}
+	if out.StreamMaxRecvBytes <= 0 {
+		out.StreamMaxRecvBytes = DefaultStreamMaxRecvBytes
 	}
 	return out
 }

@@ -128,6 +128,38 @@ func TestAgentCompatInvalidRangeFails(t *testing.T) {
 	}
 }
 
+func TestAgentStreamMaxRecvBytesDefault(t *testing.T) {
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.AgentStreamMaxRecvBytes != 64<<20 {
+		t.Errorf("AgentStreamMaxRecvBytes = %d, want %d (64MiB)", c.AgentStreamMaxRecvBytes, 64<<20)
+	}
+}
+
+func TestAgentStreamMaxRecvBytesEnvOverride(t *testing.T) {
+	t.Setenv("INARI_AGENT_STREAM_MAX_RECV_BYTES", "134217728")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.AgentStreamMaxRecvBytes != 128<<20 {
+		t.Errorf("AgentStreamMaxRecvBytes = %d, want %d (128MiB)", c.AgentStreamMaxRecvBytes, 128<<20)
+	}
+}
+
+func TestAgentStreamMaxRecvBytesInvalidFallsBack(t *testing.T) {
+	t.Setenv("INARI_AGENT_STREAM_MAX_RECV_BYTES", "not-a-number")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.AgentStreamMaxRecvBytes != 64<<20 {
+		t.Errorf("AgentStreamMaxRecvBytes = %d, want default %d on invalid env", c.AgentStreamMaxRecvBytes, 64<<20)
+	}
+}
+
 func TestGitStateRepoOrgEnvOverride(t *testing.T) {
 	t.Setenv("INARI_GIT_STATE_REPO_ORG", "7k-group")
 	c, err := Load()

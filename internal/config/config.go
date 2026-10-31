@@ -303,6 +303,21 @@ type Config struct {
 	// plane (kubeproxy) never uses an external provider.
 	FlagsProvider    string
 	FlagsProviderURL string
+
+	// Cluster Dex fan-out (operator sunset Phase 2, decision D5;
+	// internal/clusterdex). DexChartVersion pins the official dexidp chart
+	// rendered per cluster (default 0.25.2, the ClusterDex CRD default).
+	// DexImage optionally overrides the Dex image (repository:tag).
+	// PlatformChartRepoURL/Name/Version locate the inari-platform chart
+	// (OCI) backing the argocd-config ApplicationSet; an empty Version
+	// disables the argocd-config fan-out (the dex appset still renders) —
+	// the pin is human-maintained in the server chart env, like
+	// AgentRecommendedVersion.
+	DexChartVersion      string
+	DexImage             string
+	PlatformChartRepoURL string
+	PlatformChartName    string
+	PlatformChartVersion string
 }
 
 // KubeproxyConfig is the inari-kubeproxy data-plane binary's configuration
@@ -503,6 +518,12 @@ func Load() (*Config, error) {
 		CacheFlagsTTL:            durEnv("INARI_CACHE_FLAGS_TTL", 10*time.Second),
 		FlagsProvider:            env("INARI_FLAGS_PROVIDER", ""),
 		FlagsProviderURL:         env("INARI_FLAGS_PROVIDER_URL", ""),
+
+		DexChartVersion:      env("INARI_DEX_CHART_VERSION", "0.25.2"),
+		DexImage:             env("INARI_DEX_IMAGE", ""),
+		PlatformChartRepoURL: env("INARI_PLATFORM_CHART_REPO_URL", "oci://ghcr.io/7k-inari/charts"),
+		PlatformChartName:    env("INARI_PLATFORM_CHART_NAME", "inari-platform"),
+		PlatformChartVersion: env("INARI_PLATFORM_CHART_VERSION", ""),
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("config: INARI_DATABASE_URL must not be empty")

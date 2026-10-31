@@ -134,3 +134,63 @@ tenant (the ops reconcile endpoint commits the descriptor set) before new
 cluster registrations rely on the claim path — a registration in between
 commits a claim Application whose AppProject does not exist yet (ArgoCD
 sync error until the tenant render lands; self-healing, but noisy).
+
+## Cluster Dex fan-out (operator sunset Phase 2, decision D5)
+
+The ClusterDex CR/controller is replaced by a server-rendered ArgoCD
+**ApplicationSet pair** per baseline repo (`internal/clusterdex`), fanned
+out by a **list generator** over server-side inventory selectors — never
+ArgoCD cluster-secret labels (engine-agnostic: Flux/Fleet possible later
+without selector changes):
+
+- `dex/applicationset.yaml` — official dexidp chart (pinned via
+  `INARI_DEX_CHART_VERSION`, default 0.25.2) with the hardened baseline
+  values ported 1:1 from the operator (default-deny egress except DNS/443,
+  PDB, non-root/seccomp, resource limits), `configSecret.create=false`
+  against the ESO-synced `dex-config` Secret, and per-cluster overlays at
+  `clusters/<cluster>/dex/values.yaml` (`fullnameOverride: dex-<id>` pins
+  the Service name so the deterministic issuer
+  `http://dex-<id>.dex.svc.cluster.local:5556/dex` stays valid).
+- `argocd-config/applicationset.yaml` — the `inari-platform` chart (OCI,
+  pinned via `INARI_PLATFORM_CHART_VERSION`; empty disables this appset)
+  with only its argocd section enabled, rendering the fail-closed
+  `argocd-cm`/`argocd-rbac-cm` baseline and, when
+  `INARI_ESO_SECRET_STORE` is set, the ExternalSecrets projecting the
+  cluster's Dex material from Vault. Per-cluster overlays at
+  `clusters/<cluster>/argocd-config/values.yaml` carry the issuer, the
+  secret references, and the team-derived group mapping.
+
+**Selector model:** every active/degraded org cluster gets the baseline;
+the inventory label `inari.io/dex=disabled` opts a cluster out. Clusters
+are grouped by their bound baseline repo (`clusters.baseline_repo_id`,
+falling back to the org default); each repo's committed appset lists the
+full matched membership (review/audit form), while the **delivery** is
+per-cluster: the agent bridge upserts a single-element view of each appset
+into that cluster's own ArgoCD (the appset controller is cluster-local, so
+a multi-element appset would deploy siblings' Dex instances locally).
+Delivery queue IDs are content-versioned, so changed manifests redeliver
+despite the queue's idempotency-by-ID. Generated child Applications carry
+the ArgoCD resources finalizer: removing a cluster's element (opt-out,
+deletion) prunes its Dex.
+
+**Triggers** (outbox consumer `clusterdex-reconcile`): `cluster.registered`
+(registration, label changes — labels only mutate via re-registration —
+and baseline rebinds), `cluster.deleted`, `team.created`/`team.deleted`,
+`rbac.mappings.updated`, `tenant.created`, and `git.webhook.pr_merged`
+(PR-policy repos: delivery waits for the merge). Re-render + commit happen
+only on drift. The `cluster_dex.fanout` runtime flag is the kill-switch
+(default on — there is no legacy render path to dual-run, D7).
+
+**RBAC mapping** derives from the tenant's teams: admin-role teams map to
+`role:admin`, all others to `role:readonly`; group paths are the Keycloak
+full paths (`/tenant-<slug>/<team>`) — the same contract as
+`rbacmaterialize`. `policy.default` stays empty (fail closed).
+
+**Secret provisioning (unchanged seam):** registration
+(`agentgateway.RegisterCluster`) provisions the `cluster-<id>-dex` Keycloak
+client (`tenancy.CreateClusterDexClient`) and writes the Dex `config.yaml`
+(Keycloak connector + `argocd` static client) and the static-client secret
+to the cluster's Vault path (`inari/clusters/<id>/oidc-client-secret`, keys
+`dex-config-yaml` / `dex-argocd-client-secret`). Secret values never touch
+git, logs, or status; the rendered manifests reference the ESO-synced
+Secrets by name/key only.

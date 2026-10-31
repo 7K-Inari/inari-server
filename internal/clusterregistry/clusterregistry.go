@@ -54,6 +54,12 @@ type ClientManager interface {
 	// kubectl tunnel agent (plan §7.2) and returns its clientID. Its secret
 	// is read via ClusterClientSecret like the agent client's.
 	CreateTunnelClient(ctx context.Context, clusterID string) (clientID string, err error)
+	// CreateClusterDexClient provisions the cluster-<id>-dex OIDC client
+	// the cluster-local Dex federates against (operator sunset Phase 2) and
+	// returns its clientID and generated secret — the secret is written to
+	// the platform secret store (ESO delivery) and never persisted
+	// server-side.
+	CreateClusterDexClient(ctx context.Context, clusterID, dexIssuer string, audiences []string) (clientID, secret string, err error)
 }
 
 // TokenGenerator issues the plaintext bootstrap token (seam for tests).

@@ -42,6 +42,15 @@ func goldenCases() []goldenCase {
 	helmAppset.params.DeployMode = types.AddonDeployModeApplicationSet
 	helmAppset.params.Clusters = []ClusterTarget{{ID: "c1", Name: "prod-eu"}, {ID: "c2", Name: "prod-us"}}
 
+	helmAppsetFields := helmAppset
+	helmAppsetFields.name = "helm-appset-fields"
+	helmAppsetFields.params.AppNameTemplate = "{{dexAppName}}"
+	helmAppsetFields.params.CascadeDelete = true
+	helmAppsetFields.params.Clusters = []ClusterTarget{
+		{ID: "c1", Name: "prod-eu", Fields: map[string]string{"dexAppName": "dex-c1", "clusterID": "c1"}},
+		{ID: "c2", Name: "prod-us", Fields: map[string]string{"dexAppName": "dex-c2", "clusterID": "c2"}},
+	}
+
 	kroApp := goldenCase{
 		name:    "kro-app",
 		desc:    kroDesc(),
@@ -88,7 +97,7 @@ metadata:
 		mustJSONString("apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: ${policyName}\n"),
 		map[string]string{"policyName": "deny-all"})
 
-	return []goldenCase{helmApp, helmAppset, kroApp, kroAppset, manifestsMulti, manifestsParams}
+	return []goldenCase{helmApp, helmAppset, helmAppsetFields, kroApp, kroAppset, manifestsMulti, manifestsParams}
 }
 
 func TestGolden(t *testing.T) {

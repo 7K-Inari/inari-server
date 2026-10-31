@@ -47,6 +47,11 @@ type ClusterTarget struct {
 	ID     string // inventory cluster id
 	Name   string // used in list-generator elements and overlay paths
 	Server string // ArgoCD destination server; empty = local cluster
+	// Fields are extra list-generator element entries the caller needs in
+	// the template (engine-agnostic fan-out parameters, e.g. a per-cluster
+	// app name or id). The keys "cluster" and "server" are reserved and
+	// never overridden by Fields.
+	Fields map[string]string
 }
 
 // localServer is the default ArgoCD destination (tenant-local ArgoCD).
@@ -67,6 +72,21 @@ type RenderParams struct {
 	BaseBranch  string                // targetRevision for git sources
 	Path        string                // repo-relative base path (clusters/<c>/<item>/<inst> or addons/<name>)
 	Project     string                // ArgoCD project; empty = "default"
+	// AppNameTemplate overrides the ApplicationSet child-name pattern
+	// (applicationset mode only; default "<prefix>-<id>-{{cluster}}"). Used
+	// when the child Application name must follow an external contract —
+	// e.g. the ClusterDex parity name dex-<clusterID> via {{dexAppName}}.
+	AppNameTemplate string
+	// ReleaseName overrides the helm release name (helm sources; default
+	// Name). Generator placeholders ({{cluster}}, {{dexAppName}}, ...) are
+	// interpolated per element in applicationset mode — e.g. the ClusterDex
+	// parity release name {{dexAppName}}.
+	ReleaseName string
+	// CascadeDelete adds the ArgoCD resources finalizer to the appset
+	// template metadata so removing a list-generator element (cluster
+	// opt-out / fleet drain) prunes the child app's resources. Default off:
+	// adoption flows must never delete pre-existing resources (decision 2).
+	CascadeDelete bool
 }
 
 // Renderer renders one source descriptor into commit-ready files.
@@ -162,9 +182,10 @@ func (p RenderParams) validate() error {
 			return fmt.Errorf("renderer: application deploy mode takes exactly one cluster, got %d", len(p.Clusters))
 		}
 	case types.AddonDeployModeApplicationSet:
-		if len(p.Clusters) == 0 {
-			return errors.New("renderer: applicationset deploy mode requires at least one cluster")
-		}
+		// Zero clusters are valid: the list generator renders an empty
+		// elements list (fleet drain — the appset prunes its children via
+		// the resources finalizer). Callers that require a non-empty fleet
+		// (addons) reject empty selectors before calling Render.
 		for _, c := range p.Clusters {
 			if c.Name == "" {
 				return errors.New("renderer: applicationset cluster targets require Name")

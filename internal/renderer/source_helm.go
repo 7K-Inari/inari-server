@@ -34,8 +34,12 @@ func (helmHandler) Render(_ context.Context, desc types.SourceDescriptor, p Rend
 		return nil, err
 	}
 
+	releaseName := p.Name
+	if p.ReleaseName != "" {
+		releaseName = p.ReleaseName
+	}
 	helmBlock := map[string]any{
-		"releaseName": p.Name,
+		"releaseName": releaseName,
 		"valueFiles":  []any{baseValueFile(p)},
 	}
 	if p.DeployMode == types.AddonDeployModeApplicationSet {

@@ -22,6 +22,7 @@ import (
 
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/capabilities"
+	"github.com/7K-Inari/inari-server/internal/clusterdex"
 	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/inventory"
@@ -32,6 +33,7 @@ import (
 type fakeClients struct {
 	created  []string
 	disabled []string
+	dex      []string
 }
 
 func (f *fakeClients) CreateClusterClient(_ context.Context, clusterID string) (string, error) {
@@ -47,6 +49,13 @@ func (f *fakeClients) DisableClient(_ context.Context, clientID string) error {
 }
 func (f *fakeClients) CreateTunnelClient(_ context.Context, clusterID string) (string, error) {
 	return "tunnel-" + clusterID, nil
+}
+
+// CreateClusterDexClient mirrors tenancy.KeycloakAdmin's clientID contract
+// (cluster-<id>-dex) and returns a fixed secret.
+func (f *fakeClients) CreateClusterDexClient(_ context.Context, clusterID, dexIssuer string, _ []string) (string, string, error) {
+	f.dex = append(f.dex, clusterID+"|"+dexIssuer)
+	return "cluster-" + clusterID + "-dex", "dex-secret-for-" + clusterID, nil
 }
 
 // fakeSecrets captures delivered secrets; fail makes Put error (delivery
@@ -200,6 +209,37 @@ func TestRegistrationExchangeEndToEnd(t *testing.T) {
 	tunnelPath := secrets.ClusterOIDCPath(cluster.ID) + "#" + TunnelSecretKey
 	if got := r.secrets.puts[tunnelPath]; got != "secret-for-tunnel-"+cluster.ID {
 		t.Errorf("delivered tunnel secret at %q = %q", tunnelPath, got)
+	}
+
+	// Dex SSO baseline (operator sunset Phase 2): the cluster-<id>-dex
+	// client is provisioned against the deterministic cluster-local issuer,
+	// and the Dex config.yaml + ArgoCD static-client secret ride the same
+	// ESO path — the rendered appsets reference them by name/key only.
+	wantDex := cluster.ID + "|" + clusterdex.DefaultIssuerURL(cluster.ID)
+	if len(r.clients.dex) != 1 || r.clients.dex[0] != wantDex {
+		t.Errorf("dex client provisioned = %v, want [%s]", r.clients.dex, wantDex)
+	}
+	dexConfig := r.secrets.puts[secrets.ClusterOIDCPath(cluster.ID)+"#"+clusterdex.VaultKeyDexConfigYAML]
+	for _, want := range []string{
+		"issuer: " + clusterdex.DefaultIssuerURL(cluster.ID),
+		"clientID: cluster-" + cluster.ID + "-dex",
+		"clientSecret: dex-secret-for-" + cluster.ID,
+		"enablePasswordDB: true",
+		"id: keycloak",
+		"id: argocd",
+		"organization",
+	} {
+		if !strings.Contains(dexConfig, want) {
+			t.Errorf("dex config.yaml missing %q:\n%s", want, dexConfig)
+		}
+	}
+	staticSecret := r.secrets.puts[secrets.ClusterOIDCPath(cluster.ID)+"#"+clusterdex.VaultKeyArgoCDClientSecret]
+	if staticSecret == "" {
+		t.Error("argocd static-client secret not delivered")
+	}
+	// The static client secret in the Dex config matches the delivered one.
+	if !strings.Contains(dexConfig, "secret: "+staticSecret) {
+		t.Error("dex config staticClients must embed the delivered argocd secret")
 	}
 
 	got, err := r.registry.GetCluster(ctx, cluster.ID)
@@ -598,6 +638,35 @@ func TestRevokedClusterCannotReconnect(t *testing.T) {
 		t.Error("revoked cluster unexpectedly admitted")
 	}
 }
+
+// Kill-switch (cluster_dex.fanout): with the fan-out disabled, registration
+// skips the Dex client provisioning and Vault writes entirely.
+func TestRegistrationSkipsDexWhenFanoutDisabled(t *testing.T) {
+	r := newRig(t, false)
+	r.gw.WithFeatureFlags(staticFlagEval{on: false})
+	ctx := context.Background()
+	cluster, err := r.registry.CreateCluster(ctx, "user-1", "org:1", "kind-dev", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := r.registry.IssueToken(ctx, "user-1", cluster.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.gw.RegisterCluster(ctx, registerReq(token)); err != nil {
+		t.Fatalf("RegisterCluster: %v", err)
+	}
+	if len(r.clients.dex) != 0 {
+		t.Errorf("dex client must not be provisioned when disabled: %v", r.clients.dex)
+	}
+	if got := r.secrets.puts[secrets.ClusterOIDCPath(cluster.ID)+"#"+clusterdex.VaultKeyDexConfigYAML]; got != "" {
+		t.Error("dex config must not be delivered when disabled")
+	}
+}
+
+type staticFlagEval struct{ on bool }
+
+func (f staticFlagEval) Bool(context.Context, string, string) bool { return f.on }
 
 func mustCluster(t *testing.T, r *rig, id string) *types.Cluster {
 	t.Helper()

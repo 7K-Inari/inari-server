@@ -132,6 +132,89 @@ func TestBuildApplicationSetListGenerator(t *testing.T) {
 	}
 }
 
+func TestBuildApplicationSetElementFields(t *testing.T) {
+	p := testParams()
+	p.DeployMode = types.AddonDeployModeApplicationSet
+	p.Clusters = []ClusterTarget{
+		{ID: "c1", Name: "prod-eu", Fields: map[string]string{"dexAppName": "dex-c1", "clusterID": "c1"}},
+		{ID: "c2", Name: "prod-us", Fields: map[string]string{"dexAppName": "dex-c2", "clusterID": "c2"}},
+	}
+	appset := buildApplicationSet(p, map[string]any{"source": gitSource(p, p.Path)})
+	doc := parseDoc(t, appset)
+
+	spec := doc["spec"].(map[string]any)
+	elements := spec["generators"].([]any)[0].(map[string]any)["list"].(map[string]any)["elements"].([]any)
+	el0 := elements[0].(map[string]any)
+	if el0["cluster"] != "prod-eu" || el0["server"] != localServer {
+		t.Errorf("element[0] = %v", el0)
+	}
+	if el0["dexAppName"] != "dex-c1" || el0["clusterID"] != "c1" {
+		t.Errorf("element[0] fields = %v", el0)
+	}
+	el1 := elements[1].(map[string]any)
+	if el1["dexAppName"] != "dex-c2" {
+		t.Errorf("element[1] fields = %v", el1)
+	}
+}
+
+func TestBuildApplicationSetElementFieldsNeverClobberCore(t *testing.T) {
+	p := testParams()
+	p.DeployMode = types.AddonDeployModeApplicationSet
+	p.Clusters = []ClusterTarget{
+		{ID: "c1", Name: "prod-eu", Fields: map[string]string{"cluster": "bogus", "server": "bogus"}},
+	}
+	appset := buildApplicationSet(p, map[string]any{"source": gitSource(p, p.Path)})
+	elements := parseDoc(t, appset)["spec"].(map[string]any)["generators"].([]any)[0].(map[string]any)["list"].(map[string]any)["elements"].([]any)
+	el := elements[0].(map[string]any)
+	if el["cluster"] != "prod-eu" || el["server"] != localServer {
+		t.Errorf("fields must not clobber cluster/server: %v", el)
+	}
+}
+
+func TestBuildApplicationSetAppNameTemplate(t *testing.T) {
+	p := testParams()
+	p.DeployMode = types.AddonDeployModeApplicationSet
+	p.AppNameTemplate = "{{dexAppName}}"
+	p.Clusters = []ClusterTarget{{ID: "c1", Name: "prod-eu", Fields: map[string]string{"dexAppName": "dex-c1"}}}
+	appset := buildApplicationSet(p, map[string]any{"source": gitSource(p, p.Path)})
+	tpl := parseDoc(t, appset)["spec"].(map[string]any)["template"].(map[string]any)
+	if got := tpl["metadata"].(map[string]any)["name"]; got != "{{dexAppName}}" {
+		t.Errorf("template name = %v, want {{dexAppName}}", got)
+	}
+}
+
+func TestBuildApplicationSetCascadeDeleteFinalizer(t *testing.T) {
+	p := testParams()
+	p.DeployMode = types.AddonDeployModeApplicationSet
+	p.CascadeDelete = true
+	p.Clusters = []ClusterTarget{{ID: "c1", Name: "prod-eu"}}
+	appset := buildApplicationSet(p, map[string]any{"source": gitSource(p, p.Path)})
+	tpl := parseDoc(t, appset)["spec"].(map[string]any)["template"].(map[string]any)
+	fin, ok := tpl["metadata"].(map[string]any)["finalizers"].([]any)
+	if !ok || len(fin) != 1 || fin[0] != "resources-finalizer.argocd.argoproj.io" {
+		t.Errorf("finalizers = %v, want resources-finalizer", tpl["metadata"])
+	}
+
+	// Default: no finalizers (adoption semantics stay unchanged).
+	p.CascadeDelete = false
+	appset = buildApplicationSet(p, map[string]any{"source": gitSource(p, p.Path)})
+	tpl = parseDoc(t, appset)["spec"].(map[string]any)["template"].(map[string]any)
+	if _, ok := tpl["metadata"].(map[string]any)["finalizers"]; ok {
+		t.Error("finalizers must be omitted when CascadeDelete is false")
+	}
+}
+
+func TestBuildApplicationSetEmptyFleet(t *testing.T) {
+	p := testParams()
+	p.DeployMode = types.AddonDeployModeApplicationSet
+	p.Clusters = nil
+	appset := buildApplicationSet(p, map[string]any{"source": gitSource(p, p.Path)})
+	elements := parseDoc(t, appset)["spec"].(map[string]any)["generators"].([]any)[0].(map[string]any)["list"].(map[string]any)["elements"].([]any)
+	if len(elements) != 0 {
+		t.Errorf("empty fleet must render zero elements: %v", elements)
+	}
+}
+
 func TestGitSourceOmitsPathForValuesRef(t *testing.T) {
 	p := testParams()
 	src := valuesRefSource(p)

@@ -122,6 +122,9 @@ type Gateway struct {
 	// tenant_git_repos registry (Feature A); nil means the field is
 	// omitted from registration responses.
 	baselineRepos BaselineRepoLookup
+	// flags reads runtime feature flags (cluster_dex.fanout kill-switch);
+	// nil means feature defaults apply (Dex provisioning on).
+	flags FlagEvaluator
 	// sessions fences duplicate agent streams: at most one live session per
 	// cluster identity (last-writer-wins eviction, see session_registry.go).
 	sessionsMu sync.Mutex
@@ -142,6 +145,18 @@ type BaselineRepoLookup interface {
 // WithBaselineRepoLookup wires the baseline repo registry lookup (nil-safe).
 func (g *Gateway) WithBaselineRepoLookup(l BaselineRepoLookup) *Gateway {
 	g.baselineRepos = l
+	return g
+}
+
+// FlagEvaluator is the feature-flag read seam (featureflags.Resolver).
+type FlagEvaluator interface {
+	Bool(ctx context.Context, key, clusterID string) bool
+}
+
+// WithFeatureFlags wires the runtime flag resolver (nil-safe: nil keeps
+// registered flag defaults).
+func (g *Gateway) WithFeatureFlags(f FlagEvaluator) *Gateway {
+	g.flags = f
 	return g
 }
 

@@ -73,9 +73,14 @@ func TestRenderValidatesParams(t *testing.T) {
 	p = testParams()
 	p.DeployMode = types.AddonDeployModeApplicationSet
 	p.Clusters = nil
-	if _, err := r.Render(context.Background(), desc, p); err == nil ||
-		!strings.Contains(err.Error(), "at least one cluster") {
-		t.Fatalf("applicationset mode without clusters: err = %v", err)
+	// Zero clusters render an empty list generator (fleet drain: the appset
+	// prunes its children via the resources finalizer). Callers that require
+	// a non-empty fleet (addons) check BEFORE calling Render.
+	helmDesc := types.SourceDescriptor{Kind: types.SourceKindHelm, Helm: &types.HelmSource{
+		RepoURL: "https://charts.jetstack.io", Chart: "cert-manager", Version: "v1.16.2",
+	}}
+	if _, err := r.Render(context.Background(), helmDesc, p); err != nil {
+		t.Fatalf("applicationset mode with zero clusters must render an empty list: %v", err)
 	}
 
 	p = testParams()

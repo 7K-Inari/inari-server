@@ -308,9 +308,13 @@ func clientClaimDocs(org *types.Organization, claimName, clientID, issuerURL str
 		"spec": map[string]any{
 			"provider": map[string]any{
 				"kubernetes": map[string]any{
-					"server": map[string]any{"url": localClusterServer},
-					"caProvider": map[string]any{
-						"type": "ConfigMap", "name": "kube-root-ca.crt", "key": "ca.crt", "namespace": ns,
+					"server": map[string]any{
+						"url": localClusterServer,
+						// ESO v1: caProvider nests under server (strict
+						// decoding rejects kubernetes.caProvider).
+						"caProvider": map[string]any{
+							"type": "ConfigMap", "name": "kube-root-ca.crt", "key": "ca.crt", "namespace": ns,
+						},
 					},
 					"auth": map[string]any{"serviceAccount": map[string]any{"name": "eso-tenant-secret-reader"}},
 				},

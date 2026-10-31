@@ -143,7 +143,8 @@ func (s *session) handleCapabilityUpdate(ctx context.Context, upd *agentv1.Capab
 	if err != nil {
 		return fmt.Errorf("ingest capability chunk: %w", err)
 	}
-	if s.syncKeep == nil {
+	syncInFlight := s.syncKeep != nil
+	if !syncInFlight {
 		s.syncKeep = map[capabilityKey]struct{}{}
 	}
 	s.unionKeep(items)
@@ -152,7 +153,17 @@ func (s *session) handleCapabilityUpdate(ctx context.Context, upd *agentv1.Capab
 		return nil // data chunk; reconciliation waits for the terminal chunk
 	}
 
-	// Terminal (empty) chunk: reconcile + commit.
+	// Terminal (empty) chunk: reconcile + commit. A terminal with NO sync
+	// in flight whose checksum is already committed (or empty) is a
+	// duplicated terminal (agent misbehavior): finalizing it would use an
+	// EMPTY keep set and soft-delete every live capability, so drop it. A
+	// legitimate terminal-only sync (empty snapshot) always carries a
+	// checksum that differs from the stored one and finalizes normally.
+	if !syncInFlight && (upd.StateChecksum == "" || upd.StateChecksum == s.cluster.CapabilityChecksum) {
+		s.syncKeep = nil
+		s.syncUpserted = 0
+		return nil
+	}
 	keep := make([]types.CapabilityItem, 0, len(s.syncKeep))
 	for k := range s.syncKeep {
 		keep = append(keep, types.CapabilityItem{

@@ -476,6 +476,45 @@ func TestSessionIncrementalUpsertDuringSyncJoinsKeepSet(t *testing.T) {
 	}
 }
 
+// A duplicated terminal chunk (agent misbehavior) must NOT re-finalize:
+// the accumulator reset after the first finalize, so a second terminal
+// would use an EMPTY keep set and soft-delete every live capability. The
+// duplicate (same checksum, no sync in flight) is dropped instead.
+func TestSessionDuplicateTerminalChunkDropped(t *testing.T) {
+	caps := &fakeCapsIngestor{}
+	s := (&Gateway{caps: caps}).newSession(&types.Cluster{ID: "cluster:test", OrgID: "org:test"})
+	ctx := context.Background()
+
+	must := func(ev *agentv1.Event) {
+		t.Helper()
+		if _, err := s.handleEvent(ctx, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(capUpdateEvent(t, true, "sum-1", capCRD("a")))
+	must(capUpdateEvent(t, true, "sum-1")) // terminal
+	must(capUpdateEvent(t, true, "sum-1")) // duplicated terminal
+
+	if len(caps.finalized) != 1 {
+		t.Fatalf("finalizes = %d, want 1 (duplicated terminal must be dropped)", len(caps.finalized))
+	}
+
+	// A legitimate terminal-only sync (empty snapshot) still finalizes: its
+	// checksum differs from the stored one.
+	must(capUpdateEvent(t, true, "sum-empty"))
+	if len(caps.finalized) != 2 {
+		t.Fatalf("finalizes = %d, want 2 (terminal-only sync must finalize)", len(caps.finalized))
+	}
+	if len(caps.finalized[1].keep) != 0 {
+		t.Errorf("terminal-only sync keep set = %v, want empty", caps.finalized[1].keep)
+	}
+	// …and its own duplicate is dropped as well.
+	must(capUpdateEvent(t, true, "sum-empty"))
+	if len(caps.finalized) != 2 {
+		t.Fatalf("finalizes = %d, want 2 (duplicated empty-sync terminal dropped)", len(caps.finalized))
+	}
+}
+
 // After finalize the accumulator resets: the next sync starts clean.
 func TestSessionSyncAccumulatorResetsAfterFinalize(t *testing.T) {
 	caps := &fakeCapsIngestor{}

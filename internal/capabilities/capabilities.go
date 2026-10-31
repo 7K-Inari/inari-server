@@ -189,7 +189,10 @@ func (s *Service) IngestChunk(ctx context.Context, orgID, clusterID string, item
 // soft-deletes every live capability absent from keep (the sync's
 // accumulated membership), stores the state checksum, and writes the
 // aggregate audit + outbox record. Idempotent: a duplicated terminal chunk
-// with the same membership and checksum converges to the same state.
+// with the same membership and checksum converges to the same state — but
+// keep MUST be the sync's full accumulated membership (an empty keep
+// soft-deletes everything), so the session layer drops duplicated terminal
+// chunks outright instead of re-finalizing with a reset accumulator.
 func (s *Service) FinalizeSync(ctx context.Context, orgID, clusterID string, keep []types.CapabilityItem, stateChecksum string, upserted int) (int, error) {
 	var deleted int
 	err := s.db.WithTx(ctx, func(tx pgx.Tx) error {

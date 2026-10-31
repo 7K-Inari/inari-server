@@ -936,6 +936,16 @@ func TestCapabilityChunkedFullSync(t *testing.T) {
 		t.Fatalf("checksum = %q after finalize, want sum-2", got)
 	}
 
+	// A duplicated terminal chunk must NOT re-finalize: the keep-set
+	// accumulator reset after finalize, so re-finalizing would use an empty
+	// keep set and soft-delete every live capability.
+	if _, err := sess.handleEvent(ctx, capabilityEvent(t, true, "sum-2")); err != nil {
+		t.Fatal(err)
+	}
+	if got := listNames(); len(got) != 2 || !got["a"] || !got["b"] {
+		t.Fatalf("duplicated terminal must not delete rows: %v, want a,b", got)
+	}
+
 	// Shrink-to-zero: a terminal-only sync (empty snapshot) deletes all.
 	if _, err := sess.handleEvent(ctx, capabilityEvent(t, true, "sum-3")); err != nil {
 		t.Fatal(err)

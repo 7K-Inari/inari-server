@@ -11,11 +11,6 @@ import (
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
-// fakeFlags is a static FlagEvaluator for the render-cutover gate.
-type fakeFlags bool
-
-func (f fakeFlags) Bool(context.Context, string, string) bool { return bool(f) }
-
 // fakeTenantLookup resolves orgs by ID (tenancy.Service seam).
 type fakeTenantLookup struct{ org *types.Organization }
 
@@ -23,8 +18,8 @@ func (f fakeTenantLookup) GetTenantByID(context.Context, string) (*types.Organiz
 	return f.org, nil
 }
 
-func renderSvc(flagOn bool) *Service {
-	return NewService(nil, nil, nil).WithFlags(fakeFlags(flagOn))
+func renderSvc() *Service {
+	return NewService(nil, nil, nil)
 }
 
 func testOrg() *types.Organization {
@@ -48,30 +43,8 @@ func parseYAML(t *testing.T, content string) map[string]any {
 	return doc
 }
 
-func TestRenderTenantFilesLegacyWhenFlagOff(t *testing.T) {
-	s := renderSvc(false)
-	files, err := s.RenderTenantFiles(context.Background(), testOrg(), "https://fake.git/inari/platform.git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(files) != 3 {
-		t.Fatalf("files = %d, want 3 (legacy CRs)", len(files))
-	}
-	if files[0].Path != "tenants/acme/keycloak-realm.yaml" {
-		t.Errorf("path = %q", files[0].Path)
-	}
-	if !strings.Contains(string(files[0].Content), "platform.inari.io/v1alpha1") {
-		t.Errorf("legacy CR expected:\n%s", files[0].Content)
-	}
-	// No flags wired at all → legacy as well (nil-safe).
-	files, err = NewService(nil, nil, nil).RenderTenantFiles(context.Background(), testOrg(), "x")
-	if err != nil || len(files) != 3 {
-		t.Errorf("unwired flags: files = %d, err = %v", len(files), err)
-	}
-}
-
-func TestRenderTenantFilesDescriptorsWhenFlagOn(t *testing.T) {
-	s := renderSvc(true)
+func TestRenderTenantFilesDescriptors(t *testing.T) {
+	s := renderSvc()
 	repoURL := "https://fake.git/inari/platform.git"
 	files, err := s.RenderTenantFiles(context.Background(), testOrg(), repoURL)
 	if err != nil {
@@ -217,27 +190,27 @@ func TestTenantIssuerURL(t *testing.T) {
 }
 
 func TestTenantRenderPaths(t *testing.T) {
-	off, err := renderSvc(false).TenantRenderPaths(context.Background(), "acme")
+	paths, err := renderSvc().TenantRenderPaths(context.Background(), "acme")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(off) != 3 || off[0] != "tenants/acme/keycloak-realm.yaml" {
-		t.Errorf("flag off paths = %v", off)
+	// The 8 tenant-level descriptor paths (client claims are unwired here).
+	if len(paths) != 8 {
+		t.Errorf("paths = %v, want 8 descriptor paths", paths)
 	}
-	on, err := renderSvc(true).TenantRenderPaths(context.Background(), "acme")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Union of legacy (3) + descriptor paths (8) for teardown.
-	if len(on) != 11 {
-		t.Errorf("flag on paths = %v", on)
+	// D7: no legacy platform.inari.io CR paths in the teardown set.
+	for _, p := range paths {
+		if strings.HasSuffix(p, "keycloak-realm.yaml") || strings.HasSuffix(p, "dns-record.yaml") ||
+			strings.HasSuffix(p, "tenant-namespace.yaml") {
+			t.Errorf("legacy CR path %q must not be in the delete set", p)
+		}
 	}
 }
 
 func TestRenderKeycloakClientClaim(t *testing.T) {
 	org := testOrg()
 	git := gitprovider.NewFake()
-	s := renderSvc(true).
+	s := renderSvc().
 		WithGitOps("inari/platform", git).
 		WithTenantLookup(fakeTenantLookup{org: org})
 
@@ -300,6 +273,12 @@ func TestRenderKeycloakClientClaim(t *testing.T) {
 	if cap_, _ := server["caProvider"].(map[string]any); cap_["namespace"] != nil {
 		t.Errorf("namespaced SecretStore must not set caProvider.namespace: %v", cap_)
 	}
+	// ESO's kubernetes provider schema DEFAULTS remoteNamespace to "default"
+	// — the store must pin the tenant namespace or reads target the wrong
+	// namespace and fail RBAC.
+	if k8s["remoteNamespace"] != "tenant-acme" {
+		t.Errorf("remoteNamespace = %v, want tenant-acme (ESO schema default is \"default\")", k8s["remoteNamespace"])
+	}
 
 	// Idempotent re-render (registration retry): same content, no error.
 	if _, err := s.RenderKeycloakClientClaim(context.Background(), org.ID, "01JFXM6E8BM0G52GQPMNWP2ZC0", clientID,
@@ -308,21 +287,9 @@ func TestRenderKeycloakClientClaim(t *testing.T) {
 	}
 }
 
-func TestRenderKeycloakClientClaimFallback(t *testing.T) {
-	// Flag off → rendered=false, no git touched.
-	git := gitprovider.NewFake()
-	s := renderSvc(false).
-		WithGitOps("inari/platform", git).
-		WithTenantLookup(fakeTenantLookup{org: testOrg()})
-	rendered, err := s.RenderKeycloakClientClaim(context.Background(), "org:kc-123", "c1", "cluster-c1", "iss")
-	if err != nil || rendered {
-		t.Errorf("flag off: rendered=%v err=%v", rendered, err)
-	}
-	if len(git.Files("inari/platform", "main")) != 0 {
-		t.Error("flag off must not commit")
-	}
-	// Flag on but git unwired → rendered=false (legacy fallback).
-	rendered, err = renderSvc(true).RenderKeycloakClientClaim(context.Background(), "org:kc-123", "c1", "cluster-c1", "iss")
+func TestRenderKeycloakClientClaimUnwired(t *testing.T) {
+	// Git unwired → rendered=false (no repo to commit to).
+	rendered, err := renderSvc().RenderKeycloakClientClaim(context.Background(), "org:kc-123", "c1", "cluster-c1", "iss")
 	if err != nil || rendered {
 		t.Errorf("unwired git: rendered=%v err=%v", rendered, err)
 	}
@@ -343,9 +310,13 @@ func TestKindForCRDRenderedKinds(t *testing.T) {
 			t.Errorf("IsPlatformKind(%q) = false", kind)
 		}
 	}
-	// Legacy kinds still route; unknown kinds still rejected.
-	if _, ok := KindForCRD("KeycloakRealm.platform.inari.io"); !ok {
-		t.Error("legacy KeycloakRealm kind rejected")
+	// Legacy platform.inari.io kinds no longer route (D7 — the CRDs are
+	// gone); unknown kinds are rejected.
+	if _, ok := KindForCRD("KeycloakRealm.platform.inari.io"); ok {
+		t.Error("legacy KeycloakRealm kind must not route")
+	}
+	if IsPlatformKind("KeycloakRealm.platform.inari.io") {
+		t.Error("legacy KeycloakRealm kind must not be a platform kind")
 	}
 	if IsPlatformKind("Deployment.apps") {
 		t.Error("Deployment.apps must not be a platform kind")

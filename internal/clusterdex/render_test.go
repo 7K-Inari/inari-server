@@ -43,7 +43,9 @@ func TestAppName(t *testing.T) {
 	if got := AppName("cluster:abc-123"); got != "dex-abc-123" {
 		t.Errorf("AppName(cluster:abc-123) = %q", got)
 	}
-	if AppName("c1") != AppName("c1") {
+	// Deterministic per input, distinct across inputs.
+	first, second := AppName("c1"), AppName("c1")
+	if first != second {
 		t.Fatal("AppName must be deterministic")
 	}
 	if AppName("c1") == AppName("c2") {
@@ -61,7 +63,7 @@ func TestAppNameTruncatesLongIDs(t *testing.T) {
 		t.Errorf("AppName = %q, want dex- prefix", got)
 	}
 	// Same hash suffix contract as the operator: sha256 content hash.
-	if AppName(long) != AppName(long) {
+	if first, second := AppName(long), AppName(long); first != second {
 		t.Fatal("truncated name must be deterministic")
 	}
 	if AppName(long) == AppName(long+"b") {

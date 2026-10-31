@@ -117,6 +117,13 @@ func (s *Service) RerenderOrg(ctx context.Context, orgID string, staleClusterNam
 	if err != nil {
 		return err
 	}
+	// Config-level failures (e.g. a malformed Dex image override) are global
+	// — they fail every repo identically — so they abort the pass loudly
+	// (the outbox redelivers and dead-letters visibly) instead of being
+	// logged once per repo.
+	if _, err := s.appSetSpecs(); err != nil {
+		return err
+	}
 
 	// Selector (engine-agnostic, decision D5): every active/degraded org
 	// cluster gets the Dex baseline unless it carries the opt-out label.
@@ -185,7 +192,7 @@ func (s *Service) reconcileRepo(ctx context.Context, orgID string, repo *types.T
 		return nil // never managed and nothing matched: leave the repo alone
 	}
 
-	files, err := s.renderRepoFiles(repo, members, groups)
+	files, err := s.renderRepoFiles(ctx, repo, members, groups)
 	if err != nil {
 		return err
 	}
@@ -268,15 +275,22 @@ func (s *Service) reconcileRepo(ctx context.Context, orgID string, repo *types.T
 	}
 
 	// Delivery gate: deliver only when the repo's committed state matches
-	// the desired appset (direct: just committed; PR policy: after merge —
-	// the git.webhook.pr_merged event re-triggers this pass).
-	currentSet, err := provider.ReadFile(ctx, repo.Repo, repo.BaseBranch, repoPathDex+"/applicationset.yaml")
-	if err != nil {
-		return fmt.Errorf("re-read appset: %w", err)
-	}
-	desiredSet := desiredGitContent(files, repoPathDex+"/applicationset.yaml")
-	if currentSet != desiredSet {
-		return nil // membership not live in git yet
+	// the desired appsets (direct: just committed; PR policy: after merge —
+	// the git.webhook.pr_merged event re-triggers this pass). Both appsets
+	// must be live: delivering a view whose $values overlays are not on the
+	// base branch yet would render broken children.
+	for _, path := range []string{repoPathDex, repoPathArgoConfig} {
+		desired := desiredGitContent(files, path+"/applicationset.yaml")
+		if desired == "" {
+			continue // argocd-config disabled (no chart pin)
+		}
+		current, err := provider.ReadFile(ctx, repo.Repo, repo.BaseBranch, path+"/applicationset.yaml")
+		if err != nil {
+			return fmt.Errorf("re-read %s appset: %w", path, err)
+		}
+		if current != desired {
+			return nil // membership not live in git yet
+		}
 	}
 	return s.deliver(ctx, repo, members, optedOut, optedOutHere)
 }
@@ -315,8 +329,12 @@ func (s *Service) deliverCluster(ctx context.Context, repo *types.TenantGitRepo,
 	if asMember {
 		members = []types.Cluster{cluster}
 	}
-	for _, spec := range s.appSetSpecs() {
-		files, err := s.renderAppSet(spec, repo, members)
+	specs, err := s.appSetSpecs()
+	if err != nil {
+		return err
+	}
+	for _, spec := range specs {
+		files, err := s.renderAppSet(ctx, spec, repo, members)
 		if err != nil {
 			return err
 		}
@@ -351,26 +369,27 @@ type appSetSpec struct {
 
 // appSetSpecs builds the two fan-out specs for the current config. The
 // argocd-config spec is absent when the platform chart pin is unconfigured.
-func (s *Service) appSetSpecs() []appSetSpec {
+// A malformed Dex image override (config error) is a hard error: silently
+// dropping the dex appset would stall the delivery gate forever with the
+// stale committed manifest left in place.
+func (s *Service) appSetSpecs() ([]appSetSpec, error) {
 	dexBase, err := dexBaseValues(s.cfg)
-	specs := []appSetSpec{}
 	if err != nil {
-		s.log.Warn("clusterdex: invalid dex base values", "error", err)
-	} else {
-		specs = append(specs, appSetSpec{
-			id:       workloadDex,
-			workload: workloadDex,
-			path:     repoPathDex,
-			desc: types.SourceDescriptor{Kind: types.SourceKindHelm, Helm: &types.HelmSource{
-				RepoURL: DexChartRepoURL, Chart: DexChartName, Version: s.cfg.dexChartVersion(),
-			}},
-			appNameTemplate: appNameTplDex,
-			releaseName:     appNameTplDex,
-			namespace:       DexNamespace,
-			syncOptions:     []string{"CreateNamespace=true"},
-			baseValues:      dexBase,
-		})
+		return nil, fmt.Errorf("clusterdex: dex base values: %w", err)
 	}
+	specs := []appSetSpec{{
+		id:       workloadDex,
+		workload: workloadDex,
+		path:     repoPathDex,
+		desc: types.SourceDescriptor{Kind: types.SourceKindHelm, Helm: &types.HelmSource{
+			RepoURL: DexChartRepoURL, Chart: DexChartName, Version: s.cfg.dexChartVersion(),
+		}},
+		appNameTemplate: appNameTplDex,
+		releaseName:     appNameTplDex,
+		namespace:       DexNamespace,
+		syncOptions:     []string{"CreateNamespace=true"},
+		baseValues:      dexBase,
+	}}
 	if s.cfg.PlatformChartVersion == "" {
 		s.log.Warn("clusterdex: platform chart version unconfigured; argocd-config fan-out skipped")
 	} else {
@@ -387,13 +406,13 @@ func (s *Service) appSetSpecs() []appSetSpec {
 			baseValues:      argoConfigBaseValues(s.cfg),
 		})
 	}
-	return specs
+	return specs, nil
 }
 
 // renderAppSet renders one appset (base values + applicationset.yaml) for
 // the given cluster membership, embedding the repo's real clone URL and
 // branch in the $values ref.
-func (s *Service) renderAppSet(spec appSetSpec, repo *types.TenantGitRepo, members []types.Cluster) ([]renderer.RenderedFile, error) {
+func (s *Service) renderAppSet(ctx context.Context, spec appSetSpec, repo *types.TenantGitRepo, members []types.Cluster) ([]renderer.RenderedFile, error) {
 	targets := make([]renderer.ClusterTarget, 0, len(members))
 	for _, c := range members {
 		targets = append(targets, renderer.ClusterTarget{
@@ -405,7 +424,7 @@ func (s *Service) renderAppSet(spec appSetSpec, repo *types.TenantGitRepo, membe
 	if err != nil {
 		return nil, err
 	}
-	return s.renders.Render(context.Background(), spec.desc, renderer.RenderParams{
+	return s.renders.Render(ctx, spec.desc, renderer.RenderParams{
 		Name: spec.workload, Namespace: spec.namespace,
 		ID: spec.id, DeployMode: types.AddonDeployModeApplicationSet,
 		Clusters: targets,
@@ -426,10 +445,14 @@ func (s *Service) renderAppSet(spec appSetSpec, repo *types.TenantGitRepo, membe
 // renderRepoFiles renders the full file set for one baseline repo: both
 // appsets (full membership — the review/audit form), their base values, and
 // the per-cluster overlays.
-func (s *Service) renderRepoFiles(repo *types.TenantGitRepo, members []types.Cluster, groups RBACGroups) ([]gitprovider.File, error) {
+func (s *Service) renderRepoFiles(ctx context.Context, repo *types.TenantGitRepo, members []types.Cluster, groups RBACGroups) ([]gitprovider.File, error) {
 	var out []gitprovider.File
-	for _, spec := range s.appSetSpecs() {
-		files, err := s.renderAppSet(spec, repo, members)
+	specs, err := s.appSetSpecs()
+	if err != nil {
+		return nil, err
+	}
+	for _, spec := range specs {
+		files, err := s.renderAppSet(ctx, spec, repo, members)
 		if err != nil {
 			return nil, err
 		}

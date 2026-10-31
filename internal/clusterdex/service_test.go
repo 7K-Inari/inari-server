@@ -430,6 +430,77 @@ func TestRerenderOrgMultiBaselineGrouping(t *testing.T) {
 	}
 }
 
+// Regression (QA): a malformed Dex image override is a hard config error —
+// silently dropping the dex spec would stall the delivery gate forever with
+// the stale committed manifest left in place.
+func TestRerenderOrgBadDexImageFails(t *testing.T) {
+	f := newFixture(t, []types.Cluster{cluster("c1", "prod-eu", nil)}, nil)
+	f.svc.cfg.DexImage = "ghcr.io/dexidp/dex@sha256:1a2b3c" // digest ref: rejected
+	if err := f.svc.RerenderOrg(context.Background(), "org:1"); err == nil {
+		t.Fatal("bad dex image must fail the render (loud config error)")
+	}
+}
+
+// Regression (QA): the delivery gate covers BOTH appsets — a cluster's view
+// must not go out while its repo still lacks the argocd-config appset (its
+// $values overlays would render broken children).
+func TestRerenderOrgDeliveryGateCoversBothAppSets(t *testing.T) {
+	f := newFixture(t, []types.Cluster{cluster("c1", "prod-eu", nil)}, nil)
+	ctx := context.Background()
+	f.repo.CommitPolicy = types.CommitPolicyPullRequest
+	if err := f.svc.RerenderOrg(ctx, "org:1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.git.PRs) != 1 || len(f.queue.cmds) != 0 {
+		t.Fatalf("first pass: PRs=%d cmds=%d, want 1/0", len(f.git.PRs), len(f.queue.cmds))
+	}
+	// Merge ONLY the dex files (split-brain merge simulation): the dex
+	// appset is live, argocd-config is not.
+	for _, file := range f.git.PRs[0].Files {
+		if !strings.HasPrefix(file.Path, "dex/") && !strings.HasPrefix(file.Path, "clusters/") {
+			continue
+		}
+		if _, err := f.git.CommitFiles(ctx, f.repo.Repo, "main", []gitprovider.File{file}, "merge dex half"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.svc.RerenderOrg(ctx, "org:1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.queue.cmds) != 0 {
+		t.Errorf("delivery must wait until BOTH appsets live: %d commands", len(f.queue.cmds))
+	}
+	// Merge the rest: delivery proceeds.
+	for _, file := range f.git.PRs[0].Files {
+		if _, err := f.git.CommitFiles(ctx, f.repo.Repo, "main", []gitprovider.File{file}, "merge rest"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.svc.RerenderOrg(ctx, "org:1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.queue.cmds) != 2 {
+		t.Errorf("after full merge: %d commands, want 2", len(f.queue.cmds))
+	}
+}
+
+// Regression (QA): an opted-out cluster that was never managed by the repo
+// gets no drain delivery (an empty appset would be pointless noise).
+func TestRerenderOrgNeverManagedOptOutGetsNoDrain(t *testing.T) {
+	f := newFixture(t, []types.Cluster{
+		cluster("c1", "prod-eu", map[string]string{DisabledLabel: DisabledLabelValue}),
+	}, nil)
+	if err := f.svc.RerenderOrg(context.Background(), "org:1"); err != nil {
+		t.Fatal(err)
+	}
+	if files := f.git.Files("acme/acme-inari-state", "main"); len(files) != 0 {
+		t.Errorf("never-managed opt-out must produce no renders: %v", keysOf(files))
+	}
+	if len(f.queue.cmds) != 0 {
+		t.Errorf("never-managed opt-out must produce no deliveries: %v", f.queue.cmds)
+	}
+}
+
 func TestRerenderOrgSkipsClustersWithoutBaseline(t *testing.T) {
 	f := newFixture(t, []types.Cluster{cluster("c1", "prod-eu", nil)}, nil)
 	f.svc.baselines = fakeBaselines{byCluster: map[string]string{}} // unbound

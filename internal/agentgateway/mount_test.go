@@ -10,6 +10,7 @@ import (
 	connect "connectrpc.com/connect/v2"
 	"connectrpc.com/connect/v2/connecthttp"
 	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
 	"github.com/7K-Inari/inari-api/gen/go/inari/agent/v1/agentv1connect"
@@ -108,7 +109,8 @@ func TestStreamDefaultReadLimitRejectsOversize(t *testing.T) {
 }
 
 // TestStreamReadLimitAdmitsLargeMessages is the fix assertion: the
-// production mount options must admit messages beyond the 4MiB default.
+// production mount options must admit messages beyond connect's 4MiB
+// default (headroom over the agent's 2MiB chunk budget).
 func TestStreamReadLimitAdmitsLargeMessages(t *testing.T) {
 	cfg := (&Config{}).withDefaults()
 	ts := mountStub(t, cfg.MountOptions()...)
@@ -150,5 +152,73 @@ func TestStreamReadLimitRawConfigLiteral(t *testing.T) {
 	}
 	if _, err := stream.Receive(); err != nil {
 		t.Fatalf("raw Config{}.MountOptions() must admit oversize messages, got %v", err)
+	}
+}
+
+// capabilityChunk builds a ConnectRequest carrying one framed full-sync
+// chunk (full_sync=true) whose schema padding totals ~size bytes — the
+// shape the chunked agent actually sends.
+func capabilityChunk(t *testing.T, size int) *agentv1.ConnectRequest {
+	t.Helper()
+	schema, err := structpb.NewStruct(map[string]interface{}{"pad": strings.Repeat("x", size)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	any, err := anypb.New(&agentv1.CapabilityUpdate{
+		FullSync:      true,
+		StateChecksum: "sum",
+		Capabilities: []*agentv1.Capability{{
+			Kind: agentv1.CapabilityKind_CAPABILITY_KIND_CRD,
+			Name: "giants.example.com", Group: "example.com", Version: "v1",
+			Schema: schema,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &agentv1.ConnectRequest{Event: &agentv1.Event{
+		EventId: "chunk-1",
+		Type:    agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_CAPABILITY_UPDATE),
+		Payload: any,
+	}}
+}
+
+// TestStockReadLimitAdmitsFramedChunk is the systemic-fix assertion: an
+// agent-side byte-bounded full-sync chunk (<=2MiB budget) fits connect's
+// STOCK 4MiB read limit — the raised limit is no longer load-bearing for
+// well-behaved agents (M5W2 finding F1 end-state).
+func TestStockReadLimitAdmitsFramedChunk(t *testing.T) {
+	ts := mountStub(t) // no options: connect default (4MiB)
+	stream, err := streamClient(ts).Connect(context.Background())
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if err := stream.Send(capabilityChunk(t, 2<<20)); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	resp, err := stream.Receive()
+	if err != nil {
+		t.Fatalf("a framed <=2MiB chunk must pass the stock 4MiB limit, got %v", err)
+	}
+	if resp.Event.GetEventId() != "bye" {
+		t.Fatalf("want the stub's pong, got %+v", resp.Event)
+	}
+}
+
+// TestStreamReadLimitRejectsBeyondCeiling restores the limit's
+// backpressure purpose: with the stopgap retired to 8MiB, a message beyond
+// the ceiling is rejected instead of exhausting server memory.
+func TestStreamReadLimitRejectsBeyondCeiling(t *testing.T) {
+	cfg := (&Config{}).withDefaults()
+	ts := mountStub(t, cfg.MountOptions()...)
+	stream, err := streamClient(ts).Connect(context.Background())
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if err := stream.Send(capabilityChunk(t, 9<<20)); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if _, err := stream.Receive(); connect.CodeOf(err) != connect.CodeResourceExhausted {
+		t.Fatalf("want resource_exhausted beyond the 8MiB ceiling, got %v", err)
 	}
 }

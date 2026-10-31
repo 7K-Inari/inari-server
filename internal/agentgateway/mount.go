@@ -5,13 +5,15 @@ import (
 )
 
 // DefaultStreamMaxRecvBytes is the per-message read limit for the
-// agent-facing Connect mounts. connect's default (4MiB) is too small for
-// capability full-sync replays from CRD-rich clusters: the agent's CRD
-// capability collector embeds openAPIV3 schemas, and a hub carrying
-// Crossplane + provider-keycloak + ESO + CNPG + ArgoCD CRDs exceeds 4MiB
-// easily (~10MiB observed in e2e). Sessions then die on every full sync
-// (resource_exhausted), taking status streaming down with them.
-const DefaultStreamMaxRecvBytes = 64 << 20 // 64MiB
+// agent-facing Connect mounts. Capability traffic is byte-bounded at the
+// source: the agent chunks CapabilityUpdates to a 2MiB proto-size budget
+// (inari-agent internal/capability DefaultMaxBatchBytes), so messages no
+// longer scale with cluster CRD count. 8MiB restores the limit's
+// backpressure purpose while leaving generous headroom over the chunk
+// budget for one oversize member or future growth. (History: the 64MiB
+// stopgap from the M5W2 validation admitted monolithic full-sync replays,
+// ~10MiB on hub-class clusters; chunking is the systemic fix.)
+const DefaultStreamMaxRecvBytes = 8 << 20 // 8MiB
 
 // MountOptions returns the connecthttp transport options for the
 // agent-facing RPC mounts (registration, event stream, credentials) —

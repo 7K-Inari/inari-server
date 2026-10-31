@@ -498,6 +498,17 @@ func TestCapabilityIngestPersists(t *testing.T) {
 		t.Fatalf("capabilities = %d, want 2", len(list))
 	}
 
+	// Framed full sync commits its checksum on the empty terminal chunk.
+	if got, _ := r.registry.GetCluster(ctx, cluster.ID); got.CapabilityChecksum != "" {
+		t.Errorf("checksum = %q before the terminal chunk, want uncommitted", got.CapabilityChecksum)
+	}
+	if _, err := sess.handleEvent(ctx, capabilityEvent(t, true, "sum-1")); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := r.registry.GetCluster(ctx, cluster.ID); got.CapabilityChecksum != "sum-1" {
+		t.Errorf("checksum = %q after terminal chunk, want sum-1", got.CapabilityChecksum)
+	}
+
 	// Incremental delete removes one record.
 	_, err = sess.handleEvent(ctx, capabilityEvent(t, false, "sum-2",
 		&agentv1.Capability{Kind: agentv1.CapabilityKind_CAPABILITY_KIND_CRD, Name: "foos.example.com", Group: "example.com", Version: "v1", Action: agentv1.CapabilityAction_CAPABILITY_ACTION_DELETE},
@@ -839,5 +850,121 @@ func TestRegistrationClaimRenderErrorKeepsTokenConsumable(t *testing.T) {
 	ensurer.claimErr = nil
 	if _, err := r.gw.RegisterCluster(ctx, registerReq(token)); err != nil {
 		t.Fatalf("RegisterCluster retry: %v", err)
+	}
+}
+
+// Framed full sync (stream payload sizing fix, M5W2 finding F1): chunks
+// upsert immediately, but delete-missing reconciliation and the checksum
+// commit wait for the empty terminal chunk — an abandoned replay never
+// deletes live capabilities and never poisons the resync checksum.
+func TestCapabilityChunkedFullSync(t *testing.T) {
+	r := newRig(t, false)
+	ctx := context.Background()
+	cluster, _ := r.registry.CreateCluster(ctx, "user-1", "org:1", "kind-dev", nil)
+	token, _, _ := r.registry.IssueToken(ctx, "user-1", cluster.ID)
+	if _, err := r.gw.RegisterCluster(ctx, registerReq(token)); err != nil {
+		t.Fatal(err)
+	}
+	sess := r.gw.newSession(mustCluster(t, r, cluster.ID))
+
+	crd := func(name string) *agentv1.Capability {
+		return &agentv1.Capability{
+			Kind: agentv1.CapabilityKind_CAPABILITY_KIND_CRD,
+			Name: name, Group: "example.com", Version: "v1",
+		}
+	}
+	listNames := func() map[string]bool {
+		t.Helper()
+		list, err := r.caps.List(ctx, cluster.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]bool{}
+		for _, c := range list {
+			out[c.Name] = true
+		}
+		return out
+	}
+	checksum := func() string {
+		t.Helper()
+		got, err := r.registry.GetCluster(ctx, cluster.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got.CapabilityChecksum
+	}
+
+	// First sync: two data chunks + terminal → all three rows, checksum set.
+	if _, err := sess.handleEvent(ctx, capabilityEvent(t, true, "sum-1", crd("a"), crd("b"))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sess.handleEvent(ctx, capabilityEvent(t, true, "sum-1", crd("stale"))); err != nil {
+		t.Fatal(err)
+	}
+	if got := listNames(); len(got) != 3 {
+		t.Fatalf("after data chunks: %v, want a,b,stale upserted immediately", got)
+	}
+	if got := checksum(); got != "" {
+		t.Fatalf("checksum = %q before the terminal chunk, want uncommitted", got)
+	}
+	if _, err := sess.handleEvent(ctx, capabilityEvent(t, true, "sum-1")); err != nil {
+		t.Fatal(err)
+	}
+	if got := checksum(); got != "sum-1" {
+		t.Fatalf("checksum = %q after terminal, want sum-1", got)
+	}
+
+	// Second sync drops "stale": the data chunk alone must NOT delete it.
+	if _, err := sess.handleEvent(ctx, capabilityEvent(t, true, "sum-2", crd("a"), crd("b"))); err != nil {
+		t.Fatal(err)
+	}
+	if got := listNames(); !got["stale"] {
+		t.Fatal("abandoned/incomplete sync must not delete live capabilities")
+	}
+	if got := checksum(); got != "sum-1" {
+		t.Fatalf("checksum = %q mid-sync, want still sum-1", got)
+	}
+
+	// Terminal chunk reconciles: stale is deleted, checksum commits.
+	if _, err := sess.handleEvent(ctx, capabilityEvent(t, true, "sum-2")); err != nil {
+		t.Fatal(err)
+	}
+	if got := listNames(); len(got) != 2 || !got["a"] || !got["b"] {
+		t.Fatalf("after finalize: %v, want a,b", got)
+	}
+	if got := checksum(); got != "sum-2" {
+		t.Fatalf("checksum = %q after finalize, want sum-2", got)
+	}
+
+	// Shrink-to-zero: a terminal-only sync (empty snapshot) deletes all.
+	if _, err := sess.handleEvent(ctx, capabilityEvent(t, true, "sum-3")); err != nil {
+		t.Fatal(err)
+	}
+	if got := listNames(); len(got) != 0 {
+		t.Fatalf("terminal-only sync must delete all rows, got %v", got)
+	}
+	if got := checksum(); got != "sum-3" {
+		t.Fatalf("checksum = %q, want sum-3", got)
+	}
+
+	// One aggregate audit record per finalize (fullSync:true), not per chunk.
+	events, err := audit.NewStore().List(ctx, r.db.Pool, "org:1", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fullSyncAudits int
+	for _, ev := range events {
+		if ev.Action != "capabilities.ingested" {
+			continue
+		}
+		var payload struct {
+			FullSync bool `json:"fullSync"`
+		}
+		if err := json.Unmarshal(ev.Payload, &payload); err == nil && payload.FullSync {
+			fullSyncAudits++
+		}
+	}
+	if fullSyncAudits != 3 {
+		t.Errorf("full-sync audit records = %d, want 3 (one per finalize)", fullSyncAudits)
 	}
 }

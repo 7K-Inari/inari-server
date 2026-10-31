@@ -342,3 +342,162 @@ func TestAckUnknownIDStillCompletes(t *testing.T) {
 		t.Fatalf("completed = %v", q.completed)
 	}
 }
+
+// fakeCapsIngestor fakes the capabilityIngestor seam for session tests.
+type fakeCapsIngestor struct {
+	chunks    [][]types.CapabilityItem
+	ingests   []types.CapabilityIngest
+	finalized []finalizeCall
+}
+
+type finalizeCall struct {
+	keep     []types.CapabilityItem
+	checksum string
+	upserted int
+}
+
+func (f *fakeCapsIngestor) Ingest(_ context.Context, _, _ string, upd types.CapabilityIngest) error {
+	f.ingests = append(f.ingests, upd)
+	return nil
+}
+
+func (f *fakeCapsIngestor) IngestChunk(_ context.Context, _, _ string, items []types.CapabilityItem) (int, error) {
+	f.chunks = append(f.chunks, items)
+	return len(items), nil
+}
+
+func (f *fakeCapsIngestor) FinalizeSync(_ context.Context, _, _ string, keep []types.CapabilityItem, stateChecksum string, upserted int) (int, error) {
+	f.finalized = append(f.finalized, finalizeCall{keep: keep, checksum: stateChecksum, upserted: upserted})
+	return 0, nil
+}
+
+func capUpdateEvent(t *testing.T, fullSync bool, checksum string, caps ...*agentv1.Capability) *agentv1.Event {
+	t.Helper()
+	any, err := anypb.New(&agentv1.CapabilityUpdate{FullSync: fullSync, StateChecksum: checksum, Capabilities: caps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &agentv1.Event{
+		EventId: "ev-cap",
+		Type:    agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_CAPABILITY_UPDATE),
+		Payload: any,
+	}
+}
+
+func capCRD(name string) *agentv1.Capability {
+	return &agentv1.Capability{
+		Kind: agentv1.CapabilityKind_CAPABILITY_KIND_CRD,
+		Name: name, Group: "example.com", Version: "v1",
+	}
+}
+
+func keepNames(items []types.CapabilityItem) map[string]int {
+	out := map[string]int{}
+	for _, it := range items {
+		out[it.Name]++
+	}
+	return out
+}
+
+// Framed full sync: chunks upsert incrementally, but reconciliation
+// (delete-missing) and the checksum commit wait for the empty terminal
+// chunk — an abandoned replay never deletes live capabilities.
+func TestSessionChunkedFullSyncFinalizesOnTerminalChunk(t *testing.T) {
+	caps := &fakeCapsIngestor{}
+	s := (&Gateway{caps: caps}).newSession(&types.Cluster{ID: "cluster:test", OrgID: "org:test"})
+	ctx := context.Background()
+
+	if _, err := s.handleEvent(ctx, capUpdateEvent(t, true, "sum-1", capCRD("a"), capCRD("b"))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.handleEvent(ctx, capUpdateEvent(t, true, "sum-1", capCRD("c"))); err != nil {
+		t.Fatal(err)
+	}
+	if len(caps.chunks) != 2 {
+		t.Fatalf("IngestChunk calls = %d, want 2", len(caps.chunks))
+	}
+	if len(caps.finalized) != 0 {
+		t.Fatal("finalize must wait for the terminal chunk")
+	}
+	if s.cluster.CapabilityChecksum != "" {
+		t.Error("checksum must not be committed before the terminal chunk")
+	}
+
+	if _, err := s.handleEvent(ctx, capUpdateEvent(t, true, "sum-1")); err != nil {
+		t.Fatal(err)
+	}
+	if len(caps.finalized) != 1 {
+		t.Fatalf("finalizes = %d, want 1", len(caps.finalized))
+	}
+	fin := caps.finalized[0]
+	if fin.checksum != "sum-1" || fin.upserted != 3 {
+		t.Errorf("finalize = %+v, want checksum sum-1, upserted 3", fin)
+	}
+	names := keepNames(fin.keep)
+	if len(names) != 3 || names["a"] != 1 || names["b"] != 1 || names["c"] != 1 {
+		t.Errorf("keep set = %v, want a,b,c", names)
+	}
+	if s.cluster.CapabilityChecksum != "sum-1" {
+		t.Errorf("session checksum = %q, want sum-1 after finalize", s.cluster.CapabilityChecksum)
+	}
+}
+
+// An incremental upsert landing mid-sync joins the keep set, so finalize
+// cannot delete a capability the replay snapshot predates.
+func TestSessionIncrementalUpsertDuringSyncJoinsKeepSet(t *testing.T) {
+	caps := &fakeCapsIngestor{}
+	s := (&Gateway{caps: caps}).newSession(&types.Cluster{ID: "cluster:test", OrgID: "org:test"})
+	ctx := context.Background()
+
+	if _, err := s.handleEvent(ctx, capUpdateEvent(t, true, "sum-1", capCRD("a"))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.handleEvent(ctx, capUpdateEvent(t, false, "sum-2", capCRD("c"))); err != nil {
+		t.Fatal(err)
+	}
+	if len(caps.ingests) != 1 {
+		t.Fatalf("incremental must go through Ingest, got %d", len(caps.ingests))
+	}
+	if _, err := s.handleEvent(ctx, capUpdateEvent(t, true, "sum-1")); err != nil {
+		t.Fatal(err)
+	}
+	if len(caps.finalized) != 1 {
+		t.Fatalf("finalizes = %d, want 1", len(caps.finalized))
+	}
+	names := keepNames(caps.finalized[0].keep)
+	if names["a"] != 1 || names["c"] != 1 {
+		t.Errorf("keep set = %v, want a (chunk) and c (interleaved incremental)", names)
+	}
+	// The committed checksum is the replay's, not the interleaved
+	// incremental's: the next handshake then resyncs once more and
+	// converges, instead of trusting state whose deletes never ran.
+	if caps.finalized[0].checksum != "sum-1" {
+		t.Errorf("finalized checksum = %q, want the replay's sum-1", caps.finalized[0].checksum)
+	}
+}
+
+// After finalize the accumulator resets: the next sync starts clean.
+func TestSessionSyncAccumulatorResetsAfterFinalize(t *testing.T) {
+	caps := &fakeCapsIngestor{}
+	s := (&Gateway{caps: caps}).newSession(&types.Cluster{ID: "cluster:test", OrgID: "org:test"})
+	ctx := context.Background()
+
+	must := func(ev *agentv1.Event) {
+		t.Helper()
+		if _, err := s.handleEvent(ctx, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(capUpdateEvent(t, true, "sum-1", capCRD("a")))
+	must(capUpdateEvent(t, true, "sum-1")) // terminal
+	must(capUpdateEvent(t, true, "sum-2", capCRD("b")))
+	must(capUpdateEvent(t, true, "sum-2")) // terminal
+
+	if len(caps.finalized) != 2 {
+		t.Fatalf("finalizes = %d, want 2", len(caps.finalized))
+	}
+	names := keepNames(caps.finalized[1].keep)
+	if len(names) != 1 || names["b"] != 1 {
+		t.Errorf("second sync keep set = %v, want only b (accumulator must reset)", names)
+	}
+}

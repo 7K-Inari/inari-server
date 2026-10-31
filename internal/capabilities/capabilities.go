@@ -130,36 +130,17 @@ func NewService(d *db.DB, store *Store, auditStore *audit.Store) *Service {
 	return &Service{db: d, store: store, audit: auditStore}
 }
 
-// Ingest persists one capability-update for a cluster: upserts, deletes,
-// full-sync reconciliation, checksum bookkeeping, audit + outbox.
+// Ingest persists one incremental capability-update for a cluster: upserts,
+// deletes, checksum bookkeeping, audit + outbox. Framed full syncs do NOT
+// go through here — they use IngestChunk/FinalizeSync so an abandoned sync
+// can never delete live rows.
 func (s *Service) Ingest(ctx context.Context, orgID, clusterID string, upd types.CapabilityIngest) error {
 	var upserted, deleted int
 	err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
-		var upserts []types.CapabilityItem
-		for _, item := range upd.Items {
-			switch item.Action {
-			case types.CapabilityActionDelete:
-				ok, err := s.store.SoftDelete(ctx, tx, clusterID, item)
-				if err != nil {
-					return err
-				}
-				if ok {
-					deleted++
-				}
-			default: // upsert (also the zero value)
-				if err := s.store.Upsert(ctx, tx, clusterID, item); err != nil {
-					return err
-				}
-				upserted++
-				upserts = append(upserts, item)
-			}
-		}
-		if upd.FullSync {
-			n, err := s.store.SoftDeleteMissing(ctx, tx, clusterID, upserts)
-			if err != nil {
-				return err
-			}
-			deleted += n
+		var err error
+		upserted, deleted, err = s.applyItems(ctx, tx, clusterID, upd.Items)
+		if err != nil {
+			return err
 		}
 		if upd.StateChecksum != "" {
 			const sql = `UPDATE clusters SET capability_checksum = $2, last_seen_at = now() WHERE id = $1`
@@ -170,20 +151,99 @@ func (s *Service) Ingest(ctx context.Context, orgID, clusterID string, upd types
 		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
 			OrgID: orgID, Actor: "agent:" + clusterID, Action: "capabilities.ingested",
 			ObjectType: "cluster", ObjectID: clusterID,
-			Payload: json.RawMessage(fmt.Sprintf(`{"upserted":%d,"deleted":%d,"fullSync":%t}`, upserted, deleted, upd.FullSync)),
+			Payload: json.RawMessage(fmt.Sprintf(`{"upserted":%d,"deleted":%d,"fullSync":%t}`, upserted, deleted, false)),
 		}); err != nil {
 			return err
 		}
 		return audit.AppendOutbox(ctx, tx, orgID, types.EventCapabilitiesIngested, types.CapabilitiesIngestedPayload{
 			OrgID: orgID, ClusterID: clusterID,
 			Upserted: upserted, Deleted: deleted,
-			FullSync: upd.FullSync, StateChecksum: upd.StateChecksum,
+			FullSync: false, StateChecksum: upd.StateChecksum,
 		})
 	})
 	if err != nil {
 		return fmt.Errorf("capabilities: ingest: %w", err)
 	}
 	return nil
+}
+
+// IngestChunk applies one chunk of a framed full sync: upserts and deletes
+// only. Reconciliation (delete-missing), the state checksum, and
+// audit/outbox are deferred to FinalizeSync, so a stream drop mid-sync
+// leaves live capabilities untouched and the next handshake resyncs.
+// Returns the number of upserted items (for the aggregate audit record).
+func (s *Service) IngestChunk(ctx context.Context, orgID, clusterID string, items []types.CapabilityItem) (int, error) {
+	var upserted int
+	err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		upserted, _, err = s.applyItems(ctx, tx, clusterID, items)
+		return err
+	})
+	if err != nil {
+		return 0, fmt.Errorf("capabilities: ingest chunk: %w", err)
+	}
+	return upserted, nil
+}
+
+// FinalizeSync completes a framed full sync on the terminal chunk:
+// soft-deletes every live capability absent from keep (the sync's
+// accumulated membership), stores the state checksum, and writes the
+// aggregate audit + outbox record. Idempotent: a duplicated terminal chunk
+// with the same membership and checksum converges to the same state.
+func (s *Service) FinalizeSync(ctx context.Context, orgID, clusterID string, keep []types.CapabilityItem, stateChecksum string, upserted int) (int, error) {
+	var deleted int
+	err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		deleted, err = s.store.SoftDeleteMissing(ctx, tx, clusterID, keep)
+		if err != nil {
+			return err
+		}
+		if stateChecksum != "" {
+			const sql = `UPDATE clusters SET capability_checksum = $2, last_seen_at = now() WHERE id = $1`
+			if _, err := tx.Exec(ctx, sql, clusterID, stateChecksum); err != nil {
+				return err
+			}
+		}
+		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
+			OrgID: orgID, Actor: "agent:" + clusterID, Action: "capabilities.ingested",
+			ObjectType: "cluster", ObjectID: clusterID,
+			Payload: json.RawMessage(fmt.Sprintf(`{"upserted":%d,"deleted":%d,"fullSync":%t}`, upserted, deleted, true)),
+		}); err != nil {
+			return err
+		}
+		return audit.AppendOutbox(ctx, tx, orgID, types.EventCapabilitiesIngested, types.CapabilitiesIngestedPayload{
+			OrgID: orgID, ClusterID: clusterID,
+			Upserted: upserted, Deleted: deleted,
+			FullSync: true, StateChecksum: stateChecksum,
+		})
+	})
+	if err != nil {
+		return 0, fmt.Errorf("capabilities: finalize sync: %w", err)
+	}
+	return deleted, nil
+}
+
+// applyItems upserts/deletes the items of one update within tx, returning
+// the upserted and deleted counts.
+func (s *Service) applyItems(ctx context.Context, tx pgx.Tx, clusterID string, items []types.CapabilityItem) (upserted, deleted int, err error) {
+	for _, item := range items {
+		switch item.Action {
+		case types.CapabilityActionDelete:
+			ok, derr := s.store.SoftDelete(ctx, tx, clusterID, item)
+			if derr != nil {
+				return 0, 0, derr
+			}
+			if ok {
+				deleted++
+			}
+		default: // upsert (also the zero value)
+			if err := s.store.Upsert(ctx, tx, clusterID, item); err != nil {
+				return 0, 0, err
+			}
+			upserted++
+		}
+	}
+	return upserted, deleted, nil
 }
 
 // List returns the live capabilities of a cluster.

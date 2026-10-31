@@ -1,5 +1,8 @@
 bin/
 dist/
+# `go build ./cmd/...` without -o drops the binary at the repo root
+/inari-server
+/inari-kubeproxy
 *.test
 coverage.out
 coverage.html

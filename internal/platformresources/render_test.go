@@ -295,6 +295,11 @@ func TestRenderKeycloakClientClaim(t *testing.T) {
 	if !ok || server["caProvider"] == nil {
 		t.Errorf("server.caProvider missing in SecretStore: %v", k8s)
 	}
+	// A namespaced SecretStore forbids caProvider.namespace (ESO admission:
+	// the store implicitly reads its own namespace).
+	if cap_, _ := server["caProvider"].(map[string]any); cap_["namespace"] != nil {
+		t.Errorf("namespaced SecretStore must not set caProvider.namespace: %v", cap_)
+	}
 
 	// Idempotent re-render (registration retry): same content, no error.
 	if _, err := s.RenderKeycloakClientClaim(context.Background(), org.ID, "01JFXM6E8BM0G52GQPMNWP2ZC0", clientID,

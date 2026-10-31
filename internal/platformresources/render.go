@@ -311,9 +311,12 @@ func clientClaimDocs(org *types.Organization, claimName, clientID, issuerURL str
 					"server": map[string]any{
 						"url": localClusterServer,
 						// ESO v1: caProvider nests under server (strict
-						// decoding rejects kubernetes.caProvider).
+						// decoding rejects kubernetes.caProvider), and a
+						// namespaced SecretStore forbids caProvider.namespace
+						// (admission webhook: the store implicitly reads its
+						// own namespace — kube-root-ca.crt exists everywhere).
 						"caProvider": map[string]any{
-							"type": "ConfigMap", "name": "kube-root-ca.crt", "key": "ca.crt", "namespace": ns,
+							"type": "ConfigMap", "name": "kube-root-ca.crt", "key": "ca.crt",
 						},
 					},
 					"auth": map[string]any{"serviceAccount": map[string]any{"name": "eso-tenant-secret-reader"}},

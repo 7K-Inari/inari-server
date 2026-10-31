@@ -120,6 +120,17 @@ var registry = []Definition{
 		Authority: AuthorityDB,
 	},
 	{
+		Key:    KeyPlatformResourcesGitOpsRender,
+		Type:   FlagTypeBoolean,
+		Scopes: []Scope{ScopePlatform},
+		// false preserves the legacy platform.inari.io CR render until the
+		// descriptor render path is validated (dual-run).
+		Default:     false,
+		Description: "render tenant platform resources as renderer source descriptors (native manifests/KRO/Crossplane claims) instead of platform.inari.io CRs",
+		// Render cutover: DB-authoritative even with an external provider.
+		Authority: AuthorityDB,
+	},
+	{
 		Key:    KeyClusterDexFanout,
 		Type:   FlagTypeBoolean,
 		Scopes: []Scope{ScopePlatform},

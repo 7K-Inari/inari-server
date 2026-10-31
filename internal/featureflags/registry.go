@@ -97,6 +97,14 @@ const KeyKubectlAccessEnabled = "kubectl_access.enabled"
 // render path is validated.
 const KeyPlatformResourcesGitOpsRender = "platform_resources.gitops_render"
 
+// KeyClusterDexFanout gates the server-rendered ClusterDex replacement
+// (operator sunset Phase 2, decision D5): the clusterdex reconciler renders
+// the dex + argocd-config ApplicationSets per baseline repo and delivers
+// per-cluster views via the agent bridge. Kill-switch only — there is no
+// legacy render path to dual-run (D7); off pauses re-renders and
+// registration-time Dex client provisioning.
+const KeyClusterDexFanout = "cluster_dex.fanout"
+
 // registry is the single source of truth for runtime flags. Add new flags
 // here; the REST catalog endpoint serves this list.
 var registry = []Definition{
@@ -112,14 +120,14 @@ var registry = []Definition{
 		Authority: AuthorityDB,
 	},
 	{
-		Key:    KeyPlatformResourcesGitOpsRender,
+		Key:    KeyClusterDexFanout,
 		Type:   FlagTypeBoolean,
 		Scopes: []Scope{ScopePlatform},
-		// false preserves the legacy platform.inari.io CR render until the
-		// descriptor render path is validated (dual-run).
-		Default:     false,
-		Description: "render tenant platform resources as renderer source descriptors (native manifests/KRO/Crossplane claims) instead of platform.inari.io CRs",
-		// Render cutover: DB-authoritative even with an external provider.
+		// true: the ClusterDex replacement is the only render path (D7 — no
+		// dual-run); the flag exists purely as a kill-switch.
+		Default:     true,
+		Description: "server-rendered Dex SSO baseline fan-out (dex + argocd-config ApplicationSets per baseline repo, agent-bridge delivery)",
+		// Kill-switch: DB-authoritative even with an external provider.
 		Authority: AuthorityDB,
 	},
 }

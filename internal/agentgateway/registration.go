@@ -2,6 +2,8 @@ package agentgateway
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,7 +14,9 @@ import (
 
 	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
 
+	"github.com/7K-Inari/inari-server/internal/clusterdex"
 	"github.com/7K-Inari/inari-server/internal/clusterregistry"
+	"github.com/7K-Inari/inari-server/internal/featureflags"
 	"github.com/7K-Inari/inari-server/internal/secrets"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -82,6 +86,16 @@ func (g *Gateway) RegisterCluster(ctx context.Context, req *agentv1.RegisterClus
 	if err := g.secrets.Put(ctx, secrets.ClusterOIDCPath(cluster.ID), TunnelSecretKey, tunnelSecret); err != nil {
 		return nil, connect.NewError(connect.CodeUnavailable, fmt.Errorf("pending_secret_delivery: write tunnel secret: %w", err).Error())
 	}
+	// Dex SSO baseline (operator sunset Phase 2, decision D5): provision the
+	// per-cluster Dex-federation client (cluster-<id>-dex) and deliver the
+	// Dex config.yaml + ArgoCD static-client secret via the same Vault/ESO
+	// seam. Pre-token-burn like the other side effects; gated by the
+	// cluster_dex.fanout kill-switch.
+	if g.dexProvisioningEnabled(ctx, cluster.ID) {
+		if err := g.provisionDex(ctx, cluster); err != nil {
+			return nil, err
+		}
+	}
 	// The client is provisioned + its secret delivered: the control plane is
 	// the source of truth for this resource (no operator CR is rendered for
 	// keycloak-client rows), so mark it ready here.
@@ -142,6 +156,57 @@ func (g *Gateway) RegisterCluster(ctx context.Context, req *agentv1.RegisterClus
 		}
 	}
 	return res, nil
+}
+
+// dexProvisioningEnabled reports whether the Dex fan-out kill-switch is on
+// (nil flags = registered default: on).
+func (g *Gateway) dexProvisioningEnabled(ctx context.Context, clusterID string) bool {
+	return g.flags == nil || g.flags.Bool(ctx, featureflags.KeyClusterDexFanout, clusterID)
+}
+
+// provisionDex provisions the cluster-<id>-dex Keycloak client and delivers
+// the Dex config.yaml (Keycloak connector + argocd static client) and the
+// static-client secret to the cluster's Vault path. The rendered appsets
+// reference only the ESO-secret names/keys; this Vault write is the single
+// place secret material enters the delivery path.
+func (g *Gateway) provisionDex(ctx context.Context, cluster *types.Cluster) error {
+	issuer := clusterdex.DefaultIssuerURL(cluster.ID)
+	dexClientID, dexSecret, err := g.clients.CreateClusterDexClient(ctx, cluster.ID, issuer, nil)
+	if err != nil {
+		return connect.NewError(connect.CodeInternal, fmt.Errorf("provision dex identity: %w", err).Error())
+	}
+	staticSecret, err := newStaticSecret()
+	if err != nil {
+		return connect.NewError(connect.CodeInternal, fmt.Errorf("provision dex static secret: %w", err).Error())
+	}
+	configYAML, err := clusterdex.RenderDexConfig(clusterdex.DexConfigInput{
+		Issuer:             issuer,
+		KeycloakIssuerURL:  g.cfg.OIDCIssuerURL,
+		ClientID:           dexClientID,
+		ClientSecret:       dexSecret,
+		ArgoCDStaticSecret: staticSecret,
+	})
+	if err != nil {
+		return connect.NewError(connect.CodeInternal, fmt.Errorf("render dex config: %w", err).Error())
+	}
+	path := secrets.ClusterOIDCPath(cluster.ID)
+	if err := g.secrets.Put(ctx, path, clusterdex.VaultKeyDexConfigYAML, string(configYAML)); err != nil {
+		return connect.NewError(connect.CodeUnavailable, fmt.Errorf("pending_secret_delivery: write dex config: %w", err).Error())
+	}
+	if err := g.secrets.Put(ctx, path, clusterdex.VaultKeyArgoCDClientSecret, staticSecret); err != nil {
+		return connect.NewError(connect.CodeUnavailable, fmt.Errorf("pending_secret_delivery: write dex argocd secret: %w", err).Error())
+	}
+	return nil
+}
+
+// newStaticSecret generates the Dex static-client secret ArgoCD
+// authenticates with (256-bit, base64url).
+func newStaticSecret() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
 func (g *Gateway) peekToken(ctx context.Context, token string) (*types.Cluster, error) {

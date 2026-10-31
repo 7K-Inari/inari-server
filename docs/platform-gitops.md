@@ -5,7 +5,7 @@ plane (`platform_resources` table, status `reconciling` until the platform
 reconciler reports back) and rendered as inari-operator `api/v1alpha1` CRs in
 the platform GitOps repo — or, with the `platform_resources.gitops_render`
 feature flag on, as renderer source descriptors (native manifests, KRO
-instance, provider-keycloak claims; see "Render cutover" below):
+instance, provider-keycloak namespaced XRs; see "Render cutover" below):
 
 | Platform resource  | Kind (CR)      | Name          | Desired state                          |
 | ------------------ | -------------- | ------------- | -------------------------------------- |
@@ -45,7 +45,7 @@ to conflict on; matches pull-never-push (the operator reconciles from git).
 - `agentgateway.RegisterCluster` — upserts the `keycloak-client` row after
   the Keycloak client is provisioned, before the registration token is burned
   (retry-safe). With the render cutover on, it renders the provider-keycloak
-  `TenantClient` claim into the hub-facing platform repo instead (see below).
+  `TenantClient` namespaced XR into the hub-facing platform repo instead (see below).
 - `tenantzonefactory` "wire into Inari" step (`ModuleWiring.WireZone`) —
   re-ensures the base rows (idempotent; safe on zone step retries) and, when
   `INARI_PLATFORM_GITOPS_REPO` is set, renders the CR manifests
@@ -82,7 +82,7 @@ tenants/<slug>/
 │   ├── application.yaml          #   (default project; instance in ns "default" — the
 │   └── instance.yaml             #    namespaced RGD creates tenant-<slug> itself)
 └── keycloak/
-    └── realm/                    # crossplane descriptor: TenantRealm claim
+    └── realm/                    # crossplane descriptor: TenantRealm XR (namespaced)
         ├── application.yaml      #   (project tenant-<slug>, destination tenant-<slug>)
         └── manifests/00-tenantrealm-<slug>.yaml
 ```
@@ -93,8 +93,9 @@ Key differences from the legacy render:
   objects (`DNSEndpoint`, `AppProject`) are committed directly; the
   `TenantNamespace` instance targets the KRO RGD (`stacks.inari.io/v1alpha1`,
   release-bundle `charts/inari-platform-graphs`); Keycloak realm/clients are
-  Crossplane `provider-keycloak` claims (`identity.inari.io/v1alpha1`
-  `TenantRealm`/`TenantClient`).
+  Crossplane `provider-keycloak` namespaced XRs (`identity.inari.io/v1alpha1`
+  `TenantRealm`/`TenantClient` — Crossplane v2, where the namespaced XR is
+  the user-facing kind; there are no claims).
 - **Render-time validation moved server-side.** DNS zone containment (every
   record must live inside the shared platform zone) is validated before
   commit; the dexidp chart repo (`https://charts.dexidp.io`) is auto-unioned
@@ -105,16 +106,19 @@ Key differences from the legacy render:
   to the tenant namespace and sources to the platform repo + dex chart repo.
   `impersonateServiceAccount` is dropped — the write path is server → git →
   hub ArgoCD, authorized at the repo level.
-- **Registration renders a claim.** `agentgateway.RegisterCluster` renders
-  the per-cluster OIDC client as a `TenantClient` claim (plus the ESO
+- **Registration renders a client XR.** `agentgateway.RegisterCluster` renders
+  the per-cluster OIDC client as a `TenantClient` XR (plus the ESO
   `SecretStore`/`ExternalSecret` plumbing that materializes the credentials
   Secret in the tenant namespace) into
   `tenants/<slug>/keycloak/client-<id>/`, before the registration token is
   burned (failures keep the token consumable; retries re-commit identical
-  content). During dual-run the `keycloak-client` desired-state row is
-  upserted alongside the claim so the resources view is unchanged; the
-  Admin API provisioning and ESO secret delivery for the agent bootstrap
-  are likewise unchanged until the provider-keycloak cutover (Phase 3).
+  content). The `keycloak-client` desired-state row is upserted alongside so
+  the resources view is unchanged, and the XR's status folds onto it. The
+  Admin API provisioning and ESO/Vault secret delivery for the agent
+  bootstrap stay on the server seam (plan §4.2 — per-cluster agent/tunnel/dex
+  client secrets must be delivered synchronously at registration); the
+  provider-keycloak cutover (Phase 3, landed) makes the XR the live manager
+  of the tenant realm and its workload-federation clients.
 - **Status fold-back.** The agent's configurable GVR watches report the new
   kinds (`TenantRealm.identity.inari.io`,
   `TenantClient.identity.inari.io`, `DNSEndpoint.externaldns.k8s.io`,
@@ -122,12 +126,12 @@ Key differences from the legacy render:
   same `platform_resources` rows the legacy CRs reported against.
 
 Teardown (`tenantzonefactory.DeleteTenantManifests`) deletes the union of
-legacy, descriptor, and per-cluster client-claim paths (the latter
+legacy, descriptor, and per-cluster client-XR paths (the latter
 enumerated from the tenant's `keycloak-client` rows), so tenants rendered
 by either generation are removed cleanly.
 
 **Cutover procedure.** The tenant-scoped Applications rendered at cluster
-registration (TenantClient claims) run under the per-tenant AppProject
+registration (TenantClient XRs) run under the per-tenant AppProject
 `tenant-<slug>`, which is only committed by the tenant render above. Flip
 order therefore matters: enable the flag, then re-render every existing
 tenant (the ops reconcile endpoint commits the descriptor set) before new

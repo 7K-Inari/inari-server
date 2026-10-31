@@ -3,7 +3,7 @@
 // resources are rendered as internal/renderer source descriptors and
 // committed to the hub-facing platform repo (decision D3) — native
 // DNSEndpoint/AppProject manifests, a tenantnamespace KRO instance, and
-// provider-keycloak TenantRealm/TenantClient claims. Gated by the
+// provider-keycloak TenantRealm/TenantClient namespaced XRs. Gated by the
 // platform_resources.gitops_render feature flag (off = legacy CR render,
 // the dual-run lever).
 //
@@ -227,7 +227,7 @@ func appProjectDoc(org *types.Organization, repoURL string) map[string]any {
 	}
 }
 
-// realmClaimDoc renders the provider-keycloak TenantRealm claim (identity.inari.io/v1alpha1, W1-2 XRD).
+// realmClaimDoc renders the provider-keycloak TenantRealm namespaced XR (identity.inari.io/v1alpha1, W1-2 XRD; Crossplane v2: the namespaced XR is the user-facing kind).
 func realmClaimDoc(org *types.Organization) map[string]any {
 	return map[string]any{
 		"apiVersion": "identity.inari.io/v1alpha1",
@@ -271,7 +271,7 @@ func tenantIssuerURL(issuerURL, realm string) string {
 }
 
 // clientClaimDocs renders the per-client document set (W1-2 contract,
-// examples/keycloak-client-secret-delivery.yaml): the TenantClient claim
+// examples/keycloak-client-secret-delivery.yaml): the TenantClient XR
 // plus the ExternalSecret materializing the operator-compatible
 // credentials Secret, and the once-per-tenant ESO plumbing (ServiceAccount,
 // Role, RoleBinding, namespaced SecretStore) — re-rendered on every commit,
@@ -428,7 +428,7 @@ func yamlDocsJSON(docs []map[string]any) (json.RawMessage, error) {
 // hub-facing platform repo. Flag off: the legacy platform.inari.io CR
 // manifests (RenderTenantManifests). Flag on: renderer source descriptors —
 // per-tenant AppProject, native DNSEndpoint, the tenantnamespace KRO
-// instance, and the TenantRealm claim — each as an ArgoCD Application +
+// instance, and the TenantRealm XR — each as an ArgoCD Application +
 // manifests under tenants/<slug>/. repoURL is the repo's clone URL (the
 // Application source); it is unused by the legacy path.
 func (s *Service) RenderTenantFiles(ctx context.Context, org *types.Organization, repoURL string) ([]gitprovider.File, error) {
@@ -505,7 +505,7 @@ func (s *Service) renderTenantDescriptors(ctx context.Context, org *types.Organi
 		return nil, fmt.Errorf("platformresources: render tenantnamespace instance: %w", err)
 	}
 
-	// TenantRealm claim (provider-keycloak, hub-side; D1/D3).
+	// TenantRealm XR (provider-keycloak, hub-side; D1/D3).
 	realmDesc, err := crossplaneDescriptor(realmClaimDoc(org))
 	if err != nil {
 		return nil, err
@@ -522,7 +522,7 @@ func (s *Service) renderTenantDescriptors(ctx context.Context, org *types.Organi
 // rendered files in the hub-facing platform repo — the teardown delete
 // set. The union always covers the legacy CR paths; with the flag on it
 // adds the tenant descriptor paths (D7: dev/staging tenants may have been
-// rendered by either generation). Per-cluster TenantClient claims are
+// rendered by either generation). Per-cluster TenantClient XRs are
 // committed at registration, not by the tenant render, so their paths are
 // enumerated from the keycloak-client rows — regardless of the flag,
 // which may have flipped between registration and teardown (deleting
@@ -583,8 +583,8 @@ func (s *Service) clientClaimRenderPaths(ctx context.Context, slug string) ([]st
 	return paths, nil
 }
 
-// renderClientClaim renders the per-client claim file set (the
-// TenantClient claim + ESO plumbing) — shared by RenderKeycloakClientClaim
+// renderClientClaim renders the per-client XR file set (the
+// TenantClient XR + ESO plumbing) — shared by RenderKeycloakClientClaim
 // (commit) and TenantRenderPaths (teardown delete set) so the two layouts
 // can never drift.
 func (s *Service) renderClientClaim(ctx context.Context, org *types.Organization, clientID, issuerURL, repoURL string) ([]gitprovider.File, error) {
@@ -610,12 +610,12 @@ func (s *Service) renderClientClaim(ctx context.Context, org *types.Organization
 }
 
 // RenderKeycloakClientClaim renders the provider-keycloak TenantClient
-// claim (+ ESO secret-delivery plumbing) for a per-cluster OIDC client into
+// XR (+ ESO secret-delivery plumbing) for a per-cluster OIDC client into
 // the hub-facing platform repo under tenants/<slug>/keycloak/client-<id>/
 // and commits it (decision D3: never to team repos). Dual-run: the caller
 // keeps upserting the keycloak-client desired-state row alongside, so the
-// resources view and status tracking are unchanged until the Phase 3
-// provider cutover.
+// resources view and status tracking are unchanged across the Phase 3
+// provider cutover (the XR is now the live manager; D1).
 //
 // Returns rendered=false (no error) when the cutover flag is off or the
 // platform GitOps repo is unwired — the caller falls back to the legacy

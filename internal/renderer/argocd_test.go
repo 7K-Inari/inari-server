@@ -204,6 +204,17 @@ func TestBuildApplicationSetCascadeDeleteFinalizer(t *testing.T) {
 	}
 }
 
+func TestBuildApplicationSetEmptyFleet(t *testing.T) {
+	p := testParams()
+	p.DeployMode = types.AddonDeployModeApplicationSet
+	p.Clusters = nil
+	appset := buildApplicationSet(p, map[string]any{"source": gitSource(p, p.Path)})
+	elements := parseDoc(t, appset)["spec"].(map[string]any)["generators"].([]any)[0].(map[string]any)["list"].(map[string]any)["elements"].([]any)
+	if len(elements) != 0 {
+		t.Errorf("empty fleet must render zero elements: %v", elements)
+	}
+}
+
 func TestGitSourceOmitsPathForValuesRef(t *testing.T) {
 	p := testParams()
 	src := valuesRefSource(p)

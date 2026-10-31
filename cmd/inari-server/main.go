@@ -30,6 +30,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/capabilities"
 	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/7K-Inari/inari-server/internal/cloudaccounts"
+	"github.com/7K-Inari/inari-server/internal/clusterdex"
 	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/config"
 	"github.com/7K-Inari/inari-server/internal/cryptoenvelope"
@@ -871,6 +872,21 @@ func run() error {
 	addonsSvc := addons.NewService(database, invStore, catalogSvc, registry, repoResolver, gateway.Queue(), auditStore)
 	gateway.SetAddonDiscoverySink(addonsSvc)
 
+	// Cluster Dex fan-out (operator sunset Phase 2, decision D5): the
+	// server-rendered replacement for the ClusterDex CR/controller. The
+	// reconciler (outbox consumer below) re-renders the dex +
+	// argocd-config ApplicationSets per baseline repo on cluster/team/RBAC
+	// events and delivers per-cluster views via the agent bridge.
+	clusterDexSvc := clusterdex.NewService(database, clusterdex.Config{
+		DexChartVersion:      cfg.DexChartVersion,
+		DexImage:             cfg.DexImage,
+		PlatformChartRepoURL: cfg.PlatformChartRepoURL,
+		PlatformChartName:    cfg.PlatformChartName,
+		PlatformChartVersion: cfg.PlatformChartVersion,
+		ESOSecretStore:       cfg.ESOSecretStore,
+	}, registry, svc, invStore, invStore, repoResolver, gateway.Queue(), auditStore, log)
+	gateway.WithFeatureFlags(flagResolver)
+
 	cloudAccountsSvc := cloudaccounts.NewService(database, cloudaccounts.NewStore(), auditStore, cloudaccounts.NewSTSValidator())
 
 	notificationsSvc := notifications.NewService(database, notifications.NewStore(), auditStore,
@@ -1035,6 +1051,9 @@ func run() error {
 			// re-render managed ApplicationSet addons whose server-side
 			// selector membership changed.
 			audit.Named("addons-fleet-reconcile", addons.NewFleetReconciler(addonsSvc, log)),
+			// Operator sunset Phase 2 (D5): cluster register/label-change/
+			// delete + team/RBAC events re-render the Dex fan-out.
+			audit.Named("clusterdex-reconcile", clusterdex.NewReconciler(clusterDexSvc, flagResolver, log)),
 			// M4: normalized git webhook events (git.webhook.pr_merged) —
 			// completes the ArgoCD registration that pull_request-policy
 			// deploys/addons deferred until the PR merged.

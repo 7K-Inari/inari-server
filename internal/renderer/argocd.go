@@ -105,7 +105,9 @@ func buildApplication(p RenderParams, sourceBlock map[string]any) []byte {
 // generator over the selected clusters (decision 8: membership computed by
 // Inari, never ArgoCD cluster-secret labels). tmpl carries the template's
 // source block; destination/server and the app name are generator-templated
-// here so handlers stay engine-agnostic.
+// here so handlers stay engine-agnostic. Per-cluster Fields are merged into
+// each element (reserved keys cluster/server win); AppNameTemplate overrides
+// the child-name pattern; CascadeDelete adds the resources finalizer.
 func buildApplicationSet(p RenderParams, tmplSourceBlock map[string]any) []byte {
 	elements := make([]any, len(p.Clusters))
 	for i, c := range p.Clusters {
@@ -113,7 +115,27 @@ func buildApplicationSet(p RenderParams, tmplSourceBlock map[string]any) []byte 
 		if server == "" {
 			server = localServer
 		}
-		elements[i] = map[string]any{"cluster": c.Name, "server": server}
+		el := map[string]any{}
+		for k, v := range c.Fields {
+			if k == "cluster" || k == "server" {
+				continue
+			}
+			el[k] = v
+		}
+		el["cluster"] = c.Name
+		el["server"] = server
+		elements[i] = el
+	}
+	tplName := p.AppPrefix + "-" + strings.ToLower(p.ID) + "-{{cluster}}"
+	if p.AppNameTemplate != "" {
+		tplName = p.AppNameTemplate
+	}
+	tplMeta := map[string]any{
+		// Lowercased ID (RFC 1123), same contract as appName.
+		"name": tplName,
+	}
+	if p.CascadeDelete {
+		tplMeta["finalizers"] = []any{"resources-finalizer.argocd.argoproj.io"}
 	}
 	tplSpec := map[string]any{
 		"project":    p.project(),
@@ -139,11 +161,8 @@ func buildApplicationSet(p RenderParams, tmplSourceBlock map[string]any) []byte 
 				map[string]any{"list": map[string]any{"elements": elements}},
 			},
 			"template": map[string]any{
-				"metadata": map[string]any{
-					// Lowercased ID (RFC 1123), same contract as appName.
-					"name": p.AppPrefix + "-" + strings.ToLower(p.ID) + "-{{cluster}}",
-				},
-				"spec": tplSpec,
+				"metadata": tplMeta,
+				"spec":     tplSpec,
 			},
 		},
 	}

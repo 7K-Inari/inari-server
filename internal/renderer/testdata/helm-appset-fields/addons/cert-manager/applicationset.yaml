@@ -1,0 +1,47 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+    name: inari-addonset-addon-01
+    namespace: argocd
+spec:
+    generators:
+        - list:
+            elements:
+                - cluster: prod-eu
+                  clusterID: c1
+                  dexAppName: dex-c1
+                  server: https://kubernetes.default.svc
+                - cluster: prod-us
+                  clusterID: c2
+                  dexAppName: dex-c2
+                  server: https://kubernetes.default.svc
+    goTemplate: false
+    template:
+        metadata:
+            finalizers:
+                - resources-finalizer.argocd.argoproj.io
+            name: '{{dexAppName}}'
+        spec:
+            destination:
+                namespace: cert-manager
+                server: '{{server}}'
+            project: default
+            sources:
+                - chart: cert-manager
+                  helm:
+                    ignoreMissingValueFiles: true
+                    releaseName: cert-manager
+                    valueFiles:
+                        - $values/addons/cert-manager/values.yaml
+                        - $values/clusters/{{cluster}}/cert-manager/values.yaml
+                  repoURL: https://charts.jetstack.io
+                  targetRevision: v1.16.2
+                - ref: values
+                  repoURL: https://github.com/acme/acme-inari-state
+                  targetRevision: main
+            syncPolicy:
+                automated:
+                    prune: false
+                    selfHeal: true
+                syncOptions:
+                    - TakeOwnership=true

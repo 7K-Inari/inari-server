@@ -331,15 +331,19 @@ func TestDecommissionSkipsManifestDeleteWithoutSeam(t *testing.T) {
 func TestModuleWiringDeleteTenantManifests(t *testing.T) {
 	ctx := context.Background()
 	git := gitprovider.NewFake()
-	w := &ModuleWiring{Git: git, PlatformGitOpsRepo: "org/platform-gitops"}
+	renderSvc := platformresources.NewService(nil, nil, nil)
+	w := &ModuleWiring{Git: git, PlatformGitOpsRepo: "org/platform-gitops", PlatformResources: renderSvc}
 	org := &types.Organization{ID: "org:1", Slug: "acme-dev"}
 
 	// Seed the repo the way WireZone does.
 	if _, err := git.EnsureRepo(ctx, "org/platform-gitops"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := git.CommitFiles(ctx, "org/platform-gitops", "main",
-		platformresources.RenderTenantManifests(org), "seed"); err != nil {
+	seed, err := renderSvc.RenderTenantFiles(ctx, org, "https://invalid/platform.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.CommitFiles(ctx, "org/platform-gitops", "main", seed, "seed"); err != nil {
 		t.Fatal(err)
 	}
 

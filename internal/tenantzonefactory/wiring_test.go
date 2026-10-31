@@ -18,14 +18,16 @@ func (f *fakePlatformEnsurer) EnsureBaseResources(_ context.Context, org *types.
 	return nil
 }
 
-// RenderTenantFiles mirrors the legacy (flag-off) render so the wiring test
-// keeps asserting the CR manifest layout.
-func (f *fakePlatformEnsurer) RenderTenantFiles(_ context.Context, org *types.Organization, _ string) ([]gitprovider.File, error) {
-	return platformresources.RenderTenantManifests(org), nil
+// RenderTenantFiles/TenantRenderPaths delegate to a real platformresources
+// service so the wiring test asserts the descriptor render layout.
+var fakeRenderSvc = platformresources.NewService(nil, nil, nil)
+
+func (f *fakePlatformEnsurer) RenderTenantFiles(ctx context.Context, org *types.Organization, repoURL string) ([]gitprovider.File, error) {
+	return fakeRenderSvc.RenderTenantFiles(ctx, org, repoURL)
 }
 
-func (f *fakePlatformEnsurer) TenantRenderPaths(_ context.Context, slug string) ([]string, error) {
-	return platformresources.TenantManifestPaths(slug), nil
+func (f *fakePlatformEnsurer) TenantRenderPaths(ctx context.Context, slug string) ([]string, error) {
+	return fakeRenderSvc.TenantRenderPaths(ctx, slug)
 }
 
 func TestWireZoneEnsuresPlatformResourcesAndCommitsManifests(t *testing.T) {
@@ -49,16 +51,17 @@ func TestWireZoneEnsuresPlatformResourcesAndCommitsManifests(t *testing.T) {
 	}
 	files := git.Files("inari-platform-gitops", "main")
 	for _, want := range []string{
-		"tenants/acme/keycloak-realm.yaml",
-		"tenants/acme/dns-record.yaml",
-		"tenants/acme/tenant-namespace.yaml",
+		"tenants/acme/project/application.yaml",
+		"tenants/acme/dns/manifests/00-dnsendpoint-acme.yaml",
+		"tenants/acme/namespace/instance.yaml",
+		"tenants/acme/keycloak/realm/manifests/00-tenantrealm-acme.yaml",
 	} {
 		if _, ok := files[want]; !ok {
 			t.Errorf("platform gitops repo missing %s (has %v)", want, files)
 		}
 	}
-	if !strings.Contains(files["tenants/acme/dns-record.yaml"], "zoneRef: shared") {
-		t.Errorf("dns-record manifest = %s", files["tenants/acme/dns-record.yaml"])
+	if !strings.Contains(files["tenants/acme/dns/manifests/00-dnsendpoint-acme.yaml"], "externaldns.k8s.io/v1alpha1") {
+		t.Errorf("dns manifest = %s", files["tenants/acme/dns/manifests/00-dnsendpoint-acme.yaml"])
 	}
 
 	// Retry (resume after partial run) re-ensures without error.

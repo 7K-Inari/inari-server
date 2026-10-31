@@ -311,7 +311,7 @@ func TestApplyStatusAndGet(t *testing.T) {
 
 	observed := time.Date(2026, 9, 11, 10, 0, 0, 0, time.UTC)
 	matched, err := svc.ApplyStatus(ctx, "cluster-1", platformresources.StatusUpdate{
-		Resource:   types.ResourceRef{Kind: "TenantNamespace.platform.inari.io", Name: "acme-apps"},
+		Resource:   types.ResourceRef{Kind: "TenantNamespace.stacks.inari.io", Name: "acme-apps"},
 		Health:     "healthy",
 		Message:    "namespace provisioned",
 		ObservedAt: observed,
@@ -350,7 +350,7 @@ func TestApplyStatusAndGet(t *testing.T) {
 
 	// Degraded health maps to failed.
 	if _, err := svc.ApplyStatus(ctx, "cluster-1", platformresources.StatusUpdate{
-		Resource: types.ResourceRef{Kind: "TenantNamespace.platform.inari.io", Name: "acme-apps"},
+		Resource: types.ResourceRef{Kind: "TenantNamespace.stacks.inari.io", Name: "acme-apps"},
 		Health:   "degraded",
 		Message:  "quota exceeded",
 	}); err != nil {
@@ -368,7 +368,7 @@ func TestApplyStatusAndGet(t *testing.T) {
 	// audit/outbox rows.
 	events := countOutbox(t, database, types.EventPlatformResourceStatus)
 	matched, err = svc.ApplyStatus(ctx, "cluster-1", platformresources.StatusUpdate{
-		Resource: types.ResourceRef{Kind: "KeycloakRealm.platform.inari.io", Name: "never-desired"},
+		Resource: types.ResourceRef{Kind: "TenantRealm.identity.inari.io", Name: "never-desired"},
 		Health:   "healthy",
 	})
 	if err != nil {
@@ -402,13 +402,13 @@ func TestApplyStatusAndGet(t *testing.T) {
 func TestTenantRenderPathsCoverCommittedClientClaims(t *testing.T) {
 	svc, _ := itSetup(t)
 	git := gitprovider.NewFake()
-	svc.WithFlags(itFlagsOn{}).
-		WithTenantResolver(itTenantResolver{}).
+	svc.WithTenantResolver(itTenantResolver{}).
 		WithTenantLookup(itTenantLookup{}).
 		WithGitOps("inari/platform", git)
 	ctx := context.Background()
 
-	// Registration-path claim render (flag on) + the dual-run row.
+	// Registration-path claim render + the desired-state row it reports
+	// against.
 	const clientID = "cluster-01JFXM6E8BM0G52GQPMNWP2ZC0"
 	rendered, err := svc.RenderKeycloakClientClaim(ctx, "org:1", "01JFXM6E8BM0G52GQPMNWP2ZC0", clientID,
 		"http://keycloak/realms/inari")
@@ -437,10 +437,6 @@ func TestTenantRenderPathsCoverCommittedClientClaims(t *testing.T) {
 		}
 	}
 }
-
-type itFlagsOn struct{}
-
-func (itFlagsOn) Bool(context.Context, string, string) bool { return true }
 
 type itTenantResolver struct{}
 

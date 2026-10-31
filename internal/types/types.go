@@ -332,9 +332,10 @@ type CapabilityItem struct {
 	Action         CapabilityAction
 }
 
-// CapabilityIngest is one capability-update event to persist.
+// CapabilityIngest is one incremental capability-update event to persist.
+// Framed full syncs use IngestChunk/FinalizeSync instead, so there is no
+// FullSync flag here.
 type CapabilityIngest struct {
-	FullSync      bool
 	Items         []CapabilityItem
 	StateChecksum string
 }

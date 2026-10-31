@@ -1,20 +1,19 @@
 # Platform GitOps: per-tenant platform resources
 
 M7.W2. Every tenant gets three base platform resources tracked in the control
-plane (`platform_resources` table, status `reconciling` until the platform
-reconciler reports back) and rendered as inari-operator `api/v1alpha1` CRs in
-the platform GitOps repo — or, with the `platform_resources.gitops_render`
-feature flag on, as renderer source descriptors (native manifests, KRO
-instance, provider-keycloak namespaced XRs; see "Render cutover" below):
+plane (`platform_resources` table, status `reconciling` until the agent
+reports the rendered resources back) and rendered as renderer source
+descriptors (native manifests, KRO instance, provider-keycloak namespaced
+XRs; see "Rendered resources" below) in the hub-facing platform GitOps repo:
 
-| Platform resource  | Kind (CR)      | Name          | Desired state                          |
-| ------------------ | -------------- | ------------- | -------------------------------------- |
-| `keycloak-realm`   | KeycloakRealm  | `<slug>`      | `{"realm":"inari","organization":...}` |
-| `dns-zone`         | DNSRecord      | `<slug>`      | `{"mode":"shared-record"}`             |
-| `tenant-namespace` | TenantNamespace| `tenant-<slug>`| `{"namespace":"tenant-<slug>"}`       |
+| Platform resource  | Rendered as                              | Name          | Desired state                          |
+| ------------------ | ---------------------------------------- | ------------- | -------------------------------------- |
+| `keycloak-realm`   | `TenantRealm.identity.inari.io` XR       | `<slug>`      | `{"realm":"inari","organization":...}` |
+| `dns-zone`         | `DNSEndpoint.externaldns.k8s.io`         | `<slug>`      | `{"mode":"shared-record"}`             |
+| `tenant-namespace` | `TenantNamespace.stacks.inari.io` (KRO)  | `tenant-<slug>`| `{"namespace":"tenant-<slug>"}`       |
 
 The `dns-zone` resource uses the **shared-zone model**: one platform-owned
-DNS zone; the tenant's set of DNSRecords lives under it (`shared-record`
+DNS zone; the tenant's set of DNS records lives under it (`shared-record`
 mode), no per-tenant hosted zones.
 
 Additionally, each cluster registration upserts a `keycloak-client` resource
@@ -22,19 +21,10 @@ Additionally, each cluster registration upserts a `keycloak-client` resource
 
 ## Repo layout
 
-One directory per tenant in the platform GitOps repo, synced by a single
-ArgoCD **ApplicationSet** with a git-directories generator over `tenants/*`:
-
-```
-tenants/<slug>/
-├── keycloak-realm.yaml
-├── dns-record.yaml
-└── tenant-namespace.yaml
-```
-
-Rationale (vs. one Application per tenant or a central ApplicationSet list):
-adding/removing a tenant is a single directory commit/delete; no central file
-to conflict on; matches pull-never-push (the operator reconciles from git).
+One directory tree per tenant in the hub-facing platform repo, one ArgoCD
+`Application` + manifests per descriptor (see "Rendered resources" below for
+the full layout). Hub ArgoCD applies the repo; tenants never write it
+(decision D3).
 
 ## Control-plane flow
 
@@ -44,31 +34,27 @@ to conflict on; matches pull-never-push (the operator reconciles from git).
   base rows via `EnsureDesired` (audit + outbox only when new/changed).
 - `agentgateway.RegisterCluster` — upserts the `keycloak-client` row after
   the Keycloak client is provisioned, before the registration token is burned
-  (retry-safe). With the render cutover on, it renders the provider-keycloak
-  `TenantClient` namespaced XR into the hub-facing platform repo instead (see below).
+  (retry-safe), and renders the provider-keycloak `TenantClient` namespaced
+  XR into the hub-facing platform repo (see below).
 - `tenantzonefactory` "wire into Inari" step (`ModuleWiring.WireZone`) —
   re-ensures the base rows (idempotent; safe on zone step retries) and, when
-  `INARI_PLATFORM_GITOPS_REPO` is set, renders the CR manifests
-  (`platformresources.RenderTenantManifests`) and commits them to the platform
-  GitOps repo through the `gitprovider.Provider` seam.
+  `INARI_PLATFORM_GITOPS_REPO` is set, renders the tenant's descriptors
+  (`platformresources.Service.RenderTenantFiles`) and commits them to the
+  platform GitOps repo through the `gitprovider.Provider` seam.
 - Startup backfill (`cmd/inari-server/main.go`) — after migrations, ensures
   base rows for all pre-existing tenants (best-effort, logged, idempotent).
 
 Out of scope here: the reconciler status sink (separate task) and resource
 deletion on tenant/zone teardown.
 
-## Render cutover (operator sunset Phase 1)
+## Rendered resources (operator sunset)
 
-The feature flag `platform_resources.gitops_render` (runtime flag, platform
-scope, default **off**) switches the render target from inari-operator CRs to
-source descriptors for the source-agnostic renderer (`internal/renderer/`).
-This is the dual-run lever while the new render path is validated; the
-legacy path above remains the flag-off behavior.
-
-When the flag is **on**, `platformresources` renders into the same
-hub-facing platform repo (hub ArgoCD applies it; tenants never write it —
-decision D3), one ArgoCD `Application` + manifests per descriptor under
-tenant-scoped paths:
+`platformresources` renders into the hub-facing platform repo (hub ArgoCD
+applies it; tenants never write it — decision D3), one ArgoCD `Application`
++ manifests per descriptor under tenant-scoped paths. The legacy
+`platform.inari.io/v1alpha1` CR render (inari-operator) and its
+`platform_resources.gitops_render` dual-run flag were removed in Phase 4
+(D7 — pre-release, no dual-run/migration):
 
 ```
 tenants/<slug>/
@@ -87,7 +73,7 @@ tenants/<slug>/
         └── manifests/00-tenantrealm-<slug>.yaml
 ```
 
-Key differences from the legacy render:
+Key properties of the render:
 
 - **Native resources, no facade CRs.** cert-manager/ExternalDNS/ArgoCD
   objects (`DNSEndpoint`, `AppProject`) are committed directly; the
@@ -119,25 +105,22 @@ Key differences from the legacy render:
   client secrets must be delivered synchronously at registration); the
   provider-keycloak cutover (Phase 3, landed) makes the XR the live manager
   of the tenant realm and its workload-federation clients.
-- **Status fold-back.** The agent's configurable GVR watches report the new
-  kinds (`TenantRealm.identity.inari.io`,
+- **Status fold-back.** The agent's configurable GVR watches report the
+  rendered kinds (`TenantRealm.identity.inari.io`,
   `TenantClient.identity.inari.io`, `DNSEndpoint.externaldns.k8s.io`,
   `TenantNamespace.stacks.inari.io`); the status sink maps them onto the
-  same `platform_resources` rows the legacy CRs reported against.
+  `platform_resources` rows.
 
-Teardown (`tenantzonefactory.DeleteTenantManifests`) deletes the union of
-legacy, descriptor, and per-cluster client-XR paths (the latter
-enumerated from the tenant's `keycloak-client` rows), so tenants rendered
-by either generation are removed cleanly.
+Teardown (`tenantzonefactory.DeleteTenantManifests`) deletes the descriptor
+paths plus the per-cluster client-XR paths (the latter enumerated from the
+tenant's `keycloak-client` rows).
 
-**Cutover procedure.** The tenant-scoped Applications rendered at cluster
+**Ordering note.** The tenant-scoped Applications rendered at cluster
 registration (TenantClient XRs) run under the per-tenant AppProject
-`tenant-<slug>`, which is only committed by the tenant render above. Flip
-order therefore matters: enable the flag, then re-render every existing
-tenant (the ops reconcile endpoint commits the descriptor set) before new
-cluster registrations rely on the claim path — a registration in between
-commits a claim Application whose AppProject does not exist yet (ArgoCD
-sync error until the tenant render lands; self-healing, but noisy).
+`tenant-<slug>`, which is only committed by the tenant render above. A
+registration landing before the tenant render commits a claim Application
+whose AppProject does not exist yet (ArgoCD sync error until the tenant
+render lands; self-healing, but noisy).
 
 ## Cluster Dex fan-out (operator sunset Phase 2, decision D5)
 

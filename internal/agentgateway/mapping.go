@@ -128,7 +128,6 @@ func mapStatusUpdate(upd *agentv1.StatusUpdate) StatusUpdate {
 // agent may send types we do not know — drop-and-log, never fatal).
 func mapCapabilityUpdate(upd *agentv1.CapabilityUpdate) types.CapabilityIngest {
 	out := types.CapabilityIngest{
-		FullSync:      upd.FullSync,
 		StateChecksum: upd.StateChecksum,
 	}
 	for _, c := range upd.Capabilities {

@@ -2,7 +2,6 @@ package platformresources
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -65,47 +64,5 @@ func TestBaseResourceSpecs(t *testing.T) {
 	}
 	if nsDesired["namespace"] != "tenant-acme" {
 		t.Errorf("tenant-namespace desired = %v", nsDesired)
-	}
-}
-
-func TestRenderTenantManifests(t *testing.T) {
-	org := &types.Organization{ID: "org:kc-123", Slug: "acme"}
-	files := RenderTenantManifests(org)
-	if len(files) != 3 {
-		t.Fatalf("RenderTenantManifests returned %d files, want 3", len(files))
-	}
-	wantPaths := []string{
-		"tenants/acme/keycloak-realm.yaml",
-		"tenants/acme/dns-record.yaml",
-		"tenants/acme/tenant-namespace.yaml",
-	}
-	wantKinds := []string{"KeycloakRealm", "DNSRecord", "TenantNamespace"}
-	for i, f := range files {
-		if f.Path != wantPaths[i] {
-			t.Errorf("file %d path = %q, want %q", i, f.Path, wantPaths[i])
-		}
-		c := string(f.Content)
-		for _, want := range []string{
-			"apiVersion: platform.inari.io/v1alpha1",
-			"kind: " + wantKinds[i],
-			"name: ",
-			"platform.inari.io/org: acme",
-			"tenantID: acme",
-			"namespace: tenant-acme",
-		} {
-			if !strings.Contains(c, want) {
-				t.Errorf("%s missing %q:\n%s", f.Path, want, c)
-			}
-		}
-	}
-	if !strings.Contains(string(files[1].Content), "zoneRef: shared") {
-		t.Errorf("dns-record manifest must use the shared-zone model:\n%s", files[1].Content)
-	}
-	// Deterministic: same input renders byte-identical output.
-	again := RenderTenantManifests(org)
-	for i := range files {
-		if string(files[i].Content) != string(again[i].Content) {
-			t.Errorf("render %d not deterministic", i)
-		}
 	}
 }

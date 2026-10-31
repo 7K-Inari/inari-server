@@ -47,7 +47,7 @@ func TestMapCapabilityUpdateDropsUnknownKinds(t *testing.T) {
 		},
 	}
 	got := mapCapabilityUpdate(upd)
-	if !got.FullSync || got.StateChecksum != "sum1" {
+	if got.StateChecksum != "sum1" {
 		t.Errorf("metadata lost: %+v", got)
 	}
 	if len(got.Items) != 1 {

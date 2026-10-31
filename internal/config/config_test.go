@@ -133,8 +133,8 @@ func TestAgentStreamMaxRecvBytesDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if c.AgentStreamMaxRecvBytes != 64<<20 {
-		t.Errorf("AgentStreamMaxRecvBytes = %d, want %d (64MiB)", c.AgentStreamMaxRecvBytes, 64<<20)
+	if c.AgentStreamMaxRecvBytes != 8<<20 {
+		t.Errorf("AgentStreamMaxRecvBytes = %d, want %d (8MiB)", c.AgentStreamMaxRecvBytes, 8<<20)
 	}
 }
 
@@ -155,8 +155,8 @@ func TestAgentStreamMaxRecvBytesInvalidFallsBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if c.AgentStreamMaxRecvBytes != 64<<20 {
-		t.Errorf("AgentStreamMaxRecvBytes = %d, want default %d on invalid env", c.AgentStreamMaxRecvBytes, 64<<20)
+	if c.AgentStreamMaxRecvBytes != 8<<20 {
+		t.Errorf("AgentStreamMaxRecvBytes = %d, want default %d on invalid env", c.AgentStreamMaxRecvBytes, 8<<20)
 	}
 }
 

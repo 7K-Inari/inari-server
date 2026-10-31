@@ -91,11 +91,22 @@ type commandQueue interface {
 	Get(ctx context.Context, id string) (*types.AgentCommand, error)
 }
 
+// capabilityIngestor is the session-facing capability-ingest seam
+// (*capabilities.Service implements it; session tests fake it). Framed full
+// syncs arrive in byte-bounded chunks: IngestChunk applies each chunk's
+// upserts, FinalizeSync runs reconciliation + checksum on the terminal
+// (empty) chunk.
+type capabilityIngestor interface {
+	Ingest(ctx context.Context, orgID, clusterID string, upd types.CapabilityIngest) error
+	IngestChunk(ctx context.Context, orgID, clusterID string, items []types.CapabilityItem) (int, error)
+	FinalizeSync(ctx context.Context, orgID, clusterID string, keep []types.CapabilityItem, stateChecksum string, upserted int) (int, error)
+}
+
 // Gateway bundles the Agent Gateway dependencies.
 type Gateway struct {
 	registry   *clusterregistry.Service
 	clients    clusterregistry.ClientManager
-	caps       *capabilities.Service
+	caps       capabilityIngestor
 	queue      commandQueue
 	audit      *audit.Store
 	db         *db.DB

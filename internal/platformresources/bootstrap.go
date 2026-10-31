@@ -1,7 +1,7 @@
 // Tenant bootstrap (M7.W2): the base platform-resource rows every tenant
-// gets (keycloak-realm, dns-zone, tenant-namespace) and the GitOps CR
-// manifests (inari-operator api/v1alpha1) rendered for the platform GitOps
-// repo. Desired state only — the reconciler + status sink are a later task.
+// gets (keycloak-realm, dns-zone, tenant-namespace). Desired state only —
+// the rendered manifests live in render.go (renderer source descriptors,
+// committed to the hub-facing platform repo).
 package platformresources
 
 import (
@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -58,67 +57,4 @@ func (s *Service) EnsureBaseResources(ctx context.Context, org *types.Organizati
 		}
 	}
 	return nil
-}
-
-// TenantManifestPaths returns the repo-relative paths of the tenant CR
-// manifests in the platform GitOps repo — the single source of truth shared
-// by RenderTenantManifests (commit) and zone teardown (delete).
-func TenantManifestPaths(slug string) []string {
-	return []string{
-		"tenants/" + slug + "/keycloak-realm.yaml",
-		"tenants/" + slug + "/dns-record.yaml",
-		"tenants/" + slug + "/tenant-namespace.yaml",
-	}
-}
-
-// RenderTenantManifests renders the tenant CR manifests (inari-operator
-// api/v1alpha1) for the platform GitOps repo. Layout: one directory per
-// tenant at tenants/<slug>/, synced by a single ArgoCD ApplicationSet with a
-// git-directories generator (see docs/platform-gitops.md). Filenames are
-// stable so repeat commits are no-ops when nothing changed.
-func RenderTenantManifests(org *types.Organization) []gitprovider.File {
-	realm := fmt.Sprintf(`apiVersion: platform.inari.io/v1alpha1
-kind: KeycloakRealm
-metadata:
-  name: %s
-  labels:
-    platform.inari.io/org: %s
-spec:
-  tenantID: %s
-  namespace: tenant-%s
-  realm: inari
-  displayName: %s
-`, org.Slug, org.Slug, org.Slug, org.Slug, org.DisplayName)
-	dns := fmt.Sprintf(`apiVersion: platform.inari.io/v1alpha1
-kind: DNSRecord
-metadata:
-  name: %s
-  labels:
-    platform.inari.io/org: %s
-spec:
-  tenantID: %s
-  namespace: tenant-%s
-  zoneRef: shared
-  endpoints:
-    - dnsName: tenant-%s.7kgroup.org
-      recordType: CNAME
-      targets:
-        - inari.7kgroup.org
-`, org.Slug, org.Slug, org.Slug, org.Slug, org.Slug)
-	ns := fmt.Sprintf(`apiVersion: platform.inari.io/v1alpha1
-kind: TenantNamespace
-metadata:
-  name: tenant-%s
-  labels:
-    platform.inari.io/org: %s
-spec:
-  tenantID: %s
-  namespace: tenant-%s
-`, org.Slug, org.Slug, org.Slug, org.Slug)
-	paths := TenantManifestPaths(org.Slug)
-	return []gitprovider.File{
-		{Path: paths[0], Content: []byte(realm)},
-		{Path: paths[1], Content: []byte(dns)},
-		{Path: paths[2], Content: []byte(ns)},
-	}
 }

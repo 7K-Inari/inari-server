@@ -1,11 +1,10 @@
-// Render cutover (operator sunset Phase 1, parent plan §4.2/§6): instead of
-// platform.inari.io/v1alpha1 CRs for the operator, the tenant's platform
+// Render path (operator sunset, parent plan §4.2/§6): the tenant's platform
 // resources are rendered as internal/renderer source descriptors and
 // committed to the hub-facing platform repo (decision D3) — native
 // DNSEndpoint/AppProject manifests, a tenantnamespace KRO instance, and
-// provider-keycloak TenantRealm/TenantClient namespaced XRs. Gated by the
-// platform_resources.gitops_render feature flag (off = legacy CR render,
-// the dual-run lever).
+// provider-keycloak TenantRealm/TenantClient namespaced XRs. The legacy
+// platform.inari.io/v1alpha1 CR render was removed in Phase 4 (D7: no
+// dual-run, no migration — pre-release).
 //
 // Render-time logic ported from the operator's controllers:
 //   - DNS zone containment (dns_controller.go): every record must live
@@ -27,7 +26,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/7K-Inari/inari-server/internal/featureflags"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
 	"github.com/7K-Inari/inari-server/internal/renderer"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
@@ -80,11 +78,6 @@ func resolvePlatformRGD(_ context.Context, ref string) ([]byte, error) {
 	return nil, fmt.Errorf("platformresources: unknown platform RGD ref %q", ref)
 }
 
-// FlagEvaluator is the feature-flag read seam (featureflags.Resolver).
-type FlagEvaluator interface {
-	Bool(ctx context.Context, key, clusterID string) bool
-}
-
 // TenantLookupByID resolves an org by its stable ID (tenancy.Service seam)
 // — registration knows the cluster's OrgID and claim rendering needs the
 // slug for repo paths and TenantReference fields.
@@ -92,18 +85,9 @@ type TenantLookupByID interface {
 	GetTenantByID(ctx context.Context, id string) (*types.Organization, error)
 }
 
-// WithFlags wires the feature-flag resolver gating the render cutover.
-func (s *Service) WithFlags(f FlagEvaluator) *Service { s.flags = f; return s }
-
 // WithTenantLookup wires the by-ID tenant lookup used by the keycloak
 // client claim render.
 func (s *Service) WithTenantLookup(l TenantLookupByID) *Service { s.tenantLookup = l; return s }
-
-// gitopsRenderEnabled reports whether the descriptor render path is active.
-// Nil-safe: no flags wired (tests, legacy wiring) means legacy CR render.
-func (s *Service) gitopsRenderEnabled(ctx context.Context) bool {
-	return s.flags != nil && s.flags.Bool(ctx, featureflags.KeyPlatformResourcesGitOpsRender, "")
-}
 
 // tenantNamespaceName is the tenant's hub namespace (unchanged contract).
 func tenantNamespaceName(slug string) string { return "tenant-" + slug }
@@ -308,6 +292,10 @@ func clientClaimDocs(org *types.Organization, claimName, clientID, issuerURL str
 		"spec": map[string]any{
 			"provider": map[string]any{
 				"kubernetes": map[string]any{
+					// ESO's kubernetes provider schema defaults
+					// remoteNamespace to "default" — pin the tenant
+					// namespace or reads target the wrong namespace.
+					"remoteNamespace": ns,
 					"server": map[string]any{
 						"url": localClusterServer,
 						// ESO v1: caProvider nests under server (strict
@@ -432,16 +420,12 @@ func yamlDocsJSON(docs []map[string]any) (json.RawMessage, error) {
 }
 
 // RenderTenantFiles renders the tenant's platform resources for the
-// hub-facing platform repo. Flag off: the legacy platform.inari.io CR
-// manifests (RenderTenantManifests). Flag on: renderer source descriptors —
-// per-tenant AppProject, native DNSEndpoint, the tenantnamespace KRO
-// instance, and the TenantRealm XR — each as an ArgoCD Application +
-// manifests under tenants/<slug>/. repoURL is the repo's clone URL (the
-// Application source); it is unused by the legacy path.
+// hub-facing platform repo as renderer source descriptors — per-tenant
+// AppProject, native DNSEndpoint, the tenantnamespace KRO instance, and the
+// TenantRealm XR — each as an ArgoCD Application + manifests under
+// tenants/<slug>/. repoURL is the repo's clone URL (the Application
+// source).
 func (s *Service) RenderTenantFiles(ctx context.Context, org *types.Organization, repoURL string) ([]gitprovider.File, error) {
-	if !s.gitopsRenderEnabled(ctx) {
-		return RenderTenantManifests(org), nil
-	}
 	return s.renderTenantDescriptors(ctx, org, repoURL)
 }
 
@@ -527,24 +511,19 @@ func (s *Service) renderTenantDescriptors(ctx context.Context, org *types.Organi
 
 // TenantRenderPaths returns the repo-relative paths of the tenant's
 // rendered files in the hub-facing platform repo — the teardown delete
-// set. The union always covers the legacy CR paths; with the flag on it
-// adds the tenant descriptor paths (D7: dev/staging tenants may have been
-// rendered by either generation). Per-cluster TenantClient XRs are
-// committed at registration, not by the tenant render, so their paths are
-// enumerated from the keycloak-client rows — regardless of the flag,
-// which may have flipped between registration and teardown (deleting
-// paths that were never committed is a no-op).
+// set. Per-cluster TenantClient XRs are committed at registration, not by
+// the tenant render, so their paths are enumerated from the
+// keycloak-client rows (deleting paths that were never committed is a
+// no-op).
 func (s *Service) TenantRenderPaths(ctx context.Context, slug string) ([]string, error) {
-	paths := TenantManifestPaths(slug)
-	if s.gitopsRenderEnabled(ctx) {
-		// Paths are slug-derived only; a synthetic org reproduces them exactly.
-		files, err := s.renderTenantDescriptors(ctx, &types.Organization{Slug: slug}, "https://invalid/platform.git")
-		if err != nil {
-			return nil, err
-		}
-		for _, f := range files {
-			paths = append(paths, f.Path)
-		}
+	// Paths are slug-derived only; a synthetic org reproduces them exactly.
+	files, err := s.renderTenantDescriptors(ctx, &types.Organization{Slug: slug}, "https://invalid/platform.git")
+	if err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, len(files))
+	for _, f := range files {
+		paths = append(paths, f.Path)
 	}
 	clientPaths, err := s.clientClaimRenderPaths(ctx, slug)
 	if err != nil {
@@ -619,18 +598,17 @@ func (s *Service) renderClientClaim(ctx context.Context, org *types.Organization
 // RenderKeycloakClientClaim renders the provider-keycloak TenantClient
 // XR (+ ESO secret-delivery plumbing) for a per-cluster OIDC client into
 // the hub-facing platform repo under tenants/<slug>/keycloak/client-<id>/
-// and commits it (decision D3: never to team repos). Dual-run: the caller
-// keeps upserting the keycloak-client desired-state row alongside, so the
-// resources view and status tracking are unchanged across the Phase 3
-// provider cutover (the XR is now the live manager; D1).
+// and commits it (decision D3: never to team repos). The caller keeps
+// upserting the keycloak-client desired-state row alongside, so the
+// resources view and status tracking cover the claim (the XR is the live
+// manager; D1).
 //
-// Returns rendered=false (no error) when the cutover flag is off or the
-// platform GitOps repo is unwired — the caller falls back to the legacy
-// desired-state row. Errors abort the caller BEFORE the registration token
+// Returns rendered=false (no error) when the platform GitOps repo is
+// unwired. Errors abort the caller BEFORE the registration token
 // is burned, so the agent can retry (retry-safe); repeat calls re-commit
 // identical content (idempotent).
 func (s *Service) RenderKeycloakClientClaim(ctx context.Context, orgID, clusterID, clientID, issuerURL string) (bool, error) {
-	if !s.gitopsRenderEnabled(ctx) || s.git == nil || s.platformGitOpsRepo == "" || s.tenantLookup == nil {
+	if s.git == nil || s.platformGitOpsRepo == "" || s.tenantLookup == nil {
 		return false, nil
 	}
 	org, err := s.tenantLookup.GetTenantByID(ctx, orgID)

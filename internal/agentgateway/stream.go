@@ -79,10 +79,105 @@ type session struct {
 	resyncSent  bool
 	pingSeq     int64
 	lastBeat    time.Time
+	// syncKeep accumulates the membership keys of an in-flight framed full
+	// sync (nil when no sync is in flight); syncUpserted counts chunk
+	// upserts for the aggregate audit record. Deletes are deferred to the
+	// terminal chunk, so a dropped stream never deletes live capabilities.
+	syncKeep     map[capabilityKey]struct{}
+	syncUpserted int
+}
+
+// capabilityKey identifies one capability row for full-sync keep sets.
+type capabilityKey struct {
+	kind, group, name, version string
 }
 
 func (g *Gateway) newSession(c *types.Cluster) *session {
 	return &session{gw: g, cluster: c, lastBeat: time.Now()}
+}
+
+// handleCapabilityUpdate ingests one capability-update event. Full syncs are
+// framed (stream payload sizing fix — CRD-rich snapshots no longer fit one
+// stream message): every chunk carries full_sync=true and the sync ends with
+// an EMPTY terminal chunk. Chunks upsert immediately; delete-missing
+// reconciliation and the checksum commit wait for the terminal chunk.
+//
+// A full sync without a terminal chunk (a stale pre-chunking agent's
+// monolithic sync) upserts but never reconciles and never commits its
+// checksum, so the next handshake mismatch resyncs until the agent restarts
+// into the chunked image (pre-release, no compat window — parent decision
+// D7).
+func (s *session) handleCapabilityUpdate(ctx context.Context, upd *agentv1.CapabilityUpdate) error {
+	items := mapCapabilityUpdate(upd).Items
+	if !upd.FullSync {
+		// StateChecksum on an update is the agent's state AFTER applying the
+		// delta, so it advances on every change — it must not be compared
+		// against the stored checksum here (stale-state detection happens at
+		// handshake via LastSeenStateChecksum).
+		checksum := upd.StateChecksum
+		if s.syncKeep != nil {
+			// Mid-sync: the checksum commit is the terminal chunk's job —
+			// committing the interleaved incremental's newer checksum would
+			// trust state whose deletes never ran. The next handshake
+			// mismatch resyncs once more and converges.
+			checksum = ""
+		}
+		if err := s.gw.caps.Ingest(ctx, s.cluster.OrgID, s.cluster.ID, types.CapabilityIngest{
+			Items:         items,
+			StateChecksum: checksum,
+		}); err != nil {
+			return fmt.Errorf("ingest capabilities: %w", err)
+		}
+		if s.syncKeep != nil {
+			// An incremental upsert landing mid-sync joins the keep set so
+			// finalize cannot delete a capability the replay snapshot
+			// predates.
+			s.unionKeep(items)
+		} else if upd.StateChecksum != "" {
+			s.cluster.CapabilityChecksum = upd.StateChecksum
+		}
+		return nil
+	}
+
+	upserted, err := s.gw.caps.IngestChunk(ctx, s.cluster.OrgID, s.cluster.ID, items)
+	if err != nil {
+		return fmt.Errorf("ingest capability chunk: %w", err)
+	}
+	if s.syncKeep == nil {
+		s.syncKeep = map[capabilityKey]struct{}{}
+	}
+	s.unionKeep(items)
+	s.syncUpserted += upserted
+	if len(upd.Capabilities) > 0 {
+		return nil // data chunk; reconciliation waits for the terminal chunk
+	}
+
+	// Terminal (empty) chunk: reconcile + commit.
+	keep := make([]types.CapabilityItem, 0, len(s.syncKeep))
+	for k := range s.syncKeep {
+		keep = append(keep, types.CapabilityItem{
+			Kind: types.CapabilityKind(k.kind), Group: k.group, Name: k.name, Version: k.version,
+		})
+	}
+	if _, err := s.gw.caps.FinalizeSync(ctx, s.cluster.OrgID, s.cluster.ID, keep, upd.StateChecksum, s.syncUpserted); err != nil {
+		return fmt.Errorf("finalize capability sync: %w", err)
+	}
+	s.syncKeep = nil
+	s.syncUpserted = 0
+	if upd.StateChecksum != "" {
+		s.cluster.CapabilityChecksum = upd.StateChecksum
+	}
+	return nil
+}
+
+// unionKeep adds the upserted items' keys to the in-flight sync's keep set.
+func (s *session) unionKeep(items []types.CapabilityItem) {
+	for _, it := range items {
+		if it.Action == types.CapabilityActionDelete {
+			continue
+		}
+		s.syncKeep[capabilityKey{string(it.Kind), it.Group, it.Name, it.Version}] = struct{}{}
+	}
 }
 
 func newEvent(typ string, payload proto.Message) (*agentv1.Event, error) {
@@ -128,15 +223,8 @@ func (s *session) handleEvent(ctx context.Context, ev *agentv1.Event) ([]*agentv
 			slog.Warn("agentgateway: bad capability-update payload", "cluster", s.cluster.ID, "error", err)
 			return out, nil // drop-and-log per compatibility contract
 		}
-		// StateChecksum on an update is the agent's state AFTER applying the
-		// delta, so it advances on every change — it must not be compared
-		// against the stored checksum here (stale-state detection happens at
-		// handshake via LastSeenStateChecksum).
-		if err := s.gw.caps.Ingest(ctx, s.cluster.OrgID, s.cluster.ID, mapCapabilityUpdate(&upd)); err != nil {
-			return nil, fmt.Errorf("ingest capabilities: %w", err)
-		}
-		if upd.StateChecksum != "" {
-			s.cluster.CapabilityChecksum = upd.StateChecksum
+		if err := s.handleCapabilityUpdate(ctx, &upd); err != nil {
+			return nil, err
 		}
 
 	case agentv1.EventType_EVENT_TYPE_STATUS_UPDATE:

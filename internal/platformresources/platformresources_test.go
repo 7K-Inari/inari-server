@@ -45,14 +45,16 @@ func TestPlatformResourceStatusValid(t *testing.T) {
 
 func TestIsPlatformKind(t *testing.T) {
 	for _, kind := range []string{
-		"KeycloakRealm.platform.inari.io",
-		"DNSRecord.platform.inari.io",
+		"TenantRealm.identity.inari.io",
+		"DNSEndpoint.externaldns.k8s.io",
 	} {
 		if !IsPlatformKind(kind) {
 			t.Errorf("IsPlatformKind(%q) = false, want true", kind)
 		}
 	}
-	for _, kind := range []string{"", "Deployment", "apps/Deployment", "platform.inari.io"} {
+	// Legacy platform.inari.io CRDs are gone (D7) and must not route.
+	for _, kind := range []string{"", "Deployment", "apps/Deployment", "platform.inari.io",
+		"KeycloakRealm.platform.inari.io", "DNSRecord.platform.inari.io"} {
 		if IsPlatformKind(kind) {
 			t.Errorf("IsPlatformKind(%q) = true, want false", kind)
 		}
@@ -61,11 +63,10 @@ func TestIsPlatformKind(t *testing.T) {
 
 func TestKindForCRD(t *testing.T) {
 	cases := map[string]types.PlatformResourceKind{
-		"KeycloakRealm.platform.inari.io":   types.PlatformKindKeycloakRealm,
-		"KeycloakClient.platform.inari.io":  types.PlatformKindKeycloakClient,
-		"DNSZone.platform.inari.io":         types.PlatformKindDNSZone,
-		"DNSRecord.platform.inari.io":       types.PlatformKindDNSZone,
-		"TenantNamespace.platform.inari.io": types.PlatformKindTenantNamespace,
+		"TenantRealm.identity.inari.io":   types.PlatformKindKeycloakRealm,
+		"TenantClient.identity.inari.io":  types.PlatformKindKeycloakClient,
+		"DNSEndpoint.externaldns.k8s.io":  types.PlatformKindDNSZone,
+		"TenantNamespace.stacks.inari.io": types.PlatformKindTenantNamespace,
 	}
 	for crd, want := range cases {
 		got, ok := KindForCRD(crd)
@@ -73,7 +74,8 @@ func TestKindForCRD(t *testing.T) {
 			t.Errorf("KindForCRD(%q) = %q,%v, want %q,true", crd, got, ok, want)
 		}
 	}
-	for _, crd := range []string{"", "Deployment", "Unknown.platform.inari.io"} {
+	for _, crd := range []string{"", "Deployment", "Unknown.platform.inari.io",
+		"KeycloakRealm.platform.inari.io", "DNSRecord.platform.inari.io"} {
 		if got, ok := KindForCRD(crd); ok {
 			t.Errorf("KindForCRD(%q) = %q,true, want false", crd, got)
 		}

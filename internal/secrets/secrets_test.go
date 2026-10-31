@@ -103,6 +103,40 @@ func TestVaultWriterPutMergesSiblings(t *testing.T) {
 	}
 }
 
+func TestVaultWriterGet(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if r.URL.Path == "/v1/kv/data/inari/clusters/abc/oidc-client-secret" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"data": map[string]string{"client-secret": "s3cr3t"}},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	w := NewVaultWriter(srv.URL, "tok-1", "kv")
+	ctx := context.Background()
+
+	v, found, err := w.Get(ctx, "inari/clusters/abc/oidc-client-secret", "client-secret")
+	if err != nil || !found || v != "s3cr3t" {
+		t.Errorf("Get existing = %q, %v, %v", v, found, err)
+	}
+	// Missing key on an existing path: found=false, no error.
+	if _, found, err := w.Get(ctx, "inari/clusters/abc/oidc-client-secret", "nope"); err != nil || found {
+		t.Errorf("Get missing key = found %v, err %v", found, err)
+	}
+	// Missing path: found=false, no error (read-back must tolerate first
+	// registration).
+	if _, found, err := w.Get(ctx, "inari/clusters/ghost/oidc-client-secret", "client-secret"); err != nil || found {
+		t.Errorf("Get missing path = found %v, err %v", found, err)
+	}
+}
+
 func TestVaultWriterPutError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusForbidden)

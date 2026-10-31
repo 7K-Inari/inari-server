@@ -175,7 +175,11 @@ func (g *Gateway) provisionDex(ctx context.Context, cluster *types.Cluster) erro
 	if err != nil {
 		return connect.NewError(connect.CodeInternal, fmt.Errorf("provision dex identity: %w", err).Error())
 	}
-	staticSecret, err := newStaticSecret()
+	// Keep an already-delivered static secret stable across re-registrations:
+	// rotating it would desync ArgoCD's ESO-synced client secret from the
+	// running Dex (which reads config.yaml only at startup) until the next
+	// Dex restart — an SSO outage window on a mere label change.
+	staticSecret, err := g.stableStaticSecret(ctx, secrets.ClusterOIDCPath(cluster.ID))
 	if err != nil {
 		return connect.NewError(connect.CodeInternal, fmt.Errorf("provision dex static secret: %w", err).Error())
 	}
@@ -197,6 +201,21 @@ func (g *Gateway) provisionDex(ctx context.Context, cluster *types.Cluster) erro
 		return connect.NewError(connect.CodeUnavailable, fmt.Errorf("pending_secret_delivery: write dex argocd secret: %w", err).Error())
 	}
 	return nil
+}
+
+// stableStaticSecret returns the cluster's existing Dex static-client
+// secret when one was already delivered, or generates a fresh one. A read
+// failure is NOT fall-backed to regeneration (that would silently rotate on
+// a Vault read outage) — the registration fails and retries instead.
+func (g *Gateway) stableStaticSecret(ctx context.Context, path string) (string, error) {
+	existing, found, err := g.secrets.Get(ctx, path, clusterdex.VaultKeyArgoCDClientSecret)
+	if err != nil {
+		return "", fmt.Errorf("read back dex argocd secret: %w", err)
+	}
+	if found && existing != "" {
+		return existing, nil
+	}
+	return newStaticSecret()
 }
 
 // newStaticSecret generates the Dex static-client secret ArgoCD

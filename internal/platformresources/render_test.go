@@ -283,6 +283,24 @@ func TestRenderKeycloakClientClaim(t *testing.T) {
 		t.Errorf("externalsecret template data = %v", tmpl)
 	}
 
+	// ESO v1 schema: caProvider nests under server — a top-level
+	// kubernetes.caProvider is rejected by strict decoding (caught live by
+	// the renderpath e2e).
+	ss := parseYAML(t, byPath[base+"manifests/03-secretstore-keycloak-client-connections.yaml"])
+	k8s := ss["spec"].(map[string]any)["provider"].(map[string]any)["kubernetes"].(map[string]any)
+	if _, bad := k8s["caProvider"]; bad {
+		t.Error("caProvider must nest under server (ESO strict decoding rejects kubernetes.caProvider)")
+	}
+	server, ok := k8s["server"].(map[string]any)
+	if !ok || server["caProvider"] == nil {
+		t.Errorf("server.caProvider missing in SecretStore: %v", k8s)
+	}
+	// A namespaced SecretStore forbids caProvider.namespace (ESO admission:
+	// the store implicitly reads its own namespace).
+	if cap_, _ := server["caProvider"].(map[string]any); cap_["namespace"] != nil {
+		t.Errorf("namespaced SecretStore must not set caProvider.namespace: %v", cap_)
+	}
+
 	// Idempotent re-render (registration retry): same content, no error.
 	if _, err := s.RenderKeycloakClientClaim(context.Background(), org.ID, "01JFXM6E8BM0G52GQPMNWP2ZC0", clientID,
 		"http://keycloak/realms/inari"); err != nil {

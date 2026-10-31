@@ -32,6 +32,12 @@ type Writer interface {
 	// Put writes value at path (relative to the KV mount), overwriting any
 	// prior version. Must be idempotent — registration retries re-write.
 	Put(ctx context.Context, path, key, value string) error
+	// Get reads back one key at path. found=false on a missing path or key
+	// (not an error). Exists so registration can keep already-delivered
+	// secrets stable across re-registrations instead of rotating them under
+	// a running consumer (putMerged already reads the document, so the
+	// Vault identity carries read in practice).
+	Get(ctx context.Context, path, key string) (value string, found bool, err error)
 }
 
 // VaultWriter writes to a Vault KV v2 mount over HTTP.
@@ -131,6 +137,30 @@ func (v *VaultWriter) Put(ctx context.Context, path, key, value string) error {
 		}
 	}
 	return fmt.Errorf("vault: put %s: status %d: %s", path, status, body)
+}
+
+// Get implements Writer.Get over the kv-v2 document, with the same
+// re-login-once retry as Put for kubernetes auth.
+func (v *VaultWriter) Get(ctx context.Context, path, key string) (string, bool, error) {
+	token, err := v.currentToken(ctx, false)
+	if err != nil {
+		return "", false, err
+	}
+	doc, err := v.get(ctx, path, token)
+	if err != nil && v.k8sAuth {
+		// The cached token may have been revoked or expired ahead of
+		// schedule: re-login once and retry, mirroring Put.
+		token, lerr := v.currentToken(ctx, true)
+		if lerr != nil {
+			return "", false, fmt.Errorf("vault: get %s: %v and re-login failed: %v", path, err, lerr)
+		}
+		doc, err = v.get(ctx, path, token)
+	}
+	if err != nil {
+		return "", false, err
+	}
+	value, found := doc[key]
+	return value, found, nil
 }
 
 // currentToken returns a valid Vault token. For token auth it is the static

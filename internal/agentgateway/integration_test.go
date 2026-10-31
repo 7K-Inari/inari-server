@@ -76,6 +76,14 @@ func (f *fakeSecrets) Put(_ context.Context, path, key, value string) error {
 	return nil
 }
 
+func (f *fakeSecrets) Get(_ context.Context, path, key string) (string, bool, error) {
+	if f.fail {
+		return "", false, errors.New("vault down")
+	}
+	v, ok := f.puts[path+"#"+key]
+	return v, ok, nil
+}
+
 func setupDB(t *testing.T) *db.DB {
 	t.Helper()
 	ctx := context.Background()
@@ -263,6 +271,50 @@ func TestRegistrationExchangeEndToEnd(t *testing.T) {
 	// Unknown token is rejected.
 	if _, err := r.gw.RegisterCluster(ctx, registerReq("bogus")); connect.CodeOf(err) != connect.CodeUnauthenticated {
 		t.Errorf("bogus token code = %v, want Unauthenticated", connect.CodeOf(err))
+	}
+}
+
+// Re-registration (fresh token, e.g. a label change) must NOT rotate the
+// Dex static-client secret: the running Dex reads config.yaml only at
+// startup, so a rotated secret would desync ArgoCD's ESO-synced client
+// secret from Dex until a restart — an SSO outage window.
+func TestReRegistrationKeepsDexStaticSecretStable(t *testing.T) {
+	r := newRig(t, false)
+	ctx := context.Background()
+
+	cluster, err := r.registry.CreateCluster(ctx, "user-1", "org:1", "kind-dev", nil)
+	if err != nil {
+		t.Fatalf("CreateCluster: %v", err)
+	}
+	token, _, err := r.registry.IssueToken(ctx, "user-1", cluster.ID)
+	if err != nil {
+		t.Fatalf("IssueToken: %v", err)
+	}
+	if _, err := r.gw.RegisterCluster(ctx, registerReq(token)); err != nil {
+		t.Fatalf("first RegisterCluster: %v", err)
+	}
+	secretKey := secrets.ClusterOIDCPath(cluster.ID) + "#" + clusterdex.VaultKeyArgoCDClientSecret
+	first := r.secrets.puts[secretKey]
+	if first == "" {
+		t.Fatal("argocd static-client secret not delivered on first registration")
+	}
+
+	// Re-register with a fresh token and changed labels.
+	token2, _, err := r.registry.IssueToken(ctx, "user-1", cluster.ID)
+	if err != nil {
+		t.Fatalf("IssueToken (re-registration): %v", err)
+	}
+	req := registerReq(token2)
+	req.ClusterLabels = map[string]string{"env": "prod"}
+	if _, err := r.gw.RegisterCluster(ctx, req); err != nil {
+		t.Fatalf("re-RegisterCluster: %v", err)
+	}
+	if got := r.secrets.puts[secretKey]; got != first {
+		t.Errorf("static secret rotated on re-registration: %q -> %q", first, got)
+	}
+	dexConfig := r.secrets.puts[secrets.ClusterOIDCPath(cluster.ID)+"#"+clusterdex.VaultKeyDexConfigYAML]
+	if !strings.Contains(dexConfig, "secret: "+first) {
+		t.Error("re-rendered dex config.yaml must embed the stable static secret")
 	}
 }
 

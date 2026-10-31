@@ -69,12 +69,10 @@ func TestRegistryAuthorityInvariant(t *testing.T) {
 
 // TestRegistryCoversKnownFlags pins the shipped flag set: a registry edit
 // that REPLACES instead of appends an entry silently unregisters a live
-// flag (the REST API then 404s it) — exactly what the clusterdex commit did
-// to platform_resources.gitops_render.
+// flag (the REST API then 404s it).
 func TestRegistryCoversKnownFlags(t *testing.T) {
 	for _, key := range []string{
 		KeyKubectlAccessEnabled,
-		KeyPlatformResourcesGitOpsRender,
 		KeyClusterDexFanout,
 	} {
 		if _, ok := Lookup(key); !ok {

@@ -66,6 +66,9 @@ state machine** rather than a synchronous delete:
   deletion progress) and safe to retry; there is no undo past approval.
 - In-flight orchestrator runs are not cancelled (no cancel-by-org API);
   documented force caveat.
-- Operator-side GC of platform CRs (keycloakrealm/dnszone/tenantnamespace)
-  for a deleted tenant remains a follow-up; the server-side desired-state
-  rows cascade away with the org.
+- Platform GC of a deleted tenant's hub-side resources runs through the
+  gitops repo: `tenantzonefactory.DeleteTenantManifests` removes the
+  tenant's rendered descriptors (KRO instance, TenantRealm/TenantClient
+  XRs, DNSEndpoint, AppProject) from the platform repo and hub ArgoCD
+  prunes them (KRO owner refs cascade the namespace children); the
+  server-side desired-state rows cascade away with the org.

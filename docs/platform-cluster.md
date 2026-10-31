@@ -63,23 +63,25 @@ curl -H "Authorization: Bearer $TOKEN" \
 # expect state=active and a recent lastSeenAt
 ```
 
-## RBAC note (platform.inari.io CRDs)
+## RBAC note (platform resource kinds)
 
 The inari-agent Helm chart grants
 only generic discovery access (CRDs, nodes, Crossplane/kro/OLM watchers) via
-the `inari-agent-discovery` ClusterRole — it deliberately contains **no**
-`platform.inari.io` rules. Read access to the platform CRDs is added by the
-inari-agent repo under a **separate ClusterRole name** so the two RBAC
-sources never conflict; do not reuse `inari-agent-discovery` agent-side.
+the `inari-agent-discovery` ClusterRole. Read access to the platform-tracked
+resource kinds (`TenantRealm`/`TenantClient` `identity.inari.io`,
+`DNSEndpoint` `externaldns.k8s.io`, `TenantNamespace` `stacks.inari.io`) is
+added by the inari-agent repo under a **separate ClusterRole name** so the
+two RBAC sources never conflict; do not reuse `inari-agent-discovery`
+agent-side.
 
-## Operator sunset note (render cutover)
+## Platform resources on the hub (operator sunset complete)
 
-The `platform.inari.io` CRDs above are being phased out (operator sunset
-plan). With the `platform_resources.gitops_render` runtime flag on, the
-control plane renders native ExternalDNS/ArgoCD manifests, a `tenantnamespace`
-KRO instance, and provider-keycloak `TenantRealm`/`TenantClient` namespaced XRs into
-the hub-facing platform repo instead of operator CRs (see
-`docs/platform-gitops.md` → "Render cutover"). The platform cluster
+The legacy `platform.inari.io` CRDs and the inari-operator are retired
+(operator sunset Phase 4). The control plane renders native
+ExternalDNS/ArgoCD manifests, a `tenantnamespace` KRO instance, and
+provider-keycloak `TenantRealm`/`TenantClient` namespaced XRs into the
+hub-facing platform repo (see
+`docs/platform-gitops.md` → "Rendered resources"). The platform cluster
 registered by this document is the hub whose ArgoCD applies that repo;
 KRO, Crossplane + provider-keycloak, and ESO are hub prerequisites installed
 by the release-bundle gitops (`gitops/operators/`, `gitops/platform/`).

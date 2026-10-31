@@ -12,7 +12,6 @@ import (
 	"github.com/7K-Inari/inari-server/internal/cloudaccounts"
 	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
-	"github.com/7K-Inari/inari-server/internal/platformresources"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -64,16 +63,15 @@ type BaselineRepos interface {
 
 // PlatformResourceEnsurer upserts the tenant's base platform resources
 // (platformresources.Service seam, M7.W2) and renders the tenant's platform
-// manifests for the hub-facing platform repo (render-cutover aware: legacy
-// platform.inari.io CRs vs. renderer descriptors, per the
-// platform_resources.gitops_render flag).
+// resources as renderer source descriptors for the hub-facing platform
+// repo.
 type PlatformResourceEnsurer interface {
 	EnsureBaseResources(ctx context.Context, org *types.Organization) error
-	// RenderTenantFiles renders the tenant's platform manifests (flag-aware);
-	// repoURL is the platform repo's clone URL (Application source).
+	// RenderTenantFiles renders the tenant's platform descriptors; repoURL
+	// is the platform repo's clone URL (Application source).
 	RenderTenantFiles(ctx context.Context, org *types.Organization, repoURL string) ([]gitprovider.File, error)
 	// TenantRenderPaths lists the tenant's rendered paths in the platform
-	// repo (teardown delete set; flag-aware).
+	// repo (teardown delete set).
 	TenantRenderPaths(ctx context.Context, slug string) ([]string, error)
 }
 
@@ -218,19 +216,15 @@ func (w *ModuleWiring) WireZone(ctx context.Context, zone *types.TenantZone, rol
 // DeleteTenantManifests removes the tenant's platform manifests
 // (tenants/<slug>/) from the platform GitOps repo (M7.W4 teardown step).
 // Idempotent: deleting paths that no longer exist is a no-op. The delete
-// set comes from the platform-resources module so it tracks the active
-// render path (legacy CRs vs. renderer descriptors).
+// set comes from the platform-resources module so it tracks the rendered
+// layout exactly.
 func (w *ModuleWiring) DeleteTenantManifests(ctx context.Context, orgSlug string) error {
-	if w.Git == nil || w.PlatformGitOpsRepo == "" {
+	if w.Git == nil || w.PlatformGitOpsRepo == "" || w.PlatformResources == nil {
 		return nil
 	}
-	paths := platformresources.TenantManifestPaths(orgSlug)
-	if w.PlatformResources != nil {
-		p, err := w.PlatformResources.TenantRenderPaths(ctx, orgSlug)
-		if err != nil {
-			return fmt.Errorf("tzf: list tenant render paths: %w", err)
-		}
-		paths = p
+	paths, err := w.PlatformResources.TenantRenderPaths(ctx, orgSlug)
+	if err != nil {
+		return fmt.Errorf("tzf: list tenant render paths: %w", err)
 	}
 	if _, err := w.Git.DeleteFiles(ctx, w.PlatformGitOpsRepo, "main", paths,
 		"chore: remove tenant platform resources for "+orgSlug); err != nil {

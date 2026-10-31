@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -37,16 +36,15 @@ type Service struct {
 	clusters ClusterLister
 	tenants  TenantResolver
 
-	// git + platformGitOpsRepo render tenant CR manifests into the platform
-	// GitOps repo on ops reconcile; empty repo disables the commit.
+	// git + platformGitOpsRepo render tenant platform-resource descriptors
+	// into the platform GitOps repo on ops reconcile; empty repo disables
+	// the commit.
 	git                gitprovider.Provider
 	platformGitOpsRepo string
 
-	// renders is the source-agnostic render pipeline (descriptor render
-	// path); flags gates the cutover; tenantLookup resolves orgs by ID for
-	// the keycloak client claim render.
+	// renders is the source-agnostic render pipeline; tenantLookup resolves
+	// orgs by ID for the keycloak client claim render.
 	renders      *renderer.Registry
-	flags        FlagEvaluator
 	tenantLookup TenantLookupByID
 }
 
@@ -76,8 +74,8 @@ func (s *Service) WithClusterLister(l ClusterLister) *Service { s.clusters = l; 
 func (s *Service) WithTenantResolver(t TenantResolver) *Service { s.tenants = t; return s }
 
 // WithGitOps wires the platform GitOps repo (repo + provider) so an ops
-// reconcile re-renders and commits the tenant's CR manifests — the lever
-// when the CRs were never (or wrongly) materialized.
+// reconcile re-renders and commits the tenant's descriptors — the lever
+// when the resources were never (or wrongly) materialized.
 func (s *Service) WithGitOps(repo string, p gitprovider.Provider) *Service {
 	s.platformGitOpsRepo, s.git = repo, p
 	return s
@@ -155,10 +153,10 @@ func (s *Service) RequestReconcile(ctx context.Context, actor string, org *types
 	if err != nil {
 		return 0, 0, err
 	}
-	// Re-render + commit the tenant's CR manifests to the platform GitOps
-	// repo so the ArgoCD sync can actually materialize them (idempotent:
-	// unchanged content is a no-op commit the provider may still record).
-	// RenderTenantFiles is flag-aware: legacy CRs vs. renderer descriptors.
+	// Re-render + commit the tenant's platform-resource descriptors to the
+	// platform GitOps repo so the ArgoCD sync can actually materialize them
+	// (idempotent: unchanged content is a no-op commit the provider may
+	// still record).
 	if s.git != nil && s.platformGitOpsRepo != "" {
 		repoURL, err := s.git.EnsureRepo(ctx, s.platformGitOpsRepo)
 		if err != nil {
@@ -244,12 +242,8 @@ func (s *Service) enqueueResync(ctx context.Context, clusterID string, org *type
 	})
 }
 
-// platformKindSuffix marks agent-reported CRDs owned by the platform
-// reconciler (ResourceRef.kind = "<Kind>.platform.inari.io").
-const platformKindSuffix = ".platform.inari.io"
-
 // StatusUpdate is the internal form of an agent status-update event for one
-// platform CRD (mirrors the inventory seam's shape).
+// platform resource (mirrors the inventory seam's shape).
 type StatusUpdate struct {
 	Resource   types.ResourceRef
 	Health     string
@@ -258,10 +252,9 @@ type StatusUpdate struct {
 }
 
 // renderedKindMap folds agent-reported status for the resources the
-// descriptor render path (platform_resources.gitops_render) commits —
-// native DNSEndpoint, the tenantnamespace KRO instance, provider-keycloak
-// claims — into the same platform-resource rows the legacy CRs reported
-// against. Keys are the agent's group-qualified kinds ("<Kind>.<group>").
+// descriptor render path commits — native DNSEndpoint, the tenantnamespace
+// KRO instance, provider-keycloak claims — into the platform-resource rows.
+// Keys are the agent's group-qualified kinds ("<Kind>.<group>").
 var renderedKindMap = map[string]types.PlatformResourceKind{
 	"TenantRealm.identity.inari.io":   types.PlatformKindKeycloakRealm,
 	"TenantClient.identity.inari.io":  types.PlatformKindKeycloakClient,
@@ -270,38 +263,20 @@ var renderedKindMap = map[string]types.PlatformResourceKind{
 }
 
 // IsPlatformKind reports whether an agent resource kind belongs to the
-// platform-tracked set (routing predicate for the status sink): the legacy
-// platform.inari.io CRDs plus the rendered replacement kinds.
+// platform-tracked set (routing predicate for the status sink): the kinds
+// the descriptor render path commits.
 func IsPlatformKind(kind string) bool {
-	if _, ok := renderedKindMap[kind]; ok {
-		return true
-	}
-	return strings.HasSuffix(kind, platformKindSuffix) && len(kind) > len(platformKindSuffix)
+	_, ok := renderedKindMap[kind]
+	return ok
 }
 
-// KindForCRD maps an agent CRD kind to the platform resource kind recorded
-// at EnsureDesired time. DNSZone and DNSRecord both report against the
-// dns-zone row (records live under their zone's name); the rendered
-// DNSEndpoint carries the same name. Rendered replacement kinds map to the
-// same rows their legacy counterparts reported against.
+// KindForCRD maps an agent-reported kind to the platform resource kind
+// recorded at EnsureDesired time. The rendered DNSEndpoint reports against
+// the dns-zone row (records live under their zone's name); the KRO
+// TenantNamespace instance reports against the tenant-namespace row.
 func KindForCRD(crd string) (types.PlatformResourceKind, bool) {
-	if kind, ok := renderedKindMap[crd]; ok {
-		return kind, true
-	}
-	if !strings.HasSuffix(crd, platformKindSuffix) || len(crd) <= len(platformKindSuffix) {
-		return "", false
-	}
-	switch strings.TrimSuffix(crd, platformKindSuffix) {
-	case "KeycloakRealm":
-		return types.PlatformKindKeycloakRealm, true
-	case "KeycloakClient":
-		return types.PlatformKindKeycloakClient, true
-	case "DNSZone", "DNSRecord":
-		return types.PlatformKindDNSZone, true
-	case "TenantNamespace":
-		return types.PlatformKindTenantNamespace, true
-	}
-	return "", false
+	kind, ok := renderedKindMap[crd]
+	return kind, ok
 }
 
 // deriveStatus maps agent health to the platform resource status.

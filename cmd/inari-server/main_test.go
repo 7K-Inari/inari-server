@@ -41,11 +41,10 @@ func TestStatusSinkRouterRouting(t *testing.T) {
 
 	observed := time.Date(2026, 9, 11, 10, 0, 0, 0, time.UTC)
 	platformKinds := []string{
-		"KeycloakRealm.platform.inari.io",
-		"KeycloakClient.platform.inari.io",
-		"DNSZone.platform.inari.io",
-		"DNSRecord.platform.inari.io",
-		"TenantNamespace.platform.inari.io",
+		"TenantRealm.identity.inari.io",
+		"TenantClient.identity.inari.io",
+		"DNSEndpoint.externaldns.k8s.io",
+		"TenantNamespace.stacks.inari.io",
 	}
 	for _, kind := range platformKinds {
 		if _, err := r.ApplyStatus(ctx, "org:1", "cluster-1", agentgateway.StatusUpdate{

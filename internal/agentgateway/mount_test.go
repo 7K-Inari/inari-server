@@ -9,6 +9,7 @@ import (
 
 	connect "connectrpc.com/connect/v2"
 	"connectrpc.com/connect/v2/connecthttp"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/structpb"
 
@@ -65,8 +66,13 @@ func bigHandshake(t *testing.T) *agentv1.ConnectRequest {
 // same mechanism as cmd/inari-server's listener).
 func mountStub(t *testing.T, opts ...connecthttp.Option) *httptest.Server {
 	t.Helper()
+	return mountHandler(t, readAllStream{t}, opts...)
+}
+
+func mountHandler(t *testing.T, h agentv1connect.EventStreamServiceHandler, opts ...connecthttp.Option) *httptest.Server {
+	t.Helper()
 	srv := connect.NewServer()
-	agentv1connect.RegisterEventStreamServiceHandler(srv, readAllStream{t})
+	agentv1connect.RegisterEventStreamServiceHandler(srv, h)
 	mux := http.NewServeMux()
 	connecthttp.Mount(mux, srv, opts...)
 	ts := httptest.NewUnstartedServer(mux)
@@ -220,5 +226,88 @@ func TestStreamReadLimitRejectsBeyondCeiling(t *testing.T) {
 	}
 	if _, err := stream.Receive(); connect.CodeOf(err) != connect.CodeResourceExhausted {
 		t.Fatalf("want resource_exhausted beyond the 8MiB ceiling, got %v", err)
+	}
+}
+
+// syncDrainStream ingests framed full-sync chunks until the empty terminal
+// chunk arrives, then answers with one small frame — it exercises the
+// transport ceiling across a whole multi-chunk replay, not one message.
+type syncDrainStream struct {
+	agentv1connect.UnimplementedEventStreamServiceHandler
+	chunks int
+	bytes  int
+}
+
+func (s *syncDrainStream) Connect(_ context.Context, stream agentv1connect.EventStreamServiceConnectServerStream) error {
+	for {
+		msg, err := stream.Receive()
+		if err != nil {
+			return err
+		}
+		if msg.Event == nil || msg.Event.Payload == nil {
+			continue
+		}
+		var upd agentv1.CapabilityUpdate
+		if !msg.Event.Payload.MessageIs(&upd) {
+			continue
+		}
+		if err := msg.Event.Payload.UnmarshalTo(&upd); err != nil {
+			return err
+		}
+		s.chunks++
+		s.bytes += proto.Size(msg.Event)
+		if upd.FullSync && len(upd.Capabilities) == 0 { // terminal chunk
+			pong, _ := anypb.New(&agentv1.Ping{})
+			return stream.Send(&agentv1.ConnectResponse{Event: &agentv1.Event{
+				EventId: "bye",
+				Type:    agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_PING),
+				Payload: pong,
+			}})
+		}
+	}
+}
+
+// TestFramedReplayExceedsRetiredStopgap is the acceptance-level wire test
+// (M5W2 finding F1; parent plan §7 risk #4): a full-sync replay whose
+// AGGREGATE schema payload exceeds the retired 64MiB stopgap streams
+// through the production mount options as bounded chunks — the stream
+// stays up because no single message approaches the 8MiB ceiling.
+func TestFramedReplayExceedsRetiredStopgap(t *testing.T) {
+	drain := &syncDrainStream{}
+	cfg := (&Config{}).withDefaults()
+	ts := mountHandler(t, drain, cfg.MountOptions()...)
+	stream, err := streamClient(ts).Connect(context.Background())
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	// 40 x ~2MiB chunks = ~80MiB aggregate, over the retired 64MiB stopgap.
+	for i := 0; i < 40; i++ {
+		if err := stream.Send(capabilityChunk(t, 2<<20)); err != nil {
+			t.Fatalf("chunk %d: %v", i, err)
+		}
+	}
+	terminal, err := anypb.New(&agentv1.CapabilityUpdate{FullSync: true, StateChecksum: "sum"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Send(&agentv1.ConnectRequest{Event: &agentv1.Event{
+		EventId: "terminal",
+		Type:    agentv1.EventTypeString(agentv1.EventType_EVENT_TYPE_CAPABILITY_UPDATE),
+		Payload: terminal,
+	}}); err != nil {
+		t.Fatalf("terminal chunk: %v", err)
+	}
+	resp, err := stream.Receive()
+	if err != nil {
+		t.Fatalf("an 80MiB framed replay must stay under the ceiling per message, got %v", err)
+	}
+	if resp.Event.GetEventId() != "bye" {
+		t.Fatalf("want the drain's pong, got %+v", resp.Event)
+	}
+	if drain.chunks != 41 {
+		t.Errorf("chunks = %d, want 41 (40 data + terminal)", drain.chunks)
+	}
+	if drain.bytes <= 64<<20 {
+		t.Errorf("aggregate = %d bytes, want > 64MiB to prove the stopgap is retired", drain.bytes)
 	}
 }

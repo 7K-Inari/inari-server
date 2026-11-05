@@ -515,6 +515,35 @@ func TestSessionDuplicateTerminalChunkDropped(t *testing.T) {
 	}
 }
 
+// An incremental DELETE landing mid-sync removes the key from the keep
+// set: the replay snapshot predates the delete, so keeping the key would
+// resurrect a capability the cluster no longer has at finalize.
+func TestSessionIncrementalDeleteDuringSyncLeavesKeepSet(t *testing.T) {
+	caps := &fakeCapsIngestor{}
+	s := (&Gateway{caps: caps}).newSession(&types.Cluster{ID: "cluster:test", OrgID: "org:test"})
+	ctx := context.Background()
+
+	must := func(ev *agentv1.Event) {
+		t.Helper()
+		if _, err := s.handleEvent(ctx, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(capUpdateEvent(t, true, "sum-1", capCRD("a"), capCRD("b")))
+	del := capCRD("a")
+	del.Action = agentv1.CapabilityAction_CAPABILITY_ACTION_DELETE
+	must(capUpdateEvent(t, false, "sum-2", del))
+	must(capUpdateEvent(t, true, "sum-1")) // terminal
+
+	if len(caps.finalized) != 1 {
+		t.Fatalf("finalizes = %d, want 1", len(caps.finalized))
+	}
+	names := keepNames(caps.finalized[0].keep)
+	if len(names) != 1 || names["b"] != 1 {
+		t.Errorf("keep set = %v, want only b (the mid-sync delete of a must leave the keep set)", names)
+	}
+}
+
 // After finalize the accumulator resets: the next sync starts clean.
 func TestSessionSyncAccumulatorResetsAfterFinalize(t *testing.T) {
 	caps := &fakeCapsIngestor{}

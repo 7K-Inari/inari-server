@@ -181,13 +181,20 @@ func (s *session) handleCapabilityUpdate(ctx context.Context, upd *agentv1.Capab
 	return nil
 }
 
-// unionKeep adds the upserted items' keys to the in-flight sync's keep set.
+// unionKeep adds the upserted items' keys to the in-flight sync's keep set
+// and removes deleted items' keys: the replay snapshot predates an
+// interleaved delete, so keeping the key would resurrect the row at
+// finalize. (A delete whose replay chunk arrives LATER re-adds the key —
+// an unavoidable ordering race without sync framing IDs; it converges via
+// the next handshake's checksum mismatch.)
 func (s *session) unionKeep(items []types.CapabilityItem) {
 	for _, it := range items {
+		key := capabilityKey{string(it.Kind), it.Group, it.Name, it.Version}
 		if it.Action == types.CapabilityActionDelete {
+			delete(s.syncKeep, key)
 			continue
 		}
-		s.syncKeep[capabilityKey{string(it.Kind), it.Group, it.Name, it.Version}] = struct{}{}
+		s.syncKeep[key] = struct{}{}
 	}
 }
 

@@ -92,6 +92,11 @@ type Config struct {
 	// shared INARI_EXTENSION_GATEWAY_TOKEN was removed (issue #75).
 	ExtensionGatewayAudience string
 	ESOSecretStore           string
+	// ESOSecretNamespace overrides the namespace the agent-gateway handshake
+	// advertises for the ESO-delivered OIDC client secret (plan §5.3).
+	// Empty keeps the agentgateway default (inari-system) — correct for real
+	// tenant clusters; the e2e env's agent runs in inari-e2e-agent.
+	ESOSecretNamespace string
 
 	// Platform Vault (ESO delivery of per-cluster OIDC client secrets, plan
 	// §5.3). Empty VaultAddr disables delivery; registration then fails
@@ -433,6 +438,7 @@ func Load() (*Config, error) {
 		AgentGatewayAddress:        env("INARI_AGENT_GATEWAY_ADDRESS", "https://inari-server.example.com"),
 		ExtensionGatewayAudience:   env("INARI_EXTENSION_GATEWAY_AUDIENCE", "inari-extension-gateway"),
 		ESOSecretStore:             env("INARI_ESO_SECRET_STORE", "inari-platform"),
+		ESOSecretNamespace:         env("INARI_ESO_SECRET_NAMESPACE", ""),
 
 		VaultAddr:        env("INARI_VAULT_ADDR", ""),
 		VaultToken:       env("INARI_VAULT_TOKEN", ""),

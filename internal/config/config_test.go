@@ -86,6 +86,29 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 }
 
+func TestESOSecretNamespaceEnv(t *testing.T) {
+	// Default: empty — the agentgateway withDefaults keeps inari-system
+	// (correct for real tenant clusters).
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.ESOSecretNamespace != "" {
+		t.Errorf("ESOSecretNamespace = %q, want empty default", c.ESOSecretNamespace)
+	}
+	// The e2e env sets it to the e2e agent's dedicated namespace (the
+	// handshake's secret-delivery reference must point where the agent
+	// actually runs — inari-system is the platform agent's, hands off).
+	t.Setenv("INARI_ESO_SECRET_NAMESPACE", "inari-e2e-agent")
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.ESOSecretNamespace != "inari-e2e-agent" {
+		t.Errorf("ESOSecretNamespace = %q, want inari-e2e-agent", c.ESOSecretNamespace)
+	}
+}
+
 func TestAgentCompatDefaults(t *testing.T) {
 	c, err := Load()
 	if err != nil {

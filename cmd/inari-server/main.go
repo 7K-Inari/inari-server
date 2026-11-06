@@ -667,6 +667,7 @@ func run() error {
 	agentGWCfg := agentgateway.Config{
 		OIDCIssuerURL:           cfg.OIDCIssuerURL,
 		ESOSecretStore:          cfg.ESOSecretStore,
+		ESOSecretNamespace:      cfg.ESOSecretNamespace,
 		CurrentAgentVersion:     cfg.CurrentAgentVersion,
 		AgentSupportedRange:     cfg.AgentSupportedRange,
 		AgentRecommendedVersion: cfg.AgentRecommendedVersion,

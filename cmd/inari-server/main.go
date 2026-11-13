@@ -67,6 +67,7 @@ import (
 	"connectrpc.com/connect/v2"
 	"connectrpc.com/connect/v2/connecthttp"
 	agentv1connect "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1/agentv1connect"
+	"github.com/7K-Inari/inari-api/gen/go/inari/extensions/v1/extensionsv1connect"
 )
 
 func main() {
@@ -1164,12 +1165,15 @@ func run() error {
 	router.Handle("/"+agentv1connect.EventStreamServiceName+"/*", rpcMux)
 	router.Handle("/"+agentv1connect.AgentCredentialsServiceName+"/*", rpcMux)
 
-	// Extension-gateway tunnel (plan §5.8): extensions invoke imperative
-	// actions on tenant clusters, authenticated by per-extension identity
-	// (ADR-0008): Authorization: Bearer <client_credentials JWT>.
-	if path, handler := gateway.ExtensionInvokeHandler(extAuth, 0); handler != nil {
-		router.Handle(path, handler)
-		log.Info("extension gateway tunnel enabled", "path", path)
+	// Extension-gateway tunnel (plan §5.8): the generated inari.extensions.v1
+	// service invokes imperative actions on tenant clusters, authenticated by
+	// per-extension identity (ADR-0008).
+	if svc := gateway.ExtensionInvokeService(extAuth, 0); svc != nil {
+		extensionRPC := connect.NewServer()
+		extensionsv1connect.RegisterAgentGatewayHandler(extensionRPC, svc)
+		connecthttp.Mount(rpcMux, extensionRPC, agentGWCfg.MountOptions()...)
+		router.Handle("/"+extensionsv1connect.AgentGatewayName+"/*", rpcMux)
+		log.Info("extension gateway tunnel enabled", "path", extensionsv1connect.AgentGatewayInvokeActionProcedure)
 	}
 
 	// Extension proxy: wildcard path mounted on chi directly; the proxy runs

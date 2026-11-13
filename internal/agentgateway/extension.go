@@ -14,19 +14,16 @@ import (
 	"google.golang.org/protobuf/types/known/anypb"
 
 	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
+	extensionsv1 "github.com/7K-Inari/inari-api/gen/go/inari/extensions/v1"
+	"github.com/7K-Inari/inari-api/gen/go/inari/extensions/v1/extensionsv1connect"
 
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
 // Extension-gateway tunnel (plan §5.3 imperative ops / §5.8): extensions call
 // the control plane to run one imperative action on a tenant cluster and wait
-// for the result. The reference contract is the protojson-over-gRPC method
-//
-//	/inari.extensions.v1.AgentGateway/InvokeAction
-//
-// request: agentv1.InvokeAction, response: agentv1.CommandAck, with tenant and
-// cluster carried in the x-inari-tenant / x-inari-cluster metadata headers
-// (contract defined by 7K-Inari/inari-ext-argocd, the reference extension).
+// for the result. The canonical inari-api inari.extensions.v1.AgentGateway
+// contract carries agentv1.InvokeAction and returns agentv1.CommandAck.
 //
 // Authentication is per-extension identity (ADR-0008): the extension backend
 // presents a client_credentials JWT (Authorization: Bearer) minted for its
@@ -35,22 +32,22 @@ import (
 // gateway is platform-internal machine traffic (the end user was already
 // authenticated + authorized by the extension proxy at /api/extensions/<name>/*).
 const (
-	// ExtensionInvokeProcedure is the full gRPC method path.
-	ExtensionInvokeProcedure = "/inari.extensions.v1.AgentGateway/InvokeAction"
+	// ExtensionInvokeProcedure is the generated AgentGateway InvokeAction path.
+	ExtensionInvokeProcedure = extensionsv1connect.AgentGatewayInvokeActionProcedure
 	// MetadataTenant/MetadataCluster route the command to a cluster.
-	MetadataTenant  = "x-inari-tenant"
-	MetadataCluster = "x-inari-cluster"
+	MetadataTenant  = extensionsv1.MetadataTenant
+	MetadataCluster = extensionsv1.MetadataCluster
 	// MetadataUserCredentialRef carries the opaque per-user credential
 	// reference the agent redeems via AgentCredentials.RedeemUserCredential
 	// (agent.v1 InvokeAction.user_credential_ref). The command journal is
 	// persisted, so only this reference ever crosses the hop — raw user
 	// tokens are rejected, never stored in agent_commands.payload.
-	MetadataUserCredentialRef = "x-inari-user-credential-ref"
+	MetadataUserCredentialRef = extensionsv1.MetadataUserCredentialRef
 	// MetadataUserCredential carries a raw per-user token from the extension
 	// hop (in memory only). The gateway mints a vault ref for it and the
 	// command payload carries only that ref — the token is never persisted,
 	// logged, or audited.
-	MetadataUserCredential = "x-inari-user-credential"
+	MetadataUserCredential = extensionsv1.MetadataUserCredential
 	defaultInvokeWait      = 60 * time.Second
 )
 
@@ -87,43 +84,43 @@ type ExtensionAuthenticator interface {
 	AuthenticateExtension(ctx context.Context, header http.Header) (*types.Extension, error)
 }
 
-// ExtensionInvokeHandler returns the ConnectRPC handler for the extension
-// tunnel, or nil when no authenticator is wired (feature off). queue
-// receives the command and the handler polls it until the agent's
-// CommandAck lands (the stream's dispatch/ack loop does the transport).
-//
-// connect v2 has no ad-hoc NewUnaryHandler: the synthetic procedure is
-// registered as a connect.Method on a throwaway Server and mounted through
-// connecthttp like any generated service.
-func (g *Gateway) ExtensionInvokeHandler(auth ExtensionAuthenticator, wait time.Duration) (string, http.Handler) {
+type extensionService struct {
+	gateway *Gateway
+	auth    ExtensionAuthenticator
+	wait    time.Duration
+}
+
+// InvokeAction implements the generated inari.extensions.v1.AgentGateway
+// handler. Metadata is read from the generated Connect call context.
+func (s *extensionService) InvokeAction(ctx context.Context, req *agentv1.InvokeAction) (*agentv1.CommandAck, error) {
+	info, ok := connect.CallInfoForServerContext(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeInternal, "missing RPC call info")
+	}
+	return s.gateway.invokeExtension(ctx, req, httpHeader(info.RequestHeader()), s.auth, s.wait)
+}
+
+// ExtensionInvokeService returns the generated AgentGateway implementation, or
+// nil when no authenticator is wired (feature off).
+func (g *Gateway) ExtensionInvokeService(auth ExtensionAuthenticator, wait time.Duration) extensionsv1connect.AgentGatewayHandler {
 	if auth == nil {
-		return "", nil
+		return nil
 	}
 	if wait <= 0 {
 		wait = defaultInvokeWait
 	}
+	return &extensionService{gateway: g, auth: auth, wait: wait}
+}
+
+// ExtensionInvokeHandler is a generated-handler HTTP wrapper used by focused
+// integration tests. Production mounts ExtensionInvokeService by service name.
+func (g *Gateway) ExtensionInvokeHandler(auth ExtensionAuthenticator, wait time.Duration) (string, http.Handler) {
+	svc := g.ExtensionInvokeService(auth, wait)
+	if svc == nil {
+		return "", nil
+	}
 	server := connect.NewServer()
-	server.Register(connect.Method{
-		Spec: connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Procedure:  ExtensionInvokeProcedure,
-		},
-		Handler: func(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-			var req agentv1.InvokeAction
-			if err := stream.Receive(&req); err != nil {
-				return err
-			}
-			info, ok := connect.CallInfoForServerContext(ctx)
-			if !ok {
-				return connect.NewError(connect.CodeInternal, "missing RPC call info")
-			}
-			res, err := g.invokeExtension(ctx, &req, httpHeader(info.RequestHeader()), auth, wait)
-			if err != nil {
-				return err
-			}
-			return stream.Send(res)
-		},
-	})
+	extensionsv1connect.RegisterAgentGatewayHandler(server, svc)
 	mux := http.NewServeMux()
 	connecthttp.Mount(mux, server)
 	return ExtensionInvokeProcedure, mux
@@ -202,6 +199,12 @@ func (g *Gateway) invokeExtension(ctx context.Context, req *agentv1.InvokeAction
 	if credRef != "" {
 		req.UserCredentialRef = credRef
 	}
+	// Imperative operations fail closed before enqueue/audit when no outbound
+	// agent stream can accept the command. Input and vault validation above
+	// retain their specific errors; other command queues are unchanged.
+	if !g.hasLiveSession(clusterID) {
+		return nil, connect.Errorf(connect.CodeUnavailable, "no connected agent for cluster %q", clusterID)
+	}
 	anyPayload, err := anypb.New(req)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
@@ -247,7 +250,7 @@ func (g *Gateway) invokeExtension(ctx context.Context, req *agentv1.InvokeAction
 	} else if err := g.queue.Enqueue(ctx, cmd); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("enqueue: %w", err).Error())
 	}
-	ack, err := g.awaitAck(ctx, cmd.ID, wait)
+	ack, err := g.awaitAck(ctx, cmd.ClusterID, cmd.ID, wait)
 	if err != nil {
 		return nil, err
 	}
@@ -257,7 +260,7 @@ func (g *Gateway) invokeExtension(ctx context.Context, req *agentv1.InvokeAction
 // awaitAck polls the command journal until the agent acks (or the wait
 // expires). The dispatch loop delivers at-least-once; the agent is
 // idempotent on command id.
-func (g *Gateway) awaitAck(ctx context.Context, commandID string, wait time.Duration) (*agentv1.CommandAck, error) {
+func (g *Gateway) awaitAck(ctx context.Context, clusterID, commandID string, wait time.Duration) (*agentv1.CommandAck, error) {
 	deadline := time.Now().Add(wait)
 	for {
 		cmd, err := g.queue.Get(ctx, commandID)
@@ -268,6 +271,9 @@ func (g *Gateway) awaitAck(ctx context.Context, commandID string, wait time.Dura
 			case types.CommandStatusNacked:
 				return &agentv1.CommandAck{CommandId: commandID, Result: agentv1.CommandResult_COMMAND_RESULT_FAILED, Message: cmd.ResultMessage}, nil
 			}
+		}
+		if !g.hasLiveSession(clusterID) {
+			return nil, connect.Errorf(connect.CodeUnavailable, "agent disconnected while awaiting command %q", commandID)
 		}
 		if time.Now().After(deadline) {
 			return nil, connect.Errorf(connect.CodeDeadlineExceeded, "agent did not ack within %s (offline?)", wait)

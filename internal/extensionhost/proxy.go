@@ -8,6 +8,7 @@ package extensionhost
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httputil"
@@ -176,12 +177,21 @@ func writeProxyAuthError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.As(err, &reauth):
 		w.Header().Set(HeaderReauth, reauth.Provider)
-		http.Error(w, `{"detail":"re-authentication required","code":"`+codeReauthRequired+`"}`, http.StatusUnauthorized)
+		writeProxyError(w, http.StatusUnauthorized, "re-authentication required", codeReauthRequired)
 	case errors.Is(err, ErrExchangeDenied):
-		http.Error(w, `{"detail":"downstream permission denied","code":"`+codeDownstreamPermissionDenied+`"}`, http.StatusForbidden)
+		writeProxyError(w, http.StatusForbidden, "downstream permission denied", codeDownstreamPermissionDenied)
 	case errors.Is(err, ErrExchangeUnavailable), errors.Is(err, ErrAuthMethodUnavailable):
-		http.Error(w, `{"detail":"extension auth unavailable","code":"`+codeAuthUnavailable+`"}`, http.StatusBadGateway)
+		writeProxyError(w, http.StatusBadGateway, "extension auth unavailable", codeAuthUnavailable)
 	default:
-		http.Error(w, `{"detail":"extension auth failed","code":"`+codeAuthUnavailable+`"}`, http.StatusBadGateway)
+		writeProxyError(w, http.StatusBadGateway, "extension auth failed", codeAuthUnavailable)
 	}
+}
+
+func writeProxyError(w http.ResponseWriter, status int, detail, code string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(struct {
+		Detail string `json:"detail"`
+		Code   string `json:"code"`
+	}{Detail: detail, Code: code})
 }

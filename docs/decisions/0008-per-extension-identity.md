@@ -40,6 +40,12 @@ and the tunnel authenticates callers with standard OIDC JWTs:
   extensions stay unbound. End-user authorization is unchanged at the
   extension proxy (JWT + FGA `invoke`); no platform-admin role or org
   membership is ever granted to extension clients.
+- **Canonical contract and liveness.** The tunnel uses the generated
+  `inari.extensions.v1.AgentGateway` contract from `inari-api`, not an
+  extension-owned service descriptor. An imperative invoke fails with
+  `UNAVAILABLE` before enqueue/audit when no outbound agent session is live,
+  and also if that session disconnects while awaiting acknowledgement.
+  Other agent command queues retain their existing offline behavior.
 - **Rotation.** `POST /api/v1/tenants/{org}/extensions/{id}/identity/rotate`
   regenerates the secret (returned once, audited
   `extension.identity.secret_rotated`) — per-extension, independent of every

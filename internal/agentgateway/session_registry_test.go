@@ -66,7 +66,13 @@ func TestRegisterSessionDifferentClustersCoexist(t *testing.T) {
 func TestUnregisterCurrentSession(t *testing.T) {
 	gw := &Gateway{}
 	h := gw.registerSession("cluster:a", func() {})
+	if !gw.hasLiveSession("cluster:a") {
+		t.Fatal("registered session is not live")
+	}
 	gw.unregisterSession("cluster:a", h)
+	if gw.hasLiveSession("cluster:a") {
+		t.Fatal("unregistered session is still live")
+	}
 	gw.sessionsMu.Lock()
 	_, ok := gw.sessions["cluster:a"]
 	gw.sessionsMu.Unlock()

@@ -182,6 +182,11 @@ const (
 
 	EventPlatformResourceStatus    = "platform_resource.status"
 	EventPlatformResourceReconcile = "platform_resource.reconcile_requested"
+
+	EventResourceTargetCreated      = "resource_target.created"
+	EventResourceTargetUpdated      = "resource_target.updated"
+	EventResourceTargetDeleted      = "resource_target.deleted"
+	EventResourceTargetGrantChanged = "resource_target.grant_changed"
 )
 
 // ClusterState is the cluster lifecycle state (plan §5.11).
@@ -1052,6 +1057,22 @@ type PlatformResourceReconcilePayload struct {
 	Actor                string `json:"actor"`
 	ResourcesReRequested int    `json:"resourcesReRequested"`
 	ClustersNotified     int    `json:"clustersNotified"`
+}
+
+// ResourceTargetGrant is an exact target/team relation snapshot for authz
+// reconciliation and lifecycle cleanup.
+type ResourceTargetGrant struct {
+	TargetID string `json:"targetId"`
+	TeamID   string `json:"teamId"`
+	Relation string `json:"relation"`
+}
+
+// ResourceTargetPayload drives current-state target authz reconciliation.
+type ResourceTargetPayload struct {
+	OrgID    string                `json:"orgId"`
+	TargetID string                `json:"targetId"`
+	Deleted  bool                  `json:"deleted,omitempty"`
+	Grants   []ResourceTargetGrant `json:"grants,omitempty"`
 }
 
 // TeamSeed is one default team to create with a tenant and the permission

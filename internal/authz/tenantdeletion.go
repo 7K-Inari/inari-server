@@ -33,7 +33,30 @@ func TuplesForTenantDeletion(p *types.TenantDeletingPayload) ([]Tuple, error) {
 			})
 		}
 	}
-	return tuples, nil
+	grants, err := resourceTargetGrantTuples(p.TargetGrants)
+	if err != nil {
+		return nil, err
+	}
+	return append(tuples, grants...), nil
+}
+
+func resourceTargetGrantTuples(grants []types.ResourceTargetGrant) ([]Tuple, error) {
+	out := make([]Tuple, 0, len(grants))
+	for _, grant := range grants {
+		var relation string
+		switch grant.Relation {
+		case "view":
+			relation = RelationViewGrant
+		case "use":
+			relation = RelationUseGrant
+		case "provision":
+			relation = RelationProvisionGrant
+		default:
+			return nil, fmt.Errorf("authz: unknown resource target grant %q", grant.Relation)
+		}
+		out = append(out, Tuple{User: TeamMemberUserset(grant.TeamID), Relation: relation, Object: ResourceTargetObject(grant.TargetID)})
+	}
+	return out, nil
 }
 
 func tenantDeletionObjectString(typ, id string) (string, error) {
@@ -54,6 +77,8 @@ func tenantDeletionObjectString(typ, id string) (string, error) {
 		return DriftEventObject(id), nil
 	case "tenant_zone":
 		return TenantZoneObject(id), nil
+	case TypeResourceTarget:
+		return ResourceTargetObject(id), nil
 	}
 	return "", fmt.Errorf("authz: unknown tenant-deletion object type %q", typ)
 }

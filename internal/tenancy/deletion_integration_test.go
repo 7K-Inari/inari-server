@@ -252,9 +252,9 @@ func TestTenantDeletionHappyPath(t *testing.T) {
 	}
 
 	// FGA tuples retracted: the org permission tuples of every default
-	// team (20+14+5+1 = 40 across the built-in bundles) + the creator's
-	// two membership tuples (org-admins + platform-team).
-	if want := 20 + 14 + 5 + 1 + 2; len(rec.deleted) != want {
+	// team (21+15+5+1 across the built-in bundles, including target management)
+	// + the creator's two membership tuples (org-admins + platform-team).
+	if want := 21 + 15 + 5 + 1 + 2; len(rec.deleted) != want {
 		t.Errorf("deleted tuples = %d, want %d: %+v", len(rec.deleted), want, rec.deleted)
 	}
 	for _, tup := range rec.deleted {

@@ -217,6 +217,24 @@ func (s *Store) tenantSnapshot(ctx context.Context, q db.Querier, org *types.Org
 		{"rollout", `SELECT id FROM rollouts WHERE org_id = $1`},
 		{"drift_event", `SELECT id FROM drift_events WHERE org_id = $1`},
 		{"tenant_zone", `SELECT id FROM tenant_zones WHERE org_id = $1`},
+		{"resource_target", `SELECT id FROM resource_targets WHERE org_id = $1`},
+	}
+	grantRows, err := q.Query(ctx, `SELECT g.target_id, g.team_id, g.relation FROM resource_target_grants g
+		JOIN resource_targets rt ON rt.id=g.target_id WHERE rt.org_id=$1 ORDER BY g.target_id, g.team_id`, org.ID)
+	if err != nil {
+		return nil, err
+	}
+	for grantRows.Next() {
+		var grant types.ResourceTargetGrant
+		if err := grantRows.Scan(&grant.TargetID, &grant.TeamID, &grant.Relation); err != nil {
+			grantRows.Close()
+			return nil, err
+		}
+		p.TargetGrants = append(p.TargetGrants, grant)
+	}
+	grantRows.Close()
+	if err := grantRows.Err(); err != nil {
+		return nil, err
 	}
 	for _, o := range objects {
 		rows, err := q.Query(ctx, o.sql, org.ID)

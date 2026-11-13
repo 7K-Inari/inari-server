@@ -1098,11 +1098,12 @@ type TenantCreatedPayload struct {
 // (cluster, cloud_account, cluster_set, policy_pack, extension, rollout,
 // drift_event, tenant_zone) to the org's object ids of that type.
 type TenantDeletingPayload struct {
-	OrgID   string              `json:"orgId"`
-	Slug    string              `json:"slug"`
-	Teams   []TeamSeed          `json:"teams"`
-	Members []MembershipPayload `json:"members"`
-	Objects map[string][]string `json:"objects"`
+	OrgID        string                `json:"orgId"`
+	Slug         string                `json:"slug"`
+	Teams        []TeamSeed            `json:"teams"`
+	Members      []MembershipPayload   `json:"members"`
+	Objects      map[string][]string   `json:"objects"`
+	TargetGrants []ResourceTargetGrant `json:"targetGrants,omitempty"`
 }
 
 // TenantDeletedPayload is the outbox payload for EventTenantDeleted.
@@ -1142,12 +1143,13 @@ type TenantDeletion struct {
 // EventTeamDeleted; Permissions is the team's role bundle snapshot driving
 // the per-permission org tuple write/retraction.
 type TeamCreatedPayload struct {
-	OrgID       string   `json:"orgId"`
-	TeamID      string   `json:"teamId"`
-	Name        string   `json:"name"`
-	RoleID      string   `json:"roleId"`
-	RoleName    string   `json:"roleName"`
-	Permissions []string `json:"permissions"`
+	OrgID        string                `json:"orgId"`
+	TeamID       string                `json:"teamId"`
+	Name         string                `json:"name"`
+	RoleID       string                `json:"roleId"`
+	RoleName     string                `json:"roleName"`
+	Permissions  []string              `json:"permissions"`
+	TargetGrants []ResourceTargetGrant `json:"targetGrants,omitempty"`
 }
 
 // MembershipPayload is the outbox payload for membership add/remove events.

@@ -1,8 +1,11 @@
 package authz
 
 import (
+	"context"
 	"slices"
 	"testing"
+
+	"github.com/7K-Inari/inari-server/internal/types"
 )
 
 func TestResourceTargetModelAndPermissions(t *testing.T) {
@@ -38,5 +41,33 @@ func TestResourceTargetModelAndPermissions(t *testing.T) {
 	}
 	if ResourceTargetObject("rt-1") != "resource_target:rt-1" {
 		t.Errorf("unexpected object %q", ResourceTargetObject("rt-1"))
+	}
+}
+
+func TestResourceTargetLifecycleTuples(t *testing.T) {
+	payload := &types.TenantDeletingPayload{
+		OrgID: "org:1", Objects: map[string][]string{TypeResourceTarget: {"rt-1"}},
+		TargetGrants: []types.ResourceTargetGrant{{TargetID: "rt-1", TeamID: "team-1", Relation: "provision"}},
+	}
+	tuples, err := TuplesForTenantDeletion(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tuples) != 2 {
+		t.Fatalf("tuples = %+v, want parent and exact provision grant", tuples)
+	}
+	if tuples[1].Relation != RelationProvisionGrant || tuples[1].User != TeamMemberUserset("team-1") {
+		t.Errorf("grant tuple = %+v", tuples[1])
+	}
+
+	fs := &fakeStore{}
+	writer := NewTupleWriter(fs)
+	if err := writer.Handle(context.Background(), event(t, types.EventTeamDeleted, types.TeamCreatedPayload{
+		OrgID: "org:1", TeamID: "team-1", TargetGrants: payload.TargetGrants,
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if len(fs.deleted) != 1 || fs.deleted[0].Relation != RelationProvisionGrant {
+		t.Errorf("team deletion did not retract target grant: %+v", fs.deleted)
 	}
 }

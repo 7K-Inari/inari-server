@@ -118,10 +118,19 @@ func (w *TupleWriter) Handle(ctx context.Context, ev *types.OutboxEvent) error {
 		if err := json.Unmarshal(ev.Payload, &p); err != nil {
 			return err
 		}
-		// Removes the team#member → permission org tuples. Per-member
-		// team:<id>#member tuples dangle harmlessly once the team object is
-		// gone.
-		return w.store.DeleteTuples(ctx, permissionTuples(p.OrgID, p.TeamID, p.Permissions))
+		// Removes the team#member → permission org tuples and exact target
+		// grants captured before the DB cascade. Per-member team:<id>#member
+		// tuples dangle harmlessly once the team object is gone.
+		tuples := permissionTuples(p.OrgID, p.TeamID, p.Permissions)
+		grants, err := resourceTargetGrantTuples(p.TargetGrants)
+		if err != nil {
+			return err
+		}
+		tuples = append(tuples, grants...)
+		if len(tuples) == 0 {
+			return nil
+		}
+		return w.store.DeleteTuples(ctx, tuples)
 	case types.EventMembershipAdded:
 		var p types.MembershipPayload
 		if err := json.Unmarshal(ev.Payload, &p); err != nil {

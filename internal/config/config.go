@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
 	"github.com/blang/semver"
 )
 
@@ -120,16 +121,15 @@ type Config struct {
 	VaultK8sAuthPath  string
 	VaultK8sTokenPath string
 
-	// CatalogOCIPath points at a local fixture OCI layout directory
-	// (dev/tests). CatalogOCIIndexRef takes precedence when both are set.
-	CatalogOCIPath string
-	// CatalogOCIIndexRef is the OCI reference of the inari-catalog index
-	// artifact (e.g. ghcr.io/7k-inari/catalog/index:latest). When set, the
-	// real registry puller is used instead of the fixture.
-	CatalogOCIIndexRef string
-	// CatalogSyncInterval re-syncs the catalog periodically; 0 = sync once
-	// at startup only.
-	CatalogSyncInterval time.Duration
+	// TrustedSourcesFile is the strict catalog.sources/template.sources YAML
+	// document. TrustedSources is nil when no external sources are configured.
+	TrustedSourcesFile string
+	TrustedSources     *trustedsource.File
+	// CatalogSyncInterval and TemplateSyncInterval re-sync sources
+	// periodically; 0 = startup only. File intervals take precedence over the
+	// corresponding operational environment setting.
+	CatalogSyncInterval  time.Duration
+	TemplateSyncInterval time.Duration
 	// GitProvider selects the git backend: "fake" (default, local dev/tests),
 	// "github" (GitHub App credentials, §12.1/2 — never PATs), or "local"
 	// (filesystem-backed bare repos under GitLocalRoot — real commits for
@@ -205,24 +205,14 @@ type Config struct {
 
 	// Scaffolding / Software Templates (M8, plan §4/§10).
 	// ScaffoldGitOrg is the git organization/owner receiving scaffolded
-	// repos; ScaffoldTemplateDir is the local dir holding template
-	// definitions; ScaffoldRunTTL is the retention for completed/failed
-	// runs before they are swept.
+	// repos; ScaffoldRunTTL is the retention for completed/failed runs
+	// before they are swept. Trusted template sources are configured only
+	// through TrustedSourcesFile.
 	ScaffoldReconcileInterval time.Duration
 	ScaffoldStepMaxAttempts   int64
 	ScaffoldGitOrg            string
-	ScaffoldTemplateDir       string
 	ScaffoldRunTTL            time.Duration
-	// ScaffoldTemplateOCIIndexRef switches template ingestion from the
-	// local dir to the OCI registry index (application/vnd.inari.template.v1
-	// artifacts); ScaffoldTemplateCacheDir receives the extracted packages.
-	ScaffoldTemplateOCIIndexRef string
-	ScaffoldTemplateCacheDir    string
-	// ScaffoldTemplateVerify enables cosign keyless signature verification
-	// of template artifacts (same trust model as the server images).
-	ScaffoldTemplateVerify         bool
-	ScaffoldTemplateCosignIdentity string
-	ScaffoldTemplateCosignIssuer   string
+	ScaffoldTemplateCacheDir  string
 
 	// UiExtensionVerify enables cosign keyless signature verification of
 	// UI-extension remoteEntry OCI artifacts before the control plane serves
@@ -404,6 +394,19 @@ func LoadKubeproxy() (*KubeproxyConfig, error) {
 }
 
 func Load() (*Config, error) {
+	for _, key := range []string{
+		"INARI_CATALOG_OCI_INDEX_REF",
+		"INARI_CATALOG_OCI_PATH",
+		"INARI_SCAFFOLD_TEMPLATE_OCI_INDEX_REF",
+		"INARI_SCAFFOLD_TEMPLATE_DIR",
+		"INARI_SCAFFOLD_TEMPLATE_VERIFY",
+		"INARI_SCAFFOLD_TEMPLATE_COSIGN_IDENTITY",
+		"INARI_SCAFFOLD_TEMPLATE_COSIGN_ISSUER",
+	} {
+		if os.Getenv(key) != "" {
+			return nil, fmt.Errorf("config: %s was removed; use INARI_TRUSTED_SOURCES_FILE with catalog.sources/template.sources", key)
+		}
+	}
 	c := &Config{
 		HTTPAddr:                  env("INARI_HTTP_ADDR", ":8080"),
 		LogLevel:                  env("INARI_LOG_LEVEL", "info"),
@@ -449,9 +452,9 @@ func Load() (*Config, error) {
 		VaultK8sTokenPath: env("INARI_VAULT_K8S_TOKEN_PATH",
 			"/var/run/secrets/kubernetes.io/serviceaccount/token"),
 
-		CatalogOCIPath:           env("INARI_CATALOG_OCI_PATH", ""),
-		CatalogOCIIndexRef:       env("INARI_CATALOG_OCI_INDEX_REF", ""),
+		TrustedSourcesFile:       env("INARI_TRUSTED_SOURCES_FILE", ""),
 		CatalogSyncInterval:      durEnv("INARI_CATALOG_SYNC_INTERVAL", 0),
+		TemplateSyncInterval:     durEnv("INARI_TEMPLATE_SYNC_INTERVAL", 0),
 		GitProvider:              env("INARI_GIT_PROVIDER", "fake"),
 		GitLocalRoot:             env("INARI_GIT_LOCAL_ROOT", "/var/lib/inari/git"),
 		GitHubAppID:              intEnv("INARI_GITHUB_APP_ID", 0),
@@ -490,16 +493,11 @@ func Load() (*Config, error) {
 		TZFReconcileInterval: durEnv("INARI_TZF_RECONCILE_INTERVAL", 30*time.Second),
 		TZFStepMaxAttempts:   intEnv("INARI_TZF_STEP_MAX_ATTEMPTS", 5),
 
-		ScaffoldReconcileInterval:      durEnv("INARI_SCAFFOLD_RECONCILE_INTERVAL", 30*time.Second),
-		ScaffoldStepMaxAttempts:        intEnv("INARI_SCAFFOLD_STEP_MAX_ATTEMPTS", 5),
-		ScaffoldGitOrg:                 env("INARI_SCAFFOLD_GIT_ORG", ""),
-		ScaffoldTemplateDir:            env("INARI_SCAFFOLD_TEMPLATE_DIR", ""),
-		ScaffoldRunTTL:                 durEnv("INARI_SCAFFOLD_RUN_TTL", 7*24*time.Hour),
-		ScaffoldTemplateOCIIndexRef:    env("INARI_SCAFFOLD_TEMPLATE_OCI_INDEX_REF", ""),
-		ScaffoldTemplateCacheDir:       env("INARI_SCAFFOLD_TEMPLATE_CACHE_DIR", ""),
-		ScaffoldTemplateVerify:         boolEnv("INARI_SCAFFOLD_TEMPLATE_VERIFY", false),
-		ScaffoldTemplateCosignIdentity: env("INARI_SCAFFOLD_TEMPLATE_COSIGN_IDENTITY", ""),
-		ScaffoldTemplateCosignIssuer:   env("INARI_SCAFFOLD_TEMPLATE_COSIGN_ISSUER", ""),
+		ScaffoldReconcileInterval: durEnv("INARI_SCAFFOLD_RECONCILE_INTERVAL", 30*time.Second),
+		ScaffoldStepMaxAttempts:   intEnv("INARI_SCAFFOLD_STEP_MAX_ATTEMPTS", 5),
+		ScaffoldGitOrg:            env("INARI_SCAFFOLD_GIT_ORG", ""),
+		ScaffoldRunTTL:            durEnv("INARI_SCAFFOLD_RUN_TTL", 7*24*time.Hour),
+		ScaffoldTemplateCacheDir:  env("INARI_SCAFFOLD_TEMPLATE_CACHE_DIR", ""),
 
 		UiExtensionVerify:         boolEnv("INARI_UI_EXTENSION_VERIFY", false),
 		UiExtensionCosignIdentity: env("INARI_UI_EXTENSION_COSIGN_IDENTITY", ""),
@@ -531,6 +529,31 @@ func Load() (*Config, error) {
 		PlatformChartRepoURL: env("INARI_PLATFORM_CHART_REPO_URL", "oci://ghcr.io/7k-inari/charts"),
 		PlatformChartName:    env("INARI_PLATFORM_CHART_NAME", "inari-platform"),
 		PlatformChartVersion: env("INARI_PLATFORM_CHART_VERSION", ""),
+	}
+	if c.TrustedSourcesFile != "" {
+		raw, err := os.ReadFile(c.TrustedSourcesFile)
+		if err != nil {
+			return nil, fmt.Errorf("config: read INARI_TRUSTED_SOURCES_FILE %q: %w", c.TrustedSourcesFile, err)
+		}
+		sources, err := trustedsource.DecodeFile(raw)
+		if err != nil {
+			return nil, fmt.Errorf("config: parse INARI_TRUSTED_SOURCES_FILE %q: %w", c.TrustedSourcesFile, err)
+		}
+		c.TrustedSources = sources
+		if sources.Catalog != nil && sources.Catalog.SyncInterval != "" {
+			interval, err := time.ParseDuration(sources.Catalog.SyncInterval)
+			if err != nil {
+				return nil, fmt.Errorf("config: catalog.syncInterval: %w", err)
+			}
+			c.CatalogSyncInterval = interval
+		}
+		if sources.Template != nil && sources.Template.SyncInterval != "" {
+			interval, err := time.ParseDuration(sources.Template.SyncInterval)
+			if err != nil {
+				return nil, fmt.Errorf("config: template.syncInterval: %w", err)
+			}
+			c.TemplateSyncInterval = interval
+		}
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("config: INARI_DATABASE_URL must not be empty")

@@ -718,12 +718,9 @@ func run() error {
 	// through the durable agent command queue.
 	platformResourcesSvc.WithCommandQueue(gateway.Queue()).WithClusterLister(registry).WithTenantResolver(svc)
 
+	// Trusted source construction is injected below; removed single-index and
+	// local-file environment fallbacks are never consulted.
 	var puller catalog.OCIPuller
-	if cfg.CatalogOCIIndexRef != "" {
-		puller = &catalog.RegistryPuller{IndexRef: cfg.CatalogOCIIndexRef}
-	} else if cfg.CatalogOCIPath != "" {
-		puller = &catalog.FixturePuller{Root: cfg.CatalogOCIPath}
-	}
 	catalogSvc := catalog.NewService(database, catalog.NewStore(), capabilities.NewStore(), auditStore, puller)
 	if err := catalogSvc.SeedPlatformApps(ctx); err != nil {
 		return err
@@ -743,36 +740,9 @@ func run() error {
 		}
 	}
 
-	// M8.W2: software templates ship in a local dir (baked into the image);
-	// sync them into the catalog as source=template items. M8.W6: setting
-	// INARI_SCAFFOLD_TEMPLATE_OCI_INDEX_REF switches ingestion to the OCI
-	// registry (application/vnd.inari.template.v1 artifacts, cosign-verified
-	// when INARI_SCAFFOLD_TEMPLATE_VERIFY=true). Best-effort like the
-	// catalog sync above; a startup sync suffices for the file source, and
-	// the OCI source re-pulls lazily via Get on cache miss.
+	// Template sources are constructed from the strict trusted-source file in
+	// the multi-source wiring increment; no local-directory fallback remains.
 	var templateSource scaffold.TemplateSource
-	if cfg.ScaffoldTemplateOCIIndexRef != "" {
-		ociPuller := &scaffold.OCIRegistryPuller{
-			IndexRef: cfg.ScaffoldTemplateOCIIndexRef,
-			CacheDir: cfg.ScaffoldTemplateCacheDir,
-		}
-		if cfg.ScaffoldTemplateVerify {
-			ociPuller.Verifier = &scaffold.CosignVerifier{
-				CertIdentityRegexp:   cfg.ScaffoldTemplateCosignIdentity,
-				CertOidcIssuerRegexp: cfg.ScaffoldTemplateCosignIssuer,
-			}
-		}
-		templateSource = ociPuller
-	} else if cfg.ScaffoldTemplateDir != "" {
-		templateSource = &scaffold.FilePuller{Root: cfg.ScaffoldTemplateDir}
-	}
-	if templateSource != nil {
-		if n, err := scaffold.SyncTemplates(ctx, templateSource, catalogSvc); err != nil {
-			slog.Error("template sync failed", "error", err)
-		} else {
-			slog.Info("template sync complete", "templates", n)
-		}
-	}
 
 	approvalsSvc := approvals.NewService(database, approvals.NewStore(database), auditStore, svc, catalogSvc).WithPlatformChecker(authorizer)
 	go leaderlease.Run(ctx, leaser, "approvals-expiry", func(lctx context.Context) {

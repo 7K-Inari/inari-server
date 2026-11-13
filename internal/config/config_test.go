@@ -48,8 +48,8 @@ func TestLoadDefaults(t *testing.T) {
 	if c.ScaffoldGitOrg != "" {
 		t.Errorf("ScaffoldGitOrg = %q, want empty", c.ScaffoldGitOrg)
 	}
-	if c.ScaffoldTemplateDir != "" {
-		t.Errorf("ScaffoldTemplateDir = %q, want empty", c.ScaffoldTemplateDir)
+	if c.TrustedSourcesFile != "" {
+		t.Errorf("TrustedSourcesFile = %q, want empty", c.TrustedSourcesFile)
 	}
 	if c.ScaffoldRunTTL.Hours() != 168 {
 		t.Errorf("ScaffoldRunTTL = %v, want 168h", c.ScaffoldRunTTL)
@@ -198,7 +198,7 @@ func TestScaffoldEnvOverride(t *testing.T) {
 	t.Setenv("INARI_SCAFFOLD_RECONCILE_INTERVAL", "10s")
 	t.Setenv("INARI_SCAFFOLD_STEP_MAX_ATTEMPTS", "3")
 	t.Setenv("INARI_SCAFFOLD_GIT_ORG", "inari-apps")
-	t.Setenv("INARI_SCAFFOLD_TEMPLATE_DIR", "/srv/templates")
+	t.Setenv("INARI_SCAFFOLD_TEMPLATE_CACHE_DIR", "/srv/template-cache")
 	t.Setenv("INARI_SCAFFOLD_RUN_TTL", "24h")
 	c, err := Load()
 	if err != nil {
@@ -213,8 +213,8 @@ func TestScaffoldEnvOverride(t *testing.T) {
 	if c.ScaffoldGitOrg != "inari-apps" {
 		t.Errorf("ScaffoldGitOrg = %q, want inari-apps", c.ScaffoldGitOrg)
 	}
-	if c.ScaffoldTemplateDir != "/srv/templates" {
-		t.Errorf("ScaffoldTemplateDir = %q, want /srv/templates", c.ScaffoldTemplateDir)
+	if c.ScaffoldTemplateCacheDir != "/srv/template-cache" {
+		t.Errorf("ScaffoldTemplateCacheDir = %q, want /srv/template-cache", c.ScaffoldTemplateCacheDir)
 	}
 	if c.ScaffoldRunTTL.Hours() != 24 {
 		t.Errorf("ScaffoldRunTTL = %v, want 24h", c.ScaffoldRunTTL)

@@ -51,7 +51,7 @@ func TestAuthzSyncConvergesCurrentStateAndReplays(t *testing.T) {
 	fga := newSyncFGA()
 	sync := NewAuthzSync(database, NewStore(), fga)
 	target, err := svc.Create(ctx, "org:store", "user:admin", CreateInput{
-		Name: "deployment", ResourceRef: ResourceRef{Kind: ResourceKindCluster, ID: "cluster:store"},
+		Name: "deployment", ResourceRef: TargetResourceRef{Kind: ResourceKindCluster, ID: "cluster:store"},
 		Capability: CapabilityDeploymentCluster,
 	})
 	if err != nil {

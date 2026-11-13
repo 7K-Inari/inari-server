@@ -49,7 +49,7 @@ func setupStore(t *testing.T) (*db.DB, context.Context, string, string) {
 
 func testTarget(id string) *Target {
 	return &Target{
-		ID: id, OrgID: "org:store", Name: "shared", ResourceRef: ResourceRef{Kind: ResourceKindCluster, ID: "cluster:store"},
+		ID: id, OrgID: "org:store", Name: "shared", ResourceRef: TargetResourceRef{Kind: ResourceKindCluster, ID: "cluster:store"},
 		Capabilities: []string{CapabilityDeploymentCluster}, Config: json.RawMessage(`{}`), Enabled: true, Revision: 1,
 	}
 }

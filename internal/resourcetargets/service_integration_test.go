@@ -57,9 +57,10 @@ func (f fakeTeams) ListTeams(context.Context, string) ([]types.Team, error) {
 }
 
 type fakeTargetAuthz struct {
-	manager bool
-	allowed map[string]bool
-	err     error
+	manager         bool
+	managerSubjects map[string]bool
+	allowed         map[string]bool
+	err             error
 }
 
 func (f *fakeTargetAuthz) key(subject, relation, object string) string {
@@ -70,7 +71,7 @@ func (f *fakeTargetAuthz) Check(_ context.Context, subject, relation, object str
 		return false, f.err
 	}
 	if relation == authz.RelationResourceTargetsManage && object == authz.OrgObject("org:store") {
-		return f.manager, nil
+		return f.manager || f.managerSubjects[subject], nil
 	}
 	return f.allowed[f.key(subject, relation, object)], nil
 }
@@ -120,7 +121,7 @@ func TestServiceDeploymentListResolveAndImmediateRevocation(t *testing.T) {
 	svc, _, az, teamID, _ := serviceFixture(t)
 	ctx := context.Background()
 	target, err := svc.Create(ctx, "org:store", "user:admin", CreateInput{
-		Name: "deployment", ResourceRef: ResourceRef{Kind: ResourceKindCluster, ID: "cluster:store"},
+		Name: "deployment", ResourceRef: TargetResourceRef{Kind: ResourceKindCluster, ID: "cluster:store"},
 		Capability: CapabilityDeploymentCluster, Config: json.RawMessage(`{}`),
 	})
 	if err != nil {
@@ -173,7 +174,7 @@ func TestServiceMonitoringAndDeploymentShareResolver(t *testing.T) {
 	svc, database, az, teamID, _ := serviceFixture(t)
 	ctx := context.Background()
 	target, err := svc.Create(ctx, "org:store", "user:admin", CreateInput{
-		Name: "central Grafana", ResourceRef: ResourceRef{Kind: ResourceKindCluster, ID: "cluster:store"},
+		Name: "central Grafana", ResourceRef: TargetResourceRef{Kind: ResourceKindCluster, ID: "cluster:store"},
 		Capability: CapabilityMonitoringGrafana,
 		Config:     json.RawMessage(strings.Replace(string(validGrafanaConfig()), "team-1", teamID, 1)),
 	})
@@ -221,7 +222,7 @@ func TestServiceManagerAndAuthorizationFailure(t *testing.T) {
 	svc, _, az, _, _ := serviceFixture(t)
 	ctx := context.Background()
 	target, err := svc.Create(ctx, "org:store", "user:admin", CreateInput{
-		Name: "deployment", ResourceRef: ResourceRef{Kind: ResourceKindCluster, ID: "cluster:store"},
+		Name: "deployment", ResourceRef: TargetResourceRef{Kind: ResourceKindCluster, ID: "cluster:store"},
 		Capability: CapabilityDeploymentCluster,
 	})
 	if err != nil {

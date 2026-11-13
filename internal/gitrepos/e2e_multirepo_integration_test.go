@@ -63,7 +63,7 @@ func (e2eClusters) GetCluster(_ context.Context, id string) (*types.Cluster, err
 type e2eTargets struct{}
 
 func (e2eTargets) ResolveResource(ctx context.Context, _, _, _ string, _ resourcetargets.Action,
-	ref resourcetargets.ResourceRef, _ json.RawMessage) (*resourcetargets.ResolvedTarget, error) {
+	ref resourcetargets.TargetResourceRef, _ json.RawMessage) (*resourcetargets.ResolvedTarget, error) {
 	cluster, err := (e2eClusters{}).GetCluster(ctx, ref.ID)
 	return &resourcetargets.ResolvedTarget{Cluster: cluster}, err
 }

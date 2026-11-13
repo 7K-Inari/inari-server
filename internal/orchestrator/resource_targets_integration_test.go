@@ -17,7 +17,7 @@ import (
 type stubTargetResolver struct{ deny atomic.Bool }
 
 func (s *stubTargetResolver) ResolveResource(ctx context.Context, orgID, subject, capability string, action resourcetargets.Action,
-	ref resourcetargets.ResourceRef, selection json.RawMessage) (*resourcetargets.ResolvedTarget, error) {
+	ref resourcetargets.TargetResourceRef, selection json.RawMessage) (*resourcetargets.ResolvedTarget, error) {
 	if s.deny.Load() {
 		return nil, resourcetargets.ErrTargetDenied
 	}

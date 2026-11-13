@@ -333,7 +333,11 @@ func (s *Service) isManager(ctx context.Context, orgID, subject string) (bool, e
 	if s.authz == nil {
 		return false, fmt.Errorf("resourcetargets: authorizer is not configured")
 	}
-	return s.authz.Check(ctx, subjectObject(subject), authz.RelationResourceTargetsManage, authz.OrgObject(orgID))
+	allowed, err := s.authz.Check(ctx, subjectObject(subject), authz.RelationResourceTargetsManage, authz.OrgObject(orgID))
+	if err != nil {
+		return false, &AuthorizationError{Err: err}
+	}
+	return allowed, nil
 }
 
 // authorize combines the OpenFGA decision with a current-DB narrowing fence.
@@ -348,7 +352,7 @@ func (s *Service) authorize(ctx context.Context, orgID, subject, targetID string
 	}
 	allowed, err := s.authz.Check(ctx, subjectObject(subject), relation, authz.ResourceTargetObject(targetID))
 	if err != nil {
-		return err
+		return &AuthorizationError{Err: err}
 	}
 	if !allowed {
 		return ErrTargetDenied
@@ -433,7 +437,7 @@ func (s *Service) List(ctx context.Context, orgID, subject string, filter ListFi
 	if !manager {
 		objects, err := s.authz.ListObjects(ctx, subjectObject(subject), relation, authz.TypeResourceTarget)
 		if err != nil {
-			return nil, err
+			return nil, &AuthorizationError{Err: err}
 		}
 		var candidates []string
 		for _, object := range objects {
@@ -531,7 +535,7 @@ func (s *Service) Resolve(ctx context.Context, in ResolveInput) (*ResolvedTarget
 	return &ResolvedTarget{Target: *descriptor, Selection: selection, Approval: approval, Cluster: snapshot.Cluster}, nil
 }
 
-func (s *Service) ResolveResource(ctx context.Context, orgID, subject, capability string, action Action, ref ResourceRef, selection json.RawMessage) (*ResolvedTarget, error) {
+func (s *Service) ResolveResource(ctx context.Context, orgID, subject, capability string, action Action, ref TargetResourceRef, selection json.RawMessage) (*ResolvedTarget, error) {
 	target, err := s.store.GetByResource(ctx, s.db.Pool, orgID, capability, ref)
 	if err != nil {
 		return nil, err

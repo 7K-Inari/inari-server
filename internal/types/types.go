@@ -126,6 +126,7 @@ const (
 	EventApprovalExpired          = "approval.expired"
 	EventApprovalConfigUpdated    = "approvals.config.updated"
 	EventDeployRequested          = "deploy.requested"
+	EventDeployTargetDenied       = "deploy.target_denied"
 	EventInstanceCreated          = "instance.created"
 	EventInstanceStatus           = "instance.status"
 	EventInstanceUpgraded         = "instance.upgraded"

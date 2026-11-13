@@ -40,6 +40,14 @@ func NewResumeHandler(svc *Service, approvals ApprovalLoader, log *slog.Logger) 
 
 func (h *ResumeHandler) EventTypes() []string { return []string{types.EventApprovalDecided} }
 
+func (h *ResumeHandler) denyTarget(ctx context.Context, req *types.ApprovalRequest) error {
+	if err := h.svc.auditTargetDenial(ctx, req.OrgID, req.Requester, req.ClusterID); err != nil {
+		return err
+	}
+	h.log.Warn("orchestrator: resumed request blocked by target authorization", "approval", req.ID, "cluster", req.ClusterID)
+	return nil
+}
+
 func (h *ResumeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) error {
 	var p types.ApprovalPayload
 	if err := json.Unmarshal(ev.Payload, &p); err != nil {
@@ -59,13 +67,21 @@ func (h *ResumeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) error
 	// own paths — never as deploys.
 	switch req.Action {
 	case GateActionInstanceUpdate:
-		if err := h.svc.UpdateSpecResume(ctx, req.OrgID, req.InstanceID, req.Spec, impersonation.SystemActor("approvals")); err != nil {
+		err := h.svc.UpdateSpecResumeAs(ctx, req.OrgID, req.InstanceID, req.Spec, impersonation.SystemActor("approvals"), req.Requester)
+		if terminalTargetError(err) {
+			return h.denyTarget(ctx, req)
+		}
+		if err != nil {
 			return fmt.Errorf("orchestrator: resume update approval %s: %w", p.ApprovalID, err)
 		}
 		h.log.Info("orchestrator: approval-gated spec update resumed", "approval", p.ApprovalID, "instance", req.InstanceID)
 		return nil
 	case GateActionInstanceDelete:
-		if err := h.svc.DeleteInstanceResume(ctx, req.OrgID, req.InstanceID, impersonation.SystemActor("approvals")); err != nil {
+		err := h.svc.DeleteInstanceResumeAs(ctx, req.OrgID, req.InstanceID, impersonation.SystemActor("approvals"), req.Requester)
+		if terminalTargetError(err) {
+			return h.denyTarget(ctx, req)
+		}
+		if err != nil {
 			return fmt.Errorf("orchestrator: resume delete approval %s: %w", p.ApprovalID, err)
 		}
 		h.log.Info("orchestrator: approval-gated instance delete resumed", "approval", p.ApprovalID, "instance", req.InstanceID)
@@ -94,7 +110,10 @@ func (h *ResumeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) error
 	}
 	// Re-run request-time policy: a policy created or tightened between the
 	// approval request and the decision must still gate the resumed deploy.
-	cluster, err := h.svc.clusters.GetCluster(ctx, req.ClusterID)
+	cluster, err := h.svc.resolveDeploymentCluster(ctx, req.OrgID, req.ClusterID, req.Requester)
+	if terminalTargetError(err) {
+		return h.denyTarget(ctx, req)
+	}
 	if err != nil {
 		return fmt.Errorf("orchestrator: resume: cluster %s: %w", req.ClusterID, err)
 	}

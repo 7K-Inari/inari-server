@@ -28,6 +28,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
 	"github.com/7K-Inari/inari-server/internal/renderer"
+	"github.com/7K-Inari/inari-server/internal/resourcetargets"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -44,6 +45,13 @@ type CatalogResolver interface {
 // ClusterResolver is the cluster registry seam.
 type ClusterResolver interface {
 	GetCluster(ctx context.Context, id string) (*types.Cluster, error)
+}
+
+// ResourceTargetResolver is the shared org target PEP. Orchestrator never
+// treats a caller-selected cluster ID as sufficient proof of entitlement.
+type ResourceTargetResolver interface {
+	ResolveResource(ctx context.Context, orgID, subject, capability string, action resourcetargets.Action,
+		ref resourcetargets.ResourceRef, selection json.RawMessage) (*resourcetargets.ResolvedTarget, error)
 }
 
 // Gate is the approvals seam.
@@ -100,6 +108,10 @@ var ErrNoGitConfig = fmt.Errorf("orchestrator: tenant has no git config (provisi
 // ErrClusterNotActive blocks deploys to non-active clusters (§5.11 cordon).
 var ErrClusterNotActive = fmt.Errorf("orchestrator: cluster is not active")
 
+// ErrTargetResolverRequired prevents a partially wired control plane from
+// silently bypassing target grants.
+var ErrTargetResolverRequired = fmt.Errorf("orchestrator: resource target resolver is not configured")
+
 // ErrClusterMismatch is returned when the cluster belongs to another tenant
 // (reads as not-found to the caller).
 var ErrClusterMismatch = fmt.Errorf("orchestrator: cluster does not belong to tenant")
@@ -152,6 +164,7 @@ type Service struct {
 	instances *inventory.Store
 	catalog   CatalogResolver
 	clusters  ClusterResolver
+	targets   ResourceTargetResolver
 	gate      Gate
 	policy    PolicyChecker // nil = no policy enforcement
 	queue     Queue
@@ -175,6 +188,50 @@ func NewService(d *db.DB, instances *inventory.Store, catalog CatalogResolver, c
 	}
 	s.renders = renderer.New(s.resolveRGD)
 	return s
+}
+
+func (s *Service) WithResourceTargets(targets ResourceTargetResolver) *Service {
+	s.targets = targets
+	return s
+}
+
+func (s *Service) resolveDeploymentCluster(ctx context.Context, orgID, clusterID, subject string) (*types.Cluster, error) {
+	if s.targets == nil {
+		return nil, ErrTargetResolverRequired
+	}
+	resolved, err := s.targets.ResolveResource(ctx, orgID, subject, resourcetargets.CapabilityDeploymentCluster,
+		resourcetargets.ActionUse, resourcetargets.ResourceRef{Kind: resourcetargets.ResourceKindCluster, ID: clusterID}, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resolved == nil || resolved.Cluster == nil {
+		return nil, fmt.Errorf("orchestrator: target resolver returned no cluster")
+	}
+	return resolved.Cluster, nil
+}
+
+func terminalTargetError(err error) bool {
+	return errors.Is(err, resourcetargets.ErrTargetDenied) ||
+		errors.Is(err, resourcetargets.ErrTargetNotFound) ||
+		errors.Is(err, resourcetargets.ErrUnavailable) ||
+		errors.Is(err, resourcetargets.ErrStaleRevision)
+}
+
+// auditTargetDenial records a terminal post-approval denial without exposing
+// provider config or turning a revoked grant into an outbox retry loop.
+func (s *Service) auditTargetDenial(ctx context.Context, orgID, requester, clusterID string) error {
+	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		ev := &types.AuditEvent{OrgID: orgID, Actor: requester, Impersonator: impersonation.FromContext(ctx),
+			Action: "deploy.target_denied", ObjectType: "cluster", ObjectID: clusterID,
+			Payload: json.RawMessage(`{"reason":"target grant revoked or target unavailable"}`)}
+		if err := impersonation.Stamp(ctx, ev); err != nil {
+			return err
+		}
+		if err := s.audit.Record(ctx, tx, ev); err != nil {
+			return err
+		}
+		return audit.AppendOutbox(ctx, tx, orgID, types.EventDeployTargetDenied, types.InstancePayload{OrgID: orgID, ClusterID: clusterID})
+	})
 }
 
 // rgdRef is the catalog-backed RGD reference carried in kro source
@@ -249,7 +306,7 @@ func (s *Service) renderCheck(ctx context.Context, orgID string, manifests ...[]
 // policy requires review, an approval request is created and the deploy
 // resumes automatically on approval (see ResumeHandler).
 func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult, error) {
-	cluster, err := s.clusters.GetCluster(ctx, req.ClusterID)
+	cluster, err := s.resolveDeploymentCluster(ctx, req.OrgID, req.ClusterID, req.Requester)
 	if err != nil {
 		return nil, err
 	}
@@ -710,7 +767,7 @@ func (s *Service) revert(ctx context.Context, orgID, instanceID, toVersion, repo
 	if err := s.checkRepoSelector(ctx, existing, repoID); err != nil {
 		return nil, err
 	}
-	cluster, err := s.clusters.GetCluster(ctx, existing.ClusterID)
+	cluster, err := s.resolveDeploymentCluster(ctx, orgID, existing.ClusterID, requester)
 	if err != nil {
 		return nil, err
 	}
@@ -760,7 +817,7 @@ func (s *Service) UpdateSpec(ctx context.Context, orgID, instanceID string, spec
 	if err := s.checkRepoSelector(ctx, existing, repoID); err != nil {
 		return nil, err
 	}
-	cluster, err := s.clusters.GetCluster(ctx, existing.ClusterID)
+	cluster, err := s.resolveDeploymentCluster(ctx, orgID, existing.ClusterID, requester)
 	if err != nil {
 		return nil, err
 	}
@@ -795,15 +852,23 @@ func (s *Service) UpdateSpec(ctx context.Context, orgID, instanceID string, spec
 	}, item, existing.Version, existing, types.EventInstanceUpdated, true)
 }
 
-// UpdateSpecResume re-enters the spec update after its approval was granted
-// (ResumeHandler; the gate already ran at request time).
+// UpdateSpecResume re-enters the spec update after its approval was granted.
+// The authorization subject remains the original requester while requester is
+// the audit actor (system automation on an outbox resume).
 func (s *Service) UpdateSpecResume(ctx context.Context, orgID, instanceID string, spec json.RawMessage, requester string) error {
+	return s.UpdateSpecResumeAs(ctx, orgID, instanceID, spec, requester, requester)
+}
+
+func (s *Service) UpdateSpecResumeAs(ctx context.Context, orgID, instanceID string, spec json.RawMessage, requester, authorizationSubject string) error {
 	existing, err := s.instances.Get(ctx, s.db.Pool, instanceID)
 	if err != nil {
 		return err
 	}
 	if existing.OrgID != orgID {
 		return inventory.ErrInstanceNotFound
+	}
+	if _, err := s.resolveDeploymentCluster(ctx, orgID, existing.ClusterID, authorizationSubject); err != nil {
+		return err
 	}
 	item, err := s.catalog.GetItemByID(ctx, existing.CatalogItemID)
 	if err != nil {
@@ -827,6 +892,9 @@ func (s *Service) DeleteInstance(ctx context.Context, orgID, instanceID, request
 	if existing.OrgID != orgID {
 		return nil, inventory.ErrInstanceNotFound
 	}
+	if _, err := s.resolveDeploymentCluster(ctx, orgID, existing.ClusterID, requester); err != nil {
+		return nil, err
+	}
 	item, err := s.catalog.GetItemByID(ctx, existing.CatalogItemID)
 	if err != nil {
 		return nil, err
@@ -848,15 +916,21 @@ func (s *Service) DeleteInstance(ctx context.Context, orgID, instanceID, request
 	return &DeployResult{InstanceID: instanceID, Version: existing.Version, Status: string(types.InstanceStateDeleting)}, nil
 }
 
-// DeleteInstanceResume re-enters the delete after its approval was granted
-// (ResumeHandler; the gate already ran at request time).
+// DeleteInstanceResume re-enters the delete after its approval was granted.
 func (s *Service) DeleteInstanceResume(ctx context.Context, orgID, instanceID, requester string) error {
+	return s.DeleteInstanceResumeAs(ctx, orgID, instanceID, requester, requester)
+}
+
+func (s *Service) DeleteInstanceResumeAs(ctx context.Context, orgID, instanceID, requester, authorizationSubject string) error {
 	existing, err := s.instances.Get(ctx, s.db.Pool, instanceID)
 	if err != nil {
 		return err
 	}
 	if existing.OrgID != orgID {
 		return inventory.ErrInstanceNotFound
+	}
+	if _, err := s.resolveDeploymentCluster(ctx, orgID, existing.ClusterID, authorizationSubject); err != nil {
+		return err
 	}
 	return s.deleteInstance(ctx, existing, requester)
 }

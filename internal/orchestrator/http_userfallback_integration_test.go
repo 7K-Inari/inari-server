@@ -65,7 +65,7 @@ func TestGitConfigUserTemplateFallback(t *testing.T) {
 	approvalsSvc := approvals.NewService(database, approvals.NewStore(database), auditStore, tenancySvc, catalogSvc)
 	fake := gitprovider.NewFake()
 	orchSvc := orchestrator.NewService(database, inventory.NewStore(), catalogSvc, itClusters{},
-		approvalsSvc, &itQueue{}, gitprovider.StaticResolver{P: fake}, auditStore)
+		approvalsSvc, &itQueue{}, gitprovider.StaticResolver{P: fake}, auditStore).WithResourceTargets(&stubTargetResolver{})
 	router, api := httpserver.NewRouter(slog.Default(), itValidator{}, database)
 	orchestrator.NewHandler(orchSvc, itTenants{"acme": {ID: "org:1", Slug: "acme"}}, az).RegisterRoutes(api)
 	srv := httptest.NewServer(router)

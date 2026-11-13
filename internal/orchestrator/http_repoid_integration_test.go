@@ -91,7 +91,7 @@ func itServerWithRepoResolver(t *testing.T) (*httptest.Server, *db.DB, *gitprovi
 	resolver := gitprovider.StaticResolver{P: fake}
 	repoResolver := gitprovider.NewRepoResolver(repoStoreAdapter{invStore, database}, nil, resolver)
 	orchSvc := orchestrator.NewService(database, invStore, catalogSvc, itClusters{},
-		approvalsSvc, queue, resolver, auditStore).WithRepoResolver(repoResolver)
+		approvalsSvc, queue, resolver, auditStore).WithRepoResolver(repoResolver).WithResourceTargets(&stubTargetResolver{})
 
 	router, api := httpserver.NewRouter(slog.Default(), itValidator{}, database)
 	catalog.NewHandler(catalogSvc, itTenants{"acme": {ID: "org:1", Slug: "acme"}}, itAuthorizer{allow: true}).RegisterRoutes(api)
@@ -276,7 +276,7 @@ func itServerM3WithRepoResolver(t *testing.T) (*httptest.Server, *db.DB, *gitpro
 	invStore := inventory.NewStore()
 	repoResolver := gitprovider.NewRepoResolver(repoStoreAdapter{invStore, database}, nil, resolver)
 	orchSvc := orchestrator.NewService(database, invStore, catalogSvc, itClusters{},
-		approvalsSvc, q, resolver, auditStore).WithRepoResolver(repoResolver)
+		approvalsSvc, q, resolver, auditStore).WithRepoResolver(repoResolver).WithResourceTargets(&stubTargetResolver{})
 	dispatcher := eventbustest.Dispatcher(t, database, time.Millisecond,
 		audit.Named("orchestrator-resume", orchestrator.NewResumeHandler(orchSvc, approvalsSvc, slog.Default())))
 
@@ -375,7 +375,7 @@ func itServerEnforcement(t *testing.T) (*httptest.Server, *db.DB, *gitprovider.F
 	resolver := gitprovider.StaticResolver{P: fake}
 	repoResolver := gitprovider.NewRepoResolver(repoStoreAdapter{invStore, database}, nil, resolver)
 	orchSvc := orchestrator.NewService(database, invStore, catalogSvc, itClusters{},
-		approvalsSvc, queue, resolver, auditStore).WithRepoResolver(repoResolver)
+		approvalsSvc, queue, resolver, auditStore).WithRepoResolver(repoResolver).WithResourceTargets(&stubTargetResolver{})
 
 	router, api := httpserver.NewRouter(slog.Default(), enforcementValidator{}, database)
 	orchestrator.NewHandler(orchSvc, itTenants{"acme": {ID: "org:1", Slug: "acme"}}, enforcementAuthorizer{}).

@@ -41,6 +41,11 @@ func (p itPolicyChecker) RenderCheck(context.Context, string, ...[]byte) (*types
 // policy checker. Returns the services the M3 flows need to drive directly.
 func itServerM3(t *testing.T, checker orchestrator.PolicyChecker) (*httptest.Server, *db.DB, *gitprovider.Fake, *itQueue, *approvals.Service, *audit.Dispatcher) {
 	t.Helper()
+	return itServerM3Targets(t, checker, &stubTargetResolver{})
+}
+
+func itServerM3Targets(t *testing.T, checker orchestrator.PolicyChecker, targets orchestrator.ResourceTargetResolver) (*httptest.Server, *db.DB, *gitprovider.Fake, *itQueue, *approvals.Service, *audit.Dispatcher) {
+	t.Helper()
 	ctx := context.Background()
 	pg, err := testutil.SharedPostgres(ctx)
 	if err != nil {
@@ -78,7 +83,7 @@ func itServerM3(t *testing.T, checker orchestrator.PolicyChecker) (*httptest.Ser
 	git := gitprovider.StaticResolver{P: fake}
 	queue := &itQueue{}
 	orchSvc := orchestrator.NewService(database, inventory.NewStore(), catalogSvc, itClusters{},
-		approvalsSvc, queue, git, auditStore)
+		approvalsSvc, queue, git, auditStore).WithResourceTargets(targets)
 	if checker != nil {
 		orchSvc = orchSvc.WithPolicyChecker(checker)
 	}

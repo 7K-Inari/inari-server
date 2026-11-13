@@ -184,21 +184,21 @@ func TestCatalogListAndPin(t *testing.T) {
 	}
 	var pg *catalog.ItemView
 	for i := range out.Items {
-		if out.Items[i].ID == "curated:postgres-aws" {
+		if out.Items[i].ID == "core/postgres-aws" {
 			pg = &out.Items[i]
 		}
 	}
 	if pg == nil {
-		t.Fatalf("curated:postgres-aws missing from catalog: %s", body)
+		t.Fatalf("core/postgres-aws missing from catalog: %s", body)
 	}
 	if len(pg.Versions) != 2 {
 		t.Errorf("postgres-aws versions = %d, want 2", len(pg.Versions))
 	}
 
-	if code, body := itReq(t, srv, "PUT", "/api/v1/tenants/acme/catalog/curated:postgres-aws/pin", "good", `{"version":"1.0.0"}`); code != http.StatusOK && code != http.StatusNoContent {
+	if code, body := itReq(t, srv, "PUT", "/api/v1/tenants/acme/catalog/core/postgres-aws/pin", "good", `{"version":"1.0.0"}`); code != http.StatusOK && code != http.StatusNoContent {
 		t.Fatalf("pin: %d %s", code, body)
 	}
-	code, body = itReq(t, srv, "GET", "/api/v1/tenants/acme/catalog/curated:postgres-aws", "good", "")
+	code, body = itReq(t, srv, "GET", "/api/v1/tenants/acme/catalog/core/postgres-aws", "good", "")
 	if code != http.StatusOK {
 		t.Fatalf("get item: %d %s", code, body)
 	}
@@ -213,7 +213,7 @@ func TestCatalogListAndPin(t *testing.T) {
 	}
 
 	// Pin to a nonexistent version is rejected.
-	if code, _ := itReq(t, srv, "PUT", "/api/v1/tenants/acme/catalog/curated:postgres-aws/pin", "good", `{"version":"9.9.9"}`); code != http.StatusBadRequest {
+	if code, _ := itReq(t, srv, "PUT", "/api/v1/tenants/acme/catalog/core/postgres-aws/pin", "good", `{"version":"9.9.9"}`); code != http.StatusBadRequest {
 		t.Errorf("pin bogus version: got %d, want 400", code)
 	}
 	// Outsider sees nothing.
@@ -231,7 +231,7 @@ func TestDeployToHealthVisible(t *testing.T) {
 	ctx := context.Background()
 
 	code, body := itReq(t, srv, "POST", "/api/v1/tenants/acme/deploys", "good",
-		`{"itemId":"curated:postgres-aws","clusterId":"cluster-1","name":"my-db","namespace":"apps","ownerTeam":"developers","spec":{"engineVersion":"16","storageGB":50}}`)
+		`{"itemId":"core/postgres-aws","clusterId":"cluster-1","name":"my-db","namespace":"apps","ownerTeam":"developers","spec":{"engineVersion":"16","storageGB":50}}`)
 	if code != http.StatusOK {
 		t.Fatalf("deploy: %d %s", code, body)
 	}
@@ -248,14 +248,14 @@ func TestDeployToHealthVisible(t *testing.T) {
 
 	// Commit landed in the tenant state repo.
 	files := git.Files("inari-dev/acme-inari-state", "main")
-	inst, ok := files["clusters/cluster-1/postgres-aws/my-db/instance.yaml"]
+	inst, ok := files["clusters/cluster-1/core/postgres-aws/my-db/instance.yaml"]
 	if !ok {
 		t.Fatalf("instance manifest not committed: %v", keysOf(files))
 	}
 	if !strings.Contains(inst, "kind: PostgresAWS") || !strings.Contains(inst, "storageGB: 50") {
 		t.Errorf("rendered manifest wrong:\n%s", inst)
 	}
-	if _, ok := files["clusters/cluster-1/postgres-aws/my-db/application.yaml"]; !ok {
+	if _, ok := files["clusters/cluster-1/core/postgres-aws/my-db/application.yaml"]; !ok {
 		t.Error("application manifest not committed")
 	}
 
@@ -335,7 +335,7 @@ func TestDeployGitAuthFailureMapping(t *testing.T) {
 	srv, _, queue := itServerWithGit(t, errGitResolver{err: notInstalled})
 	defer srv.Close()
 
-	deployBody := `{"itemId":"curated:postgres-aws","clusterId":"cluster-1","name":"my-db","namespace":"apps","ownerTeam":"developers","spec":{"engineVersion":"16"}}`
+	deployBody := `{"itemId":"core/postgres-aws","clusterId":"cluster-1","name":"my-db","namespace":"apps","ownerTeam":"developers","spec":{"engineVersion":"16"}}`
 	code, body := itReq(t, srv, "POST", "/api/v1/tenants/acme/deploys", "good", deployBody)
 	if code != http.StatusPreconditionFailed {
 		t.Fatalf("not-installed deploy: %d %s, want 412", code, body)
@@ -373,12 +373,12 @@ func TestApprovalGate(t *testing.T) {
 
 	// Flip the item to peer approval.
 	if _, err := database.Pool.Exec(ctx,
-		`UPDATE catalog_items SET approval_policy = 'peer' WHERE id = 'curated:web-service'`); err != nil {
+		`UPDATE catalog_items SET approval_policy = 'peer' WHERE id = 'core/web-service'`); err != nil {
 		t.Fatal(err)
 	}
 
 	code, body := itReq(t, srv, "POST", "/api/v1/tenants/acme/deploys", "good",
-		`{"itemId":"curated:web-service","clusterId":"cluster-1","name":"web","channel":"incubating","spec":{"hostname":"app.example.com"}}`)
+		`{"itemId":"core/web-service","clusterId":"cluster-1","name":"web","channel":"incubating","spec":{"hostname":"app.example.com"}}`)
 	if code != http.StatusOK {
 		t.Fatalf("deploy: %d %s", code, body)
 	}
@@ -429,11 +429,11 @@ func TestUpgradeFlow(t *testing.T) {
 	defer srv.Close()
 
 	// Pin the tenant to 1.0.0 so the deploy starts behind latest.
-	if code, body := itReq(t, srv, "PUT", "/api/v1/tenants/acme/catalog/curated:postgres-aws/pin", "good", `{"version":"1.0.0"}`); code >= 300 {
+	if code, body := itReq(t, srv, "PUT", "/api/v1/tenants/acme/catalog/core/postgres-aws/pin", "good", `{"version":"1.0.0"}`); code >= 300 {
 		t.Fatalf("pin: %d %s", code, body)
 	}
 	code, body := itReq(t, srv, "POST", "/api/v1/tenants/acme/deploys", "good",
-		`{"itemId":"curated:postgres-aws","clusterId":"cluster-1","name":"db1","spec":{"storageGB":20}}`)
+		`{"itemId":"core/postgres-aws","clusterId":"cluster-1","name":"db1","spec":{"storageGB":20}}`)
 	if code != http.StatusOK {
 		t.Fatalf("deploy: %d %s", code, body)
 	}
@@ -481,11 +481,11 @@ func TestUpgradeFlow(t *testing.T) {
 	}
 	// The instance manifest carries the user spec; the new 1.1.0 field shows
 	// up in the version's schema served by the catalog.
-	inst := git.Files("inari-dev/acme-inari-state", "main")["clusters/cluster-1/postgres-aws/db1/instance.yaml"]
+	inst := git.Files("inari-dev/acme-inari-state", "main")["clusters/cluster-1/core/postgres-aws/db1/instance.yaml"]
 	if !strings.Contains(inst, "storageGB: 20") {
 		t.Errorf("upgraded manifest lost user spec:\n%s", inst)
 	}
-	code, body = itReq(t, srv, "GET", "/api/v1/tenants/acme/catalog/curated:postgres-aws", "good", "")
+	code, body = itReq(t, srv, "GET", "/api/v1/tenants/acme/catalog/core/postgres-aws", "good", "")
 	if code != http.StatusOK || !strings.Contains(body, "multiAZ") {
 		t.Errorf("1.1.0 schema with multiAZ not served: %d", code)
 	}
@@ -607,11 +607,11 @@ func TestInstanceLifecycle(t *testing.T) {
 	ctx := context.Background()
 
 	// Deploy pinned at 1.0.0 so upgrade/rollback have somewhere to go.
-	if code, body := itReq(t, srv, "PUT", "/api/v1/tenants/acme/catalog/curated:postgres-aws/pin", "good", `{"version":"1.0.0"}`); code >= 300 {
+	if code, body := itReq(t, srv, "PUT", "/api/v1/tenants/acme/catalog/core/postgres-aws/pin", "good", `{"version":"1.0.0"}`); code >= 300 {
 		t.Fatalf("pin: %d %s", code, body)
 	}
 	code, body := itReq(t, srv, "POST", "/api/v1/tenants/acme/deploys", "good",
-		`{"itemId":"curated:postgres-aws","clusterId":"cluster-1","name":"db1","spec":{"storageGB":20}}`)
+		`{"itemId":"core/postgres-aws","clusterId":"cluster-1","name":"db1","spec":{"storageGB":20}}`)
 	if code != http.StatusOK {
 		t.Fatalf("deploy: %d %s", code, body)
 	}
@@ -631,7 +631,7 @@ func TestInstanceLifecycle(t *testing.T) {
 	if out.Deploy.Version != "1.0.0" || out.Deploy.Status != "upgrading" {
 		t.Errorf("update result = %+v", out.Deploy)
 	}
-	inst := git.Files("inari-dev/acme-inari-state", "main")["clusters/cluster-1/postgres-aws/db1/instance.yaml"]
+	inst := git.Files("inari-dev/acme-inari-state", "main")["clusters/cluster-1/core/postgres-aws/db1/instance.yaml"]
 	if !strings.Contains(inst, "storageGB: 42") {
 		t.Errorf("re-rendered manifest missing new spec:\n%s", inst)
 	}

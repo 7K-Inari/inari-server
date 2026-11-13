@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
 	"github.com/7K-Inari/inari-server/internal/artifactadmission"
+	"github.com/7K-Inari/inari-server/internal/oci"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -93,6 +95,27 @@ func (s *Service) AdmitVersion(ctx context.Context, itemID, version string, envi
 		out.ChartEvidence = chartEvidence
 	}
 	return out, nil
+}
+
+// fixtureBackend is used only by NewService's local FixturePuller path. It
+// keeps existing internal integration fixtures independent of a live registry;
+// production sources are constructed through NewServiceWithSources.
+type fixtureBackend struct{}
+
+func (fixtureBackend) Fetch(_ context.Context, ref string) (*oci.Artifact, error) {
+	digest := ref
+	if at := strings.LastIndex(ref, "@"); at >= 0 {
+		digest = ref[at+1:]
+	}
+	return &oci.Artifact{Digest: digest, MediaType: trustedsource.CatalogPackageMediaType}, nil
+}
+
+func (fixtureBackend) VerifySignature(context.Context, string, artifactadmission.PublisherExpectation) error {
+	return nil
+}
+
+func (fixtureBackend) VerifyAttestations(context.Context, string, artifactadmission.PublisherExpectation, string) ([]artifactadmission.Attestation, error) {
+	return nil, nil
 }
 
 func admissionEntry(payload json.RawMessage) (trustedsource.IndexEntry, error) {

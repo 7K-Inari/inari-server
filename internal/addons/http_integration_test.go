@@ -487,15 +487,15 @@ func TestAddonsHTTPSupportedAddonsCDLoop(t *testing.T) {
 			item: "platform:external-dns", version: "1.15.2",
 			values: `{"policy":"upsert-only"}`, newValues: `{"policy":"sync"}`,
 			wantInFile: "policy: sync",
-			deployMode: "application", wantPath: "addons/external-dns",
-			wantFile: "addons/external-dns/application.yaml",
+			deployMode: "application", wantPath: "addons/platform:external-dns",
+			wantFile: "addons/platform:external-dns/application.yaml",
 		},
 		{
 			item: "platform:argocd", version: "7.6.12",
 			values: `{"server":{"replicas":2}}`, newValues: `{"server":{"replicas":3}}`,
 			wantInFile: "replicas: 3",
-			deployMode: "applicationset", wantPath: "addons/argocd",
-			wantFile: "addons/argocd/applicationset.yaml",
+			deployMode: "applicationset", wantPath: "addons/platform:argocd",
+			wantFile: "addons/platform:argocd/applicationset.yaml",
 		},
 	}
 	for _, c := range cases {
@@ -560,7 +560,7 @@ func TestAddonsHTTPSupportedAddonsCDLoop(t *testing.T) {
 			t.Errorf("%s list lacks the fleet argocd addon: %s", cluster, body)
 		}
 	}
-	appSet := f.git.Files("acme/acme-inari-state", "main")["addons/argocd/applicationset.yaml"]
+	appSet := f.git.Files("acme/acme-inari-state", "main")["addons/platform:argocd/applicationset.yaml"]
 	for _, cluster := range []string{"prod-eu", "prod-us"} {
 		if !strings.Contains(appSet, cluster) {
 			t.Errorf("ApplicationSet list generator must target %s:\n%s", cluster, appSet)

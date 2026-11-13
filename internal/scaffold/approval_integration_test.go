@@ -79,7 +79,7 @@ func TestApprovalGatedRunResumesOnApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	run, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "go-service", "", "", json.RawMessage(`{"name":"payments-api"}`))
+	run, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "template:go-service", "", "", json.RawMessage(`{"name":"payments-api"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestApprovalGatedRunRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	run, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "go-service", "", "", json.RawMessage(`{"name":"payments-api"}`))
+	run, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "template:go-service", "", "", json.RawMessage(`{"name":"payments-api"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +203,7 @@ func TestUngatedTemplateSkipsApproval(t *testing.T) {
 		Upsert: &fakeUpserter{}, RBAC: &fakeRBACBinder{},
 		Templates: &FilePuller{Root: dir}, Tenants: itResolver(), Gate: ap,
 	})
-	run, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "go-service", "", "", json.RawMessage(`{"name":"payments-api"}`))
+	run, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "template:go-service", "", "", json.RawMessage(`{"name":"payments-api"}`))
 	if err != nil {
 		t.Fatal(err)
 	}

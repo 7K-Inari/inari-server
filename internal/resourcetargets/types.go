@@ -31,7 +31,7 @@ func (a Action) Valid() bool {
 	return a == ActionView || a == ActionUse || a == ActionProvision
 }
 
-type ResourceRef struct {
+type TargetResourceRef struct {
 	Kind string `json:"kind"`
 	ID   string `json:"id"`
 }
@@ -70,22 +70,22 @@ type Grant struct {
 }
 
 type Target struct {
-	ID               string          `json:"id"`
-	OrgID            string          `json:"orgId"`
-	Name             string          `json:"name"`
-	ResourceRef      ResourceRef     `json:"resourceRef"`
-	Capabilities     []string        `json:"capabilities"`
-	Config           json.RawMessage `json:"config"`
-	Enabled          bool            `json:"enabled"`
-	IsDefault        bool            `json:"isDefault"`
-	Revision         int64           `json:"revision"`
-	Binding          Binding         `json:"binding"`
-	Readiness        Readiness       `json:"readiness"`
-	EffectiveActions []Action        `json:"effectiveActions,omitempty"`
-	Grants           []Grant         `json:"grants,omitempty"`
-	CreatedBy        string          `json:"-"`
-	CreatedAt        time.Time       `json:"createdAt"`
-	UpdatedAt        time.Time       `json:"updatedAt"`
+	ID               string            `json:"id"`
+	OrgID            string            `json:"orgId"`
+	Name             string            `json:"name"`
+	ResourceRef      TargetResourceRef `json:"resourceRef"`
+	Capabilities     []string          `json:"capabilities"`
+	Config           json.RawMessage   `json:"config"`
+	Enabled          bool              `json:"enabled"`
+	IsDefault        bool              `json:"isDefault"`
+	Revision         int64             `json:"revision"`
+	Binding          Binding           `json:"binding"`
+	Readiness        Readiness         `json:"readiness"`
+	EffectiveActions []Action          `json:"effectiveActions,omitempty"`
+	Grants           []Grant           `json:"grants,omitempty"`
+	CreatedBy        string            `json:"-"`
+	CreatedAt        time.Time         `json:"createdAt"`
+	UpdatedAt        time.Time         `json:"updatedAt"`
 }
 
 func (t *Target) Capability() string {
@@ -102,7 +102,7 @@ type ApprovalPolicy struct {
 
 type CreateInput struct {
 	Name        string
-	ResourceRef ResourceRef
+	ResourceRef TargetResourceRef
 	Capability  string
 	Config      json.RawMessage
 	IsDefault   bool
@@ -118,7 +118,7 @@ type PatchInput struct {
 
 type ListFilter struct {
 	Capability         string
-	ResourceRef        *ResourceRef
+	ResourceRef        *TargetResourceRef
 	Action             Action
 	IncludeUnavailable bool
 }
@@ -156,6 +156,13 @@ var (
 	ErrUnavailable    = errors.New("resource target is unavailable")
 	ErrInvalidInput   = errors.New("resource target invalid input")
 )
+
+type AuthorizationError struct{ Err error }
+
+func (e *AuthorizationError) Error() string {
+	return "resource target authorization unavailable: " + e.Err.Error()
+}
+func (e *AuthorizationError) Unwrap() error { return e.Err }
 
 type FieldError struct {
 	Path    string `json:"path"`

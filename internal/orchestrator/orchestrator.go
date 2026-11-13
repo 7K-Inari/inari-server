@@ -51,7 +51,7 @@ type ClusterResolver interface {
 // treats a caller-selected cluster ID as sufficient proof of entitlement.
 type ResourceTargetResolver interface {
 	ResolveResource(ctx context.Context, orgID, subject, capability string, action resourcetargets.Action,
-		ref resourcetargets.ResourceRef, selection json.RawMessage) (*resourcetargets.ResolvedTarget, error)
+		ref resourcetargets.TargetResourceRef, selection json.RawMessage) (*resourcetargets.ResolvedTarget, error)
 }
 
 // Gate is the approvals seam.
@@ -200,7 +200,7 @@ func (s *Service) resolveDeploymentCluster(ctx context.Context, orgID, clusterID
 		return nil, ErrTargetResolverRequired
 	}
 	resolved, err := s.targets.ResolveResource(ctx, orgID, subject, resourcetargets.CapabilityDeploymentCluster,
-		resourcetargets.ActionUse, resourcetargets.ResourceRef{Kind: resourcetargets.ResourceKindCluster, ID: clusterID}, nil)
+		resourcetargets.ActionUse, resourcetargets.TargetResourceRef{Kind: resourcetargets.ResourceKindCluster, ID: clusterID}, nil)
 	if err != nil {
 		return nil, err
 	}

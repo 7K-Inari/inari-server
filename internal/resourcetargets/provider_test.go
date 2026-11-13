@@ -9,6 +9,18 @@ import (
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
+func TestProviderDescriptorsContainValidJSON(t *testing.T) {
+	for _, descriptor := range DefaultRegistry().Descriptors() {
+		for name, raw := range map[string]json.RawMessage{
+			"configSchema": descriptor.ConfigSchema, "selectionSchema": descriptor.SelectionSchema, "uiSchema": descriptor.UISchema,
+		} {
+			if !json.Valid(raw) {
+				t.Errorf("%s %s is invalid JSON: %s", descriptor.Capability, name, raw)
+			}
+		}
+	}
+}
+
 func TestDeploymentClusterProvider(t *testing.T) {
 	p := deploymentClusterProvider{}
 	if _, err := p.NormalizeConfig(json.RawMessage(`{"secret":"no"}`)); err == nil {
@@ -19,7 +31,7 @@ func TestDeploymentClusterProvider(t *testing.T) {
 		Cluster:      &types.Cluster{ID: "cluster:1", OrgID: "org:1", State: types.ClusterStateActive, LastSeenAt: &now},
 		BaselineRepo: &types.TenantGitRepo{ID: "repo-1", OrgID: "org:1", Scope: types.GitRepoScopePlatform, BaseBranch: "main", CommitPolicy: types.CommitPolicyPullRequest},
 	}
-	target := &Target{ResourceRef: ResourceRef{Kind: ResourceKindCluster, ID: "cluster:1"}, Config: json.RawMessage(`{}`)}
+	target := &Target{ResourceRef: TargetResourceRef{Kind: ResourceKindCluster, ID: "cluster:1"}, Config: json.RawMessage(`{}`)}
 	binding, readiness, err := p.Resolve(target, snapshot)
 	if err != nil {
 		t.Fatal(err)
@@ -88,7 +100,7 @@ func TestGrafanaProviderValidationAndResolution(t *testing.T) {
 		t.Fatalf("valid registration: %v", err)
 	}
 
-	target := &Target{ResourceRef: ResourceRef{Kind: ResourceKindCluster, ID: "cluster:1"}, Config: normalized}
+	target := &Target{ResourceRef: TargetResourceRef{Kind: ResourceKindCluster, ID: "cluster:1"}, Config: normalized}
 	binding, readiness, err := p.Resolve(target, validGrafanaSnapshot())
 	if err != nil {
 		t.Fatal(err)

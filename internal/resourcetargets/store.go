@@ -22,7 +22,7 @@ const targetColumns = `id, org_id, name, resource_kind, resource_id, capability,
 
 func scanTarget(row pgx.Row) (*Target, error) {
 	var t Target
-	var ref ResourceRef
+	var ref TargetResourceRef
 	var capability string
 	if err := row.Scan(&t.ID, &t.OrgID, &t.Name, &ref.Kind, &ref.ID, &capability, &t.Config,
 		&t.Enabled, &t.IsDefault, &t.Revision, &t.CreatedBy, &t.CreatedAt, &t.UpdatedAt); err != nil {
@@ -69,7 +69,7 @@ func (s *Store) Get(ctx context.Context, q db.Querier, orgID, id string) (*Targe
 	return t, err
 }
 
-func (s *Store) GetByResource(ctx context.Context, q db.Querier, orgID, capability string, ref ResourceRef) (*Target, error) {
+func (s *Store) GetByResource(ctx context.Context, q db.Querier, orgID, capability string, ref TargetResourceRef) (*Target, error) {
 	t, err := scanTarget(q.QueryRow(ctx, `SELECT `+targetColumns+` FROM resource_targets
 		WHERE org_id=$1 AND capability=$2 AND resource_kind=$3 AND resource_id=$4`, orgID, capability, ref.Kind, ref.ID))
 	if errors.Is(err, pgx.ErrNoRows) {

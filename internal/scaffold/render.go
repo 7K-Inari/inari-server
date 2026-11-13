@@ -19,6 +19,9 @@ import (
 	"text/template"
 	"unicode/utf8"
 
+	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
+	"github.com/7K-Inari/inari-server/internal/artifactadmission"
+	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -103,6 +106,56 @@ func renderSkeleton(pkgDir string, data *RenderData) ([]RenderedFile, error) {
 	return out, nil
 }
 
+type artifactTemplateSource interface {
+	GetArtifact(ctx context.Context, ref, version, expectedSkeletonDigest string) (*TemplatePackage, error)
+}
+
+func templatePackageForRun(ctx context.Context, env *ExecEnv, run *types.ScaffoldRun) (*TemplatePackage, error) {
+	if env == nil || env.Templates == nil {
+		return nil, errors.New("scaffold: no template source configured")
+	}
+	if env.Catalog == nil {
+		// DB-free runner tests exercise internal file sources only. Live
+		// wiring always supplies Catalog for source admission.
+		return env.Templates.Get(ctx, strings.TrimPrefix(run.TemplateItemID, "template:"), run.TemplateVersion)
+	}
+	item, err := env.Catalog.GetItemByID(ctx, run.TemplateItemID)
+	if err != nil {
+		return nil, err
+	}
+	if item.SourceID == "" {
+		return env.Templates.Get(ctx, strings.TrimPrefix(run.TemplateItemID, "template:"), run.TemplateVersion)
+	}
+	admitter, ok := env.Catalog.(interface {
+		AdmitVersion(context.Context, string, string, trustedsource.Environment) (*catalog.AdmittedVersion, error)
+	})
+	if !ok {
+		return nil, &artifactadmission.Error{Code: artifactadmission.CodeUnavailable, Ref: run.TemplateItemID, Err: errors.New("template admission seam is not configured"), Temporary: true}
+	}
+	admitted, err := admitter.AdmitVersion(ctx, run.TemplateItemID, run.TemplateVersion, env.Environment)
+	if err != nil {
+		return nil, err
+	}
+	source, ok := env.Templates.(artifactTemplateSource)
+	if !ok {
+		return nil, errors.New("scaffold: template source does not support exact digest resolution")
+	}
+	if admitted == nil {
+		return nil, errors.New("scaffold: admission returned no result")
+	}
+	version := admitted.Version
+	if version == nil {
+		return nil, errors.New("scaffold: admission returned no template version")
+	}
+	var payload struct {
+		SkeletonDigest string `json:"skeletonDigest"`
+	}
+	if err := json.Unmarshal(version.Payload, &payload); err != nil {
+		return nil, fmt.Errorf("scaffold: parse template payload: %w", err)
+	}
+	return source.GetArtifact(ctx, version.ArtifactRef, run.TemplateVersion, payload.SkeletonDigest)
+}
+
 // stepRendering renders the run's template skeleton into step.Result.
 // Idempotent: a step whose Result already holds a rendered file list (a
 // crash between step persist and the next step) returns done immediately.
@@ -113,8 +166,7 @@ func stepRendering(ctx context.Context, env *ExecEnv, rc *RunContext, step *type
 	if env == nil || env.Templates == nil {
 		return false, errors.New("scaffold: no template source configured")
 	}
-	name := strings.TrimPrefix(rc.Run.TemplateItemID, "template:")
-	pkg, err := env.Templates.Get(ctx, name, rc.Run.TemplateVersion)
+	pkg, err := templatePackageForRun(ctx, env, rc.Run)
 	if err != nil {
 		return false, err
 	}

@@ -72,6 +72,29 @@ func TestHelmHandlerMultiSourceApplication(t *testing.T) {
 	}
 }
 
+func TestHelmHandlerOCIChartDigest(t *testing.T) {
+	r := New(nil)
+	desc := helmDesc()
+	desc.Helm.RepoURL = "oci://ghcr.io/7k-hiroba/argocd/charts"
+	desc.Helm.Digest = "sha256:52ccaee6d4dd272e54bfccda77738b42e1edf0e4a20c27e23f0b6c15d01aef79"
+	files, err := r.Render(context.Background(), desc, testParams())
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := filesByPath(files)["addons/cert-manager/application.yaml"]
+	doc := parseDoc(t, app)
+	chart := doc["spec"].(map[string]any)["sources"].([]any)[0].(map[string]any)
+	if chart["repoURL"] != "oci://ghcr.io/7k-hiroba/argocd/charts/cert-manager" {
+		t.Errorf("repoURL = %v", chart["repoURL"])
+	}
+	if chart["targetRevision"] != desc.Helm.Digest {
+		t.Errorf("targetRevision = %v, want digest", chart["targetRevision"])
+	}
+	if _, found := chart["chart"]; found {
+		t.Errorf("mutable chart field present: %v", chart)
+	}
+}
+
 func TestHelmHandlerApplicationSetWithClusterOverlays(t *testing.T) {
 	r := New(nil)
 	p := testParams()

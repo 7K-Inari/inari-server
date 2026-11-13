@@ -52,7 +52,7 @@ type Store struct{}
 
 func NewStore() *Store { return &Store{} }
 
-const instanceCols = `id, org_id, cluster_id, catalog_item_id, version, owner_team, spec, resource_ref,
+const instanceCols = `id, org_id, cluster_id, catalog_item_id, version, artifact_digest, owner_team, spec, resource_ref,
                       health, sync_state, status_message, state, management_mode, commit_sha, pr_url,
                       repo_id, generation, created_at, updated_at`
 
@@ -60,7 +60,7 @@ func scanInstance(row pgx.Row) (*types.ResourceInstance, error) {
 	var it types.ResourceInstance
 	var ref json.RawMessage
 	var repoID *string
-	err := row.Scan(&it.ID, &it.OrgID, &it.ClusterID, &it.CatalogItemID, &it.Version, &it.OwnerTeam,
+	err := row.Scan(&it.ID, &it.OrgID, &it.ClusterID, &it.CatalogItemID, &it.Version, &it.ArtifactDigest, &it.OwnerTeam,
 		&it.Spec, &ref, &it.Health, &it.SyncState, &it.StatusMessage, &it.State, &it.ManagementMode,
 		&it.CommitSHA, &it.PRURL, &repoID, &it.Generation, &it.CreatedAt, &it.UpdatedAt)
 	if err != nil {
@@ -85,12 +85,17 @@ func (s *Store) Create(ctx context.Context, q db.Querier, it *types.ResourceInst
 		repoID = &it.RepoID
 	}
 	const sql = `INSERT INTO resource_instances
-	               (id, org_id, cluster_id, catalog_item_id, version, owner_team, spec, resource_ref,
+	               (id, org_id, cluster_id, catalog_item_id, version, artifact_digest, owner_team, spec, resource_ref,
 	                health, sync_state, status_message, state, management_mode, commit_sha, pr_url, repo_id, generation)
-	             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`
-	_, err = q.Exec(ctx, sql, it.ID, it.OrgID, it.ClusterID, it.CatalogItemID, it.Version, it.OwnerTeam,
+	             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`
+	_, err = q.Exec(ctx, sql, it.ID, it.OrgID, it.ClusterID, it.CatalogItemID, it.Version, it.ArtifactDigest, it.OwnerTeam,
 		it.Spec, ref, it.Health, it.SyncState, it.StatusMessage, it.State, it.ManagementMode,
 		it.CommitSHA, it.PRURL, repoID, it.Generation)
+	return err
+}
+
+func (s *Store) SetArtifactDigest(ctx context.Context, q db.Querier, id, digest string) error {
+	_, err := q.Exec(ctx, `UPDATE resource_instances SET artifact_digest=$2 WHERE id=$1`, id, digest)
 	return err
 }
 

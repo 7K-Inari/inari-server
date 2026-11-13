@@ -16,6 +16,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,7 +34,10 @@ import (
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/structpb"
 
+	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
+	"github.com/7K-Inari/inari-server/internal/artifactadmission"
 	"github.com/7K-Inari/inari-server/internal/audit"
+	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/impersonation"
 	"github.com/7K-Inari/inari-server/internal/inventory"
@@ -229,7 +234,7 @@ func descriptorFor(itemID string, ver *types.CatalogItemVersion) (types.SourceDe
 	case p.Chart != nil && p.Chart.RepoURL != "" && p.Chart.Chart != "":
 		return types.SourceDescriptor{
 			Kind: types.SourceKindHelm,
-			Helm: &types.HelmSource{RepoURL: p.Chart.RepoURL, Chart: p.Chart.Chart, Version: ver.Version},
+			Helm: &types.HelmSource{RepoURL: p.Chart.RepoURL, Chart: p.Chart.Chart, Version: ver.Version, Digest: ver.ChartDigest},
 		}, &p, nil
 	case p.RGD != "":
 		return types.SourceDescriptor{
@@ -239,6 +244,37 @@ func descriptorFor(itemID string, ver *types.CatalogItemVersion) (types.SourceDe
 	default:
 		return types.SourceDescriptor{}, nil, ErrNotDeployable
 	}
+}
+
+func (s *Service) admitVersion(ctx context.Context, itemID, version string, targets []renderer.ClusterTarget) error {
+	item, err := s.catalog.GetItemByID(ctx, itemID)
+	if err != nil {
+		return err
+	}
+	if item.SourceID == "" {
+		return nil
+	}
+	admitter, ok := s.catalog.(interface {
+		AdmitVersion(context.Context, string, string, trustedsource.Environment) (*catalog.AdmittedVersion, error)
+	})
+	if !ok {
+		return &artifactadmission.Error{Code: artifactadmission.CodeUnavailable, Ref: itemID, Err: errors.New("catalog admission seam is not configured"), Temporary: true}
+	}
+	environment := trustedsource.EnvironmentDevelopment
+	if len(targets) == 0 {
+		environment = trustedsource.EnvironmentProduction
+	}
+	for _, target := range targets {
+		cluster, err := s.clusters.GetCluster(ctx, target.ID)
+		if err != nil {
+			return err
+		}
+		if cluster.Labels["inari.dev/environment"] != string(trustedsource.EnvironmentDevelopment) {
+			environment = trustedsource.EnvironmentProduction
+		}
+	}
+	_, err = admitter.AdmitVersion(ctx, itemID, version, environment)
+	return err
 }
 
 // validateValues enforces decision 4: when the catalog version ships a
@@ -532,6 +568,9 @@ func (s *Service) Adopt(ctx context.Context, orgID, clusterID, catalogItem strin
 	if err != nil {
 		return nil, err
 	}
+	if err := s.admitVersion(ctx, catalogItem, version, targets); err != nil {
+		return nil, err
+	}
 
 	// Claim the (cluster, item) slot atomically BEFORE any side effects:
 	// concurrent adopts race here, and exactly one wins (the others get
@@ -566,7 +605,7 @@ func (s *Service) Adopt(ctx context.Context, orgID, clusterID, catalogItem strin
 		}
 	}
 
-	repoPath := "addons/" + workloadName(catalogItem)
+	repoPath := "addons/" + catalogItem
 	files, err := s.render(ctx, desc, renderParams{
 		addonID: addonID, name: workloadName(catalogItem), namespace: namespace,
 		mode: mode, targets: targets, prune: false,
@@ -717,11 +756,14 @@ func (s *Service) EnablePrune(ctx context.Context, orgID, addonID, actor string)
 // (direct policy only), persist, audit, outbox.
 func (s *Service) rerender(ctx context.Context, row *types.ClusterAddon, desc types.SourceDescriptor,
 	version string, values json.RawMessage, prune bool, actor, action string) (*AdoptResult, error) {
-	repo, provider, authInfo, err := s.git.ResolveRepo(ctx, row.OrgID, row.RepoID)
+	targets, err := s.targetsForRow(ctx, row)
 	if err != nil {
 		return nil, err
 	}
-	targets, err := s.targetsForRow(ctx, row)
+	if err := s.admitVersion(ctx, row.CatalogItem, version, targets); err != nil {
+		return nil, err
+	}
+	repo, provider, authInfo, err := s.git.ResolveRepo(ctx, row.OrgID, row.RepoID)
 	if err != nil {
 		return nil, err
 	}
@@ -989,13 +1031,24 @@ func appName(addonID string, mode types.AddonDeployMode) string {
 	return renderer.PrefixAddon + "-" + id
 }
 
-// workloadName derives the release/workload name from a catalog item ID
-// (platform:cert-manager → cert-manager).
+// workloadName derives a collision-resistant DNS-safe release name from a
+// canonical source/package ID while preserving legacy internal ID behavior.
 func workloadName(catalogItem string) string {
-	if i := strings.Index(catalogItem, ":"); i >= 0 {
-		return catalogItem[i+1:]
+	name := catalogItem
+	if strings.Contains(catalogItem, "/") {
+		parts := strings.Split(catalogItem, "/")
+		if len(parts) == 2 {
+			name = parts[0] + "-" + parts[1]
+		}
+	} else if i := strings.Index(catalogItem, ":"); i >= 0 {
+		name = catalogItem[i+1:]
 	}
-	return catalogItem
+	if len(name) <= 63 {
+		return name
+	}
+	sum := sha256.Sum256([]byte(name))
+	suffix := hex.EncodeToString(sum[:])[:8]
+	return strings.TrimRight(name[:63-len(suffix)-1], "-") + "-" + suffix
 }
 
 // commitPerPolicy writes files per the repo's commit policy (direct commit

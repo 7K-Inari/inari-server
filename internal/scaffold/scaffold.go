@@ -22,6 +22,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
+	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
+	"github.com/7K-Inari/inari-server/internal/artifactadmission"
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/7K-Inari/inari-server/internal/db"
@@ -84,6 +86,7 @@ func newUUID() string {
 type Config struct {
 	MaxAttempts int    // per-step attempt budget (default 5)
 	GitOrg      string // git organization/owner receiving scaffolded repos
+	Environment trustedsource.Environment
 	// RunTTL is the retention for terminal (completed/failed) runs; the
 	// reconcile loop reaps older ones (M8.W6). <= 0 disables the reaper.
 	RunTTL time.Duration
@@ -159,12 +162,16 @@ func NewService(d *db.DB, store *Store, auditStore *audit.Store, cat TemplateCat
 
 // TemplateSummary is the list-row view of a template (UI wizard browse).
 type TemplateSummary struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	DisplayName string   `json:"displayName"`
-	Description string   `json:"description"`
-	Tags        []string `json:"tags,omitempty"`
-	Version     string   `json:"version"`
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	DisplayName    string   `json:"displayName"`
+	Description    string   `json:"description"`
+	SourceID       string   `json:"sourceId,omitempty"`
+	TrustTier      string   `json:"trustTier,omitempty"`
+	Unsigned       bool     `json:"unsigned,omitempty"`
+	ArtifactDigest string   `json:"artifactDigest,omitempty"`
+	Tags           []string `json:"tags,omitempty"`
+	Version        string   `json:"version"`
 	// Kind is the template's pipeline kind (component | gitops-repo);
 	// empty on old payloads means component.
 	Kind string `json:"kind,omitempty"`
@@ -228,7 +235,11 @@ func (s *Service) summary(ctx context.Context, orgID string, it *catalog.ItemVie
 	}
 	sum := &TemplateSummary{
 		ID: it.ID, Name: it.Name, DisplayName: it.DisplayName,
-		Description: it.Description, Version: version,
+		Description: it.Description, SourceID: it.SourceID, TrustTier: it.TrustTier,
+		Unsigned: it.Unsigned, Version: version,
+	}
+	if ver, err := s.catalog.GetVersion(ctx, it.ID, version); err == nil {
+		sum.ArtifactDigest = ver.ArtifactDigest
 	}
 	if ver, err := s.catalog.GetVersion(ctx, it.ID, version); err == nil {
 		sum.Tags = parseTags(ver.Payload)
@@ -237,8 +248,8 @@ func (s *Service) summary(ctx context.Context, orgID string, it *catalog.ItemVie
 	return sum, nil
 }
 
-// resolveTemplate finds the visible template item addressed by name (item
-// name or ID), enforcing catalog visibility rules.
+// resolveTemplate finds a visible template only by canonical source-qualified
+// item ID. Bare short names and legacy template:<name> aliases are not resolved.
 func (s *Service) resolveTemplate(ctx context.Context, orgID, name string) (*catalog.ItemView, error) {
 	items, _, err := s.catalog.ListVisible(ctx, orgID, types.CatalogListOptions{})
 	if err != nil {
@@ -246,7 +257,7 @@ func (s *Service) resolveTemplate(ctx context.Context, orgID, name string) (*cat
 	}
 	for i := range items {
 		it := &items[i]
-		if it.Source == types.CatalogSourceTemplate && (it.Name == name || it.ID == name) {
+		if it.Source == types.CatalogSourceTemplate && it.ID == name {
 			return it, nil
 		}
 	}
@@ -376,6 +387,19 @@ func canonicalJSON(raw json.RawMessage) []byte {
 	return b
 }
 
+func (s *Service) admitTemplate(ctx context.Context, item *catalog.ItemView, version string) (*catalog.AdmittedVersion, error) {
+	if item.SourceID == "" {
+		return nil, nil
+	}
+	admitter, ok := s.catalog.(interface {
+		AdmitVersion(context.Context, string, string, trustedsource.Environment) (*catalog.AdmittedVersion, error)
+	})
+	if !ok {
+		return nil, &artifactadmission.Error{Code: artifactadmission.CodeUnavailable, Ref: item.ID, Err: errors.New("template admission seam is not configured"), Temporary: true}
+	}
+	return admitter.AdmitVersion(ctx, item.ID, version, s.cfg.Environment)
+}
+
 // CreateRun validates the wizard values against the template version's
 // schema and persists the run plus its initial (pending) step rows with
 // audit + outbox in one transaction. Retries with identical inputs return
@@ -394,6 +418,13 @@ func (s *Service) CreateRun(ctx context.Context, actor, orgID, name, version, di
 	if err != nil {
 		return nil, nil, false, ErrVersionNotFound
 	}
+	admitted, err := s.admitTemplate(ctx, it, version)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if admitted != nil && admitted.Version != nil {
+		ver = admitted.Version
+	}
 	if err := validateValues(ver.Schema, values); err != nil {
 		return nil, nil, false, err
 	}
@@ -408,10 +439,10 @@ func (s *Service) CreateRun(ctx context.Context, actor, orgID, name, version, di
 	}
 	kind := payloadKind(ver.Payload)
 	order := stepOrderForKind(kind)
-	key := idempotencyKey(orgID, it.Name, version, values)
+	key := idempotencyKey(orgID, it.ID+"@"+ver.ArtifactDigest, version, values)
 	run := &types.ScaffoldRun{
 		ID: "run:" + s.newID(), OrgID: orgID, TemplateItemID: it.ID,
-		TemplateVersion: version, DisplayName: displayName, Values: values,
+		TemplateVersion: version, TemplateDigest: ver.ArtifactDigest, DisplayName: displayName, Values: values,
 		Phase: types.ScaffoldPhasePending, IdempotencyKey: key, CreatedBy: actor,
 	}
 	steps := make([]types.ScaffoldRunStep, 0, len(order))

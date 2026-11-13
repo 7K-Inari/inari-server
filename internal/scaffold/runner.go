@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 
+	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
 	"github.com/7K-Inari/inari-server/internal/approvals"
 	"github.com/7K-Inari/inari-server/internal/gitrepos"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
@@ -101,15 +102,17 @@ type TeamLookup interface {
 // Feature B gitops-repo steps. All are optional — a nil seam makes the
 // depending step fail, not the engine.
 type ExecEnv struct {
-	Git        GitProvider
-	GitOrg     string // git organization/owner receiving scaffolded repos
-	Upsert     CatalogUpserter
-	RBAC       RBACBinder
-	Registrar  AppRegistrar
-	Templates  TemplateSource
-	Tenants    TenantContextResolver
-	Gate       ApprovalGate
-	GitConfigs GitConfigResolver
+	Git         GitProvider
+	GitOrg      string // git organization/owner receiving scaffolded repos
+	Upsert      CatalogUpserter
+	RBAC        RBACBinder
+	Registrar   AppRegistrar
+	Templates   TemplateSource
+	Catalog     TemplateCatalog
+	Environment trustedsource.Environment
+	Tenants     TenantContextResolver
+	Gate        ApprovalGate
+	GitConfigs  GitConfigResolver
 	// GitRepos registers team repos (kind: gitops-repo runs).
 	GitRepos GitRepoRegistrar
 	// RootApp attaches team-repo root Applications to the baseline repo.

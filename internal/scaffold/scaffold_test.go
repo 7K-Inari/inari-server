@@ -108,7 +108,7 @@ func TestListTemplatesFiltersSourceAndResolvesVersions(t *testing.T) {
 
 func TestGetTemplateReturnsSchemaAndUISchema(t *testing.T) {
 	svc := NewService(nil, NewStore(), nil, newStubCatalog(), Config{}, nil)
-	tpl, err := svc.GetTemplate(context.Background(), "org:acme", "go-service")
+	tpl, err := svc.GetTemplate(context.Background(), "org:acme", "template:go-service")
 	if err != nil {
 		t.Fatal(err)
 	}

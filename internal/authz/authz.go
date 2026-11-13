@@ -18,15 +18,21 @@ import (
 // permissions.go. RelationViewer survives only as the read-only relation
 // name on child types (never on organization).
 const (
-	RelationMember     = "member"
-	RelationParent     = "parent"
-	RelationOperator   = "operator"
-	RelationDeployer   = "deployer"
-	RelationEditor     = "editor"
-	RelationInvoke     = "invoke"
-	RelationViewer     = "viewer"
-	RelationSuperuser  = "superuser"
-	RelationOrgCreator = "org_creator"
+	RelationMember         = "member"
+	RelationParent         = "parent"
+	RelationOperator       = "operator"
+	RelationDeployer       = "deployer"
+	RelationEditor         = "editor"
+	RelationInvoke         = "invoke"
+	RelationViewer         = "viewer"
+	RelationSuperuser      = "superuser"
+	RelationOrgCreator     = "org_creator"
+	RelationManage         = "manage"
+	RelationViewGrant      = "view_grant"
+	RelationUseGrant       = "use_grant"
+	RelationProvisionGrant = "provision_grant"
+	RelationUse            = "use"
+	RelationProvision      = "provision"
 )
 
 // Object types.
@@ -44,6 +50,7 @@ const (
 	TypeRollout          = "rollout"
 	TypeDriftEvent       = "drift_event"
 	TypePlatform         = "platform"
+	TypeResourceTarget   = "resource_target"
 )
 
 // Tuple is one relationship fact.
@@ -335,6 +342,24 @@ func ModelV1() client.ClientWriteAuthorizationModelRequest {
 		RelationSuperuser:  {DirectlyRelatedUserTypes: &userRef},
 		RelationOrgCreator: {DirectlyRelatedUserTypes: &userRef},
 	}
+	resourceTargetRelations := map[string]openfga.Userset{
+		RelationParent:         direct(),
+		RelationManage:         fromParent(RelationResourceTargetsManage),
+		RelationViewGrant:      direct(),
+		RelationUseGrant:       direct(),
+		RelationProvisionGrant: direct(),
+		RelationViewer: union(
+			computed(RelationViewGrant), computed(RelationUseGrant),
+			computed(RelationProvisionGrant), computed(RelationManage)),
+		RelationUse:       union(computed(RelationUseGrant), computed(RelationManage)),
+		RelationProvision: union(computed(RelationProvisionGrant), computed(RelationManage)),
+	}
+	resourceTargetMeta := map[string]openfga.RelationMetadata{
+		RelationParent:         {DirectlyRelatedUserTypes: &orgRef},
+		RelationViewGrant:      {DirectlyRelatedUserTypes: &teamMemberRef},
+		RelationUseGrant:       {DirectlyRelatedUserTypes: &teamMemberRef},
+		RelationProvisionGrant: {DirectlyRelatedUserTypes: &teamMemberRef},
+	}
 	return client.ClientWriteAuthorizationModelRequest{
 		SchemaVersion: "1.1",
 		TypeDefinitions: []openfga.TypeDefinition{
@@ -352,6 +377,7 @@ func ModelV1() client.ClientWriteAuthorizationModelRequest {
 			{Type: TypeExtension, Relations: &extensionRelations, Metadata: &openfga.Metadata{Relations: &extensionMeta}},
 			{Type: TypeRollout, Relations: ptr(orgScopedRelations(RelationDeploymentsCreate)), Metadata: &openfga.Metadata{Relations: &orgScopedMeta}},
 			{Type: TypeDriftEvent, Relations: &driftRelations, Metadata: &openfga.Metadata{Relations: &driftMeta}},
+			{Type: TypeResourceTarget, Relations: &resourceTargetRelations, Metadata: &openfga.Metadata{Relations: &resourceTargetMeta}},
 		},
 	}
 }
@@ -413,6 +439,9 @@ func RolloutObject(id string) string {
 }
 func DriftEventObject(id string) string {
 	return TypeDriftEvent + ":" + stripTypePrefix(id, "drift")
+}
+func ResourceTargetObject(id string) string {
+	return TypeResourceTarget + ":" + stripTypePrefix(id, "resource_target")
 }
 
 // ObjectPlatform is the single global platform object used for platform-wide permission

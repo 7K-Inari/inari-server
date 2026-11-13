@@ -284,7 +284,7 @@ func TestOrgVisibilityOverlay(t *testing.T) {
 	srv, database := itServer(t)
 	defer srv.Close()
 	ctx := context.Background()
-	const item = "curated:postgres-aws"
+	const item = "core/postgres-aws"
 
 	// Default: no overlay row, platform-public → visible.
 	if e := visEntry(t, srv, "viewer", item); !e.Visible || e.OrgHidden || e.PlatformHidden {
@@ -348,7 +348,7 @@ func TestOrgVisibilityOverlay(t *testing.T) {
 	if code, _ := itReq(t, srv, "GET", "/api/v1/tenants/acme/catalog-visibility", "", ""); code != http.StatusUnauthorized {
 		t.Errorf("no token GET: got %d, want 401", code)
 	}
-	if code, _ := itReq(t, srv, "PUT", "/api/v1/tenants/acme/catalog-visibility/curated:nope", "admin", `{"visible":false}`); code != http.StatusNotFound {
+	if code, _ := itReq(t, srv, "PUT", "/api/v1/tenants/acme/catalog-visibility/core/nope", "admin", `{"visible":false}`); code != http.StatusNotFound {
 		t.Errorf("unknown item PUT: got %d, want 404", code)
 	}
 }

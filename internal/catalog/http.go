@@ -446,8 +446,11 @@ func (h *Handler) getSourceItem(ctx context.Context, in *sourceItemPathInput) (*
 }
 
 type sourcePinInput struct {
-	sourceItemPathInput
-	Body struct {
+	Org     string `path:"org"`
+	Source  string `path:"source"`
+	Name    string `path:"name"`
+	Cluster string `query:"cluster"`
+	Body    struct {
 		Version string `json:"version" minLength:"1"`
 	}
 }
@@ -461,8 +464,11 @@ func (h *Handler) deleteSourcePin(ctx context.Context, in *sourceItemPathInput) 
 }
 
 type sourceOrgVisibilityInput struct {
-	sourceItemPathInput
-	Body struct {
+	Org     string `path:"org"`
+	Source  string `path:"source"`
+	Name    string `path:"name"`
+	Cluster string `query:"cluster"`
+	Body    struct {
 		Visible bool `json:"visible" doc:"false hides the item for this org; true shows it (subject to platform rules)"`
 	}
 }
@@ -472,8 +478,11 @@ func (h *Handler) setSourceOrgVisibility(ctx context.Context, in *sourceOrgVisib
 }
 
 type sourceVisibilityInput struct {
-	sourceItemPathInput
-	Body struct {
+	Org     string `path:"org"`
+	Source  string `path:"source"`
+	Name    string `path:"name"`
+	Cluster string `query:"cluster"`
+	Body    struct {
 		Rules []struct {
 			OrgID     string `json:"orgId" minLength:"1"`
 			ClusterID string `json:"clusterId,omitempty"`

@@ -46,7 +46,7 @@ func TestReconcileDrivesRendering(t *testing.T) {
 		Templates: &FilePuller{Root: dir}, Tenants: itResolver(),
 	})
 
-	run, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "go-service", "", "", json.RawMessage(`{"name":"payments-api"}`))
+	run, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "template:go-service", "", "", json.RawMessage(`{"name":"payments-api"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestReconcileSettlesCancelledIdleRun(t *testing.T) {
 	writeFixtureTemplate(t, dir, "go-service", "1.0.0", map[string]string{"a.txt": "x"})
 	f.svc.WithExecEnv(&ExecEnv{Templates: &FilePuller{Root: dir}, Tenants: itResolver()})
 
-	run, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "go-service", "", "", json.RawMessage(`{"name":"payments-api"}`))
+	run, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "template:go-service", "", "", json.RawMessage(`{"name":"payments-api"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestReconcileBackoffSkipsRecentlyFailed(t *testing.T) {
 	// No template on disk: the rendering step fails every drive.
 	f.svc.WithExecEnv(&ExecEnv{Templates: &FilePuller{Root: t.TempDir()}, Tenants: itResolver()})
 
-	run, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "go-service", "", "", json.RawMessage(`{"name":"payments-api"}`))
+	run, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "template:go-service", "", "", json.RawMessage(`{"name":"payments-api"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,7 @@ func TestReconcileExhaustionSettlesManualIntervention(t *testing.T) {
 	ctx := context.Background()
 	f.svc.WithExecEnv(&ExecEnv{Templates: &FilePuller{Root: t.TempDir()}, Tenants: itResolver()})
 
-	run, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "go-service", "", "", json.RawMessage(`{"name":"payments-api"}`))
+	run, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "template:go-service", "", "", json.RawMessage(`{"name":"payments-api"}`))
 	if err != nil {
 		t.Fatal(err)
 	}

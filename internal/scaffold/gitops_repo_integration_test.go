@@ -79,7 +79,7 @@ func TestReconcileGitopsRepoRun(t *testing.T) {
 		GitRepos: gitReposSvc, RootApp: gitReposSvc, Teams: tenancySvc,
 	})
 
-	run, steps, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "gitops-repo", "", "",
+	run, steps, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "template:gitops-repo", "", "",
 		json.RawMessage(`{"repoName":"team-a-gitops","team":"team-a","commitPolicy":"direct","baseBranch":"main"}`))
 	if err != nil {
 		t.Fatal(err)

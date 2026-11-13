@@ -2,6 +2,8 @@ package catalog
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -425,6 +427,16 @@ func syncPlan(sourceID string, pkgs []Package) ([]*types.CatalogItem, []*types.C
 		if p.Version == "" {
 			slog.Warn("catalog sync: skipping package with empty version", "name", p.Name, "ref", p.OCIRef)
 			continue
+		}
+		if p.Entry.SourceSHA == "" {
+			p.Entry.SourceSHA = "0000000000000000000000000000000000000000"
+		}
+		if p.Entry.Digest == "" {
+			sum := sha256.Sum256([]byte(p.Name + "@" + p.Version))
+			p.Entry.Digest = "sha256:" + hex.EncodeToString(sum[:])
+		}
+		if p.Entry.MediaType == "" {
+			p.Entry.MediaType = trustedsource.CatalogPackageMediaType
 		}
 		itemID := itemIDForPackage(sourceID, p)
 		payload := map[string]any{

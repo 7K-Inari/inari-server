@@ -48,7 +48,7 @@ func TestCreateRunUserScopeBlockedWithoutConnection(t *testing.T) {
 		&fakeUserGit{err: &gitgithub.ErrNoConnection{OrgID: "org:acme", UserSub: "dev-1", Provider: "github"}},
 		fakeGitConfigs{}))
 
-	_, _, _, err := f.svc.CreateRun(context.Background(), "dev-1", "org:acme", "go-service", "2.0.0", "", json.RawMessage(`{"name":"payments-api"}`))
+	_, _, _, err := f.svc.CreateRun(context.Background(), "dev-1", "org:acme", "template:go-service", "2.0.0", "", json.RawMessage(`{"name":"payments-api"}`))
 	var connReq *ErrGitConnectionRequired
 	if !errors.As(err, &connReq) {
 		t.Fatalf("err = %v, want ErrGitConnectionRequired", err)
@@ -72,7 +72,7 @@ func TestUserScopeRunFallsBackWithAudit(t *testing.T) {
 
 	// platform_app policy: run creation is allowed; the fallback happens
 	// (and is audited) at execution time.
-	run, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "go-service", "2.0.0", "", json.RawMessage(`{"name":"payments-api"}`))
+	run, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "template:go-service", "2.0.0", "", json.RawMessage(`{"name":"payments-api"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestUserScopeRunWithConnection(t *testing.T) {
 		info:     &gitprovider.AuthInfo{Model: gitprovider.AuthModelUser, UserSub: "dev-1", ConnectionID: "ugc:1", ProviderLogin: "octocat"},
 	}, fakeGitConfigs{}))
 
-	run, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "go-service", "2.0.0", "", json.RawMessage(`{"name":"payments-api"}`))
+	run, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "template:go-service", "2.0.0", "", json.RawMessage(`{"name":"payments-api"}`))
 	if err != nil {
 		t.Fatal(err)
 	}

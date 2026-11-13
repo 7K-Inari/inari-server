@@ -603,7 +603,7 @@ func TestInstanceRepoIDAttribution(t *testing.T) {
 
 	// Instance recorded against the team repo on the baseline-bound cluster.
 	inst := &types.ResourceInstance{
-		ID: "inst-team", OrgID: "org:1", ClusterID: clusterID, CatalogItemID: "curated:web-service",
+		ID: "inst-team", OrgID: "org:1", ClusterID: clusterID, CatalogItemID: "core/web-service",
 		Version: "v1", Spec: json.RawMessage(`{}`), State: "running", ManagementMode: "adopt",
 		RepoID: teamRepo.ID,
 	}

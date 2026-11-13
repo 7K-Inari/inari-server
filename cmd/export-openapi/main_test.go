@@ -100,6 +100,14 @@ func TestExportContainsFullRESTSurface(t *testing.T) {
 		"/api/v1/tenants/{org}/policies",
 		"/api/v1/tenants/{org}/zones",
 		"/api/v1/admin/catalog/sync",
+		"/api/v1/admin/catalog/sources",
+		"/api/v1/admin/templates/sources",
+		"/api/v1/admin/templates/sync",
+		"/api/v1/tenants/{org}/catalog/{source}/{name}",
+		"/api/v1/tenants/{org}/catalog/{source}/{name}/pin",
+		"/api/v1/tenants/{org}/catalog-visibility/{source}/{name}",
+		"/api/v1/admin/catalog/{source}/{name}/visibility",
+		"/api/v1/tenants/{org}/clusters/{c}/addons/{source}/{name}/adopt",
 		// me
 		"/api/v1/me/permissions",
 		// platform admins (RBAC redesign Phase A)
@@ -117,6 +125,8 @@ func TestExportContainsFullRESTSurface(t *testing.T) {
 		"/api/v1/tenants/{org}/templates",
 		"/api/v1/tenants/{org}/templates/{name}",
 		"/api/v1/tenants/{org}/templates/{name}/runs",
+		"/api/v1/tenants/{org}/templates/{source}/{name}",
+		"/api/v1/tenants/{org}/templates/{source}/{name}/runs",
 		"/api/v1/tenants/{org}/scaffold-runs/{runId}",
 		"/api/v1/tenants/{org}/scaffold-runs/{runId}/cancel",
 		"/api/v1/tenants/{org}/scaffold-runs/{runId}/retry",

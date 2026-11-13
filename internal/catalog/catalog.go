@@ -43,7 +43,7 @@ func NewService(d *db.DB, store *Store, caps CapabilityLister, auditStore *audit
 	if puller != nil {
 		sources = []SourceSync{{Kind: "catalog", Source: fixtureSource(), Puller: puller}}
 	}
-	return NewServiceWithSources(d, store, caps, auditStore, sources)
+	return NewServiceWithSources(d, store, caps, auditStore, sources).WithAdmissionVerifier(artifactadmission.NewVerifier(fixtureBackend{}))
 }
 
 func NewServiceWithSources(d *db.DB, store *Store, caps CapabilityLister, auditStore *audit.Store, sources []SourceSync) *Service {
@@ -57,7 +57,7 @@ func NewServiceWithSources(d *db.DB, store *Store, caps CapabilityLister, auditS
 func fixtureSource() trustedsource.Source {
 	return trustedsource.Source{
 		ID: "core", IndexRef: "registry.local/core/index:latest", TrustTier: trustedsource.TrustExperimental,
-		AllowUnsigned: trustedsource.AllowUnsignedDevelopmentOnly, ArtifactPrefixes: []string{"registry.local/"},
+		ArtifactPrefixes: []string{"registry.local/"},
 		Publisher: trustedsource.Publisher{
 			Issuer: "https://token.actions.githubusercontent.com", Repository: "example/fixture",
 			Workflows: trustedsource.DefaultArtifactWorkflows(), WorkflowSHA: "0123456789abcdef0123456789abcdef01234567",

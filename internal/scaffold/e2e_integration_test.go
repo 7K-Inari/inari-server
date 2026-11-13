@@ -49,7 +49,7 @@ func TestRetryAfterTransientGitFailure(t *testing.T) {
 		Templates: &FilePuller{Root: dir}, Tenants: itResolver(),
 	})
 
-	run, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "go-service", "", "", json.RawMessage(`{"name":"payments-api"}`))
+	run, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "template:go-service", "", "", json.RawMessage(`{"name":"payments-api"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestCancelMidRunRetainsOutputs(t *testing.T) {
 		Templates: &FilePuller{Root: dir}, Tenants: itResolver(),
 	})
 
-	run, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "go-service", "", "", json.RawMessage(`{"name":"payments-api"}`))
+	run, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "template:go-service", "", "", json.RawMessage(`{"name":"payments-api"}`))
 	if err != nil {
 		t.Fatal(err)
 	}

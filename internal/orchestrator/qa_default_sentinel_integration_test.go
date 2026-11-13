@@ -20,7 +20,7 @@ func TestQADefaultSentinelSelector(t *testing.T) {
 	if got := instanceRepoID(t, database, d.InstanceID); got != baselineID {
 		t.Errorf("sentinel deploy repo_id = %q, want default %q", got, baselineID)
 	}
-	if _, ok := git.Files("inari-dev/acme-inari-state", "main")["clusters/cluster-1/postgres-aws/my-db/instance.yaml"]; !ok {
+	if _, ok := git.Files("inari-dev/acme-inari-state", "main")["clusters/cluster-1/core/postgres-aws/my-db/instance.yaml"]; !ok {
 		t.Error("sentinel deploy not committed to default repo")
 	}
 	if code, body := itReq(t, srv, "POST", "/api/v1/tenants/acme/instances/"+d.InstanceID+"/upgrade", "good",

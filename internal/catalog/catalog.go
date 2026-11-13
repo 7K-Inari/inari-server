@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
+	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
+	"github.com/7K-Inari/inari-server/internal/artifactadmission"
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -18,16 +21,49 @@ type CapabilityLister interface {
 }
 
 // Service is the Catalog Service facade (plan §5.5).
+type SourceSync struct {
+	Kind   string
+	Source trustedsource.Source
+	Puller OCIPuller
+}
+
 type Service struct {
-	db     *db.DB
-	store  *Store
-	caps   CapabilityLister
-	audit  *audit.Store
-	puller OCIPuller // nil when sync is not configured
+	db        *db.DB
+	store     *Store
+	caps      CapabilityLister
+	audit     *audit.Store
+	sources   []SourceSync
+	policies  map[string]trustedsource.Source
+	admission *artifactadmission.Verifier
+	now       func() time.Time
 }
 
 func NewService(d *db.DB, store *Store, caps CapabilityLister, auditStore *audit.Store, puller OCIPuller) *Service {
-	return &Service{db: d, store: store, caps: caps, audit: auditStore, puller: puller}
+	var sources []SourceSync
+	if puller != nil {
+		sources = []SourceSync{{Kind: "catalog", Source: fixtureSource(), Puller: puller}}
+	}
+	return NewServiceWithSources(d, store, caps, auditStore, sources)
+}
+
+func NewServiceWithSources(d *db.DB, store *Store, caps CapabilityLister, auditStore *audit.Store, sources []SourceSync) *Service {
+	policies := map[string]trustedsource.Source{}
+	for _, sourceSync := range sources {
+		policies[sourceSync.Source.ID] = sourceSync.Source
+	}
+	return &Service{db: d, store: store, caps: caps, audit: auditStore, sources: sources, policies: policies, now: time.Now}
+}
+
+func fixtureSource() trustedsource.Source {
+	return trustedsource.Source{
+		ID: "core", IndexRef: "registry.local/core/index:latest", TrustTier: trustedsource.TrustExperimental,
+		AllowUnsigned: trustedsource.AllowUnsignedDevelopmentOnly, ArtifactPrefixes: []string{"registry.local/"},
+		Publisher: trustedsource.Publisher{
+			Issuer: "https://token.actions.githubusercontent.com", Repository: "example/fixture",
+			Workflows: trustedsource.DefaultArtifactWorkflows(), WorkflowSHA: "0123456789abcdef0123456789abcdef01234567",
+			SourceRepository: "example/fixture", SourceWorkflow: ".github/workflows/release.yml",
+		},
+	}
 }
 
 // ItemView is a catalog item plus its versions for list responses.
@@ -130,6 +166,9 @@ func (s *Service) GetItem(ctx context.Context, orgID, clusterID, itemID string) 
 	if err != nil {
 		return nil, err
 	}
+	if !it.SnapshotPresent {
+		return nil, ErrItemNotFound
+	}
 	visMap, err := s.store.VisibilityMap(ctx, s.db.Pool)
 	if err != nil {
 		return nil, err
@@ -157,8 +196,12 @@ func (s *Service) GetItemByID(ctx context.Context, itemID string) (*types.Catalo
 // that load items by ID directly (orchestrator deploy). Hidden items read
 // as not-found.
 func (s *Service) EnsureVisible(ctx context.Context, orgID, clusterID, itemID string) error {
-	if _, err := s.store.GetItem(ctx, s.db.Pool, itemID); err != nil {
+	it, err := s.store.GetItem(ctx, s.db.Pool, itemID)
+	if err != nil {
 		return err
+	}
+	if !it.SnapshotPresent {
+		return ErrItemNotFound
 	}
 	visMap, err := s.store.VisibilityMap(ctx, s.db.Pool)
 	if err != nil {

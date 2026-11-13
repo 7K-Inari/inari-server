@@ -24,6 +24,10 @@ github.com/7K-Inari/inari-api v0.7.0-d1dc5a2.0.20261026085445-0464651127cd h1:1J
 github.com/7K-Inari/inari-api v0.7.0-d1dc5a2.0.20261026085445-0464651127cd/go.mod h1:aw9KMDPoyyby13ekXJNgSp20Mo+3cekKBio15soDIy0=
 github.com/7K-Inari/inari-api v0.7.0-f0bdbad.0.20261113204629-a05fda8f2619 h1:gU2ArXApwUmxVj5ghHxmappl7uncvx7EL/FaoXTs0oQ=
 github.com/7K-Inari/inari-api v0.7.0-f0bdbad.0.20261113204629-a05fda8f2619/go.mod h1:7g/rhMnq2gWf64r/JwBVDBzwGR655zHyMD8uwkPHSys=
+github.com/7K-Inari/inari-api v0.7.0-f0bdbad.0.20261113215455-b302c14e19e0 h1:YX8LUDaC5FuPIE+0pNkhB1X2EYVGalGi65DVWSwq/7Y=
+github.com/7K-Inari/inari-api v0.7.0-f0bdbad.0.20261113215455-b302c14e19e0/go.mod h1:7g/rhMnq2gWf64r/JwBVDBzwGR655zHyMD8uwkPHSys=
+github.com/7K-Inari/inari-api v0.7.0-f0bdbad.0.20261113221229-faf1fed802f0 h1:UIGNt9EmdVL11czr/lHdWLe+4rG8zMBTRBUgxFUQdbI=
+github.com/7K-Inari/inari-api v0.7.0-f0bdbad.0.20261113221229-faf1fed802f0/go.mod h1:7g/rhMnq2gWf64r/JwBVDBzwGR655zHyMD8uwkPHSys=
 github.com/AdaLogics/go-fuzz-headers v0.0.0-20240806141605-e8a1dd7889d6 h1:He8afgbRMd7mFxO99hRNu+6tazq8nFF9lIwo9JFroBk=
 github.com/AdaLogics/go-fuzz-headers v0.0.0-20240806141605-e8a1dd7889d6/go.mod h1:8o94RPi1/7XTJvwPpRSzSUedZrtlirdB3r9Z20bi2f8=
 github.com/AdamKorcz/go-fuzz-headers-1 v0.0.0-20230919221257-8b5d3ce2d11d h1:zjqpY4C7H15HjRPEenkS4SAn3Jy2eRRjkjZbGR30TOg=

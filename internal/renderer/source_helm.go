@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -48,15 +49,26 @@ func (helmHandler) Render(_ context.Context, desc types.SourceDescriptor, p Rend
 		helmBlock["valueFiles"] = []any{baseValueFile(p), overlayValueFile(p)}
 		helmBlock["ignoreMissingValueFiles"] = true
 	}
-	sources := []any{
-		map[string]any{
-			"repoURL":        h.RepoURL,
-			"chart":          h.Chart,
-			"targetRevision": h.Version,
-			"helm":           helmBlock,
-		},
-		valuesRefSource(p),
+	chartSource := map[string]any{
+		"repoURL":        h.RepoURL,
+		"chart":          h.Chart,
+		"targetRevision": h.Version,
+		"helm":           helmBlock,
 	}
+	if h.Digest != "" {
+		if !strings.HasPrefix(h.RepoURL, "oci://") {
+			return nil, errors.New("renderer: digest-pinned helm source requires an oci:// repoUrl")
+		}
+		if len(h.Digest) != len("sha256:")+64 || !strings.HasPrefix(h.Digest, "sha256:") {
+			return nil, errors.New("renderer: helm digest must be a sha256 digest")
+		}
+		chartSource = map[string]any{
+			"repoURL":        strings.TrimSuffix(h.RepoURL, "/") + "/" + h.Chart,
+			"targetRevision": h.Digest,
+			"helm":           helmBlock,
+		}
+	}
+	sources := []any{chartSource, valuesRefSource(p)}
 	sourceBlock := map[string]any{"sources": sources}
 
 	files := []RenderedFile{{Path: p.Path + "/values.yaml", Content: values}}

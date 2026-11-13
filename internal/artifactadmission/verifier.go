@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
@@ -30,7 +31,7 @@ func NewVerifier(backend Backend) *Verifier {
 var admissionDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 func (v *Verifier) VerifyIndex(ctx context.Context, source Source, artifact ArtifactDescriptor) error {
-	_, err := v.admit(ctx, Request{Source: source, Role: trustedsource.ArtifactIndex, Artifact: artifact, TargetEnvironment: trustedsource.EnvironmentDevelopment})
+	_, err := v.admit(ctx, Request{Source: source, Role: trustedsource.ArtifactIndex, Artifact: artifact, TargetEnvironment: trustedsource.EnvironmentDevelopment, SyncOnly: true})
 	return err
 }
 
@@ -53,9 +54,6 @@ func (v *Verifier) admit(ctx context.Context, req Request) (*EvidenceSummary, er
 	if unsigned && req.TargetEnvironment != trustedsource.EnvironmentDevelopment {
 		return nil, &Error{Code: CodeUnsignedProduction, Ref: ref, Err: errors.New("unsigned artifacts are restricted to an explicitly development target")}
 	}
-	if unsigned {
-		return &EvidenceSummary{Unsigned: true, ArtifactDigest: req.Artifact.Digest}, nil
-	}
 	artifact, err := v.backend.Fetch(ctx, ref)
 	if err != nil {
 		return nil, &Error{Code: CodeUnavailable, Ref: ref, Err: err, Temporary: true}
@@ -66,6 +64,9 @@ func (v *Verifier) admit(ctx context.Context, req Request) (*EvidenceSummary, er
 	if !matchesMediaType(artifact, req.Artifact.MediaType) {
 		return nil, &Error{Code: CodeMediaTypeMismatch, Ref: ref, Err: fmt.Errorf("artifact media layout does not match %q", req.Artifact.MediaType)}
 	}
+	if unsigned {
+		return &EvidenceSummary{Unsigned: true, ArtifactDigest: req.Artifact.Digest}, nil
+	}
 	expect := PublisherExpectation{Source: req.Source, Role: req.Role, SourceSHA: req.Artifact.SourceSHA, Producer: req.Artifact.Producer}
 	if err := v.backend.VerifySignature(ctx, ref, expect); err != nil {
 		return nil, admissionBackendError(CodeSignatureInvalid, ref, err)
@@ -73,6 +74,9 @@ func (v *Verifier) admit(ctx context.Context, req Request) (*EvidenceSummary, er
 	summary := &EvidenceSummary{
 		PublisherRepository: req.Source.Publisher.Repository,
 		PublisherWorkflow:   expect.Workflow(), ArtifactDigest: req.Artifact.Digest,
+	}
+	if req.SyncOnly {
+		return summary, nil
 	}
 	if req.Source.TrustTier != trustedsource.TrustOfficial && req.Source.TrustTier != trustedsource.TrustReviewed {
 		return summary, nil
@@ -130,6 +134,17 @@ func validateRequest(req Request) error {
 	}
 	if req.Source.AllowUnsigned == "" && req.Source.Publisher.Workflows.For(req.Role) == "" {
 		return &Error{Code: CodeInvalidRequest, Ref: req.Artifact.Ref, Err: errors.New("no publisher workflow is configured for the artifact role")}
+	}
+	repository := repositoryFor(req.Artifact.Ref)
+	allowed := false
+	for _, prefix := range req.Source.ArtifactPrefixes {
+		if strings.HasPrefix(repository+"/", prefix) {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return &Error{Code: CodeNamespaceDenied, Ref: req.Artifact.Ref, Err: errors.New("artifact repository is outside the source allowlist")}
 	}
 	return nil
 }

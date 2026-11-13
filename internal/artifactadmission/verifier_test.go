@@ -71,6 +71,7 @@ func validRequest() Request {
 	return Request{
 		Source: Source{
 			ID: "core", TrustTier: trustedsource.TrustOfficial,
+			ArtifactPrefixes: []string{"ghcr.io/7k-hiroba/argocd/"},
 			Publisher: trustedsource.Publisher{
 				Issuer: "https://token.actions.githubusercontent.com", Repository: "7k-hiroba/workflows",
 				Workflows: trustedsource.DefaultArtifactWorkflows(), WorkflowSHA: testSHA,
@@ -245,6 +246,22 @@ func TestExperimentalSignedNeedsNoPredicates(t *testing.T) {
 	backend.omit[trustedsource.TestEvidencePredicateType] = true
 	if _, err := NewVerifier(backend).AdmitArtifact(context.Background(), req); err != nil {
 		t.Fatalf("signed experimental rejected: %v", err)
+	}
+}
+
+func TestSyncOnlySkipsDeployEvidenceAndRejectsForeignNamespace(t *testing.T) {
+	req := validRequest()
+	req.SyncOnly = true
+	backend := newTestBackend(req)
+	backend.omit[trustedsource.SLSAProvenancePredicateType] = true
+	backend.omit[trustedsource.TestEvidencePredicateType] = true
+	if _, err := NewVerifier(backend).AdmitArtifact(context.Background(), req); err != nil {
+		t.Fatalf("sync-only verification required deploy evidence: %v", err)
+	}
+
+	req.Artifact.Ref = "ghcr.io/untrusted/web-service:1.2.0"
+	if _, err := NewVerifier(backend).AdmitArtifact(context.Background(), req); !IsCode(err, CodeNamespaceDenied) {
+		t.Fatalf("error = %v, want artifact_namespace_denied", err)
 	}
 }
 

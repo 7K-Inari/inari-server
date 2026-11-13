@@ -341,7 +341,7 @@ func TestAddonsHTTPEndToEnd(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("update: %d %s", code, body)
 	}
-	if !strings.Contains(f.git.Files("acme/acme-inari-state", "main")["addons/cert-manager/application.yaml"], "targetRevision: v1.16.2") {
+	if !strings.Contains(f.git.Files("acme/acme-inari-state", "main")["addons/platform:cert-manager/application.yaml"], "targetRevision: v1.16.2") {
 		t.Error("committed application must pin the new version")
 	}
 
@@ -354,7 +354,7 @@ func TestAddonsHTTPEndToEnd(t *testing.T) {
 	if code, body = f.req(t, "POST", "/api/v1/tenants/acme/addons/"+addonID+"/enable-prune", "admin", ""); code != http.StatusOK {
 		t.Fatalf("enable-prune: %d %s", code, body)
 	}
-	if !strings.Contains(f.git.Files("acme/acme-inari-state", "main")["addons/cert-manager/application.yaml"], "prune: true") {
+	if !strings.Contains(f.git.Files("acme/acme-inari-state", "main")["addons/platform:cert-manager/application.yaml"], "prune: true") {
 		t.Error("enable-prune must commit prune: true")
 	}
 	if code, _ := f.req(t, "POST", "/api/v1/tenants/acme/addons/"+addonID+"/enable-prune", "admin", ""); code != http.StatusConflict {
@@ -400,7 +400,7 @@ func TestAddonsHTTPTeamEnforcement(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, a := range listOut.Addons {
-		if a.RepoPath == "addons/external-secrets" {
+		if a.RepoPath == "addons/platform:external-secrets" {
 			t.Errorf("dev-b must not see team-a's addon: %s", body)
 		}
 	}

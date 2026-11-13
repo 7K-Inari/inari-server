@@ -22,6 +22,7 @@ const (
 	CodeUnsignedProduction  = "unsigned_production_denied"
 	CodeUnavailable         = "admission_unavailable"
 	CodeInvalidRequest      = "invalid_admission_request"
+	CodeNamespaceDenied     = "artifact_namespace_denied"
 )
 
 type Error struct {
@@ -90,6 +91,7 @@ type Request struct {
 	Artifact               ArtifactDescriptor
 	TargetEnvironment      trustedsource.Environment
 	RequireUICompatibility bool
+	SyncOnly               bool
 	Now                    time.Time
 }
 
@@ -108,6 +110,7 @@ type Attestation struct {
 }
 
 func repositoryFor(ref string) string {
+	ref = strings.TrimPrefix(ref, "oci://")
 	if at := strings.Index(ref, "@"); at >= 0 {
 		return ref[:at]
 	}

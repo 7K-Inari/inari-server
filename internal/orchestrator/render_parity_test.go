@@ -35,14 +35,14 @@ func TestArgoCDApplicationParity(t *testing.T) {
 		Name:           "inari-my-db",
 		Project:        "default",
 		RepoURL:        "https://github.com/inari-dev/acme-inari-state",
-		Path:           "clusters/c1/postgres-aws/inst-1",
+		Path:           "clusters/c1/curated:postgres-aws/inst-1",
 		TargetRevision: "main",
 		DestNamespace:  "apps",
 	})
 	direct := renderer.RenderSingleClusterApplication(renderer.RenderParams{
 		Name: "inari-my-db", ID: "inari-my-db", Project: "default",
 		RepoURL: "https://github.com/inari-dev/acme-inari-state",
-		Path:    "clusters/c1/postgres-aws/inst-1", BaseBranch: "main",
+		Path:    "clusters/c1/curated:postgres-aws/inst-1", BaseBranch: "main",
 		Namespace: "apps", Prune: true,
 	})
 	if string(wrapped) != string(direct) {

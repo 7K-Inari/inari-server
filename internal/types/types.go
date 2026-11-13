@@ -488,6 +488,9 @@ type CapabilityRef struct {
 type CatalogItem struct {
 	ID          string        `json:"id"`
 	Source      CatalogSource `json:"source"`
+	SourceID    string        `json:"sourceId,omitempty"`
+	TrustTier   string        `json:"trustTier,omitempty"`
+	Unsigned    bool          `json:"unsigned,omitempty"`
 	Name        string        `json:"name"`
 	DisplayName string        `json:"displayName"`
 	Description string        `json:"description"`
@@ -497,11 +500,14 @@ type CatalogItem struct {
 	// OrgID is the owning tenant for org-scoped items (e.g. scaffolded
 	// components); empty for global curated/platform items. The outbox
 	// payload carries it so the tuple writer grants the org parent tuple.
-	OrgID          string         `json:"orgId,omitempty"`
-	CapabilityRef  *CapabilityRef `json:"capabilityRef,omitempty"`
-	OCIRef         string         `json:"ociRef,omitempty"`
-	ApprovalPolicy ApprovalPolicy `json:"approvalPolicy"`
-	CreatedAt      time.Time      `json:"createdAt"`
+	OrgID             string         `json:"orgId,omitempty"`
+	SourceFingerprint string         `json:"-"`
+	SourceGeneration  int64          `json:"-"`
+	SnapshotPresent   bool           `json:"-"`
+	CapabilityRef     *CapabilityRef `json:"capabilityRef,omitempty"`
+	OCIRef            string         `json:"ociRef,omitempty"`
+	ApprovalPolicy    ApprovalPolicy `json:"approvalPolicy"`
+	CreatedAt         time.Time      `json:"createdAt"`
 }
 
 // Catalog sort values accepted by the browse API (whitelisted server-side;
@@ -516,9 +522,11 @@ const (
 // CatalogListOptions are the browse filters/sort/pagination for the catalog
 // list endpoint (ADR-0009). Limit 0 means "no pagination" (full result).
 type CatalogListOptions struct {
-	Query    string // free-text over name/display_name/description
-	Source   string
-	Category string
+	Query     string // free-text over name/display_name/description
+	Source    string
+	SourceID  string
+	TrustTier string
+	Category  string
 	// ClusterID intersects discovered capabilities ("what can I run here?").
 	ClusterID string
 	Sort      string
@@ -526,16 +534,40 @@ type CatalogListOptions struct {
 	Offset    int
 }
 
+// TrustedSourceStatus is the persisted health and last-good marker for one
+// configured source. SnapshotAgeSeconds is computed at read time.
+type TrustedSourceStatus struct {
+	Kind                string     `json:"kind"`
+	SourceID            string     `json:"sourceId"`
+	Fingerprint         string     `json:"-"`
+	State               string     `json:"state"`
+	Generation          int64      `json:"generation"`
+	ItemCount           int        `json:"itemCount"`
+	LastAttemptAt       *time.Time `json:"lastAttemptAt,omitempty"`
+	LastSuccessAt       *time.Time `json:"lastSuccessAt,omitempty"`
+	SnapshotAgeSeconds  int64      `json:"snapshotAgeSeconds"`
+	LastGoodIndexRef    string     `json:"lastGoodIndexRef,omitempty"`
+	LastGoodIndexDigest string     `json:"lastGoodIndexDigest,omitempty"`
+	LastErrorCode       string     `json:"lastErrorCode,omitempty"`
+	LastError           string     `json:"lastError,omitempty"`
+}
+
 // CatalogItemVersion is one versioned revision of an item with its OpenAPI
 // v3 schema, UI hints, and payload (RGD YAML / platform app ref).
 type CatalogItemVersion struct {
-	ID      string          `json:"id"`
-	ItemID  string          `json:"itemId"`
-	Version string          `json:"version"`
-	Channel string          `json:"channel"`
-	Schema  json.RawMessage `json:"schema,omitempty"`
-	UIHints json.RawMessage `json:"uiHints,omitempty"`
-	Payload json.RawMessage `json:"payload,omitempty"`
+	ID              string          `json:"id"`
+	ItemID          string          `json:"itemId"`
+	Version         string          `json:"version"`
+	PackageVersion  string          `json:"packageVersion,omitempty"`
+	Channel         string          `json:"channel"`
+	ArtifactRef     string          `json:"artifactRef,omitempty"`
+	ArtifactDigest  string          `json:"artifactDigest,omitempty"`
+	ChartRef        string          `json:"chartRef,omitempty"`
+	ChartDigest     string          `json:"chartDigest,omitempty"`
+	SnapshotPresent bool            `json:"-"`
+	Schema          json.RawMessage `json:"schema,omitempty"`
+	UIHints         json.RawMessage `json:"uiHints,omitempty"`
+	Payload         json.RawMessage `json:"payload,omitempty"`
 }
 
 // VisibilityRule scopes a catalog item to tenants/clusters ("*" = all).
@@ -638,6 +670,7 @@ type ResourceInstance struct {
 	ClusterID      string          `json:"clusterId"`
 	CatalogItemID  string          `json:"catalogItemId"`
 	Version        string          `json:"version"`
+	ArtifactDigest string          `json:"artifactDigest,omitempty"`
 	OwnerTeam      string          `json:"ownerTeam"`
 	Spec           json.RawMessage `json:"spec"`
 	ResourceRef    ResourceRef     `json:"resourceRef"`
@@ -830,6 +863,7 @@ type HelmSource struct {
 	RepoURL   string `json:"repoUrl"`
 	Chart     string `json:"chart"`
 	Version   string `json:"version"`
+	Digest    string `json:"digest,omitempty"`
 	ValuesRef string `json:"valuesRef,omitempty"` // git path of the values file
 }
 
@@ -926,13 +960,14 @@ type ApprovalPayload struct {
 
 // DeployRequestedPayload is the outbox payload for EventDeployRequested.
 type DeployRequestedPayload struct {
-	OrgID      string `json:"orgId"`
-	InstanceID string `json:"instanceId"`
-	ItemID     string `json:"itemId"`
-	ClusterID  string `json:"clusterId"`
-	Version    string `json:"version"`
-	CommitSHA  string `json:"commitSha,omitempty"`
-	PRURL      string `json:"prUrl,omitempty"`
+	OrgID          string `json:"orgId"`
+	InstanceID     string `json:"instanceId"`
+	ItemID         string `json:"itemId"`
+	ClusterID      string `json:"clusterId"`
+	Version        string `json:"version"`
+	ArtifactDigest string `json:"artifactDigest,omitempty"`
+	CommitSHA      string `json:"commitSha,omitempty"`
+	PRURL          string `json:"prUrl,omitempty"`
 	// Git auth attribution for the deploy's write (hybrid git app model).
 	AuthModel      string `json:"authModel,omitempty"`
 	InstallationID int64  `json:"installationId,omitempty"`
@@ -1961,6 +1996,7 @@ type ScaffoldRun struct {
 	OrgID           string          `json:"orgId"`
 	TemplateItemID  string          `json:"templateItemId"`
 	TemplateVersion string          `json:"templateVersion"`
+	TemplateDigest  string          `json:"templateDigest,omitempty"`
 	DisplayName     string          `json:"displayName"`
 	Values          json.RawMessage `json:"values,omitempty"`
 	Phase           ScaffoldPhase   `json:"phase"`

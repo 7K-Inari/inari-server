@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"sync"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -15,6 +16,7 @@ import (
 	"github.com/sigstore/cosign/v3/pkg/cosign"
 	cosignremote "github.com/sigstore/cosign/v3/pkg/oci/remote"
 	"github.com/sigstore/sigstore-go/pkg/fulcio/certificate"
+	"github.com/sigstore/sigstore-go/pkg/root"
 
 	"github.com/7K-Inari/inari-server/internal/oci"
 )
@@ -26,6 +28,11 @@ type CosignBackend struct {
 	Fetcher  *oci.Fetcher
 	Keychain authn.Keychain
 	Insecure bool
+
+	trustedMaterialOnce   sync.Once
+	trustedMaterial       root.TrustedMaterial
+	trustedMaterialErr    error
+	trustedMaterialLoader func() (root.TrustedMaterial, error)
 }
 
 func NewCosignBackend(fetcher *oci.Fetcher) *CosignBackend {
@@ -39,9 +46,33 @@ func (b *CosignBackend) Fetch(ctx context.Context, ref string) (*oci.Artifact, e
 	return b.Fetcher.Fetch(ctx, ref)
 }
 
+func (b *CosignBackend) material() (root.TrustedMaterial, error) {
+	b.trustedMaterialOnce.Do(func() {
+		if b.trustedMaterial != nil {
+			return
+		}
+		loader := b.trustedMaterialLoader
+		if loader == nil {
+			loader = cosign.TrustedRoot
+		}
+		b.trustedMaterial, b.trustedMaterialErr = loader()
+	})
+	if b.trustedMaterialErr != nil {
+		return nil, b.trustedMaterialErr
+	}
+	if b.trustedMaterial == nil {
+		return nil, errors.New("sigstore trusted material is unavailable")
+	}
+	return b.trustedMaterial, nil
+}
+
 func (b *CosignBackend) options(expected PublisherExpectation) ([]name.Option, *cosign.CheckOpts, error) {
 	if expected.Source.Publisher.Issuer == "" || expected.Source.Publisher.Repository == "" {
 		return nil, nil, &Error{Code: CodeInvalidRequest, Err: errors.New("publisher issuer and repository are required")}
+	}
+	material, err := b.material()
+	if err != nil {
+		return nil, nil, &Error{Code: CodeUnavailable, Err: fmt.Errorf("load sigstore trusted material: %w", err), Temporary: true}
 	}
 	opts := []name.Option{}
 	if b.Insecure {
@@ -55,6 +86,7 @@ func (b *CosignBackend) options(expected PublisherExpectation) ([]name.Option, *
 	return opts, &cosign.CheckOpts{
 		RegistryClientOpts: []cosignremote.Option{cosignremote.WithRemoteOptions(gcremote.WithAuthFromKeychain(kc))},
 		Identities:         []cosign.Identity{{SubjectRegExp: subject, Issuer: expected.Source.Publisher.Issuer}},
+		TrustedMaterial:    material,
 		// OCI 1.1 support is required for registry-referrer evidence. The
 		// protected producer dogfood validates the exact bundle format.
 		ExperimentalOCI11: true,

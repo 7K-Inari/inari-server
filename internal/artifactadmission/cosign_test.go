@@ -4,10 +4,13 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"errors"
 	"net/url"
+	"sync"
 	"testing"
 
 	"github.com/sigstore/sigstore-go/pkg/fulcio/certificate"
+	"github.com/sigstore/sigstore-go/pkg/root"
 )
 
 func certificateExtension(t *testing.T, oid asn1.ObjectIdentifier, value string) pkix.Extension {
@@ -35,6 +38,44 @@ func certificateForExpectation(t *testing.T, expected PublisherExpectation) *x50
 			certificateExtension(t, certificate.OIDSourceRepositoryRef, expected.Source.Publisher.SourceRef),
 			certificateExtension(t, certificate.OIDRunInvocationURI, expected.Producer.RunURI),
 		},
+	}
+}
+
+func TestCosignBackendUsesAndCachesTrustedMaterial(t *testing.T) {
+	material := &root.BaseTrustedMaterial{}
+	calls := 0
+	backend := NewCosignBackend(nil)
+	backend.trustedMaterialLoader = func() (root.TrustedMaterial, error) {
+		calls++
+		return material, nil
+	}
+
+	const workers = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, opts, err := backend.options(PublisherExpectation{Source: validRequest().Source})
+			if err != nil {
+				errs <- err
+				return
+			}
+			if opts.TrustedMaterial != material {
+				errs <- errors.New("trusted material was not propagated")
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("trusted material loader calls = %d, want exactly one", calls)
 	}
 }
 

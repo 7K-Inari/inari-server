@@ -118,6 +118,11 @@ func (s *Service) Create(ctx context.Context, orgID, actor string, in CreateInpu
 	if err := p.ValidateRegistration(snapshot, config); err != nil {
 		return nil, err
 	}
+	manager, err := s.isManager(ctx, orgID, actor)
+	if err != nil {
+		return nil, err
+	}
+	var descriptor *Target
 	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		if target.IsDefault {
 			if err := s.store.ClearDefault(ctx, tx, orgID, in.Capability, ""); err != nil {
@@ -125,6 +130,12 @@ func (s *Service) Create(ctx context.Context, orgID, actor string, in CreateInpu
 			}
 		}
 		if err := s.store.Create(ctx, tx, target); err != nil {
+			return err
+		}
+		// Decorate before commit so a provider or projection failure rolls back
+		// the insert instead of ambiguously reporting failure after success.
+		descriptor, err = s.describeSnapshot(ctx, target, actor, manager, snapshot)
+		if err != nil {
 			return err
 		}
 		if err := s.recordAudit(ctx, tx, orgID, actor, "resource_target.created", target.ID, map[string]any{
@@ -137,7 +148,7 @@ func (s *Service) Create(ctx context.Context, orgID, actor string, in CreateInpu
 	if err != nil {
 		return nil, err
 	}
-	return target, nil
+	return descriptor, nil
 }
 
 func (s *Service) Update(ctx context.Context, orgID, targetID, actor string, in PatchInput) (*Target, error) {
@@ -149,7 +160,9 @@ func (s *Service) Update(ctx context.Context, orgID, targetID, actor string, in 
 		return nil, err
 	}
 	if in.Name == nil && in.Config == nil && in.Enabled == nil && in.IsDefault == nil {
-		return target, nil
+		// A no-op PATCH has no commit ambiguity, so use the authoritative GET
+		// path rather than returning an undecorated persistence row.
+		return s.Get(ctx, orgID, actor, targetID)
 	}
 	if in.Name != nil {
 		name := strings.TrimSpace(*in.Name)
@@ -179,16 +192,26 @@ func (s *Service) Update(ctx context.Context, orgID, targetID, actor string, in 
 	if target.IsDefault && !p.Describe().SupportsDefault {
 		return nil, invalid("isDefault", "provider does not support org defaults")
 	}
+	snapshot, snapshotErr := s.loadSnapshot(ctx, target)
 	if target.Enabled {
-		snapshot, err := s.loadSnapshot(ctx, target)
-		if err != nil {
-			return nil, err
+		if snapshotErr != nil {
+			return nil, snapshotErr
 		}
 		if err := p.ValidateRegistration(snapshot, target.Config); err != nil {
 			return nil, err
 		}
+	} else if snapshotErr != nil {
+		// Disabling remains available with stale or unreadable evidence. The
+		// response explicitly reports an unavailable snapshot instead of making
+		// a committed disable look like a failed mutation.
+		snapshot = ResourceSnapshot{}
+	}
+	manager, err := s.isManager(ctx, orgID, actor)
+	if err != nil {
+		return nil, err
 	}
 	previousRevision := target.Revision
+	var descriptor *Target
 	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		if target.IsDefault {
 			if err := s.store.ClearDefault(ctx, tx, orgID, target.Capability(), target.ID); err != nil {
@@ -197,6 +220,15 @@ func (s *Service) Update(ctx context.Context, orgID, targetID, actor string, in 
 		}
 		if err := s.store.Update(ctx, tx, target, in.Revision); err != nil {
 			return err
+		}
+		// As with create, decoration is part of the transaction: any error
+		// aborts the update and the default promotion, if one was requested.
+		descriptor, err = s.describeSnapshot(ctx, target, actor, manager, snapshot)
+		if err != nil {
+			return err
+		}
+		if snapshotErr != nil {
+			descriptor.Readiness = Readiness{State: ReadinessUnavailable, Reasons: []string{"snapshot_unavailable"}}
 		}
 		if err := s.recordAudit(ctx, tx, orgID, actor, "resource_target.updated", target.ID, map[string]any{
 			"capability": target.Capability(), "previousRevision": previousRevision, "revision": target.Revision,
@@ -209,7 +241,7 @@ func (s *Service) Update(ctx context.Context, orgID, targetID, actor string, in 
 	if err != nil {
 		return nil, err
 	}
-	return target, nil
+	return descriptor, nil
 }
 
 func (s *Service) Delete(ctx context.Context, orgID, targetID, actor string) error {
@@ -455,14 +487,23 @@ func (s *Service) List(ctx context.Context, orgID, subject string, filter ListFi
 		}
 	}
 	candidates := make([]*Target, 0, len(targets))
+	providers := make(map[string]Provider, len(targets))
 	for _, target := range targets {
 		if filter.ResourceRef != nil && target.ResourceRef != *filter.ResourceRef {
+			continue
+		}
+		p, err := s.provider(target.Capability())
+		if err != nil {
+			return nil, err
+		}
+		if !actionSupported(p, filter.Action) || (!target.Enabled && filter.Action != ActionView) {
 			continue
 		}
 		if !manager && (!target.Enabled || !access[filter.Action][target.ID]) {
 			continue
 		}
 		candidates = append(candidates, target)
+		providers[target.ID] = p
 	}
 	if len(candidates) == 0 {
 		return []Target{}, nil
@@ -473,10 +514,7 @@ func (s *Service) List(ctx context.Context, orgID, subject string, filter ListFi
 	}
 	out := make([]Target, 0, len(candidates))
 	for _, target := range candidates {
-		p, err := s.provider(target.Capability())
-		if err != nil {
-			return nil, err
-		}
+		p := providers[target.ID]
 		descriptor := *target
 		descriptor.Binding, descriptor.Readiness, err = p.Resolve(target, snapshots[target.ID])
 		if err != nil {

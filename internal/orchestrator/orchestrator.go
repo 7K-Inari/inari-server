@@ -175,10 +175,11 @@ type DeployResult struct {
 	InstanceID string
 	Version    string
 	// Status is "deploying" or "pending_approval".
-	Status     string
-	ApprovalID string
-	CommitSHA  string
-	PRURL      string
+	Status         string
+	ApprovalID     string
+	CommitSHA      string
+	PRURL          string
+	ArtifactDigest string `json:"artifactDigest,omitempty"`
 }
 
 // Service is the Orchestrator module.
@@ -405,7 +406,7 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 		return nil, err
 	}
 	if !gate.Approved {
-		return &DeployResult{Status: "pending_approval", ApprovalID: gate.ApprovalID, Version: version}, nil
+		return &DeployResult{Status: "pending_approval", ApprovalID: gate.ApprovalID, Version: version, ArtifactDigest: req.ArtifactDigest}, nil
 	}
 	return s.apply(ctx, req, item, version, nil)
 }
@@ -664,7 +665,7 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 	}
 	return &DeployResult{
 		InstanceID: instanceID, Version: version, Status: string(state),
-		CommitSHA: gitResult.CommitSHA, PRURL: gitResult.PRURL,
+		CommitSHA: gitResult.CommitSHA, PRURL: gitResult.PRURL, ArtifactDigest: req.ArtifactDigest,
 	}, nil
 }
 
@@ -892,7 +893,7 @@ func (s *Service) revert(ctx context.Context, orgID, instanceID, toVersion, repo
 		return nil, err
 	}
 	if !gate.Approved {
-		return &DeployResult{Status: "pending_approval", ApprovalID: gate.ApprovalID, Version: toVersion}, nil
+		return &DeployResult{Status: "pending_approval", ApprovalID: gate.ApprovalID, Version: toVersion, ArtifactDigest: req.ArtifactDigest}, nil
 	}
 	return s.applyWithEvent(ctx, req, item, toVersion, existing, eventType, false)
 }
@@ -949,7 +950,7 @@ func (s *Service) UpdateSpec(ctx context.Context, orgID, instanceID string, spec
 		return nil, err
 	}
 	if !gate.Approved {
-		return &DeployResult{Status: "pending_approval", ApprovalID: gate.ApprovalID, Version: existing.Version}, nil
+		return &DeployResult{Status: "pending_approval", ApprovalID: gate.ApprovalID, Version: existing.Version, ArtifactDigest: req.ArtifactDigest}, nil
 	}
 	return s.applyWithEvent(ctx, req, item, existing.Version, existing, types.EventInstanceUpdated, true)
 }

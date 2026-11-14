@@ -113,6 +113,17 @@ func TestDeployAdmitsBeforePendingAndReusesImmediateAdmission(t *testing.T) {
 				if err != nil || result == nil || result.Status != "pending_approval" || result.ApprovalID != "approval-1" {
 					t.Fatalf("result = %+v, error = %v; want pending approval", result, err)
 				}
+				raw, marshalErr := json.Marshal(result)
+				if marshalErr != nil {
+					t.Fatal(marshalErr)
+				}
+				var body map[string]any
+				if err := json.Unmarshal(raw, &body); err != nil {
+					t.Fatal(err)
+				}
+				if body["artifactDigest"] != "sha256:52ccaee6d4dd272e54bfccda77738b42e1edf0e4a20c27e23f0b6c15d01aef79" {
+					t.Fatalf("pending deploy JSON = %s, want admitted artifactDigest", raw)
+				}
 			}
 			if gate.calls != 1 || catalog.admitCalls != 1 {
 				t.Fatalf("gate calls = %d, admission calls = %d; want one of each", gate.calls, catalog.admitCalls)

@@ -170,6 +170,7 @@ type TemplateSummary struct {
 	TrustTier      string   `json:"trustTier,omitempty"`
 	Unsigned       bool     `json:"unsigned,omitempty"`
 	SourceState    string   `json:"sourceState,omitempty"`
+	PackageVersion string   `json:"packageVersion,omitempty"`
 	ArtifactDigest string   `json:"artifactDigest,omitempty"`
 	Tags           []string `json:"tags,omitempty"`
 	Version        string   `json:"version"`
@@ -240,6 +241,10 @@ func (s *Service) summary(ctx context.Context, orgID string, it *catalog.ItemVie
 		Unsigned: it.Unsigned, SourceState: it.SourceState, Version: version,
 	}
 	if ver, err := s.catalog.GetVersion(ctx, it.ID, version); err == nil {
+		sum.PackageVersion = ver.PackageVersion
+		if sum.PackageVersion == "" {
+			sum.PackageVersion = ver.Version
+		}
 		sum.ArtifactDigest = ver.ArtifactDigest
 		sum.Tags = parseTags(ver.Payload)
 		sum.Kind = payloadKind(ver.Payload)

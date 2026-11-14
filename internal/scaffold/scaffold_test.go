@@ -139,6 +139,9 @@ func TestListTemplatesFiltersSourceAndResolvesVersions(t *testing.T) {
 	if templates[0].Name != "go-service" || templates[0].Version != "1.0.0" {
 		t.Fatalf("unexpected first template: %+v", templates[0])
 	}
+	if templates[0].PackageVersion != "1.0.0" {
+		t.Fatalf("packageVersion = %q, want 1.0.0", templates[0].PackageVersion)
+	}
 	if len(templates[0].Tags) != 1 || templates[0].Tags[0] != "go" {
 		t.Fatalf("want tags from manifest payload, got %v", templates[0].Tags)
 	}

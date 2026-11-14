@@ -49,24 +49,11 @@ UPDATE catalog_item_versions SET snapshot_present = false
 WHERE item_id LIKE 'curated:%' OR item_id LIKE 'platform:%' OR item_id LIKE 'template:%';
 
 -- +goose Down
-DROP INDEX IF EXISTS trusted_source_states_success_idx;
-DROP INDEX IF EXISTS catalog_item_versions_artifact_idx;
-DROP INDEX IF EXISTS catalog_items_trust_tier_idx;
-DROP INDEX IF EXISTS catalog_items_source_active_idx;
-ALTER TABLE scaffold_runs DROP COLUMN IF EXISTS template_digest;
-ALTER TABLE resource_instances DROP COLUMN IF EXISTS artifact_digest;
-ALTER TABLE catalog_item_versions
-    DROP COLUMN IF EXISTS snapshot_present,
-    DROP COLUMN IF EXISTS chart_digest,
-    DROP COLUMN IF EXISTS chart_ref,
-    DROP COLUMN IF EXISTS artifact_digest,
-    DROP COLUMN IF EXISTS artifact_ref,
-    DROP COLUMN IF EXISTS package_version;
-ALTER TABLE catalog_items
-    DROP COLUMN IF EXISTS snapshot_present,
-    DROP COLUMN IF EXISTS source_generation,
-    DROP COLUMN IF EXISTS source_fingerprint,
-    DROP COLUMN IF EXISTS unsigned,
-    DROP COLUMN IF EXISTS trust_tier,
-    DROP COLUMN IF EXISTS source_id;
-DROP TABLE IF EXISTS trusted_source_states;
+-- This migration is explicitly irreversible. Dropping the trust/admission
+-- columns would reactivate legacy external identities and expose unverified
+-- source-qualified artifacts to an older binary. Rollback requires restoring
+-- a pre-migration backup and making a deliberate operator compatibility decision.
+DO $$
+BEGIN
+    RAISE EXCEPTION 'migration 0041_trusted_sources is irreversible';
+END $$;

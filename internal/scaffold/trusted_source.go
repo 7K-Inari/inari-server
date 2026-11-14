@@ -1,9 +1,11 @@
 package scaffold
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -207,9 +209,15 @@ func (p *RegistryTemplateSource) extractAndValidate(name string, artifact *oci.A
 	digestDir := strings.NewReplacer(":", "-", "/", "-").Replace(artifact.Digest)
 	dir := filepath.Join(p.CacheDir, name, digestDir)
 	if _, err := os.Stat(filepath.Join(dir, ".extracted")); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, nil, fmt.Errorf("scaffold: inspect template cache %s: %w", dir, err)
+		}
 		if err := p.extract(name, dir, artifact); err != nil {
 			return nil, nil, err
 		}
+	}
+	if err := verifyTemplateCache(dir, artifact.Digest, artifact.Files); err != nil {
+		return nil, nil, err
 	}
 	pkg, err := readTemplateDir(dir, name)
 	if err != nil {
@@ -220,6 +228,90 @@ func (p *RegistryTemplateSource) extractAndValidate(name string, artifact *oci.A
 		return nil, nil, err
 	}
 	return pkg, manifestRaw, nil
+}
+
+// verifyTemplateCache binds the complete on-disk extraction to the artifact
+// bytes verified during this sync. Marker presence alone is never sufficient:
+// altered files, unexpected files, missing files, links, and marker spoofing
+// all fail before a snapshot can be persisted.
+func verifyTemplateCache(dir, digest string, expected map[string][]byte) error {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("scaffold: inspect template cache %s: %w", dir, err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("scaffold: template cache %s is not a real directory", dir)
+	}
+	seen := make(map[string]bool, len(expected))
+	markerSeen := false
+	err = filepath.WalkDir(dir, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == dir {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if entry.IsDir() {
+			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("scaffold: template cache contains non-regular entry %q", rel)
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if rel == ".extracted" {
+			if info.Size() != int64(len(digest)) {
+				return fmt.Errorf("scaffold: template cache marker digest mismatch")
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if string(raw) != digest {
+				return fmt.Errorf("scaffold: template cache marker digest mismatch")
+			}
+			markerSeen = true
+			return nil
+		}
+		want, ok := expected[rel]
+		if !ok {
+			return fmt.Errorf("scaffold: template cache contains unexpected file %q", rel)
+		}
+		if info.Size() != int64(len(want)) {
+			return fmt.Errorf("scaffold: template cache file %q does not match verified bytes", rel)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(raw, want) {
+			return fmt.Errorf("scaffold: template cache file %q does not match verified bytes", rel)
+		}
+		seen[rel] = true
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if !markerSeen {
+		return fmt.Errorf("scaffold: template cache marker is missing")
+	}
+	if len(seen) != len(expected) {
+		return fmt.Errorf("scaffold: template cache is incomplete: got %d of %d verified files", len(seen), len(expected))
+	}
+	for rel := range expected {
+		if !seen[rel] {
+			return fmt.Errorf("scaffold: template cache is missing verified file %q", rel)
+		}
+	}
+	return nil
 }
 
 func (p *RegistryTemplateSource) extract(name, dir string, artifact *oci.Artifact) error {

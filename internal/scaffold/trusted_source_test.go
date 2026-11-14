@@ -165,3 +165,52 @@ func TestCatalogTemplatePullerPreservesApprovalPolicy(t *testing.T) {
 		t.Fatalf("packages = %+v, want platform-admin approval policy", packages)
 	}
 }
+
+func TestRegistryTemplateSourceRejectsPreseededCachePoison(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		poison func(map[string]string)
+	}{
+		{name: "altered bytes", poison: func(files map[string]string) {
+			files["skeleton/deploy/app.yaml"] = "kind: Pod\n"
+		}},
+		{name: "unexpected file", poison: func(files map[string]string) {
+			files["skeleton/unexpected.yaml"] = "kind: Pod\n"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := setupTrustedTemplateRegistry(t)
+			indexArtifact, err := source.fetcher().Fetch(context.Background(), source.IndexRef)
+			if err != nil {
+				t.Fatal(err)
+			}
+			index, err := trustedsource.DecodeIndex(indexArtifact.Files["templates.yaml"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			entry := index.Templates[0]
+			digestDir := strings.NewReplacer(":", "-", "/", "-").Replace(entry.Digest)
+			dir := filepath.Join(source.CacheDir, entry.Name, digestDir)
+			files := templateFiles()
+			tc.poison(files)
+			for name, content := range files {
+				path := filepath.Join(dir, name)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(dir, ".extracted"), []byte(entry.Digest), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := (CatalogTemplatePuller{source}).Pull(context.Background()); err == nil || !strings.Contains(err.Error(), "cache") {
+				t.Fatalf("error = %v, want pre-seeded cache rejection", err)
+			}
+			if _, err := source.Get(context.Background(), entry.Name, entry.Version); err == nil {
+				t.Fatal("poisoned cache was published into the synced source")
+			}
+		})
+	}
+}

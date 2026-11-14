@@ -585,6 +585,16 @@ func (s *Service) TemplateNameForRun(ctx context.Context, run *types.ScaffoldRun
 	return item.Name
 }
 
+func (s *Service) admitRunForRetry(ctx context.Context, run *types.ScaffoldRun) error {
+	if s.execEnv().Catalog == nil {
+		// DB-free runner tests exercise internal file sources only. Live
+		// wiring always supplies Catalog for source admission.
+		return nil
+	}
+	_, err := admitVersionForRun(ctx, s.catalog, s.cfg.Environment, run)
+	return err
+}
+
 // RetryRun resumes a failed run from its first non-completed step (M8.W6,
 // parent plan §5.3): completed steps keep their results, everything else
 // resets with a fresh attempt budget, and the approval hold (if any) is
@@ -598,6 +608,9 @@ func (s *Service) RetryRun(ctx context.Context, actor, orgID, runID string) (*ty
 	}
 	if run.Phase != types.ScaffoldPhaseFailed {
 		return nil, nil, ErrInvalidState
+	}
+	if err := s.admitRunForRetry(ctx, run); err != nil {
+		return nil, nil, err
 	}
 	steps, err := s.store.ListSteps(ctx, s.db.Pool, run.ID)
 	if err != nil {

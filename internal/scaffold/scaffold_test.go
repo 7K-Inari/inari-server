@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
+	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
 	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -19,10 +21,12 @@ func itItemView(id, name string) *catalog.ItemView {
 
 // stubCatalog is an in-memory TemplateCatalog for DB-free service tests.
 type stubCatalog struct {
-	items     []catalog.ItemView
-	versions  map[string]*types.CatalogItemVersion // itemID+"@"+version
-	effective map[string]string                    // orgID+itemID → version
-	byID      map[string]*types.CatalogItem
+	items      []catalog.ItemView
+	versions   map[string]*types.CatalogItemVersion // itemID+"@"+version
+	effective  map[string]string                    // orgID+itemID → version
+	byID       map[string]*types.CatalogItem
+	admitCalls int
+	admitErr   error
 }
 
 func (c *stubCatalog) ListVisible(_ context.Context, _ string, opts types.CatalogListOptions) ([]catalog.ItemView, int, error) {
@@ -59,6 +63,14 @@ func (c *stubCatalog) GetItemByID(_ context.Context, itemID string) (*types.Cata
 	return nil, errors.New("no such item")
 }
 
+func (c *stubCatalog) AdmitVersion(_ context.Context, itemID, version string, _ trustedsource.Environment) (*catalog.AdmittedVersion, error) {
+	c.admitCalls++
+	if c.admitErr != nil {
+		return nil, c.admitErr
+	}
+	return &catalog.AdmittedVersion{Version: c.versions[itemID+"@"+version]}, nil
+}
+
 func newStubCatalog() *stubCatalog {
 	goSvc := *itItemView("template:go-service", "go-service")
 	goSvc.DisplayName = "Go Service"
@@ -86,6 +98,32 @@ func newStubCatalog() *stubCatalog {
 			"template:go-service": &goSvc.CatalogItem,
 			"template:web-app":    &webApp.CatalogItem,
 		},
+	}
+}
+
+func TestAdmitRunForRetryUsesExactPersistedArtifact(t *testing.T) {
+	catalog := newStubCatalog()
+	digest := "sha256:52ccaee6d4dd272e54bfccda77738b42e1edf0e4a20c27e23f0b6c15d01aef79"
+	catalog.byID["core/go-service"] = &types.CatalogItem{ID: "core/go-service", SourceID: "core", Name: "go-service", Source: types.CatalogSourceTemplate}
+	catalog.versions["core/go-service@1.0.0"] = &types.CatalogItemVersion{ItemID: "core/go-service", Version: "1.0.0", ArtifactDigest: digest}
+	svc := NewService(nil, NewStore(), nil, catalog, Config{Environment: trustedsource.EnvironmentDevelopment}, nil)
+	svc.WithExecEnv(&ExecEnv{Catalog: catalog})
+	run := &types.ScaffoldRun{ID: "run:retry", TemplateItemID: "core/go-service", TemplateVersion: "1.0.0", TemplateDigest: digest}
+	if err := svc.admitRunForRetry(context.Background(), run); err != nil {
+		t.Fatalf("admitRunForRetry: %v", err)
+	}
+	if catalog.admitCalls != 1 {
+		t.Fatalf("admission calls = %d, want 1", catalog.admitCalls)
+	}
+	denied := errors.New("evidence revoked")
+	catalog.admitErr = denied
+	if err := svc.admitRunForRetry(context.Background(), run); !errors.Is(err, denied) {
+		t.Fatalf("error = %v, want admission denial", err)
+	}
+	catalog.admitErr = nil
+	run.TemplateDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	if err := svc.admitRunForRetry(context.Background(), run); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
+		t.Fatalf("error = %v, want exact-digest mismatch", err)
 	}
 }
 

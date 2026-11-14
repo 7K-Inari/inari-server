@@ -110,6 +110,44 @@ type artifactTemplateSource interface {
 	GetArtifact(ctx context.Context, ref, version, expectedSkeletonDigest string) (*TemplatePackage, error)
 }
 
+var (
+	errLegacyIdentityUnsupported = errors.New("legacy_identity_unsupported")
+	errTemplateDigestRequired    = errors.New("scaffold: template digest is required")
+)
+
+func admitVersionForRun(ctx context.Context, cat TemplateCatalog, environment trustedsource.Environment, run *types.ScaffoldRun) (*catalog.AdmittedVersion, error) {
+	if run == nil || !strings.Contains(run.TemplateItemID, "/") || strings.Contains(run.TemplateItemID, ":") {
+		return nil, errLegacyIdentityUnsupported
+	}
+	if run.TemplateDigest == "" {
+		return nil, errTemplateDigestRequired
+	}
+	item, err := cat.GetItemByID(ctx, run.TemplateItemID)
+	if err != nil {
+		return nil, err
+	}
+	if item.SourceID == "" {
+		return nil, errLegacyIdentityUnsupported
+	}
+	admitter, ok := cat.(interface {
+		AdmitVersion(context.Context, string, string, trustedsource.Environment) (*catalog.AdmittedVersion, error)
+	})
+	if !ok {
+		return nil, &artifactadmission.Error{Code: artifactadmission.CodeUnavailable, Ref: run.TemplateItemID, Err: errors.New("template admission seam is not configured"), Temporary: true}
+	}
+	admitted, err := admitter.AdmitVersion(ctx, run.TemplateItemID, run.TemplateVersion, environment)
+	if err != nil {
+		return nil, err
+	}
+	if admitted == nil || admitted.Version == nil {
+		return nil, errors.New("scaffold: admission returned no template version")
+	}
+	if admitted.Version.ArtifactDigest != run.TemplateDigest {
+		return nil, fmt.Errorf("scaffold: template digest mismatch for %s", run.TemplateItemID)
+	}
+	return admitted, nil
+}
+
 func templatePackageForRun(ctx context.Context, env *ExecEnv, run *types.ScaffoldRun) (*TemplatePackage, error) {
 	if env == nil || env.Templates == nil {
 		return nil, errors.New("scaffold: no template source configured")
@@ -119,20 +157,7 @@ func templatePackageForRun(ctx context.Context, env *ExecEnv, run *types.Scaffol
 		// wiring always supplies Catalog for source admission.
 		return env.Templates.Get(ctx, strings.TrimPrefix(run.TemplateItemID, "template:"), run.TemplateVersion)
 	}
-	item, err := env.Catalog.GetItemByID(ctx, run.TemplateItemID)
-	if err != nil {
-		return nil, err
-	}
-	if item.SourceID == "" {
-		return env.Templates.Get(ctx, strings.TrimPrefix(run.TemplateItemID, "template:"), run.TemplateVersion)
-	}
-	admitter, ok := env.Catalog.(interface {
-		AdmitVersion(context.Context, string, string, trustedsource.Environment) (*catalog.AdmittedVersion, error)
-	})
-	if !ok {
-		return nil, &artifactadmission.Error{Code: artifactadmission.CodeUnavailable, Ref: run.TemplateItemID, Err: errors.New("template admission seam is not configured"), Temporary: true}
-	}
-	admitted, err := admitter.AdmitVersion(ctx, run.TemplateItemID, run.TemplateVersion, env.Environment)
+	admitted, err := admitVersionForRun(ctx, env.Catalog, env.Environment, run)
 	if err != nil {
 		return nil, err
 	}
@@ -140,13 +165,7 @@ func templatePackageForRun(ctx context.Context, env *ExecEnv, run *types.Scaffol
 	if !ok {
 		return nil, errors.New("scaffold: template source does not support exact digest resolution")
 	}
-	if admitted == nil {
-		return nil, errors.New("scaffold: admission returned no result")
-	}
 	version := admitted.Version
-	if version == nil {
-		return nil, errors.New("scaffold: admission returned no template version")
-	}
 	var payload struct {
 		SkeletonDigest string `json:"skeletonDigest"`
 	}

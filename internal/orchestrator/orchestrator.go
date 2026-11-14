@@ -165,6 +165,9 @@ type DeployRequest struct {
 	// to (Feature A); empty = the org's default repo.
 	RepoID         string
 	ArtifactDigest string
+	// admissionVerified is set only by this service after admitVersion succeeds
+	// in the current invocation. Resume builds a fresh request and re-admits.
+	admissionVerified bool
 }
 
 // DeployResult reports the deploy outcome.
@@ -386,6 +389,12 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 	}); err != nil {
 		return nil, err
 	}
+	digest, err := s.admitVersion(ctx, req, item, version)
+	if err != nil {
+		return nil, err
+	}
+	req.ArtifactDigest = digest
+	req.admissionVerified = true
 
 	gate, err := s.gate.Gate(ctx, approvals.GateInput{
 		OrgID: req.OrgID, Item: item, Version: version, ClusterID: req.ClusterID,
@@ -488,11 +497,13 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 	if _, err := s.catalog.GetVersion(ctx, req.ItemID, version); err != nil {
 		return nil, err
 	}
-	digest, err := s.admitVersion(ctx, req, item, version)
-	if err != nil {
-		return nil, err
+	if !req.admissionVerified {
+		digest, err := s.admitVersion(ctx, req, item, version)
+		if err != nil {
+			return nil, err
+		}
+		req.ArtifactDigest = digest
 	}
-	req.ArtifactDigest = digest
 	selector := req.RepoID
 	if existing != nil {
 		// Mutations always land in the instance's recorded repo; an
@@ -862,6 +873,16 @@ func (s *Service) revert(ctx context.Context, orgID, instanceID, toVersion, repo
 	}); err != nil {
 		return nil, err
 	}
+	req := DeployRequest{
+		OrgID: orgID, ClusterID: existing.ClusterID, ItemID: existing.CatalogItemID,
+		Version: toVersion, OwnerTeam: existing.OwnerTeam, Spec: existing.Spec, Requester: requester,
+	}
+	digest, err := s.admitVersion(ctx, req, item, toVersion)
+	if err != nil {
+		return nil, err
+	}
+	req.ArtifactDigest = digest
+	req.admissionVerified = true
 	gate, err := s.gate.Gate(ctx, approvals.GateInput{
 		OrgID: orgID, Item: item, Version: toVersion, ClusterID: existing.ClusterID,
 		Spec: existing.Spec, Requester: requester, OwnerTeam: existing.OwnerTeam,
@@ -873,10 +894,7 @@ func (s *Service) revert(ctx context.Context, orgID, instanceID, toVersion, repo
 	if !gate.Approved {
 		return &DeployResult{Status: "pending_approval", ApprovalID: gate.ApprovalID, Version: toVersion}, nil
 	}
-	return s.applyWithEvent(ctx, DeployRequest{
-		OrgID: orgID, ClusterID: existing.ClusterID, ItemID: existing.CatalogItemID,
-		Version: toVersion, OwnerTeam: existing.OwnerTeam, Spec: existing.Spec, Requester: requester,
-	}, item, toVersion, existing, eventType, false)
+	return s.applyWithEvent(ctx, req, item, toVersion, existing, eventType, false)
 }
 
 // UpdateSpec re-renders an instance at its current version with a new spec
@@ -912,6 +930,16 @@ func (s *Service) UpdateSpec(ctx context.Context, orgID, instanceID string, spec
 	}); err != nil {
 		return nil, err
 	}
+	req := DeployRequest{
+		OrgID: orgID, ClusterID: existing.ClusterID, ItemID: existing.CatalogItemID,
+		Version: existing.Version, OwnerTeam: existing.OwnerTeam, Spec: spec, Requester: requester,
+	}
+	digest, err := s.admitVersion(ctx, req, item, existing.Version)
+	if err != nil {
+		return nil, err
+	}
+	req.ArtifactDigest = digest
+	req.admissionVerified = true
 	gate, err := s.gate.Gate(ctx, approvals.GateInput{
 		OrgID: orgID, Item: item, Version: existing.Version, ClusterID: existing.ClusterID,
 		Spec: spec, Requester: requester, OwnerTeam: existing.OwnerTeam,
@@ -923,10 +951,7 @@ func (s *Service) UpdateSpec(ctx context.Context, orgID, instanceID string, spec
 	if !gate.Approved {
 		return &DeployResult{Status: "pending_approval", ApprovalID: gate.ApprovalID, Version: existing.Version}, nil
 	}
-	return s.applyWithEvent(ctx, DeployRequest{
-		OrgID: orgID, ClusterID: existing.ClusterID, ItemID: existing.CatalogItemID,
-		Version: existing.Version, OwnerTeam: existing.OwnerTeam, Spec: spec, Requester: requester,
-	}, item, existing.Version, existing, types.EventInstanceUpdated, true)
+	return s.applyWithEvent(ctx, req, item, existing.Version, existing, types.EventInstanceUpdated, true)
 }
 
 // UpdateSpecResume re-enters the spec update after its approval was granted.

@@ -6,14 +6,17 @@ import (
 	"testing"
 
 	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
+	"github.com/7K-Inari/inari-server/internal/approvals"
 	"github.com/7K-Inari/inari-server/internal/artifactadmission"
 	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
 type denialCatalog struct {
-	item    *types.CatalogItem
-	version *types.CatalogItemVersion
+	item       *types.CatalogItem
+	version    *types.CatalogItemVersion
+	admitErr   error
+	admitCalls int
 }
 
 func (d denialCatalog) GetItemByID(context.Context, string) (*types.CatalogItem, error) {
@@ -26,8 +29,22 @@ func (d denialCatalog) GetVersion(context.Context, string, string) (*types.Catal
 	return d.version, nil
 }
 func (d denialCatalog) EnsureVisible(context.Context, string, string, string) error { return nil }
-func (d denialCatalog) AdmitVersion(context.Context, string, string, trustedsource.Environment) (*catalog.AdmittedVersion, error) {
-	return nil, &artifactadmission.Error{Code: artifactadmission.CodeSignatureInvalid, Err: errors.New("bad signature")}
+func (d *denialCatalog) AdmitVersion(context.Context, string, string, trustedsource.Environment) (*catalog.AdmittedVersion, error) {
+	d.admitCalls++
+	if d.admitErr != nil {
+		return nil, d.admitErr
+	}
+	return &catalog.AdmittedVersion{Version: d.version}, nil
+}
+
+type recordingGate struct {
+	calls    int
+	approved bool
+}
+
+func (g *recordingGate) Gate(context.Context, approvals.GateInput) (*approvals.GateResult, error) {
+	g.calls++
+	return &approvals.GateResult{Approved: g.approved, ApprovalID: "approval-1"}, nil
 }
 
 type admissionCluster struct{ org string }
@@ -39,7 +56,8 @@ func (c admissionCluster) GetCluster(context.Context, string) (*types.Cluster, e
 func TestExternalAdmissionDenialStopsBeforeGit(t *testing.T) {
 	item := &types.CatalogItem{ID: "core/web-service", SourceID: "core", Name: "web-service"}
 	version := &types.CatalogItemVersion{ItemID: item.ID, Version: "1.0.0"}
-	service := NewService(nil, nil, denialCatalog{item: item, version: version}, admissionCluster{org: "org:1"}, nil, nil, nil, nil)
+	catalog := &denialCatalog{item: item, version: version, admitErr: &artifactadmission.Error{Code: artifactadmission.CodeSignatureInvalid, Err: errors.New("bad signature")}}
+	service := NewService(nil, nil, catalog, admissionCluster{org: "org:1"}, nil, nil, nil, nil)
 	_, err := service.apply(context.Background(), DeployRequest{OrgID: "org:1", ClusterID: "c1", ItemID: item.ID, Version: "1.0.0"}, item, version.Version, nil)
 	if !artifactadmission.IsCode(err, artifactadmission.CodeSignatureInvalid) {
 		t.Fatalf("error = %v, want signature_invalid and no later git resolution", err)

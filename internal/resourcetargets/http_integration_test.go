@@ -136,4 +136,13 @@ func TestHTTPTargetAdministrationAndEntitlementFilteredReads(t *testing.T) {
 	if code != http.StatusOK || strings.Contains(string(body), targetID) {
 		t.Errorf("list after revocation = %d %s", code, body)
 	}
+
+	if _, err := database.Pool.Exec(context.Background(), `UPDATE organizations SET status='deleting' WHERE id='org:store'`); err != nil {
+		t.Fatal(err)
+	}
+	code, body = targetRequest(t, srv, http.MethodPost, "/api/v1/tenants/store/resource-targets", "admin",
+		`{"name":"frozen","resourceRef":{"kind":"cluster","id":"cluster:store"},"capability":"deployment.cluster","config":{}}`)
+	if code != http.StatusConflict {
+		t.Errorf("create in deleting tenant = %d %s, want 409", code, body)
+	}
 }

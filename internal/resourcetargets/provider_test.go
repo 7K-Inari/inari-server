@@ -3,6 +3,7 @@ package resourcetargets
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -73,11 +74,13 @@ func validGrafanaSnapshot() ResourceSnapshot {
 		BaselineRepo: &types.TenantGitRepo{ID: "repo-1", OrgID: "org:1", Scope: types.GitRepoScopePlatform, BaseBranch: "main", CommitPolicy: types.CommitPolicyPullRequest},
 		Addons: []*types.ClusterAddon{{
 			ID: "addon-1", OrgID: "org:1", ClusterID: "cluster:1",
-			DiscoveredMeta: json.RawMessage(`{"releaseName":"grafana","namespace":"monitoring"}`),
+			// Match the additive metadata emitted by addons.IngestDiscovery.
+			DiscoveredMeta: json.RawMessage(`{"catalogItem":"platform:grafana","releaseName":"grafana","namespace":"monitoring","detectedVersion":"12.1.0","chart":"grafana","repoUrl":"https://charts.example"}`),
 		}},
 		Capabilities: []types.Capability{{
 			ClusterID: "cluster:1", Kind: types.CapabilityKindHelmRelease, Name: "monitoring/grafana", Group: "helm.sh",
-			UIHints: json.RawMessage(`{"status":"deployed"}`), LastSeenAt: now,
+			// The agent includes namespace alongside status in Helm UI hints.
+			UIHints: json.RawMessage(`{"namespace":"monitoring","status":"deployed"}`), LastSeenAt: now,
 		}},
 		TeamIDs: []string{"team-1"},
 	}
@@ -155,6 +158,12 @@ func TestGrafanaProviderRejectsUnsafeOrStaleInput(t *testing.T) {
 	target := &Target{Config: validGrafanaConfig()}
 	if _, _, err := p.ValidateSelection(target, json.RawMessage(`{"folder":"other/team","datasource":"metrics","evaluation":"central"}`)); err == nil {
 		t.Fatal("folder outside policy must be rejected")
+	}
+	for _, folder := range []string{"acme/../other", "acme/./team", "acme//team"} {
+		selection := json.RawMessage(`{"folder":` + strconv.Quote(folder) + `,"datasource":"metrics","evaluation":"central"}`)
+		if _, _, err := p.ValidateSelection(target, selection); err == nil {
+			t.Errorf("folder with invalid segment %q must be rejected", folder)
+		}
 	}
 	if _, _, err := p.ValidateSelection(target, json.RawMessage(`{"baseUrl":"https://evil.example"}`)); err == nil {
 		t.Fatal("selection must reject arbitrary URL bindings")

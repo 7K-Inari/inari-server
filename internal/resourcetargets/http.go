@@ -71,6 +71,9 @@ func (h *Handler) authorize(ctx context.Context, slug string, manage bool) (*typ
 	if err != nil {
 		return nil, nil, err
 	}
+	if manage && org.Status != types.OrgStatusActive {
+		return nil, nil, huma.Error409Conflict("tenant is being deleted and no longer accepts changes")
+	}
 	if manage {
 		allowed, err := h.authz.Check(ctx, authz.UserObject(id.Subject), authz.RelationResourceTargetsManage, authz.OrgObject(org.ID))
 		if err != nil {

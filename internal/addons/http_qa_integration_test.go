@@ -268,7 +268,7 @@ func TestQAVersionBumpRevalidatesStoredValues(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &out); err != nil {
 		t.Fatal(err)
 	}
-	appFile := "addons/external-dns/application.yaml"
+	appFile := "addons/platform:external-dns/application.yaml"
 	if app := f.git.Files("acme/acme-inari-state", "main")[appFile]; !strings.Contains(app, "targetRevision: 1.15.2") {
 		t.Fatalf("adopt must pin 1.15.2:\n%s", app)
 	}
@@ -307,7 +307,7 @@ func TestQAVersionBumpRevalidatesStoredValues(t *testing.T) {
 	if app := files[appFile]; !strings.Contains(app, "targetRevision: 1.16.0") {
 		t.Errorf("bump must pin 1.16.0:\n%s", app)
 	}
-	if vals := files["addons/external-dns/values.yaml"]; !strings.Contains(vals, "policy: upsert-only") {
+	if vals := files["addons/platform:external-dns/values.yaml"]; !strings.Contains(vals, "policy: upsert-only") {
 		t.Errorf("bump must commit corrected values:\n%s", vals)
 	}
 }

@@ -35,13 +35,13 @@ type Store struct{}
 // NewStore returns the scaffold run store.
 func NewStore() *Store { return &Store{} }
 
-const runCols = `id, org_id, template_item_id, template_version, display_name, values, phase,
+const runCols = `id, org_id, template_item_id, template_version, template_digest, display_name, values, phase,
 	error, outputs, idempotency_key, created_by, created_at, updated_at, cancelled_at`
 
 func scanRun(row interface{ Scan(...any) error }) (*types.ScaffoldRun, error) {
 	var r types.ScaffoldRun
 	var key *string
-	err := row.Scan(&r.ID, &r.OrgID, &r.TemplateItemID, &r.TemplateVersion, &r.DisplayName,
+	err := row.Scan(&r.ID, &r.OrgID, &r.TemplateItemID, &r.TemplateVersion, &r.TemplateDigest, &r.DisplayName,
 		&r.Values, &r.Phase, &r.Error, &r.Outputs, &key, &r.CreatedBy, &r.CreatedAt, &r.UpdatedAt,
 		&r.CancelledAt)
 	if err != nil {
@@ -69,10 +69,10 @@ func (s *Store) CreateRun(ctx context.Context, q db.Querier, r *types.ScaffoldRu
 	if r.IdempotencyKey != "" {
 		key = &r.IdempotencyKey
 	}
-	const sql = `INSERT INTO scaffold_runs (id, org_id, template_item_id, template_version,
+	const sql = `INSERT INTO scaffold_runs (id, org_id, template_item_id, template_version, template_digest,
 	             display_name, values, phase, error, outputs, idempotency_key, created_by)
-	             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING ` + runCols
-	out, err := scanRun(q.QueryRow(ctx, sql, r.ID, r.OrgID, r.TemplateItemID, r.TemplateVersion,
+	             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING ` + runCols
+	out, err := scanRun(q.QueryRow(ctx, sql, r.ID, r.OrgID, r.TemplateItemID, r.TemplateVersion, r.TemplateDigest,
 		r.DisplayName, values, r.Phase, r.Error, outputs, key, r.CreatedBy))
 	if isIdempotencyUniqueViolation(err) {
 		return ErrIdempotencyConflict

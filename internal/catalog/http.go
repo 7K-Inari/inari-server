@@ -93,9 +93,65 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		OperationID: "syncCatalog",
 		Method:      http.MethodPost,
 		Path:        "/api/v1/admin/catalog/sync",
-		Summary:     "Sync curated packages from the catalog registry (platform engineer)",
+		Summary:     "Sync trusted catalog sources independently (platform engineer)",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.syncCatalog)
+	huma.Register(api, huma.Operation{
+		OperationID: "listCatalogSources",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/admin/catalog/sources",
+		Summary:     "List catalog source health and last-good snapshots (platform engineer)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.listCatalogSources)
+	huma.Register(api, huma.Operation{
+		OperationID: "listTemplateSources",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/admin/templates/sources",
+		Summary:     "List template source health and last-good snapshots (platform engineer)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.listTemplateSources)
+	huma.Register(api, huma.Operation{
+		OperationID: "syncTemplates",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/admin/templates/sync",
+		Summary:     "Sync trusted template sources independently (platform engineer)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.syncTemplates)
+	huma.Register(api, huma.Operation{
+		OperationID: "getSourceCatalogItem",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/tenants/{org}/catalog/{source}/{name}",
+		Summary:     "Get a source-qualified catalog item",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.getSourceItem)
+	huma.Register(api, huma.Operation{
+		OperationID: "pinSourceCatalogVersion",
+		Method:      http.MethodPut,
+		Path:        "/api/v1/tenants/{org}/catalog/{source}/{name}/pin",
+		Summary:     "Pin a source-qualified catalog item version",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.setSourcePin)
+	huma.Register(api, huma.Operation{
+		OperationID: "unpinSourceCatalogVersion",
+		Method:      http.MethodDelete,
+		Path:        "/api/v1/tenants/{org}/catalog/{source}/{name}/pin",
+		Summary:     "Remove a source-qualified version pin",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.deleteSourcePin)
+	huma.Register(api, huma.Operation{
+		OperationID: "setSourceCatalogOrgVisibility",
+		Method:      http.MethodPut,
+		Path:        "/api/v1/tenants/{org}/catalog-visibility/{source}/{name}",
+		Summary:     "Set org visibility for a source-qualified item",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.setSourceOrgVisibility)
+	huma.Register(api, huma.Operation{
+		OperationID: "setSourceCatalogVisibility",
+		Method:      http.MethodPut,
+		Path:        "/api/v1/admin/catalog/{source}/{name}/visibility",
+		Summary:     "Set visibility for a source-qualified item (platform engineer)",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.setSourceVisibility)
 }
 
 // authorizeOrg performs coarse PEP (org claim) + fine PEP (OpenFGA Check).
@@ -150,14 +206,16 @@ func (h *Handler) authorizePlatform(ctx context.Context) (*authn.Identity, error
 }
 
 type listCatalogInput struct {
-	Org      string `path:"org"`
-	Cluster  string `query:"cluster" doc:"Cluster ID; intersects discovered capabilities"`
-	Query    string `query:"q" doc:"Free-text search over name, display name, and description"`
-	Source   string `query:"source" enum:"curated,discovered,platform,template" doc:"Filter by item source"`
-	Category string `query:"category" doc:"Filter by package category (discovered projections have no category)"`
-	Sort     string `query:"sort" enum:"name,name-desc,newest,oldest" default:"name" doc:"Sort order (whitelisted server-side)"`
-	Limit    int    `query:"limit" minimum:"0" maximum:"200" doc:"Page size; 0 returns all matches"`
-	Offset   int    `query:"offset" minimum:"0" doc:"Page offset into the filtered, sorted result"`
+	Org       string `path:"org"`
+	Cluster   string `query:"cluster" doc:"Cluster ID; intersects discovered capabilities"`
+	Query     string `query:"q" doc:"Free-text search over name, display name, and description"`
+	Source    string `query:"source" enum:"curated,discovered,platform,template" doc:"Filter by item kind"`
+	SourceID  string `query:"sourceId" doc:"Filter by server-assigned source ID"`
+	TrustTier string `query:"trustTier" enum:"official,reviewed,experimental" doc:"Filter by source trust tier"`
+	Category  string `query:"category" doc:"Filter by package category (discovered projections have no category)"`
+	Sort      string `query:"sort" enum:"name,name-desc,newest,oldest" default:"name" doc:"Sort order (whitelisted server-side)"`
+	Limit     int    `query:"limit" minimum:"0" maximum:"200" doc:"Page size; 0 returns all matches"`
+	Offset    int    `query:"offset" minimum:"0" doc:"Page offset into the filtered, sorted result"`
 }
 
 type listCatalogOutput struct {
@@ -175,6 +233,8 @@ func (h *Handler) listCatalog(ctx context.Context, in *listCatalogInput) (*listC
 	items, total, err := h.svc.ListVisible(ctx, org.ID, types.CatalogListOptions{
 		Query:     in.Query,
 		Source:    in.Source,
+		SourceID:  in.SourceID,
+		TrustTier: in.TrustTier,
 		Category:  in.Category,
 		ClusterID: in.Cluster,
 		Sort:      in.Sort,
@@ -314,22 +374,121 @@ func (h *Handler) setVisibility(ctx context.Context, in *visibilityInput) (*stru
 
 type syncOutput struct {
 	Body struct {
-		Synced int `json:"synced"`
+		Synced  int                         `json:"synced"`
+		Sources []types.TrustedSourceStatus `json:"sources"`
 	}
 }
 
 func (h *Handler) syncCatalog(ctx context.Context, _ *struct{}) (*syncOutput, error) {
+	return h.syncKind(ctx, "catalog")
+}
+
+func (h *Handler) syncTemplates(ctx context.Context, _ *struct{}) (*syncOutput, error) {
+	return h.syncKind(ctx, "template")
+}
+
+func (h *Handler) syncKind(ctx context.Context, kind string) (*syncOutput, error) {
 	if _, err := h.authorizePlatform(ctx); err != nil {
 		return nil, err
 	}
-	n, err := h.svc.Sync(ctx)
-	if errors.Is(err, ErrSyncNotConfigured) {
-		return nil, huma.Error409Conflict(err.Error())
+	n, syncErr := h.svc.SyncKind(ctx, kind)
+	if errors.Is(syncErr, ErrSyncNotConfigured) {
+		return nil, huma.Error409Conflict(syncErr.Error())
 	}
+	states, err := h.svc.ListTrustedSourceStates(ctx, kind)
 	if err != nil {
 		return nil, err
 	}
 	out := &syncOutput{}
 	out.Body.Synced = n
+	out.Body.Sources = states
+	// A source failure is represented in its own status. It must not hide
+	// successful independent sources or their last-good snapshots.
 	return out, nil
+}
+
+type sourceListOutput struct {
+	Body struct {
+		Sources []types.TrustedSourceStatus `json:"sources"`
+	}
+}
+
+func (h *Handler) listCatalogSources(ctx context.Context, _ *struct{}) (*sourceListOutput, error) {
+	return h.listSources(ctx, "catalog")
+}
+
+func (h *Handler) listTemplateSources(ctx context.Context, _ *struct{}) (*sourceListOutput, error) {
+	return h.listSources(ctx, "template")
+}
+
+func (h *Handler) listSources(ctx context.Context, kind string) (*sourceListOutput, error) {
+	if _, err := h.authorizePlatform(ctx); err != nil {
+		return nil, err
+	}
+	states, err := h.svc.ListTrustedSourceStates(ctx, kind)
+	if err != nil {
+		return nil, err
+	}
+	out := &sourceListOutput{}
+	out.Body.Sources = states
+	return out, nil
+}
+
+type sourceItemPathInput struct {
+	Org     string `path:"org"`
+	Source  string `path:"source"`
+	Name    string `path:"name"`
+	Cluster string `query:"cluster"`
+}
+
+func (h *Handler) getSourceItem(ctx context.Context, in *sourceItemPathInput) (*itemOutput, error) {
+	return h.getItem(ctx, &itemPathInput{Org: in.Org, Item: in.Source + "/" + in.Name, Cluster: in.Cluster})
+}
+
+type sourcePinInput struct {
+	Org     string `path:"org"`
+	Source  string `path:"source"`
+	Name    string `path:"name"`
+	Cluster string `query:"cluster"`
+	Body    struct {
+		Version string `json:"version" minLength:"1"`
+	}
+}
+
+func (h *Handler) setSourcePin(ctx context.Context, in *sourcePinInput) (*struct{}, error) {
+	return h.setPin(ctx, &pinInput{Org: in.Org, Item: in.Source + "/" + in.Name, Body: in.Body})
+}
+
+func (h *Handler) deleteSourcePin(ctx context.Context, in *sourceItemPathInput) (*struct{}, error) {
+	return h.deletePin(ctx, &itemPathInput{Org: in.Org, Item: in.Source + "/" + in.Name})
+}
+
+type sourceOrgVisibilityInput struct {
+	Org     string `path:"org"`
+	Source  string `path:"source"`
+	Name    string `path:"name"`
+	Cluster string `query:"cluster"`
+	Body    struct {
+		Visible bool `json:"visible" doc:"false hides the item for this org; true shows it (subject to platform rules)"`
+	}
+}
+
+func (h *Handler) setSourceOrgVisibility(ctx context.Context, in *sourceOrgVisibilityInput) (*struct{}, error) {
+	return h.setOrgVisibility(ctx, &orgVisibilityInput{Org: in.Org, Item: in.Source + "/" + in.Name, Body: in.Body})
+}
+
+type sourceVisibilityInput struct {
+	Source  string `path:"source"`
+	Name    string `path:"name"`
+	Cluster string `query:"cluster"`
+	Body    struct {
+		Rules []struct {
+			OrgID     string `json:"orgId" minLength:"1"`
+			ClusterID string `json:"clusterId,omitempty"`
+		} `json:"rules"`
+	}
+}
+
+func (h *Handler) setSourceVisibility(ctx context.Context, in *sourceVisibilityInput) (*struct{}, error) {
+	return h.setVisibility(ctx, &visibilityInput{Item: in.Source + "/" + in.Name, Body: in.Body})
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 
+	"github.com/7K-Inari/inari-server/internal/artifactadmission"
 	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/catalog"
@@ -71,7 +72,7 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 	huma.Register(api, huma.Operation{
 		OperationID: "listClusterAddons",
 		Method:      http.MethodGet,
-		Path:        "/api/v1/tenants/{org}/clusters/{c}/addons",
+		Path:        "/api/v1/tenants/{org}/clusters/{cluster}/addons",
 		Summary:     "List discovered + managed addons for a cluster (team-filtered, with available versions)",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.list)
@@ -79,10 +80,17 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 	huma.Register(api, huma.Operation{
 		OperationID: "adoptAddon",
 		Method:      http.MethodPost,
-		Path:        "/api/v1/tenants/{org}/clusters/{c}/addons/{catalogItem}/adopt",
+		Path:        "/api/v1/tenants/{org}/clusters/{cluster}/addons/{catalogItem}/adopt",
 		Summary:     "Adopt a (discovered or declared) addon into GitOps management",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.adopt)
+	huma.Register(api, huma.Operation{
+		OperationID: "adoptSourceAddon",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/tenants/{org}/clusters/{cluster}/addons/{source}/{name}/adopt",
+		Summary:     "Adopt a source-qualified catalog package into GitOps management",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.adoptSource)
 
 	huma.Register(api, huma.Operation{
 		OperationID: "updateAddon",
@@ -204,6 +212,13 @@ func (h *Handler) enforceAddonRepoWrite(ctx context.Context, id *authn.Identity,
 // addonError maps service errors to HTTP statuses (mirrors the orchestrator
 // and gitrepos mappings).
 func addonError(err error) error {
+	var admissionErr *artifactadmission.Error
+	if errors.As(err, &admissionErr) {
+		if admissionErr.Temporary {
+			return huma.NewError(http.StatusServiceUnavailable, admissionErr.Error())
+		}
+		return huma.Error422UnprocessableEntity(admissionErr.Error())
+	}
 	var ve *ValidationError
 	if errors.As(err, &ve) {
 		return huma.NewError(http.StatusUnprocessableEntity, ve.Error())
@@ -241,7 +256,7 @@ func addonError(err error) error {
 
 type listAddonsInput struct {
 	Org     string `path:"org"`
-	Cluster string `path:"c"`
+	Cluster string `path:"cluster"`
 }
 
 type listAddonsOutput struct {
@@ -273,7 +288,7 @@ func (h *Handler) list(ctx context.Context, in *listAddonsInput) (*listAddonsOut
 
 type adoptInput struct {
 	Org         string `path:"org"`
-	Cluster     string `path:"c"`
+	Cluster     string `path:"cluster"`
 	CatalogItem string `path:"catalogItem"`
 	Body        struct {
 		RepoID          string            `json:"repoId,omitempty" doc:"tenant_git_repos row id; empty = the cluster's bound baseline"`
@@ -314,6 +329,25 @@ func (h *Handler) adopt(ctx context.Context, in *adoptInput) (*adoptOutput, erro
 	out.Body.CommitSHA = res.CommitSHA
 	out.Body.PRURL = res.PRURL
 	return out, nil
+}
+
+type sourceAdoptInput struct {
+	Org     string `path:"org"`
+	Cluster string `path:"cluster"`
+	Source  string `path:"source"`
+	Name    string `path:"name"`
+	Body    struct {
+		RepoID          string            `json:"repoId,omitempty" doc:"tenant_git_repos row id; empty = the cluster's bound baseline"`
+		Version         string            `json:"version,omitempty" doc:"catalog version (= chart version); empty = effective pin/latest stable"`
+		Values          json.RawMessage   `json:"values,omitempty"`
+		DeployMode      string            `json:"deployMode,omitempty" enum:"application,applicationset"`
+		ClusterSelector map[string]string `json:"clusterSelector,omitempty" doc:"fleet label query (applicationset mode); empty = all org clusters"`
+		Namespace       string            `json:"namespace,omitempty" pattern:"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" maxLength:"63"`
+	}
+}
+
+func (h *Handler) adoptSource(ctx context.Context, in *sourceAdoptInput) (*adoptOutput, error) {
+	return h.adopt(ctx, &adoptInput{Org: in.Org, Cluster: in.Cluster, CatalogItem: in.Source + "/" + in.Name, Body: in.Body})
 }
 
 type updateAddonInput struct {

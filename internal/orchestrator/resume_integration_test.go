@@ -103,12 +103,12 @@ func TestApprovalGateResume(t *testing.T) {
 	ctx := context.Background()
 
 	if _, err := database.Pool.Exec(ctx,
-		`UPDATE catalog_items SET approval_policy = 'peer' WHERE id = 'curated:web-service'`); err != nil {
+		`UPDATE catalog_items SET approval_policy = 'peer' WHERE id = 'core/web-service'`); err != nil {
 		t.Fatal(err)
 	}
 
 	code, body := itReq(t, srv, "POST", "/api/v1/tenants/acme/deploys", "good",
-		`{"itemId":"curated:web-service","version":"0.1.0","clusterId":"cluster-1","name":"web","namespace":"apps","spec":{"hostname":"app.example.com"}}`)
+		`{"itemId":"core/web-service","version":"0.1.0","clusterId":"cluster-1","name":"web","namespace":"apps","spec":{"hostname":"app.example.com"}}`)
 	if code != http.StatusOK {
 		t.Fatalf("deploy: %d %s", code, body)
 	}
@@ -149,7 +149,7 @@ func TestApprovalGateResume(t *testing.T) {
 		t.Fatalf("queued commands after resume = %d, want 1", len(queue.cmds))
 	}
 	files := git.Files("inari-dev/acme-inari-state", "main")
-	if _, ok := files["clusters/cluster-1/web-service/web/instance.yaml"]; !ok {
+	if _, ok := files["clusters/cluster-1/core/web-service/web/instance.yaml"]; !ok {
 		t.Fatalf("resumed deploy not committed: %v", keysOf(files))
 	}
 
@@ -174,14 +174,14 @@ func TestApprovalCancelAndExpiry(t *testing.T) {
 	defer srv.Close()
 	ctx := context.Background()
 	if _, err := database.Pool.Exec(ctx,
-		`UPDATE catalog_items SET approval_policy = 'peer' WHERE id = 'curated:web-service'`); err != nil {
+		`UPDATE catalog_items SET approval_policy = 'peer' WHERE id = 'core/web-service'`); err != nil {
 		t.Fatal(err)
 	}
 
 	gateDeploy := func(t *testing.T, name string) string {
 		t.Helper()
 		code, body := itReq(t, srv, "POST", "/api/v1/tenants/acme/deploys", "good",
-			`{"itemId":"curated:web-service","version":"0.1.0","clusterId":"cluster-1","name":"`+name+`","spec":{"hostname":"x.example.com"}}`)
+			`{"itemId":"core/web-service","version":"0.1.0","clusterId":"cluster-1","name":"`+name+`","spec":{"hostname":"x.example.com"}}`)
 		if code != http.StatusOK {
 			t.Fatalf("deploy: %d %s", code, body)
 		}
@@ -241,7 +241,7 @@ func TestPolicyPreFlightBlocks(t *testing.T) {
 	defer srv.Close()
 
 	code, body := itReq(t, srv, "POST", "/api/v1/tenants/acme/deploys", "good",
-		`{"itemId":"curated:postgres-aws","clusterId":"cluster-1","name":"bad-db","spec":{"storageGB":50}}`)
+		`{"itemId":"core/postgres-aws","clusterId":"cluster-1","name":"bad-db","spec":{"storageGB":50}}`)
 	if code != http.StatusUnprocessableEntity {
 		t.Fatalf("deploy: got %d, want 422 (%s)", code, body)
 	}

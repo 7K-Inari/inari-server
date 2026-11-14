@@ -19,7 +19,10 @@ import (
 	"google.golang.org/protobuf/types/known/anypb"
 	"gopkg.in/yaml.v3"
 
+	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
 	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
+	"github.com/7K-Inari/inari-server/internal/artifactadmission"
+	"github.com/7K-Inari/inari-server/internal/catalog"
 
 	"github.com/7K-Inari/inari-server/internal/approvals"
 	"github.com/7K-Inari/inari-server/internal/audit"
@@ -39,6 +42,13 @@ type CatalogResolver interface {
 	// EnsureVisible enforces per-tenant/cluster catalog visibility policies
 	// (an item hidden from the tenant reads as not-found).
 	EnsureVisible(ctx context.Context, orgID, clusterID, itemID string) error
+}
+
+// VersionAdmitter is the catalog's deploy-time artifact verification seam.
+// It is required for external source IDs; internal component/discovered items
+// are explicitly outside the OCI trusted-source boundary.
+type VersionAdmitter interface {
+	AdmitVersion(ctx context.Context, itemID, version string, environment trustedsource.Environment) (*catalog.AdmittedVersion, error)
 }
 
 // ClusterResolver is the cluster registry seam.
@@ -132,7 +142,8 @@ type DeployRequest struct {
 	Requester string
 	// RepoID selects the tenant_git_repos row the manifests are committed
 	// to (Feature A); empty = the org's default repo.
-	RepoID string
+	RepoID         string
+	ArtifactDigest string
 }
 
 // DeployResult reports the deploy outcome.
@@ -306,6 +317,29 @@ func (s *Service) apply(ctx context.Context, req DeployRequest, item *types.Cata
 	return s.applyWithEvent(ctx, req, item, version, existing, "", false)
 }
 
+func (s *Service) admitVersion(ctx context.Context, req DeployRequest, item *types.CatalogItem, version string) (string, error) {
+	if item.SourceID == "" {
+		return "", nil
+	}
+	admitter, ok := s.catalog.(VersionAdmitter)
+	if !ok {
+		return "", &artifactadmission.Error{Code: artifactadmission.CodeUnavailable, Ref: req.ItemID, Err: errors.New("catalog admission seam is not configured"), Temporary: true}
+	}
+	cluster, err := s.clusters.GetCluster(ctx, req.ClusterID)
+	if err != nil {
+		return "", err
+	}
+	environment := trustedsource.Environment(cluster.Labels["inari.dev/environment"])
+	admitted, err := admitter.AdmitVersion(ctx, req.ItemID, version, environment)
+	if err != nil {
+		return "", err
+	}
+	if admitted != nil && admitted.Version != nil {
+		return admitted.Version.ArtifactDigest, nil
+	}
+	return "", nil
+}
+
 // gitTarget is the resolved repo a write lands in: the registry row when
 // the repo-aware resolver is wired, otherwise the legacy git-config
 // projection (default repo).
@@ -364,6 +398,11 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 	if _, err := s.catalog.GetVersion(ctx, req.ItemID, version); err != nil {
 		return nil, err
 	}
+	digest, err := s.admitVersion(ctx, req, item, version)
+	if err != nil {
+		return nil, err
+	}
+	req.ArtifactDigest = digest
 	selector := req.RepoID
 	if existing != nil {
 		// Mutations always land in the instance's recorded repo; an
@@ -470,7 +509,7 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 		if existing == nil {
 			inst := &types.ResourceInstance{
 				ID: instanceID, OrgID: req.OrgID, ClusterID: req.ClusterID,
-				CatalogItemID: req.ItemID, Version: version, OwnerTeam: req.OwnerTeam,
+				CatalogItemID: req.ItemID, Version: version, ArtifactDigest: req.ArtifactDigest, OwnerTeam: req.OwnerTeam,
 				Spec:        req.Spec,
 				ResourceRef: types.ResourceRef{Group: "kro.run", Kind: kindOf(manifest), Name: name, Namespace: namespace},
 				Health:      "unknown", State: state, ManagementMode: types.ManagementModeAdopt,
@@ -488,6 +527,11 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 			}
 		} else if err := s.instances.MarkDeployed(ctx, tx, instanceID, version, gitResult.CommitSHA, gitResult.PRURL, target.repoID, state, true); err != nil {
 			return err
+		}
+		if existing != nil {
+			if err := s.instances.SetArtifactDigest(ctx, tx, instanceID, req.ArtifactDigest); err != nil {
+				return err
+			}
 		}
 		ev := &types.AuditEvent{
 			OrgID: req.OrgID, Actor: req.Requester, Impersonator: impersonation.FromContext(ctx), Action: "deploy.requested",
@@ -509,7 +553,7 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 		}
 		return audit.AppendOutbox(ctx, tx, req.OrgID, eventType, types.DeployRequestedPayload{
 			OrgID: req.OrgID, InstanceID: instanceID, ItemID: req.ItemID, ClusterID: req.ClusterID,
-			Version: version, CommitSHA: gitResult.CommitSHA, PRURL: gitResult.PRURL,
+			Version: version, ArtifactDigest: req.ArtifactDigest, CommitSHA: gitResult.CommitSHA, PRURL: gitResult.PRURL,
 			AuthModel: string(authInfo.Model), InstallationID: authInfo.InstallationID, APIBase: authInfo.APIBase,
 			RepoID: target.repoID, Repo: target.repo,
 		})

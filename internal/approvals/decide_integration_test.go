@@ -288,14 +288,14 @@ func TestCancelLifecycleFrozenOrg(t *testing.T) {
 // org-admin approves a catalog request under the platform-admin policy.
 func TestDecideCatalogPlatformAdminPolicy(t *testing.T) {
 	az := itAuthorizer{allow: map[string]bool{"organization:1": true}}
-	items := decideItems{item: &types.CatalogItem{ID: "curated:postgres-aws", ApprovalPolicy: types.ApprovalPolicyPlatformAdmin}}
+	items := decideItems{item: &types.CatalogItem{ID: "core/postgres-aws", ApprovalPolicy: types.ApprovalPolicyPlatformAdmin}}
 	srv, database := itDecideServer(t, az, decideRoles{"user-3": {authz.PermApprovalsManage, authz.PermClustersRegister}}, items)
 	defer srv.Close()
 	if _, err := database.Pool.Exec(context.Background(),
-		`INSERT INTO catalog_items (id, source, name) VALUES ('curated:postgres-aws', 'curated', 'postgres-aws')`); err != nil {
+		`INSERT INTO catalog_items (id, source, name) VALUES ('core/postgres-aws', 'curated', 'postgres-aws')`); err != nil {
 		t.Fatal(err)
 	}
-	id := itSeedRequest(t, database, "org:1", "curated:postgres-aws", "", "user:req-1")
+	id := itSeedRequest(t, database, "org:1", "core/postgres-aws", "", "user:req-1")
 	code, body := itDecide(t, srv, "acme", id, "acme-only")
 	if code != http.StatusOK {
 		t.Fatalf("org-admin catalog decide = %d: %s", code, body)

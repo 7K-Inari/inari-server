@@ -23,6 +23,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/addons"
 	"github.com/7K-Inari/inari-server/internal/agentgateway"
 	"github.com/7K-Inari/inari-server/internal/approvals"
+	"github.com/7K-Inari/inari-server/internal/artifactadmission"
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/authz"
@@ -48,6 +49,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/logging"
 	"github.com/7K-Inari/inari-server/internal/metrics"
 	"github.com/7K-Inari/inari-server/internal/notifications"
+	"github.com/7K-Inari/inari-server/internal/oci"
 	"github.com/7K-Inari/inari-server/internal/orchestrator"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
 	gitgithub "github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider/github"
@@ -66,6 +68,7 @@ import (
 
 	"connectrpc.com/connect/v2"
 	"connectrpc.com/connect/v2/connecthttp"
+	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
 	agentv1connect "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1/agentv1connect"
 )
 
@@ -718,59 +721,41 @@ func run() error {
 	// through the durable agent command queue.
 	platformResourcesSvc.WithCommandQueue(gateway.Queue()).WithClusterLister(registry).WithTenantResolver(svc)
 
-	var puller catalog.OCIPuller
-	if cfg.CatalogOCIIndexRef != "" {
-		puller = &catalog.RegistryPuller{IndexRef: cfg.CatalogOCIIndexRef}
-	} else if cfg.CatalogOCIPath != "" {
-		puller = &catalog.FixturePuller{Root: cfg.CatalogOCIPath}
+	sources, admissionVerifier := buildTrustedSourceSyncs(cfg)
+	templateSyncs, templateSource := buildTrustedTemplateSyncs(cfg, admissionVerifier)
+	sources = append(sources, templateSyncs...)
+	catalogSvc := catalog.NewServiceWithSources(database, catalog.NewStore(), capabilities.NewStore(), auditStore, sources).WithAdmissionVerifier(admissionVerifier)
+	if err := catalogSvc.ReconcileSourcePolicies(ctx, "catalog", trustedSourceFingerprints(sources, "catalog")); err != nil {
+		return fmt.Errorf("reconcile catalog source policies: %w", err)
 	}
-	catalogSvc := catalog.NewService(database, catalog.NewStore(), capabilities.NewStore(), auditStore, puller)
-	if err := catalogSvc.SeedPlatformApps(ctx); err != nil {
-		return err
+	if err := catalogSvc.ReconcileSourcePolicies(ctx, "template", trustedSourceFingerprints(sources, "template")); err != nil {
+		return fmt.Errorf("reconcile template source policies: %w", err)
 	}
-	if puller != nil {
+	if len(trustedSourceFingerprints(sources, "catalog")) > 0 {
 		// Startup sync is best-effort: a transient registry outage must not
-		// crashloop the control plane; the interval loop retries.
-		if n, err := catalogSvc.Sync(ctx); err != nil {
+		// crashloop the control plane; each source retains its own last-good.
+		if n, err := catalogSvc.SyncKind(ctx, "catalog"); err != nil {
 			slog.Error("catalog sync failed", "error", err)
 		} else {
 			slog.Info("catalog sync complete", "packages", n)
 		}
 		if cfg.CatalogSyncInterval > 0 {
 			go leaderlease.Run(ctx, leaser, "catalog-oci-sync", func(lctx context.Context) {
-				runCatalogSyncLoop(lctx, catalogSvc, cfg.CatalogSyncInterval)
+				runCatalogSyncLoop(lctx, catalogSvc, "catalog", cfg.CatalogSyncInterval)
 			}, log)
 		}
 	}
 
-	// M8.W2: software templates ship in a local dir (baked into the image);
-	// sync them into the catalog as source=template items. M8.W6: setting
-	// INARI_SCAFFOLD_TEMPLATE_OCI_INDEX_REF switches ingestion to the OCI
-	// registry (application/vnd.inari.template.v1 artifacts, cosign-verified
-	// when INARI_SCAFFOLD_TEMPLATE_VERIFY=true). Best-effort like the
-	// catalog sync above; a startup sync suffices for the file source, and
-	// the OCI source re-pulls lazily via Get on cache miss.
-	var templateSource scaffold.TemplateSource
-	if cfg.ScaffoldTemplateOCIIndexRef != "" {
-		ociPuller := &scaffold.OCIRegistryPuller{
-			IndexRef: cfg.ScaffoldTemplateOCIIndexRef,
-			CacheDir: cfg.ScaffoldTemplateCacheDir,
-		}
-		if cfg.ScaffoldTemplateVerify {
-			ociPuller.Verifier = &scaffold.CosignVerifier{
-				CertIdentityRegexp:   cfg.ScaffoldTemplateCosignIdentity,
-				CertOidcIssuerRegexp: cfg.ScaffoldTemplateCosignIssuer,
-			}
-		}
-		templateSource = ociPuller
-	} else if cfg.ScaffoldTemplateDir != "" {
-		templateSource = &scaffold.FilePuller{Root: cfg.ScaffoldTemplateDir}
-	}
-	if templateSource != nil {
-		if n, err := scaffold.SyncTemplates(ctx, templateSource, catalogSvc); err != nil {
+	if len(trustedSourceFingerprints(sources, "template")) > 0 {
+		if n, err := catalogSvc.SyncKind(ctx, "template"); err != nil {
 			slog.Error("template sync failed", "error", err)
 		} else {
 			slog.Info("template sync complete", "templates", n)
+		}
+		if cfg.TemplateSyncInterval > 0 {
+			go leaderlease.Run(ctx, leaser, "template-oci-sync", func(lctx context.Context) {
+				runCatalogSyncLoop(lctx, catalogSvc, "template", cfg.TemplateSyncInterval)
+			}, log)
 		}
 	}
 
@@ -903,19 +888,25 @@ func run() error {
 	// registration via the agent queue, component records via the catalog,
 	// and maintainer-team binding via tenancy (KC group → DB role → outbox
 	// → OpenFGA tuple).
+	scaffoldEnvironment := trustedsource.EnvironmentProduction
+	if cfg.TrustedSources != nil && cfg.TrustedSources.Environment != "" {
+		scaffoldEnvironment = cfg.TrustedSources.Environment
+	}
 	scaffoldSvc := scaffold.NewService(database, scaffold.NewStore(), auditStore, catalogSvc,
-		scaffold.Config{MaxAttempts: int(cfg.ScaffoldStepMaxAttempts), GitOrg: cfg.ScaffoldGitOrg, RunTTL: cfg.ScaffoldRunTTL}, log)
+		scaffold.Config{MaxAttempts: int(cfg.ScaffoldStepMaxAttempts), GitOrg: cfg.ScaffoldGitOrg, Environment: scaffoldEnvironment, RunTTL: cfg.ScaffoldRunTTL}, log)
 	if templateSource != nil {
 		scaffoldSvc.WithExecEnv(&scaffold.ExecEnv{
-			Git:        gitPerRepo,
-			GitOrg:     cfg.ScaffoldGitOrg,
-			Upsert:     catalogSvc,
-			RBAC:       svc,
-			Registrar:  gateway.Queue(),
-			Templates:  templateSource,
-			Tenants:    scaffoldTenantResolver{tenants: svc, clusters: registry},
-			Gate:       approvalsSvc,
-			GitConfigs: scaffoldGitConfigResolver{d: database, store: inventory.NewStore()},
+			Git:         gitPerRepo,
+			GitOrg:      cfg.ScaffoldGitOrg,
+			Upsert:      catalogSvc,
+			RBAC:        svc,
+			Registrar:   gateway.Queue(),
+			Templates:   templateSource,
+			Catalog:     catalogSvc,
+			Environment: scaffoldEnvironment,
+			Tenants:     scaffoldTenantResolver{tenants: svc, clusters: registry},
+			Gate:        approvalsSvc,
+			GitConfigs:  scaffoldGitConfigResolver{d: database, store: inventory.NewStore()},
 			// Feature B (kind: gitops-repo): team-repo registration goes
 			// through the repo registry (no attach — the attaching-root-app
 			// step owns that git write); root-app attach + team lookup reuse
@@ -1225,9 +1216,63 @@ func (g deletionApprovalGate) RequestLifecycleApproval(ctx context.Context, orgI
 	return req.ID, nil
 }
 
-// runCatalogSyncLoop re-pulls the curated catalog on the configured
-// interval. Failures are logged and retried next tick.
-func runCatalogSyncLoop(ctx context.Context, svc *catalog.Service, interval time.Duration) {
+func buildTrustedSourceSyncs(cfg *config.Config) ([]catalog.SourceSync, *artifactadmission.Verifier) {
+	if cfg.TrustedSources == nil {
+		return nil, nil
+	}
+	backend := artifactadmission.NewCosignBackend(&oci.Fetcher{})
+	verifier := artifactadmission.NewVerifier(backend)
+	if cfg.TrustedSources.Catalog == nil {
+		return nil, verifier
+	}
+	var out []catalog.SourceSync
+	for _, source := range cfg.TrustedSources.Catalog.Sources {
+		out = append(out, catalog.SourceSync{
+			Kind: "catalog", Source: source,
+			Puller: &catalog.RegistryPuller{IndexRef: source.IndexRef, Source: source, Verifier: verifier},
+		})
+	}
+	return out, verifier
+}
+
+func buildTrustedTemplateSyncs(cfg *config.Config, verifier *artifactadmission.Verifier) ([]catalog.SourceSync, *scaffold.MultiTemplateSource) {
+	if cfg.TrustedSources == nil || cfg.TrustedSources.Template == nil {
+		return nil, nil
+	}
+	var syncs []catalog.SourceSync
+	multi := &scaffold.MultiTemplateSource{}
+	for _, source := range cfg.TrustedSources.Template.Sources {
+		registrySource := &scaffold.RegistryTemplateSource{
+			IndexRef: source.IndexRef, Source: source, Verifier: verifier,
+			CacheDir: cfg.ScaffoldTemplateCacheDir,
+		}
+		multi.Sources = append(multi.Sources, registrySource)
+		syncs = append(syncs, catalog.SourceSync{
+			Kind: "template", Source: source,
+			Puller: scaffold.CatalogTemplatePuller{RegistryTemplateSource: registrySource},
+		})
+	}
+	return syncs, multi
+}
+
+func trustedSourceFingerprints(sources []catalog.SourceSync, kind string) map[string]string {
+	out := map[string]string{}
+	for _, sourceSync := range sources {
+		if sourceSync.Kind != kind {
+			continue
+		}
+		fingerprint, err := (&trustedsource.File{}).Fingerprint(sourceSync.Source)
+		if err == nil {
+			out[sourceSync.Source.ID] = fingerprint
+		}
+	}
+	return out
+}
+
+// runCatalogSyncLoop re-pulls one source kind on the configured interval.
+// Individual failures are logged and retried next tick without discarding
+// another source's last-good generation.
+func runCatalogSyncLoop(ctx context.Context, svc *catalog.Service, kind string, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -1235,10 +1280,10 @@ func runCatalogSyncLoop(ctx context.Context, svc *catalog.Service, interval time
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if n, err := svc.Sync(ctx); err != nil {
-				slog.Error("catalog sync failed", "error", err)
+			if n, err := svc.SyncKind(ctx, kind); err != nil {
+				slog.Error("catalog sync failed", "kind", kind, "error", err)
 			} else {
-				slog.Info("catalog sync complete", "packages", n)
+				slog.Info("catalog sync complete", "kind", kind, "packages", n)
 			}
 		}
 	}

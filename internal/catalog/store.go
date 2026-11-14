@@ -38,17 +38,25 @@ func (s *Store) UpsertItem(ctx context.Context, q db.Querier, it *types.CatalogI
 	if policy == "" {
 		policy = types.ApprovalPolicyAuto
 	}
-	const sql = `INSERT INTO catalog_items (id, source, name, display_name, description, category, capability_ref, oci_ref, approval_policy)
-	             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+	present := it.SnapshotPresent || it.SourceID == ""
+	const sql = `INSERT INTO catalog_items (id, source, source_id, trust_tier, unsigned, name, display_name, description, category, capability_ref, oci_ref, approval_policy, source_fingerprint, source_generation, snapshot_present)
+	             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 	             ON CONFLICT (id) DO UPDATE SET
 	               source = EXCLUDED.source,
+	               source_id = EXCLUDED.source_id,
+	               trust_tier = EXCLUDED.trust_tier,
+	               unsigned = EXCLUDED.unsigned,
 	               name = EXCLUDED.name,
 	               display_name = EXCLUDED.display_name,
 	               description = EXCLUDED.description,
 	               category = EXCLUDED.category,
 	               capability_ref = EXCLUDED.capability_ref,
-	               oci_ref = EXCLUDED.oci_ref`
-	_, err := q.Exec(ctx, sql, it.ID, it.Source, it.Name, it.DisplayName, it.Description, it.Category, ref, it.OCIRef, policy)
+	               oci_ref = EXCLUDED.oci_ref,
+	               approval_policy = EXCLUDED.approval_policy,
+	               source_fingerprint = EXCLUDED.source_fingerprint,
+	               source_generation = EXCLUDED.source_generation,
+	               snapshot_present = EXCLUDED.snapshot_present`
+	_, err := q.Exec(ctx, sql, it.ID, it.Source, it.SourceID, it.TrustTier, it.Unsigned, it.Name, it.DisplayName, it.Description, it.Category, ref, it.OCIRef, policy, it.SourceFingerprint, it.SourceGeneration, present)
 	return err
 }
 
@@ -57,22 +65,29 @@ func (s *Store) UpsertVersion(ctx context.Context, q db.Querier, v *types.Catalo
 	if channel == "" {
 		channel = "stable"
 	}
-	const sql = `INSERT INTO catalog_item_versions (item_id, version, channel, schema, ui_hints, payload)
-	             VALUES ($1,$2,$3,$4,$5,$6)
+	present := v.SnapshotPresent || v.ArtifactDigest == ""
+	const sql = `INSERT INTO catalog_item_versions (item_id, version, package_version, channel, artifact_ref, artifact_digest, chart_ref, chart_digest, schema, ui_hints, payload, snapshot_present)
+	             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 	             ON CONFLICT (item_id, version) DO UPDATE SET
+	               package_version = EXCLUDED.package_version,
 	               channel = EXCLUDED.channel,
+	               artifact_ref = EXCLUDED.artifact_ref,
+	               artifact_digest = EXCLUDED.artifact_digest,
+	               chart_ref = EXCLUDED.chart_ref,
+	               chart_digest = EXCLUDED.chart_digest,
 	               schema = EXCLUDED.schema,
 	               ui_hints = EXCLUDED.ui_hints,
-	               payload = EXCLUDED.payload`
-	_, err := q.Exec(ctx, sql, v.ItemID, v.Version, channel, nullJSON(v.Schema), nullJSON(v.UIHints), nullJSON(v.Payload))
+	               payload = EXCLUDED.payload,
+	               snapshot_present = EXCLUDED.snapshot_present`
+	_, err := q.Exec(ctx, sql, v.ItemID, v.Version, v.PackageVersion, channel, v.ArtifactRef, v.ArtifactDigest, v.ChartRef, v.ChartDigest, nullJSON(v.Schema), nullJSON(v.UIHints), nullJSON(v.Payload), present)
 	return err
 }
 
 func scanItem(row pgx.Row) (*types.CatalogItem, error) {
 	var it types.CatalogItem
 	var ref json.RawMessage
-	err := row.Scan(&it.ID, &it.Source, &it.Name, &it.DisplayName, &it.Description,
-		&it.Category, &ref, &it.OCIRef, &it.ApprovalPolicy, &it.CreatedAt)
+	err := row.Scan(&it.ID, &it.Source, &it.SourceID, &it.TrustTier, &it.Unsigned, &it.Name, &it.DisplayName, &it.Description,
+		&it.Category, &ref, &it.OCIRef, &it.ApprovalPolicy, &it.SourceFingerprint, &it.SourceGeneration, &it.SnapshotPresent, &it.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +100,7 @@ func scanItem(row pgx.Row) (*types.CatalogItem, error) {
 	return &it, nil
 }
 
-const itemCols = `id, source, name, display_name, description, category, capability_ref, oci_ref, approval_policy, created_at`
+const itemCols = `id, source, source_id, trust_tier, unsigned, name, display_name, description, category, capability_ref, oci_ref, approval_policy, source_fingerprint, source_generation, snapshot_present, created_at`
 
 func (s *Store) GetItem(ctx context.Context, q db.Querier, itemID string) (*types.CatalogItem, error) {
 	it, err := scanItem(q.QueryRow(ctx, `SELECT `+itemCols+` FROM catalog_items WHERE id = $1`, itemID))
@@ -96,7 +111,7 @@ func (s *Store) GetItem(ctx context.Context, q db.Querier, itemID string) (*type
 }
 
 func (s *Store) ListItems(ctx context.Context, q db.Querier) ([]types.CatalogItem, error) {
-	return s.listItems(ctx, q, `SELECT `+itemCols+` FROM catalog_items ORDER BY name`)
+	return s.listItems(ctx, q, `SELECT `+itemCols+` FROM catalog_items WHERE snapshot_present = true ORDER BY name`)
 }
 
 // orderByClause maps the whitelisted sort values to ORDER BY clauses.
@@ -119,11 +134,19 @@ func orderByClause(sort string) string {
 // in SQL (ADR-0009). Pagination happens in the service after discovered
 // projections are merged, so no LIMIT/OFFSET here.
 func (s *Store) ListItemsFiltered(ctx context.Context, q db.Querier, opts types.CatalogListOptions) ([]types.CatalogItem, error) {
-	sql := `SELECT ` + itemCols + ` FROM catalog_items WHERE true`
+	sql := `SELECT ` + itemCols + ` FROM catalog_items WHERE snapshot_present = true`
 	args := []any{}
 	if opts.Source != "" {
 		args = append(args, opts.Source)
 		sql += fmt.Sprintf(` AND source = $%d`, len(args))
+	}
+	if opts.SourceID != "" {
+		args = append(args, opts.SourceID)
+		sql += fmt.Sprintf(` AND source_id = $%d`, len(args))
+	}
+	if opts.TrustTier != "" {
+		args = append(args, opts.TrustTier)
+		sql += fmt.Sprintf(` AND trust_tier = $%d`, len(args))
 	}
 	if opts.Category != "" {
 		args = append(args, opts.Category)
@@ -158,8 +181,8 @@ func (s *Store) listItems(ctx context.Context, q db.Querier, sql string, args ..
 func (s *Store) ListVersions(ctx context.Context, q db.Querier, itemID string) ([]types.CatalogItemVersion, error) {
 	// Empty-version rows are legacy residue from a sync bug (fixed): they
 	// can never be deployed, so hide them everywhere.
-	const sql = `SELECT item_id, version, channel, schema, ui_hints, payload
-	             FROM catalog_item_versions WHERE item_id = $1 AND version <> '' ORDER BY version`
+	const sql = `SELECT item_id, version, package_version, channel, artifact_ref, artifact_digest, chart_ref, chart_digest, schema, ui_hints, payload, snapshot_present
+	             FROM catalog_item_versions WHERE item_id = $1 AND version <> '' AND snapshot_present = true ORDER BY version`
 	rows, err := q.Query(ctx, sql, itemID)
 	if err != nil {
 		return nil, err
@@ -168,7 +191,7 @@ func (s *Store) ListVersions(ctx context.Context, q db.Querier, itemID string) (
 	var out []types.CatalogItemVersion
 	for rows.Next() {
 		var v types.CatalogItemVersion
-		if err := rows.Scan(&v.ItemID, &v.Version, &v.Channel, &v.Schema, &v.UIHints, &v.Payload); err != nil {
+		if err := rows.Scan(&v.ItemID, &v.Version, &v.PackageVersion, &v.Channel, &v.ArtifactRef, &v.ArtifactDigest, &v.ChartRef, &v.ChartDigest, &v.Schema, &v.UIHints, &v.Payload, &v.SnapshotPresent); err != nil {
 			return nil, err
 		}
 		out = append(out, v)
@@ -178,8 +201,8 @@ func (s *Store) ListVersions(ctx context.Context, q db.Querier, itemID string) (
 
 // ListVersionsForItems returns versions grouped by item ID in one query.
 func (s *Store) ListVersionsForItems(ctx context.Context, q db.Querier, itemIDs []string) (map[string][]types.CatalogItemVersion, error) {
-	const sql = `SELECT item_id, version, channel, schema, ui_hints, payload
-	             FROM catalog_item_versions WHERE item_id = ANY($1) AND version <> '' ORDER BY version`
+	const sql = `SELECT item_id, version, package_version, channel, artifact_ref, artifact_digest, chart_ref, chart_digest, schema, ui_hints, payload, snapshot_present
+	             FROM catalog_item_versions WHERE item_id = ANY($1) AND version <> '' AND snapshot_present = true ORDER BY version`
 	rows, err := q.Query(ctx, sql, itemIDs)
 	if err != nil {
 		return nil, err
@@ -188,7 +211,7 @@ func (s *Store) ListVersionsForItems(ctx context.Context, q db.Querier, itemIDs 
 	out := map[string][]types.CatalogItemVersion{}
 	for rows.Next() {
 		var v types.CatalogItemVersion
-		if err := rows.Scan(&v.ItemID, &v.Version, &v.Channel, &v.Schema, &v.UIHints, &v.Payload); err != nil {
+		if err := rows.Scan(&v.ItemID, &v.Version, &v.PackageVersion, &v.Channel, &v.ArtifactRef, &v.ArtifactDigest, &v.ChartRef, &v.ChartDigest, &v.Schema, &v.UIHints, &v.Payload, &v.SnapshotPresent); err != nil {
 			return nil, err
 		}
 		out[v.ItemID] = append(out[v.ItemID], v)

@@ -341,7 +341,7 @@ func TestAddonsHTTPEndToEnd(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("update: %d %s", code, body)
 	}
-	if !strings.Contains(f.git.Files("acme/acme-inari-state", "main")["addons/cert-manager/application.yaml"], "targetRevision: v1.16.2") {
+	if !strings.Contains(f.git.Files("acme/acme-inari-state", "main")["addons/platform:cert-manager/application.yaml"], "targetRevision: v1.16.2") {
 		t.Error("committed application must pin the new version")
 	}
 
@@ -354,7 +354,7 @@ func TestAddonsHTTPEndToEnd(t *testing.T) {
 	if code, body = f.req(t, "POST", "/api/v1/tenants/acme/addons/"+addonID+"/enable-prune", "admin", ""); code != http.StatusOK {
 		t.Fatalf("enable-prune: %d %s", code, body)
 	}
-	if !strings.Contains(f.git.Files("acme/acme-inari-state", "main")["addons/cert-manager/application.yaml"], "prune: true") {
+	if !strings.Contains(f.git.Files("acme/acme-inari-state", "main")["addons/platform:cert-manager/application.yaml"], "prune: true") {
 		t.Error("enable-prune must commit prune: true")
 	}
 	if code, _ := f.req(t, "POST", "/api/v1/tenants/acme/addons/"+addonID+"/enable-prune", "admin", ""); code != http.StatusConflict {
@@ -400,7 +400,7 @@ func TestAddonsHTTPTeamEnforcement(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, a := range listOut.Addons {
-		if a.RepoPath == "addons/external-secrets" {
+		if a.RepoPath == "addons/platform:external-secrets" {
 			t.Errorf("dev-b must not see team-a's addon: %s", body)
 		}
 	}
@@ -487,15 +487,15 @@ func TestAddonsHTTPSupportedAddonsCDLoop(t *testing.T) {
 			item: "platform:external-dns", version: "1.15.2",
 			values: `{"policy":"upsert-only"}`, newValues: `{"policy":"sync"}`,
 			wantInFile: "policy: sync",
-			deployMode: "application", wantPath: "addons/external-dns",
-			wantFile: "addons/external-dns/application.yaml",
+			deployMode: "application", wantPath: "addons/platform:external-dns",
+			wantFile: "addons/platform:external-dns/application.yaml",
 		},
 		{
 			item: "platform:argocd", version: "7.6.12",
 			values: `{"server":{"replicas":2}}`, newValues: `{"server":{"replicas":3}}`,
 			wantInFile: "replicas: 3",
-			deployMode: "applicationset", wantPath: "addons/argocd",
-			wantFile: "addons/argocd/applicationset.yaml",
+			deployMode: "applicationset", wantPath: "addons/platform:argocd",
+			wantFile: "addons/platform:argocd/applicationset.yaml",
 		},
 	}
 	for _, c := range cases {
@@ -560,7 +560,7 @@ func TestAddonsHTTPSupportedAddonsCDLoop(t *testing.T) {
 			t.Errorf("%s list lacks the fleet argocd addon: %s", cluster, body)
 		}
 	}
-	appSet := f.git.Files("acme/acme-inari-state", "main")["addons/argocd/applicationset.yaml"]
+	appSet := f.git.Files("acme/acme-inari-state", "main")["addons/platform:argocd/applicationset.yaml"]
 	for _, cluster := range []string{"prod-eu", "prod-us"} {
 		if !strings.Contains(appSet, cluster) {
 			t.Errorf("ApplicationSet list generator must target %s:\n%s", cluster, appSet)

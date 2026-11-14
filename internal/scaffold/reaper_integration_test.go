@@ -26,7 +26,7 @@ func TestRunRetentionReaper(t *testing.T) {
 	mkRun := func(name string) string {
 		// Distinct values per run — identical submits dedup on the
 		// idempotency key.
-		run, _, _, err := svc.CreateRun(ctx, "dev-1", "org:acme", "go-service", "", "",
+		run, _, _, err := svc.CreateRun(ctx, "dev-1", "org:acme", "template:go-service", "", "",
 			json.RawMessage(`{"name":"`+name+`"}`))
 		if err != nil {
 			t.Fatal(err)

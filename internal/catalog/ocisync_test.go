@@ -69,7 +69,7 @@ func TestFixturePuller(t *testing.T) {
 func TestPackageFromFilesSchemaPrecedence(t *testing.T) {
 	files := map[string][]byte{
 		"package.yaml":       []byte("version: 1.0.0\nchannel: stable\ntype: platform-app\n"),
-		"chart.yaml":         []byte("repoURL: https://example.com\nchart: demo\nnamespace: demo\nchannels:\n  stable: \"1.0.0\"\n"),
+		"chart.yaml":         []byte("repoURL: oci://example.com/charts\nchart: demo\nnamespace: demo\nchannels:\n  stable:\n    version: \"1.0.0\"\n    ociRef: example.com/charts/demo:1.0.0\n    digest: sha256:52ccaee6d4dd272e54bfccda77738b42e1edf0e4a20c27e23f0b6c15d01aef79\n"),
 		"schema.json":        []byte(`{"type":"object","properties":{"fromSchemaJson":{"type":"boolean"}}}`),
 		"values.schema.json": []byte(`{"type":"object","properties":{"fromValuesSchema":{"type":"boolean"}}}`),
 	}
@@ -95,7 +95,7 @@ func TestPackageFromFilesSchemaPrecedence(t *testing.T) {
 }
 
 func TestSyncPlanPersistsCategory(t *testing.T) {
-	items, _, err := syncPlan([]Package{{Name: "postgres-aws", Version: "1.1.0", Category: "database"}})
+	items, _, err := syncPlan("core", []Package{{Name: "postgres-aws", Version: "1.1.0", Category: "database"}})
 	if err != nil {
 		t.Fatal(err)
 	}

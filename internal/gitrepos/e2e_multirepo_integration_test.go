@@ -158,7 +158,7 @@ func TestTeamRepoEndToEnd(t *testing.T) {
 
 	// Deploy targeting the team repo → manifests land there, not baseline.
 	code, body = f.req(t, "POST", "/api/v1/tenants/acme/deploys", "admin",
-		`{"itemId":"curated:postgres-aws","clusterId":"cluster-1","name":"my-db","namespace":"apps","spec":{"engineVersion":"16","storageGB":50},"repoId":"`+teamRepoID+`"}`)
+		`{"itemId":"core/postgres-aws","clusterId":"cluster-1","name":"my-db","namespace":"apps","spec":{"engineVersion":"16","storageGB":50},"repoId":"`+teamRepoID+`"}`)
 	if code != http.StatusOK {
 		t.Fatalf("deploy: %d %s", code, body)
 	}
@@ -173,7 +173,7 @@ func TestTeamRepoEndToEnd(t *testing.T) {
 	instanceID := deployOut.Deploy.InstanceID
 
 	teamFiles := f.git.Files("acme/team-a-gitops", "main")
-	if _, ok := teamFiles["clusters/cluster-1/postgres-aws/my-db/instance.yaml"]; !ok {
+	if _, ok := teamFiles["clusters/cluster-1/core/postgres-aws/my-db/instance.yaml"]; !ok {
 		t.Fatalf("instance manifest not committed to team repo: %v", teamFiles)
 	}
 	// Baseline holds only the root app — no workload manifests.
@@ -199,7 +199,7 @@ func TestTeamRepoEndToEnd(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("undeploy: %d %s", code, body)
 	}
-	if _, ok := f.git.Files("acme/team-a-gitops", "main")["clusters/cluster-1/postgres-aws/my-db/instance.yaml"]; ok {
+	if _, ok := f.git.Files("acme/team-a-gitops", "main")["clusters/cluster-1/core/postgres-aws/my-db/instance.yaml"]; ok {
 		t.Error("instance manifest still present in team repo after undeploy")
 	}
 	var foundDelete bool

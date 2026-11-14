@@ -192,7 +192,7 @@ func TestAdoptUpdateEnablePruneEndToEnd(t *testing.T) {
 		t.Errorf("persisted row: %+v", persisted)
 	}
 	files := e.git.Files("acme/acme-inari-state", "main")
-	if !strings.Contains(files["addons/cert-manager/application.yaml"], "prune: false") {
+	if !strings.Contains(files["addons/platform:cert-manager/application.yaml"], "prune: false") {
 		t.Error("adoption renders prune OFF")
 	}
 	if len(e.queue.cmds) != 1 {
@@ -216,7 +216,7 @@ func TestAdoptUpdateEnablePruneEndToEnd(t *testing.T) {
 	if _, err := e.svc.Update(ctx, "org:1", res.Addon.ID, UpdateInput{ChartVersion: &badVersion, Values: &badValues}, "user:u1"); err == nil {
 		t.Fatal("invalid values must be rejected")
 	}
-	if strings.Contains(e.git.Files("acme/acme-inari-state", "main")["addons/cert-manager/values.yaml"], "replicaCount") {
+	if strings.Contains(e.git.Files("acme/acme-inari-state", "main")["addons/platform:cert-manager/values.yaml"], "replicaCount") {
 		t.Error("rejected update must not commit")
 	}
 
@@ -229,7 +229,7 @@ func TestAdoptUpdateEnablePruneEndToEnd(t *testing.T) {
 	if upd.Addon.ChartVersion != "v1.16.2" {
 		t.Errorf("chart version = %q", upd.Addon.ChartVersion)
 	}
-	app := e.git.Files("acme/acme-inari-state", "main")["addons/cert-manager/application.yaml"]
+	app := e.git.Files("acme/acme-inari-state", "main")["addons/platform:cert-manager/application.yaml"]
 	if !strings.Contains(app, "targetRevision: v1.16.2") {
 		t.Error("application must pin the new chart version")
 	}
@@ -242,7 +242,7 @@ func TestAdoptUpdateEnablePruneEndToEnd(t *testing.T) {
 	if !pr.Addon.PruneEnabled {
 		t.Error("prune flag must persist")
 	}
-	if !strings.Contains(e.git.Files("acme/acme-inari-state", "main")["addons/cert-manager/application.yaml"], "prune: true") {
+	if !strings.Contains(e.git.Files("acme/acme-inari-state", "main")["addons/platform:cert-manager/application.yaml"], "prune: true") {
 		t.Error("enable-prune re-renders prune: true")
 	}
 	if _, err := e.svc.EnablePrune(ctx, "org:1", res.Addon.ID, "user:u1"); !errors.Is(err, ErrPruneAlreadyEnabled) {
@@ -331,7 +331,7 @@ func TestFleetReconcileIntegration(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	appset := e.git.Files("acme/acme-inari-state", "main")["addons/cert-manager/applicationset.yaml"]
+	appset := e.git.Files("acme/acme-inari-state", "main")["addons/platform:cert-manager/applicationset.yaml"]
 	if !strings.Contains(appset, "cluster: prod-us") || !strings.Contains(appset, "cluster: prod-eu") {
 		t.Errorf("fleet membership did not expand:\n%s", appset)
 	}
@@ -378,7 +378,7 @@ func TestFleetReconcilePullRequestPolicy(t *testing.T) {
 	}
 	var expanded bool
 	for _, f := range e.git.PRs[1].Files {
-		if f.Path == "addons/cert-manager/applicationset.yaml" &&
+		if f.Path == "addons/platform:cert-manager/applicationset.yaml" &&
 			strings.Contains(string(f.Content), "cluster: prod-us") &&
 			strings.Contains(string(f.Content), "cluster: prod-eu") {
 			expanded = true

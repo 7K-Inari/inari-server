@@ -102,7 +102,7 @@ func itServerWithRepoResolver(t *testing.T) (*httptest.Server, *db.DB, *gitprovi
 }
 
 func deployBody(repoID string) string {
-	b := `{"itemId":"curated:postgres-aws","clusterId":"cluster-1","name":"my-db","namespace":"apps","spec":{"engineVersion":"16","storageGB":50}`
+	b := `{"itemId":"core/postgres-aws","clusterId":"cluster-1","name":"my-db","namespace":"apps","spec":{"engineVersion":"16","storageGB":50}`
 	if repoID != "" {
 		b += `,"repoId":"` + repoID + `"`
 	}
@@ -145,7 +145,7 @@ func TestDeployWithRepoID(t *testing.T) {
 
 	d := deployInstance(t, srv, deployBody(teamRepoID))
 	files := git.Files("inari-dev/team-a-gitops", "main")
-	if _, ok := files["clusters/cluster-1/postgres-aws/my-db/instance.yaml"]; !ok {
+	if _, ok := files["clusters/cluster-1/core/postgres-aws/my-db/instance.yaml"]; !ok {
 		t.Fatalf("instance manifest not committed to team repo: %v", keysOf(files))
 	}
 	// Nothing landed in the baseline repo.
@@ -168,7 +168,7 @@ func TestDeployDefaultRepoBackCompat(t *testing.T) {
 
 	d := deployInstance(t, srv, deployBody(""))
 	files := git.Files("inari-dev/acme-inari-state", "main")
-	if _, ok := files["clusters/cluster-1/postgres-aws/my-db/instance.yaml"]; !ok {
+	if _, ok := files["clusters/cluster-1/core/postgres-aws/my-db/instance.yaml"]; !ok {
 		t.Fatalf("instance manifest not committed to default repo: %v", keysOf(files))
 	}
 	if got := instanceRepoID(t, database, d.InstanceID); got != baselineID {
@@ -225,7 +225,7 @@ func TestMutationRepoMismatch(t *testing.T) {
 		t.Fatalf("upgrade matching repoId: %d %s", code, body)
 	}
 	files := git.Files("inari-dev/team-a-gitops", "main")
-	inst := files["clusters/cluster-1/postgres-aws/my-db/instance.yaml"]
+	inst := files["clusters/cluster-1/core/postgres-aws/my-db/instance.yaml"]
 	if !strings.Contains(inst, "storageGB: 50") {
 		t.Errorf("upgraded manifest missing from team repo:\n%s", inst)
 	}
@@ -239,7 +239,7 @@ func TestMutationRepoMismatch(t *testing.T) {
 		t.Fatalf("delete: %d %s", code, body)
 	}
 	files = git.Files("inari-dev/team-a-gitops", "main")
-	if _, ok := files["clusters/cluster-1/postgres-aws/my-db/instance.yaml"]; ok {
+	if _, ok := files["clusters/cluster-1/core/postgres-aws/my-db/instance.yaml"]; ok {
 		t.Error("instance manifest still present in team repo after delete")
 	}
 	var count int
@@ -401,7 +401,7 @@ func TestRepoWriteEnforcement(t *testing.T) {
 	defer srv.Close()
 
 	bodyWithRepo := func(name, repoID string) string {
-		return `{"itemId":"curated:postgres-aws","clusterId":"cluster-1","name":"` + name + `","spec":{"engineVersion":"16","storageGB":50},"repoId":"` + repoID + `"}`
+		return `{"itemId":"core/postgres-aws","clusterId":"cluster-1","name":"` + name + `","spec":{"engineVersion":"16","storageGB":50},"repoId":"` + repoID + `"}`
 	}
 
 	// Team member deploys to own team repo → 200.
@@ -422,7 +422,7 @@ func TestRepoWriteEnforcement(t *testing.T) {
 	}
 	// No repoId → no check (default repo, any org member).
 	if code, body := itReq(t, srv, "POST", "/api/v1/tenants/acme/deploys", "team-b-member",
-		`{"itemId":"curated:postgres-aws","clusterId":"cluster-1","name":"db-e","spec":{"engineVersion":"16","storageGB":50}}`); code != http.StatusOK {
+		`{"itemId":"core/postgres-aws","clusterId":"cluster-1","name":"db-e","spec":{"engineVersion":"16","storageGB":50}}`); code != http.StatusOK {
 		t.Errorf("default repo: got %d, want 200 (%s)", code, body)
 	}
 }
@@ -435,7 +435,7 @@ func TestRepoWriteEnforcementOnMutations(t *testing.T) {
 
 	// Admin deploys to the team repo.
 	code, body := itReq(t, srv, "POST", "/api/v1/tenants/acme/deploys", "admin",
-		`{"itemId":"curated:postgres-aws","clusterId":"cluster-1","name":"db-x","spec":{"engineVersion":"16","storageGB":50},"repoId":"`+teamRepoID+`"}`)
+		`{"itemId":"core/postgres-aws","clusterId":"cluster-1","name":"db-x","spec":{"engineVersion":"16","storageGB":50},"repoId":"`+teamRepoID+`"}`)
 	if code != http.StatusOK {
 		t.Fatalf("deploy: %d %s", code, body)
 	}
@@ -462,12 +462,12 @@ func TestApprovalResumePreservesRepoID(t *testing.T) {
 	ctx := context.Background()
 
 	if _, err := database.Pool.Exec(ctx,
-		`UPDATE catalog_items SET approval_policy = 'peer' WHERE id = 'curated:web-service'`); err != nil {
+		`UPDATE catalog_items SET approval_policy = 'peer' WHERE id = 'core/web-service'`); err != nil {
 		t.Fatal(err)
 	}
 
 	code, body := itReq(t, srv, "POST", "/api/v1/tenants/acme/deploys", "good",
-		`{"itemId":"curated:web-service","version":"0.1.0","clusterId":"cluster-1","name":"web","namespace":"apps","spec":{"hostname":"app.example.com"},"repoId":"`+teamRepoID+`"}`)
+		`{"itemId":"core/web-service","version":"0.1.0","clusterId":"cluster-1","name":"web","namespace":"apps","spec":{"hostname":"app.example.com"},"repoId":"`+teamRepoID+`"}`)
 	if code != http.StatusOK {
 		t.Fatalf("gated deploy: %d %s", code, body)
 	}
@@ -502,7 +502,7 @@ func TestApprovalResumePreservesRepoID(t *testing.T) {
 		t.Fatalf("queued commands after resume = %d, want 1", len(queue.cmds))
 	}
 	files := git.Files("inari-dev/team-a-gitops", "main")
-	if _, ok := files["clusters/cluster-1/web-service/web/instance.yaml"]; !ok {
+	if _, ok := files["clusters/cluster-1/core/web-service/web/instance.yaml"]; !ok {
 		t.Fatalf("resumed deploy not committed to team repo: %v", keysOf(files))
 	}
 	if bf := git.Files("inari-dev/acme-inari-state", "main"); len(bf) != 0 {
@@ -549,7 +549,7 @@ func TestQALegacyInstanceMutation(t *testing.T) {
 		t.Fatalf("legacy upgrade: %d %s", code, body)
 	}
 	files := git.Files("inari-dev/acme-inari-state", "main")
-	if _, ok := files["clusters/cluster-1/postgres-aws/my-db/instance.yaml"]; !ok {
+	if _, ok := files["clusters/cluster-1/core/postgres-aws/my-db/instance.yaml"]; !ok {
 		t.Fatalf("legacy upgrade not committed to default repo: %v", keysOf(files))
 	}
 	// The mutation self-heals the attribution: repo_id backfills to the
@@ -563,7 +563,7 @@ func TestQALegacyInstanceMutation(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("legacy delete: %d %s", code, body)
 	}
-	if _, ok := git.Files("inari-dev/acme-inari-state", "main")["clusters/cluster-1/postgres-aws/my-db/instance.yaml"]; ok {
+	if _, ok := git.Files("inari-dev/acme-inari-state", "main")["clusters/cluster-1/core/postgres-aws/my-db/instance.yaml"]; ok {
 		t.Error("legacy instance manifest still present in default repo after delete")
 	}
 }

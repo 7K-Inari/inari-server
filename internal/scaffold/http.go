@@ -13,6 +13,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 
+	"github.com/7K-Inari/inari-server/internal/artifactadmission"
 	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
@@ -62,6 +63,20 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 		Summary:     "Create a scaffold run (idempotent: identical resubmits return the existing run)",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.createRun)
+	huma.Register(api, huma.Operation{
+		OperationID: "getSourceTemplate",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/tenants/{org}/templates/{source}/{name}",
+		Summary:     "Get a source-qualified software template",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.getSourceTemplate)
+	huma.Register(api, huma.Operation{
+		OperationID: "createSourceScaffoldRun",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/tenants/{org}/templates/{source}/{name}/runs",
+		Summary:     "Create a run for a source-qualified template",
+		Security:    httpserver.SecurityRequirement(),
+	}, h.createSourceRun)
 
 	huma.Register(api, huma.Operation{
 		OperationID: "getScaffoldRun",
@@ -119,26 +134,37 @@ type stepView struct {
 // runView is the ScaffoldRun JSON shape the UI client consumes (plan §3).
 // Internal fields (orgId, templateItemId, idempotencyKey) stay server-side.
 type runView struct {
-	ID           string          `json:"id"`
-	TemplateName string          `json:"templateName"`
-	Version      string          `json:"version"`
-	DisplayName  string          `json:"displayName"`
-	Phase        string          `json:"phase"`
-	Steps        []stepView      `json:"steps"`
-	Outputs      json.RawMessage `json:"outputs,omitempty"`
-	Error        string          `json:"error,omitempty"`
-	CreatedBy    string          `json:"createdBy"`
-	CreatedAt    time.Time       `json:"createdAt"`
-	UpdatedAt    time.Time       `json:"updatedAt"`
+	ID             string          `json:"id"`
+	TemplateID     string          `json:"templateId"`
+	TemplateName   string          `json:"templateName"`
+	SourceID       string          `json:"sourceId,omitempty"`
+	TrustTier      string          `json:"trustTier,omitempty"`
+	Unsigned       bool            `json:"unsigned,omitempty"`
+	ArtifactDigest string          `json:"artifactDigest,omitempty"`
+	Version        string          `json:"version"`
+	DisplayName    string          `json:"displayName"`
+	Phase          string          `json:"phase"`
+	Steps          []stepView      `json:"steps"`
+	Outputs        json.RawMessage `json:"outputs,omitempty"`
+	Error          string          `json:"error,omitempty"`
+	CreatedBy      string          `json:"createdBy"`
+	CreatedAt      time.Time       `json:"createdAt"`
+	UpdatedAt      time.Time       `json:"updatedAt"`
 }
 
 func (h *Handler) toRunView(ctx context.Context, run *types.ScaffoldRun, steps []types.ScaffoldRunStep) runView {
 	v := runView{
-		ID: run.ID, TemplateName: h.svc.TemplateNameForRun(ctx, run),
-		Version: run.TemplateVersion, DisplayName: run.DisplayName,
+		ID: run.ID, TemplateID: run.TemplateItemID, TemplateName: h.svc.TemplateNameForRun(ctx, run),
+		ArtifactDigest: run.TemplateDigest,
+		Version:        run.TemplateVersion, DisplayName: run.DisplayName,
 		Phase: string(run.Phase), Outputs: run.Outputs, Error: run.Error,
 		CreatedBy: run.CreatedBy, CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt,
 		Steps: make([]stepView, 0, len(steps)),
+	}
+	if item, err := h.svc.catalog.GetItemByID(ctx, run.TemplateItemID); err == nil {
+		v.SourceID = item.SourceID
+		v.TrustTier = item.TrustTier
+		v.Unsigned = item.Unsigned
 	}
 	for _, st := range steps {
 		v.Steps = append(v.Steps, stepView{Name: st.Name, State: st.State, Attempts: st.Attempts, Error: st.Error})
@@ -173,6 +199,31 @@ func (h *Handler) listTemplates(ctx context.Context, in *listTemplatesInput) (*l
 type templatePathInput struct {
 	Org  string `path:"org"`
 	Name string `path:"name"`
+}
+
+type sourceTemplatePathInput struct {
+	Org    string `path:"org"`
+	Source string `path:"source"`
+	Name   string `path:"name"`
+}
+
+func (h *Handler) getSourceTemplate(ctx context.Context, in *sourceTemplatePathInput) (*getTemplateOutput, error) {
+	return h.getTemplate(ctx, &templatePathInput{Org: in.Org, Name: in.Source + "/" + in.Name})
+}
+
+type sourceCreateRunInput struct {
+	Org    string `path:"org"`
+	Source string `path:"source"`
+	Name   string `path:"name"`
+	Body   struct {
+		Version     string         `json:"version,omitempty" doc:"Template version; defaults to the tenant's effective version"`
+		DisplayName string         `json:"displayName,omitempty"`
+		Values      map[string]any `json:"values"`
+	}
+}
+
+func (h *Handler) createSourceRun(ctx context.Context, in *sourceCreateRunInput) (*createRunOutput, error) {
+	return h.createRun(ctx, &createRunInput{Org: in.Org, Name: in.Source + "/" + in.Name, Body: in.Body})
 }
 
 type getTemplateOutput struct {
@@ -225,6 +276,9 @@ func (h *Handler) createRun(ctx context.Context, in *createRunInput) (*createRun
 		return nil, huma.Error400BadRequest("values must be a JSON object")
 	}
 	run, steps, existed, err := h.svc.CreateRun(ctx, id.Subject, org.ID, in.Name, in.Body.Version, in.Body.DisplayName, values)
+	if mapped := scaffoldAdmissionError(err); mapped != nil {
+		return nil, mapped
+	}
 	var valErr *ValidationError
 	var connReq *ErrGitConnectionRequired
 	switch {
@@ -320,6 +374,17 @@ func (h *Handler) retryRun(ctx context.Context, in *runPathInput) (*retryRunOutp
 	return out, nil
 }
 
+func scaffoldAdmissionError(err error) error {
+	var admissionErr *artifactadmission.Error
+	if !errors.As(err, &admissionErr) {
+		return nil
+	}
+	if admissionErr.Temporary {
+		return huma.NewError(http.StatusServiceUnavailable, admissionErr.Error())
+	}
+	return huma.Error422UnprocessableEntity(admissionErr.Error())
+}
+
 // --- UI wizard contract (inari-ui/src/api/templates.ts) ------------------
 
 // scaffoldOutputs mirrors the UI client's ScaffoldOutputs: always an object
@@ -332,15 +397,19 @@ type scaffoldOutputs struct {
 
 // scaffoldView mirrors the UI client's ScaffoldRun interface field-for-field.
 type scaffoldView struct {
-	ID           string          `json:"id"`
-	TemplateID   string          `json:"templateId"`
-	TemplateName string          `json:"templateName"`
-	Name         string          `json:"name"`
-	Tenant       string          `json:"tenant"`
-	Phase        string          `json:"phase"`
-	Message      *string         `json:"message"`
-	Outputs      scaffoldOutputs `json:"outputs"`
-	CreatedAt    time.Time       `json:"createdAt"`
+	ID             string          `json:"id"`
+	TemplateID     string          `json:"templateId"`
+	TemplateName   string          `json:"templateName"`
+	SourceID       string          `json:"sourceId,omitempty"`
+	TrustTier      string          `json:"trustTier,omitempty"`
+	Unsigned       bool            `json:"unsigned,omitempty"`
+	ArtifactDigest string          `json:"artifactDigest,omitempty"`
+	Name           string          `json:"name"`
+	Tenant         string          `json:"tenant"`
+	Phase          string          `json:"phase"`
+	Message        *string         `json:"message"`
+	Outputs        scaffoldOutputs `json:"outputs"`
+	CreatedAt      time.Time       `json:"createdAt"`
 }
 
 // toScaffoldView projects a run onto the UI contract. The run's outputs
@@ -349,9 +418,15 @@ type scaffoldView struct {
 func (h *Handler) toScaffoldView(ctx context.Context, run *types.ScaffoldRun, orgSlug string) scaffoldView {
 	v := scaffoldView{
 		ID: run.ID, TemplateID: run.TemplateItemID,
-		TemplateName: h.svc.TemplateNameForRun(ctx, run),
-		Name:         run.DisplayName, Tenant: orgSlug, Phase: string(run.Phase),
+		TemplateName:   h.svc.TemplateNameForRun(ctx, run),
+		ArtifactDigest: run.TemplateDigest,
+		Name:           run.DisplayName, Tenant: orgSlug, Phase: string(run.Phase),
 		CreatedAt: run.CreatedAt,
+	}
+	if item, err := h.svc.catalog.GetItemByID(ctx, run.TemplateItemID); err == nil {
+		v.SourceID = item.SourceID
+		v.TrustTier = item.TrustTier
+		v.Unsigned = item.Unsigned
 	}
 	if run.Error != "" {
 		msg := run.Error
@@ -400,6 +475,9 @@ func (h *Handler) createScaffold(ctx context.Context, in *createScaffoldInput) (
 		return nil, huma.Error400BadRequest("parameters must be a JSON object")
 	}
 	run, _, existed, err := h.svc.CreateRun(ctx, id.Subject, org.ID, in.Body.TemplateID, "", in.Body.Name, values)
+	if mapped := scaffoldAdmissionError(err); mapped != nil {
+		return nil, mapped
+	}
 	var valErr *ValidationError
 	var connReq *ErrGitConnectionRequired
 	switch {

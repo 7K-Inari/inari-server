@@ -3,7 +3,6 @@ package orchestrator
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/7K-Inari/inari-server/internal/renderer"
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -12,7 +11,7 @@ import (
 // RepoPath is the deterministic location of an instance's manifests in the
 // tenant state repo: clusters/<cluster>/<item>/<instance>/.
 func RepoPath(clusterID, itemID, instanceID string) string {
-	return fmt.Sprintf("clusters/%s/%s/%s", clusterID, strings.TrimPrefix(itemID, "curated:"), instanceID)
+	return fmt.Sprintf("clusters/%s/%s/%s", clusterID, itemID, instanceID)
 }
 
 // RenderInstanceManifest renders a deploy spec into a KRO instance manifest.

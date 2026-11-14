@@ -154,7 +154,7 @@ func TestAddonAdoptionEndToEnd(t *testing.T) {
 	}
 
 	// The committed desired state carries prune OFF + take-ownership.
-	app := f.git.Files("acme/acme-inari-state", "main")["addons/cert-manager/application.yaml"]
+	app := f.git.Files("acme/acme-inari-state", "main")["addons/platform:cert-manager/application.yaml"]
 	if !strings.Contains(app, "prune: false") || !strings.Contains(app, "TakeOwnership=true") {
 		t.Errorf("committed application:\n%s", app)
 	}
@@ -192,11 +192,11 @@ func TestAddonAdoptionEndToEnd(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("update: %d %s", code, body)
 	}
-	app = f.git.Files("acme/acme-inari-state", "main")["addons/cert-manager/application.yaml"]
+	app = f.git.Files("acme/acme-inari-state", "main")["addons/platform:cert-manager/application.yaml"]
 	if !strings.Contains(app, "targetRevision: v1.16.1") {
 		t.Error("update must re-pin the chart version")
 	}
-	vals := f.git.Files("acme/acme-inari-state", "main")["addons/cert-manager/values.yaml"]
+	vals := f.git.Files("acme/acme-inari-state", "main")["addons/platform:cert-manager/values.yaml"]
 	if !strings.Contains(vals, "replicaCount: 3") {
 		t.Errorf("values.yaml = %q", vals)
 	}
@@ -227,7 +227,7 @@ func TestAddonAdoptionEndToEnd(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("enable-prune: %d %s", code, body)
 	}
-	app = f.git.Files("acme/acme-inari-state", "main")["addons/cert-manager/application.yaml"]
+	app = f.git.Files("acme/acme-inari-state", "main")["addons/platform:cert-manager/application.yaml"]
 	if !strings.Contains(app, "prune: true") {
 		t.Error("enable-prune must re-render with prune on")
 	}
@@ -288,7 +288,7 @@ func TestAddonAdoptionApplicationSetEndToEnd(t *testing.T) {
 
 	// The rendered ApplicationSet fans out to exactly the selector-matched
 	// clusters via the list generator (per-cluster Applications in ArgoCD).
-	appset := f.git.Files("acme/acme-inari-state", "main")["addons/cert-manager/applicationset.yaml"]
+	appset := f.git.Files("acme/acme-inari-state", "main")["addons/platform:cert-manager/applicationset.yaml"]
 	if !strings.Contains(appset, "cluster: prod-eu") || !strings.Contains(appset, "cluster: prod-us") {
 		t.Errorf("list generator must contain both prod clusters:\n%s", appset)
 	}

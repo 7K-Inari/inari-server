@@ -11,7 +11,10 @@ import (
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
-type syncFGA struct{ tuples map[string]authz.Tuple }
+type syncFGA struct {
+	tuples    map[string]authz.Tuple
+	writeHook func()
+}
 
 func newSyncFGA() *syncFGA                                                     { return &syncFGA{tuples: map[string]authz.Tuple{}} }
 func tupleKey(t authz.Tuple) string                                            { return t.User + "|" + t.Relation + "|" + t.Object }
@@ -32,6 +35,9 @@ func (f *syncFGA) WriteTuples(_ context.Context, tuples []authz.Tuple) error {
 	for _, t := range tuples {
 		f.tuples[tupleKey(t)] = t
 	}
+	if f.writeHook != nil {
+		f.writeHook()
+	}
 	return nil
 }
 func (f *syncFGA) DeleteTuples(_ context.Context, tuples []authz.Tuple) error {
@@ -43,6 +49,76 @@ func (f *syncFGA) DeleteTuples(_ context.Context, tuples []authz.Tuple) error {
 func (f *syncFGA) has(user, relation, object string) bool {
 	_, ok := f.tuples[tupleKey(authz.Tuple{User: user, Relation: relation, Object: object})]
 	return ok
+}
+
+func TestAuthzSyncDoesNotResurrectDeletingTenant(t *testing.T) {
+	svc, database, _, teamID, _ := serviceFixture(t)
+	ctx := context.Background()
+	fga := newSyncFGA()
+	sync := NewAuthzSync(database, NewStore(), fga)
+	target, err := svc.Create(ctx, "org:store", "user:admin", CreateInput{
+		Name: "deployment", ResourceRef: TargetResourceRef{Kind: ResourceKindCluster, ID: "cluster:store"},
+		Capability: CapabilityDeploymentCluster,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SetGrant(ctx, target.OrgID, target.ID, teamID, ActionUse, "user:admin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sync.SyncTarget(ctx, target.OrgID, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(fga.tuples) == 0 {
+		t.Fatal("test setup did not create target tuples")
+	}
+	if _, err := database.Pool.Exec(ctx, `UPDATE organizations SET status=$1 WHERE id=$2`, types.OrgStatusDeleting, target.OrgID); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(types.ResourceTargetPayload{OrgID: target.OrgID, TargetID: target.ID})
+	// A delayed pre-freeze event must converge to no tuples after the tenant
+	// lifecycle cleanup, not recreate the parent and grant.
+	if err := sync.Handle(ctx, &types.OutboxEvent{EventType: types.EventResourceTargetCreated, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fga.tuples) != 0 {
+		t.Fatalf("deleting tenant tuples were resurrected: %+v", fga.tuples)
+	}
+}
+
+func TestAuthzSyncRechecksTenantFreezeAfterWrite(t *testing.T) {
+	svc, database, _, teamID, _ := serviceFixture(t)
+	ctx := context.Background()
+	fga := newSyncFGA()
+	sync := NewAuthzSync(database, NewStore(), fga)
+	target, err := svc.Create(ctx, "org:store", "user:admin", CreateInput{
+		Name: "deployment", ResourceRef: TargetResourceRef{Kind: ResourceKindCluster, ID: "cluster:store"},
+		Capability: CapabilityDeploymentCluster,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SetGrant(ctx, target.OrgID, target.ID, teamID, ActionUse, "user:admin"); err != nil {
+		t.Fatal(err)
+	}
+	var freezeErr error
+	fga.writeHook = func() {
+		if freezeErr == nil {
+			_, freezeErr = database.Pool.Exec(ctx, `UPDATE organizations SET status=$1 WHERE id=$2`, types.OrgStatusDeleting, target.OrgID)
+		}
+	}
+	payload, _ := json.Marshal(types.ResourceTargetPayload{OrgID: target.OrgID, TargetID: target.ID})
+	// The organization is active at the initial read but freezes immediately
+	// after the FGA write. The post-write check must retract the new tuples.
+	if err := sync.Handle(ctx, &types.OutboxEvent{EventType: types.EventResourceTargetCreated, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	if freezeErr != nil {
+		t.Fatal(freezeErr)
+	}
+	if len(fga.tuples) != 0 {
+		t.Fatalf("tuples written across the tenant freeze were not retracted: %+v", fga.tuples)
+	}
 }
 
 func TestAuthzSyncConvergesCurrentStateAndReplays(t *testing.T) {

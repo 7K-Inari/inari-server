@@ -60,7 +60,20 @@ func authzTupleKey(tuple authz.Tuple) string {
 
 func (s *AuthzSync) SyncTarget(ctx context.Context, orgID, targetID string) error {
 	desired := map[string]authz.Tuple{}
-	_, err := s.store.Get(ctx, s.db.Pool, orgID, targetID)
+	// Event handlers and periodic convergence can race tenant teardown. Only
+	// active organizations contribute desired tuples; a stale target event for
+	// a deleting org must retract, never recreate, access after the lifecycle
+	// cleanup has run.
+	var active bool
+	if err := s.db.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM organizations WHERE id=$1 AND status='active')`, orgID).Scan(&active); err != nil {
+		return err
+	}
+	var err error
+	if active {
+		_, err = s.store.Get(ctx, s.db.Pool, orgID, targetID)
+	} else {
+		err = ErrTargetNotFound
+	}
 	if err == nil {
 		object := authz.ResourceTargetObject(targetID)
 		parent := authz.Tuple{User: authz.OrgObject(orgID), Relation: authz.RelationParent, Object: object}
@@ -111,6 +124,17 @@ func (s *AuthzSync) SyncTarget(ctx context.Context, orgID, targetID string) erro
 	if len(add) > 0 {
 		if err := s.fga.WriteTuples(ctx, add); err != nil {
 			return err
+		}
+	}
+	if active {
+		// Close the status-check/write race: if the freeze committed while FGA
+		// was being updated, immediately converge again to the deleting state.
+		var stillActive bool
+		if err := s.db.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM organizations WHERE id=$1 AND status='active')`, orgID).Scan(&stillActive); err != nil {
+			return err
+		}
+		if !stillActive {
+			return s.SyncTarget(ctx, orgID, targetID)
 		}
 	}
 	return nil

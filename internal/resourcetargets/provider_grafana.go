@@ -57,6 +57,18 @@ func (grafanaProvider) Describe() ProviderDescriptor {
 	}
 }
 
+func validGrafanaFolder(folder string) bool {
+	if strings.TrimSpace(folder) == "" || folder != strings.TrimSpace(folder) || strings.HasPrefix(folder, "/") || strings.HasSuffix(folder, "/") {
+		return false
+	}
+	for _, segment := range strings.Split(folder, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
+}
+
 func parseGrafanaConfig(raw json.RawMessage) (grafanaConfig, error) {
 	var cfg grafanaConfig
 	if err := decodeStrict(raw, &cfg); err != nil {
@@ -77,13 +89,8 @@ func parseGrafanaConfig(raw json.RawMessage) (grafanaConfig, error) {
 		return cfg, invalid("config.folderPrefixes", "at least one folder prefix is required")
 	}
 	for i, prefix := range cfg.FolderPrefixes {
-		if strings.TrimSpace(prefix) == "" || prefix != strings.TrimSpace(prefix) || strings.HasPrefix(prefix, "/") || strings.HasSuffix(prefix, "/") {
-			return cfg, invalid(fmt.Sprintf("config.folderPrefixes.%d", i), "folder prefix must be a trimmed relative path")
-		}
-		for _, segment := range strings.Split(prefix, "/") {
-			if segment == "" || segment == "." || segment == ".." {
-				return cfg, invalid(fmt.Sprintf("config.folderPrefixes.%d", i), "folder prefix contains an invalid segment")
-			}
+		if !validGrafanaFolder(prefix) {
+			return cfg, invalid(fmt.Sprintf("config.folderPrefixes.%d", i), "folder prefix must be a trimmed relative path without invalid segments")
 		}
 	}
 	if len(cfg.Datasources) == 0 {
@@ -145,7 +152,10 @@ func validateGrafanaSnapshot(snapshot ResourceSnapshot, cfg grafanaConfig) error
 		ReleaseName string `json:"releaseName"`
 		Namespace   string `json:"namespace"`
 	}
-	if err := decodeStrict(addon.DiscoveredMeta, &release); err != nil || release.ReleaseName == "" || release.Namespace == "" {
+	// Discovery projections contain additional scanner-owned metadata. Only
+	// the release identity is consumed here; unknown projection fields are
+	// additive and must not invalidate otherwise valid evidence.
+	if err := json.Unmarshal(addon.DiscoveredMeta, &release); err != nil || release.ReleaseName == "" || release.Namespace == "" {
 		return invalid("config.evidence.addonId", "addon has no discovered Helm release identity")
 	}
 	capabilityName := release.Namespace + "/" + release.ReleaseName
@@ -157,7 +167,7 @@ func validateGrafanaSnapshot(snapshot ResourceSnapshot, cfg grafanaConfig) error
 		var hints struct {
 			Status string `json:"status"`
 		}
-		if err := decodeStrict(capability.UIHints, &hints); err == nil && hints.Status == "deployed" {
+		if err := json.Unmarshal(capability.UIHints, &hints); err == nil && hints.Status == "deployed" {
 			deployed = true
 			break
 		}
@@ -223,6 +233,9 @@ func (p grafanaProvider) ValidateSelection(target *Target, raw json.RawMessage) 
 	}
 	if selection.Evaluation != cfg.Evaluation {
 		return nil, ApprovalPolicy{}, invalid("selection.evaluation", "evaluation must match target policy")
+	}
+	if !validGrafanaFolder(selection.Folder) {
+		return nil, ApprovalPolicy{}, invalid("selection.folder", "folder must be a trimmed relative path without invalid segments")
 	}
 	folderAllowed := false
 	for _, prefix := range cfg.FolderPrefixes {

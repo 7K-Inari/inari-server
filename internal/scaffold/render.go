@@ -107,7 +107,7 @@ func renderSkeleton(pkgDir string, data *RenderData) ([]RenderedFile, error) {
 }
 
 type artifactTemplateSource interface {
-	GetArtifact(ctx context.Context, ref, version, expectedSkeletonDigest string) (*TemplatePackage, error)
+	GetArtifact(ctx context.Context, ref, version, expectedSkeletonDigest string, expectedManifest []byte) (*TemplatePackage, error)
 }
 
 var (
@@ -167,12 +167,16 @@ func templatePackageForRun(ctx context.Context, env *ExecEnv, run *types.Scaffol
 	}
 	version := admitted.Version
 	var payload struct {
-		SkeletonDigest string `json:"skeletonDigest"`
+		Manifest       json.RawMessage `json:"manifest"`
+		SkeletonDigest string          `json:"skeletonDigest"`
 	}
 	if err := json.Unmarshal(version.Payload, &payload); err != nil {
 		return nil, fmt.Errorf("scaffold: parse template payload: %w", err)
 	}
-	return source.GetArtifact(ctx, version.ArtifactRef, run.TemplateVersion, payload.SkeletonDigest)
+	if len(payload.Manifest) == 0 {
+		return nil, errors.New("scaffold: signed template manifest is missing")
+	}
+	return source.GetArtifact(ctx, version.ArtifactRef, run.TemplateVersion, payload.SkeletonDigest, payload.Manifest)
 }
 
 // stepRendering renders the run's template skeleton into step.Result.

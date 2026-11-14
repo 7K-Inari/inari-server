@@ -41,11 +41,11 @@ func (m *MultiTemplateSource) Get(ctx context.Context, name, version string) (*T
 	return found, nil
 }
 
-func (m *MultiTemplateSource) GetArtifact(ctx context.Context, ref, version, expectedSkeletonDigest string) (*TemplatePackage, error) {
+func (m *MultiTemplateSource) GetArtifact(ctx context.Context, ref, version, expectedSkeletonDigest string, expectedManifest []byte) (*TemplatePackage, error) {
 	for _, source := range m.Sources {
 		for _, prefix := range source.Source.ArtifactPrefixes {
 			if strings.HasPrefix(ref, prefix) {
-				return source.GetArtifact(ctx, ref, version, expectedSkeletonDigest)
+				return source.GetArtifact(ctx, ref, version, expectedSkeletonDigest, expectedManifest)
 			}
 		}
 	}

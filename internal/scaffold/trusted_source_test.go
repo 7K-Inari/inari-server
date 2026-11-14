@@ -2,6 +2,7 @@ package scaffold
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -106,7 +107,7 @@ func TestRegistryTemplateSourceSyncAndExactGet(t *testing.T) {
 		t.Fatalf("catalog packages = %+v", catalogPackages)
 	}
 	entry := catalogPackages[0].Entry
-	pkg, err := source.GetArtifact(context.Background(), entry.OCIRef+"@"+entry.Digest, "1.0.0", catalogPackages[0].SkeletonDigest)
+	pkg, err := source.GetArtifact(context.Background(), entry.OCIRef+"@"+entry.Digest, "1.0.0", catalogPackages[0].SkeletonDigest, catalogPackages[0].ManifestJSON)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +130,7 @@ func TestRegistryTemplateSourceDetectsCacheTamper(t *testing.T) {
 		t.Fatal(err)
 	}
 	entry := catalogPackages[0].Entry
-	if _, err := source.GetArtifact(context.Background(), entry.OCIRef+"@"+entry.Digest, "1.0.0", catalogPackages[0].SkeletonDigest); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
+	if _, err := source.GetArtifact(context.Background(), entry.OCIRef+"@"+entry.Digest, "1.0.0", catalogPackages[0].SkeletonDigest, catalogPackages[0].ManifestJSON); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
 		t.Fatalf("error = %v, want skeleton digest mismatch", err)
 	}
 	if _, err := source.Get(context.Background(), "missing", "1.0.0"); err == nil {
@@ -212,5 +213,45 @@ func TestRegistryTemplateSourceRejectsPreseededCachePoison(t *testing.T) {
 				t.Fatal("poisoned cache was published into the synced source")
 			}
 		})
+	}
+}
+
+func TestTemplatePackageForRunRejectsCachedManifestTamper(t *testing.T) {
+	manifest := testTemplateYAML + "scaffold:\n  requiresApproval: true\n"
+	source := setupTrustedTemplateRegistry(t, manifest)
+	catalogPackages, err := (CatalogTemplatePuller{source}).Pull(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := catalogPackages[0].Entry
+	payload, err := json.Marshal(map[string]any{
+		"manifest": json.RawMessage(catalogPackages[0].ManifestJSON), "skeletonDigest": catalogPackages[0].SkeletonDigest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := newStubCatalog()
+	catalog.byID["core/go-service"] = &types.CatalogItem{ID: "core/go-service", SourceID: "core", Name: "go-service", Source: types.CatalogSourceTemplate}
+	catalog.versions["core/go-service@1.0.0"] = &types.CatalogItemVersion{
+		ItemID: "core/go-service", Version: "1.0.0", ArtifactRef: entry.OCIRef + "@" + entry.Digest,
+		ArtifactDigest: entry.Digest, Payload: payload,
+	}
+	run := &types.ScaffoldRun{TemplateItemID: "core/go-service", TemplateVersion: "1.0.0", TemplateDigest: entry.Digest}
+	env := &ExecEnv{Templates: source, Catalog: catalog, Environment: trustedsource.EnvironmentDevelopment}
+	if _, err := templatePackageForRun(context.Background(), env, run); err != nil {
+		t.Fatalf("verified package rejected before tampering: %v", err)
+	}
+
+	pkg, err := source.Get(context.Background(), "go-service", "1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := strings.Replace(manifest, "requiresApproval: true", "requiresApproval: false", 1)
+	if err := os.WriteFile(filepath.Join(pkg.Dir, "template.yaml"), []byte(tampered), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := templatePackageForRun(context.Background(), env, run)
+	if err == nil && !got.Manifest.Scaffold.requiresApproval() {
+		t.Fatal("cached manifest tampering disabled approval without invalidating the run")
 	}
 }

@@ -39,6 +39,8 @@ type CosignBackend struct {
 	trustedMaterial       root.TrustedMaterial
 	trustedMaterialErr    error
 	trustedMaterialLoader func() (root.TrustedMaterial, error)
+	ignoreTlogForTest     bool
+	ignoreSCTForTest      bool
 }
 
 func NewCosignBackend(fetcher *oci.Fetcher) *CosignBackend {
@@ -93,6 +95,8 @@ func (b *CosignBackend) options(expected PublisherExpectation) ([]name.Option, *
 		RegistryClientOpts: []cosignremote.Option{cosignremote.WithRemoteOptions(gcremote.WithAuthFromKeychain(kc))},
 		Identities:         []cosign.Identity{{SubjectRegExp: subject, Issuer: expected.Source.Publisher.Issuer}},
 		TrustedMaterial:    material,
+		IgnoreTlog:         b.ignoreTlogForTest,
+		IgnoreSCT:          b.ignoreSCTForTest,
 		// OCI 1.1 support is required for registry-referrer evidence. The
 		// protected producer dogfood validates the exact bundle format.
 		ExperimentalOCI11: true,
@@ -144,28 +148,29 @@ func (b *CosignBackend) VerifyAttestations(ctx context.Context, ref string, expe
 	opts.RegistryClientOpts = append(opts.RegistryClientOpts, cosignremote.WithRemoteOptions(gcremote.WithContext(ctx)))
 	signatures, _, err := cosign.VerifyImageAttestations(ctx, r, opts, nameOpts...)
 	if err != nil {
-		return nil, &Error{Code: CodeUnavailable, Ref: ref, Err: err, Temporary: true}
+		return nil, attestationError(predicateType, ref, err)
 	}
 	var out []Attestation
-	var validationErrors []error
+	var publisherErrors []error
+	var evidenceErrors []error
 	for _, signature := range signatures {
 		cert, err := signature.Cert()
 		if err != nil {
-			validationErrors = append(validationErrors, err)
+			publisherErrors = append(publisherErrors, err)
 			continue
 		}
 		if err := validateCertificate(cert, expected); err != nil {
-			validationErrors = append(validationErrors, err)
+			publisherErrors = append(publisherErrors, err)
 			continue
 		}
 		payload, err := signature.Payload()
 		if err != nil {
-			validationErrors = append(validationErrors, err)
+			evidenceErrors = append(evidenceErrors, err)
 			continue
 		}
 		verifiedPredicateType, statement, predicate, err := decodeVerifiedAttestation(payload)
 		if err != nil {
-			validationErrors = append(validationErrors, err)
+			evidenceErrors = append(evidenceErrors, err)
 			continue
 		}
 		if verifiedPredicateType != predicateType {
@@ -177,10 +182,34 @@ func (b *CosignBackend) VerifyAttestations(ctx context.Context, ref string, expe
 		}
 		out = append(out, Attestation{PredicateType: predicateType, Payload: evidencePayload})
 	}
-	if len(out) == 0 && len(validationErrors) > 0 {
-		return nil, &Error{Code: CodePublisherMismatch, Ref: ref, Err: errors.Join(validationErrors...)}
+	if len(out) == 0 {
+		if len(evidenceErrors) > 0 {
+			return nil, attestationError(predicateType, ref, errors.Join(evidenceErrors...))
+		}
+		if len(publisherErrors) > 0 {
+			return nil, &Error{Code: CodePublisherMismatch, Ref: ref, Err: errors.Join(publisherErrors...)}
+		}
 	}
 	return out, nil
+}
+
+func isTemporaryRegistryError(err error) bool {
+	var temporary interface{ Temporary() bool }
+	return errors.As(err, &temporary) && temporary.Temporary()
+}
+
+func attestationError(predicateType, ref string, err error) error {
+	if isTemporaryRegistryError(err) {
+		return &Error{Code: CodeUnavailable, Ref: ref, Err: err, Temporary: true}
+	}
+	code := CodeSignatureInvalid
+	switch predicateType {
+	case trustedsource.SLSAProvenancePredicateType:
+		code = CodeProvenanceInvalid
+	case trustedsource.TestEvidencePredicateType:
+		code = CodeTestEvidenceInvalid
+	}
+	return &Error{Code: code, Ref: ref, Err: err}
 }
 
 func decodeVerifiedAttestation(payload []byte) (string, []byte, []byte, error) {

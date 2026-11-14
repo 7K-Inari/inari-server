@@ -6,12 +6,16 @@ import (
 	"encoding/asn1"
 	"encoding/base64"
 	"errors"
+	"net/http"
 	"net/url"
 	"sync"
 	"testing"
 
+	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	"github.com/sigstore/sigstore-go/pkg/fulcio/certificate"
 	"github.com/sigstore/sigstore-go/pkg/root"
+
+	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
 )
 
 func certificateExtension(t *testing.T, oid asn1.ObjectIdentifier, value string) pkix.Extension {
@@ -78,6 +82,25 @@ func TestCosignBackendUsesAndCachesTrustedMaterial(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("trusted material loader calls = %d, want exactly one", calls)
+	}
+}
+
+func TestAttestationErrorSeparatesOutagesFromInvalidEvidence(t *testing.T) {
+	outage := attestationError(trustedsource.TestEvidencePredicateType, "repo@sha256:digest", &transport.Error{StatusCode: http.StatusServiceUnavailable})
+	if !IsTemporary(outage) || !IsCode(outage, CodeUnavailable) {
+		t.Fatalf("registry outage = %v, want temporary unavailable", outage)
+	}
+	for _, tc := range []struct {
+		predicateType string
+		wantCode      string
+	}{
+		{trustedsource.SLSAProvenancePredicateType, CodeProvenanceInvalid},
+		{trustedsource.TestEvidencePredicateType, CodeTestEvidenceInvalid},
+	} {
+		err := attestationError(tc.predicateType, "repo@sha256:digest", errors.New("malformed evidence"))
+		if IsTemporary(err) || !IsCode(err, tc.wantCode) {
+			t.Errorf("malformed evidence error = %v, want non-temporary %s", err, tc.wantCode)
+		}
 	}
 }
 

@@ -545,6 +545,9 @@ type CatalogListOptions struct {
 type TrustedSourceStatus struct {
 	Kind                string     `json:"kind"`
 	SourceID            string     `json:"sourceId"`
+	IndexRef            string     `json:"indexRef,omitempty"`
+	TrustTier           string     `json:"trustTier,omitempty"`
+	Unsigned            bool       `json:"unsigned,omitempty"`
 	Fingerprint         string     `json:"-"`
 	State               string     `json:"state"`
 	Generation          int64      `json:"generation"`

@@ -169,6 +169,7 @@ type TemplateSummary struct {
 	SourceID       string   `json:"sourceId,omitempty"`
 	TrustTier      string   `json:"trustTier,omitempty"`
 	Unsigned       bool     `json:"unsigned,omitempty"`
+	SourceState    string   `json:"sourceState,omitempty"`
 	ArtifactDigest string   `json:"artifactDigest,omitempty"`
 	Tags           []string `json:"tags,omitempty"`
 	Version        string   `json:"version"`
@@ -236,7 +237,7 @@ func (s *Service) summary(ctx context.Context, orgID string, it *catalog.ItemVie
 	sum := &TemplateSummary{
 		ID: it.ID, Name: it.Name, DisplayName: it.DisplayName,
 		Description: it.Description, SourceID: it.SourceID, TrustTier: it.TrustTier,
-		Unsigned: it.Unsigned, Version: version,
+		Unsigned: it.Unsigned, SourceState: it.SourceState, Version: version,
 	}
 	if ver, err := s.catalog.GetVersion(ctx, it.ID, version); err == nil {
 		sum.ArtifactDigest = ver.ArtifactDigest

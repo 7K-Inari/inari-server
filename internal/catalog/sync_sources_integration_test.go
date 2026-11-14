@@ -13,12 +13,16 @@ import (
 	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/7K-Inari/inari-server/internal/testutil"
 	"github.com/7K-Inari/inari-server/internal/testutil/testdb"
+	"github.com/7K-Inari/inari-server/internal/types"
 )
 
 type mutablePuller struct {
-	packages []catalog.Package
-	err      error
+	packages    []catalog.Package
+	err         error
+	indexDigest string
 }
+
+func (p *mutablePuller) LastIndexDigest() string { return p.indexDigest }
 
 func (p *mutablePuller) Pull(context.Context) ([]catalog.Package, error) {
 	if p.err != nil {
@@ -56,9 +60,10 @@ func TestSyncSourcesIndependentFailuresAndLastGood(t *testing.T) {
 		Entry:       trustedsource.IndexEntry{Digest: "sha256:" + strings.Repeat("b", 64), PackageVersion: "1.0.0"},
 		IndexDigest: "sha256:" + strings.Repeat("c", 64),
 	}}}
+	goodSource := validSyncSource("community")
 	service := catalog.NewServiceWithSources(database, catalog.NewStore(), nil, audit.NewStore(), []catalog.SourceSync{
 		{Kind: "catalog", Source: validSyncSource("broken"), Puller: broken},
-		{Kind: "catalog", Source: validSyncSource("community"), Puller: good},
+		{Kind: "catalog", Source: goodSource, Puller: good},
 	})
 	count, err := service.Sync(ctx)
 	if err == nil || !strings.Contains(err.Error(), "bad signature") || count != 1 {
@@ -97,6 +102,20 @@ func TestSyncSourcesIndependentFailuresAndLastGood(t *testing.T) {
 	if err != nil || !item.SnapshotPresent {
 		t.Fatalf("last-good item was removed: %+v, %v", item, err)
 	}
+	for _, state := range states {
+		if state.SourceID == "community" {
+			if state.IndexRef != goodSource.IndexRef || state.TrustTier != string(goodSource.TrustTier) || state.Unsigned {
+				t.Errorf("configured source metadata = %+v", state)
+			}
+		}
+	}
+	views, _, err := service.ListVisible(ctx, "org:acme", types.CatalogListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 || views[0].SourceState != "stale" {
+		t.Fatalf("visible source state = %+v, want stale", views)
+	}
 
 	if err := catalog.NewStore().ReconcileSourcePolicies(ctx, database.Pool, "catalog", map[string]string{"community": "sha256:" + strings.Repeat("f", 64)}); err != nil {
 		t.Fatal(err)
@@ -115,5 +134,31 @@ func TestSyncSourcesIndependentFailuresAndLastGood(t *testing.T) {
 	}
 	if byID["community"] != "policy-changed" || byID["broken"] != "unconfigured" {
 		t.Fatalf("reconciled states = %+v", byID)
+	}
+}
+
+func TestEmptySourceSnapshotRetainsVerifiedIndexDigest(t *testing.T) {
+	ctx := context.Background()
+	pg, err := testutil.SharedPostgres(ctx)
+	if err != nil {
+		t.Skipf("testcontainers unavailable: %v", err)
+	}
+	database, err := testdb.NewDatabase(t, pg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := "sha256:" + strings.Repeat("d", 64)
+	source := validSyncSource("empty")
+	puller := &mutablePuller{indexDigest: digest}
+	service := catalog.NewServiceWithSources(database, catalog.NewStore(), nil, audit.NewStore(), []catalog.SourceSync{{Kind: "catalog", Source: source, Puller: puller}})
+	if count, err := service.Sync(ctx); err != nil || count != 0 {
+		t.Fatalf("empty Sync count/error = %d, %v", count, err)
+	}
+	states, err := service.ListTrustedSourceStates(ctx, "catalog")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 || states[0].State != "ready" || states[0].ItemCount != 0 || states[0].LastGoodIndexDigest != digest {
+		t.Fatalf("empty source status = %+v", states)
 	}
 }

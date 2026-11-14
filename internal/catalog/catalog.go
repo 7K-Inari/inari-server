@@ -72,6 +72,7 @@ type ItemView struct {
 	Versions []types.CatalogItemVersion `json:"versions,omitempty"`
 	// PinnedVersion is the tenant's pin, when set.
 	PinnedVersion string `json:"pinnedVersion,omitempty"`
+	SourceState   string `json:"sourceState,omitempty"`
 }
 
 // UpsertItem creates or updates an item + one version with audit + outbox.
@@ -157,6 +158,13 @@ func (s *Service) ListVisible(ctx context.Context, orgID string, opts types.Cata
 		}
 		out = append(out, ItemView{CatalogItem: it, Versions: versionsByItem[it.ID], PinnedVersion: pins[it.ID]})
 	}
+	states, err := s.sourceStateMap(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	for i := range out {
+		out[i].SourceState = states[out[i].SourceID]
+	}
 	return out, total, nil
 }
 
@@ -184,7 +192,11 @@ func (s *Service) GetItem(ctx context.Context, orgID, clusterID, itemID string) 
 	if err != nil {
 		return nil, err
 	}
-	return &ItemView{CatalogItem: *it, Versions: versions, PinnedVersion: pin}, nil
+	states, err := s.sourceStateMap(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &ItemView{CatalogItem: *it, Versions: versions, PinnedVersion: pin, SourceState: states[it.SourceID]}, nil
 }
 
 // GetItemByID returns an item without visibility checks (approvals seam).

@@ -28,8 +28,15 @@ type RegistryTemplateSource struct {
 	Keychain authn.Keychain
 	Insecure bool
 
-	mu   sync.Mutex
-	byID map[string]*TemplatePackage
+	mu          sync.Mutex
+	byID        map[string]*TemplatePackage
+	indexDigest string
+}
+
+func (p *RegistryTemplateSource) LastIndexDigest() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.indexDigest
 }
 
 func (p *RegistryTemplateSource) fetcher() *oci.Fetcher {
@@ -102,6 +109,7 @@ func (p *RegistryTemplateSource) pullCatalog(ctx context.Context) ([]catalog.Pac
 	}
 	p.mu.Lock()
 	p.byID = nextByID
+	p.indexDigest = indexArtifact.Digest
 	p.mu.Unlock()
 	return out, nil
 }

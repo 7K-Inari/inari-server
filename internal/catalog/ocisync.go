@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/jackc/pgx/v5"
@@ -206,6 +207,15 @@ type RegistryPuller struct {
 	Keychain authn.Keychain
 	// Insecure allows plain-HTTP registries (tests/dev).
 	Insecure bool
+
+	mu          sync.RWMutex
+	indexDigest string
+}
+
+func (p *RegistryPuller) LastIndexDigest() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.indexDigest
 }
 
 func (p *RegistryPuller) fetcher() *oci.Fetcher {
@@ -279,6 +289,9 @@ func (p *RegistryPuller) Pull(ctx context.Context) ([]Package, error) {
 		}
 		out = append(out, pkgs...)
 	}
+	p.mu.Lock()
+	p.indexDigest = indexArtifact.Digest
+	p.mu.Unlock()
 	return out, nil
 }
 
@@ -566,6 +579,9 @@ func (s *Service) syncOne(ctx context.Context, sourceSync SourceSync) (count int
 	if len(pkgs) > 0 {
 		replacement.IndexDigest = pkgs[0].IndexDigest
 	}
+	if tracker, ok := sourceSync.Puller.(interface{ LastIndexDigest() string }); ok && tracker.LastIndexDigest() != "" {
+		replacement.IndexDigest = tracker.LastIndexDigest()
+	}
 	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		if err := s.store.ReplaceSource(ctx, tx, replacement); err != nil {
 			return err
@@ -592,7 +608,33 @@ func (s *Service) syncOne(ctx context.Context, sourceSync SourceSync) (count int
 }
 
 func (s *Service) ListTrustedSourceStates(ctx context.Context, kind string) ([]types.TrustedSourceStatus, error) {
-	return s.store.ListTrustedSourceStates(ctx, s.db.Pool, kind, s.now())
+	states, err := s.store.ListTrustedSourceStates(ctx, s.db.Pool, kind, s.now())
+	if err != nil {
+		return nil, err
+	}
+	for i := range states {
+		if source, ok := s.policies[states[i].SourceID]; ok {
+			states[i].IndexRef = source.IndexRef
+			states[i].TrustTier = string(source.TrustTier)
+			states[i].Unsigned = source.AllowUnsigned != ""
+		}
+	}
+	return states, nil
+}
+
+func (s *Service) sourceStateMap(ctx context.Context) (map[string]string, error) {
+	out := map[string]string{}
+	if len(s.policies) == 0 {
+		return out, nil
+	}
+	states, err := s.store.ListTrustedSourceStates(ctx, s.db.Pool, "", s.now())
+	if err != nil {
+		return nil, err
+	}
+	for _, state := range states {
+		out[state.SourceID] = state.State
+	}
+	return out, nil
 }
 
 func (s *Service) ReconcileSourcePolicies(ctx context.Context, kind string, expected map[string]string) error {

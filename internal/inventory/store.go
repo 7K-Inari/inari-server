@@ -977,6 +977,54 @@ func (s *Store) ListClusterAddons(ctx context.Context, q db.Querier, orgID, clus
 	return out, rows.Err()
 }
 
+// ListClusterBaselineRepos resolves every cluster's bound-or-org-default
+// platform baseline with a bounded pair of org-wide queries. It is the batch
+// counterpart of BaselineRepoSelector + GetGitRepo for resolver list views.
+func (s *Store) ListClusterBaselineRepos(ctx context.Context, q db.Querier, orgID string) (map[string]*types.TenantGitRepo, error) {
+	selectors := map[string]string{}
+	rows, err := q.Query(ctx, `SELECT c.id, COALESCE(c.baseline_repo_id, d.id) FROM clusters c
+		LEFT JOIN tenant_git_repos d ON d.org_id=c.org_id AND d.is_default
+		WHERE c.org_id=$1 ORDER BY c.id`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var clusterID string
+		var repoID *string
+		if err := rows.Scan(&clusterID, &repoID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if repoID != nil {
+			selectors[clusterID] = *repoID
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(selectors) == 0 {
+		return map[string]*types.TenantGitRepo{}, nil
+	}
+	repos, err := s.ListGitRepos(ctx, q, orgID, nil)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]*types.TenantGitRepo, len(repos))
+	for _, repo := range repos {
+		byID[repo.ID] = repo
+	}
+	out := make(map[string]*types.TenantGitRepo, len(selectors))
+	for clusterID, repoID := range selectors {
+		repo := byID[repoID]
+		if repo == nil {
+			return nil, ErrRepoNotFound
+		}
+		out[clusterID] = repo
+	}
+	return out, nil
+}
+
 // GetClusterAddon returns one addon by (cluster, catalog item).
 func (s *Store) GetClusterAddon(ctx context.Context, q db.Querier, orgID, clusterID, catalogItem string) (*types.ClusterAddon, error) {
 	a, err := scanClusterAddon(q.QueryRow(ctx, `SELECT `+clusterAddonCols+`

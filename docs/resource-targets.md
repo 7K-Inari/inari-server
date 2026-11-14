@@ -25,6 +25,8 @@ Provider-specific actions prevent a deployment `use` grant from becoming a Grafa
 
 List uses uncached OpenFGA `ListObjects`; get/resolve uses `Check`. A current-database membership/grant fence then narrows non-manager access. It can only deny, never grant. Consequently, a deleted or downgraded grant denies immediately even if an older cached OpenFGA allow still exists. New or upgraded grants fail closed until the `resource-target-authz` outbox consumer synchronizes them. Cache failures use the existing fail-open-to-OpenFGA path; an OpenFGA outage fails closed.
 
+List authorization and backing projections are evaluated in bounded org-wide batches (one relation query per action and one grant-fence query per action), with manager grants loaded in one org query rather than per target. Deployment-only lists do not load Grafana discovery or approver teams. Action-specific resolve checks only the requested grant and does not recompute every provider action.
+
 Every resolve reloads the target and backing projections. There is no descriptor, readiness, or binding cache. `expectedRevision` detects preflight/submit skew. A later DeploymentPlan must store the selected target ID and revision and call `Resolve` again at submit. Target grants do not constitute approval; provider-returned approval policy must be enforced by that plan before rendering.
 
 ## REST contract

@@ -206,6 +206,26 @@ func (s *Store) ListGrants(ctx context.Context, q db.Querier, orgID, targetID st
 	return out, rows.Err()
 }
 
+// ListGrantsForOrg batches manager descriptor grants by target ID.
+func (s *Store) ListGrantsForOrg(ctx context.Context, q db.Querier, orgID string) (map[string][]Grant, error) {
+	rows, err := q.Query(ctx, `SELECT g.target_id, g.team_id, g.relation, g.created_by, g.created_at, g.updated_at
+		FROM resource_target_grants g JOIN resource_targets rt ON rt.id=g.target_id
+		WHERE rt.org_id=$1 ORDER BY g.target_id, g.team_id`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]Grant{}
+	for rows.Next() {
+		var g Grant
+		if err := rows.Scan(&g.TargetID, &g.TeamID, &g.Relation, &g.CreatedBy, &g.CreatedAt, &g.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out[g.TargetID] = append(out[g.TargetID], g)
+	}
+	return out, rows.Err()
+}
+
 // GrantAllows is a narrowing revocation fence, not a replacement for OpenFGA.
 // It joins the current membership/grant projections so deleted or downgraded
 // grants deny immediately even while an older cached FGA allow still exists.

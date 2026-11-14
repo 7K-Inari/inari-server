@@ -22,9 +22,17 @@ func (f fakeClusters) GetCluster(context.Context, string) (*types.Cluster, error
 	return f.cluster, nil
 }
 
+func (f fakeClusters) ListClusters(_ context.Context, orgID string) ([]types.Cluster, error) {
+	if f.cluster == nil || f.cluster.OrgID != orgID {
+		return nil, nil
+	}
+	return []types.Cluster{*f.cluster}, nil
+}
+
 type fakeInventory struct {
-	repo   *types.TenantGitRepo
-	addons []*types.ClusterAddon
+	repo      *types.TenantGitRepo
+	addons    []*types.ClusterAddon
+	clusterID string
 }
 
 func (f fakeInventory) BaselineRepoSelector(context.Context, db.Querier, string, string) (string, error) {
@@ -36,6 +44,13 @@ func (f fakeInventory) BaselineRepoSelector(context.Context, db.Querier, string,
 func (f fakeInventory) GetGitRepo(context.Context, db.Querier, string, string) (*types.TenantGitRepo, error) {
 	return f.repo, nil
 }
+func (f fakeInventory) ListClusterBaselineRepos(_ context.Context, _ db.Querier, orgID string) (map[string]*types.TenantGitRepo, error) {
+	out := map[string]*types.TenantGitRepo{}
+	if f.repo != nil && f.repo.OrgID == orgID && f.clusterID != "" {
+		out[f.clusterID] = f.repo
+	}
+	return out, nil
+}
 func (f fakeInventory) ListClusterAddons(context.Context, db.Querier, string, string) ([]*types.ClusterAddon, error) {
 	return f.addons, nil
 }
@@ -43,6 +58,10 @@ func (f fakeInventory) ListClusterAddons(context.Context, db.Querier, string, st
 type fakeCapabilities struct{ capabilities []types.Capability }
 
 func (f fakeCapabilities) List(context.Context, db.Querier, string) ([]types.Capability, error) {
+	return f.capabilities, nil
+}
+
+func (f fakeCapabilities) ListForOrg(context.Context, db.Querier, string) ([]types.Capability, error) {
 	return f.capabilities, nil
 }
 
@@ -57,16 +76,19 @@ func (f fakeTeams) ListTeams(context.Context, string) ([]types.Team, error) {
 }
 
 type fakeTargetAuthz struct {
-	manager         bool
-	managerSubjects map[string]bool
-	allowed         map[string]bool
-	err             error
+	manager          bool
+	managerSubjects  map[string]bool
+	allowed          map[string]bool
+	err              error
+	checkCalls       int
+	listObjectsCalls int
 }
 
 func (f *fakeTargetAuthz) key(subject, relation, object string) string {
 	return subject + "|" + relation + "|" + object
 }
 func (f *fakeTargetAuthz) Check(_ context.Context, subject, relation, object string) (bool, error) {
+	f.checkCalls++
 	if f.err != nil {
 		return false, f.err
 	}
@@ -76,6 +98,7 @@ func (f *fakeTargetAuthz) Check(_ context.Context, subject, relation, object str
 	return f.allowed[f.key(subject, relation, object)], nil
 }
 func (f *fakeTargetAuthz) ListObjects(_ context.Context, subject, relation, objectType string) ([]string, error) {
+	f.listObjectsCalls++
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -110,7 +133,7 @@ func serviceFixture(t *testing.T) (*Service, *db.DB, *fakeTargetAuthz, string, R
 	az := &fakeTargetAuthz{allowed: map[string]bool{}}
 	svc := NewService(database, NewStore(), DefaultRegistry(), az, audit.NewStore(), Sources{
 		Clusters:     fakeClusters{cluster: snapshot.Cluster},
-		Inventory:    fakeInventory{repo: snapshot.BaselineRepo, addons: snapshot.Addons},
+		Inventory:    fakeInventory{repo: snapshot.BaselineRepo, addons: snapshot.Addons, clusterID: snapshot.Cluster.ID},
 		Capabilities: fakeCapabilities{capabilities: snapshot.Capabilities},
 		Teams:        fakeTeams{ids: []string{teamID}},
 	})

@@ -19,16 +19,19 @@ import (
 
 type ClusterGetter interface {
 	GetCluster(ctx context.Context, id string) (*types.Cluster, error)
+	ListClusters(ctx context.Context, orgID string) ([]types.Cluster, error)
 }
 
 type InventorySource interface {
 	BaselineRepoSelector(ctx context.Context, q db.Querier, orgID, clusterID string) (string, error)
 	GetGitRepo(ctx context.Context, q db.Querier, orgID, id string) (*types.TenantGitRepo, error)
+	ListClusterBaselineRepos(ctx context.Context, q db.Querier, orgID string) (map[string]*types.TenantGitRepo, error)
 	ListClusterAddons(ctx context.Context, q db.Querier, orgID, clusterID string) ([]*types.ClusterAddon, error)
 }
 
 type CapabilitySource interface {
 	List(ctx context.Context, q db.Querier, clusterID string) ([]types.Capability, error)
+	ListForOrg(ctx context.Context, q db.Querier, orgID string) ([]types.Capability, error)
 }
 
 type TeamLister interface {
@@ -423,52 +426,104 @@ func (s *Service) List(ctx context.Context, orgID, subject string, filter ListFi
 	if filter.Action == "" {
 		filter.Action = ActionView
 	}
-	relation, err := relationForAction(filter.Action)
-	if err != nil {
+	if _, err := relationForAction(filter.Action); err != nil {
 		return nil, err
 	}
 	targets, err := s.store.List(ctx, s.db.Pool, orgID, filter.Capability)
 	if err != nil {
 		return nil, err
 	}
+	if len(targets) == 0 {
+		return []Target{}, nil
+	}
 	manager, err := s.isManager(ctx, orgID, subject)
 	if err != nil {
 		return nil, err
 	}
-	allowed := map[string]bool{}
+	var access map[Action]map[string]bool
 	if !manager {
-		objects, err := s.authz.ListObjects(ctx, subjectObject(subject), relation, authz.TypeResourceTarget)
-		if err != nil {
-			return nil, &AuthorizationError{Err: err}
-		}
-		var candidates []string
-		for _, object := range objects {
-			if id, ok := strings.CutPrefix(object, authz.TypeResourceTarget+":"); ok {
-				candidates = append(candidates, id)
-				allowed[id] = true
-			}
-		}
-		allowed, err = s.store.GrantAllows(ctx, s.db.Pool, orgID, subject, candidates, filter.Action)
+		access, err = s.listAccess(ctx, orgID, subject)
 		if err != nil {
 			return nil, err
 		}
 	}
-	out := make([]Target, 0)
+	var grants map[string][]Grant
+	if manager {
+		grants, err = s.store.ListGrantsForOrg(ctx, s.db.Pool, orgID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	candidates := make([]*Target, 0, len(targets))
 	for _, target := range targets {
 		if filter.ResourceRef != nil && target.ResourceRef != *filter.ResourceRef {
 			continue
 		}
-		if !manager && (!target.Enabled || !allowed[target.ID]) {
+		if !manager && (!target.Enabled || !access[filter.Action][target.ID]) {
 			continue
 		}
-		descriptor, err := s.describe(ctx, target, subject, manager)
+		candidates = append(candidates, target)
+	}
+	if len(candidates) == 0 {
+		return []Target{}, nil
+	}
+	snapshots, err := s.loadSnapshots(ctx, orgID, candidates)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Target, 0, len(candidates))
+	for _, target := range candidates {
+		p, err := s.provider(target.Capability())
 		if err != nil {
 			return nil, err
+		}
+		descriptor := *target
+		descriptor.Binding, descriptor.Readiness, err = p.Resolve(target, snapshots[target.ID])
+		if err != nil {
+			return nil, err
+		}
+		if manager {
+			descriptor.EffectiveActions = append([]Action(nil), p.Describe().Actions...)
+			descriptor.Grants = grants[target.ID]
+		} else {
+			for _, action := range p.Describe().Actions {
+				if access[action][target.ID] {
+					descriptor.EffectiveActions = append(descriptor.EffectiveActions, action)
+				}
+			}
 		}
 		if !descriptor.Readiness.State.Selectable() && (filter.Action != ActionView || !filter.IncludeUnavailable) {
 			continue
 		}
-		out = append(out, *descriptor)
+		out = append(out, descriptor)
+	}
+	return out, nil
+}
+
+// listAccess evaluates every provider action once for the whole org. The DB
+// fence remains an intersection with OpenFGA, never an independent grant.
+func (s *Service) listAccess(ctx context.Context, orgID, subject string) (map[Action]map[string]bool, error) {
+	out := map[Action]map[string]bool{}
+	for _, action := range []Action{ActionView, ActionUse, ActionProvision} {
+		relation, err := relationForAction(action)
+		if err != nil {
+			return nil, err
+		}
+		objects, err := s.authz.ListObjects(ctx, subjectObject(subject), relation, authz.TypeResourceTarget)
+		if err != nil {
+			return nil, &AuthorizationError{Err: err}
+		}
+		candidates := make([]string, 0, len(objects))
+		for _, object := range objects {
+			if id, ok := strings.CutPrefix(object, authz.TypeResourceTarget+":"); ok {
+				candidates = append(candidates, id)
+			}
+		}
+		allowed, err := s.store.GrantAllows(ctx, s.db.Pool, orgID, subject, candidates, action)
+		if err != nil {
+			return nil, err
+		}
+		out[action] = allowed
 	}
 	return out, nil
 }
@@ -523,9 +578,22 @@ func (s *Service) Resolve(ctx context.Context, in ResolveInput) (*ResolvedTarget
 	if err != nil {
 		return nil, err
 	}
-	descriptor, err := s.describeSnapshot(ctx, target, in.Subject, manager, snapshot)
+	descriptor := *target
+	descriptor.Binding, descriptor.Readiness, err = p.Resolve(target, snapshot)
 	if err != nil {
 		return nil, err
+	}
+	if manager {
+		descriptor.EffectiveActions = append([]Action(nil), p.Describe().Actions...)
+	} else {
+		// Use/provision implies view in both the FGA model and the DB fence.
+		// The requested action was just authorized; do not repeat every other
+		// provider action check merely to decorate an internal resolve result.
+		for _, action := range p.Describe().Actions {
+			if action == ActionView || action == in.Action {
+				descriptor.EffectiveActions = append(descriptor.EffectiveActions, action)
+			}
+		}
 	}
 	if !descriptor.Readiness.State.Selectable() {
 		return nil, fmt.Errorf("%w: %s", ErrUnavailable, strings.Join(descriptor.Readiness.Reasons, ","))
@@ -534,7 +602,7 @@ func (s *Service) Resolve(ctx context.Context, in ResolveInput) (*ResolvedTarget
 	if err != nil {
 		return nil, err
 	}
-	return &ResolvedTarget{Target: *descriptor, Selection: selection, Approval: approval, Cluster: snapshot.Cluster}, nil
+	return &ResolvedTarget{Target: descriptor, Selection: selection, Approval: approval, Cluster: snapshot.Cluster}, nil
 }
 
 func (s *Service) ResolveResource(ctx context.Context, orgID, subject, capability string, action Action, ref TargetResourceRef, selection json.RawMessage) (*ResolvedTarget, error) {
@@ -595,6 +663,95 @@ func (s *Service) loadSnapshot(ctx context.Context, target *Target) (ResourceSna
 		}
 	}
 	return snapshot, nil
+}
+
+// loadSnapshots preloads org projections once for a list request. Discovery
+// and approver-team data is loaded only when a Grafana target needs it.
+func (s *Service) loadSnapshots(ctx context.Context, orgID string, targets []*Target) (map[string]ResourceSnapshot, error) {
+	out := map[string]ResourceSnapshot{}
+	if len(targets) == 0 {
+		return out, nil
+	}
+	if s.sources.Clusters == nil {
+		return nil, fmt.Errorf("resourcetargets: cluster source is not configured")
+	}
+	needsDiscovery := false
+	for _, target := range targets {
+		if target.ResourceRef.Kind != ResourceKindCluster {
+			return nil, invalid("resourceRef.kind", "only cluster resources are supported")
+		}
+		if target.Capability() == CapabilityMonitoringGrafana {
+			needsDiscovery = true
+		}
+	}
+	clusters, err := s.sources.Clusters.ListClusters(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	clusterByID := make(map[string]*types.Cluster, len(clusters))
+	for i := range clusters {
+		clusterByID[clusters[i].ID] = &clusters[i]
+	}
+	baselines := map[string]*types.TenantGitRepo{}
+	if s.sources.Inventory != nil {
+		baselines, err = s.sources.Inventory.ListClusterBaselineRepos(ctx, s.db.Pool, orgID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var addons []*types.ClusterAddon
+	var capabilities []types.Capability
+	var teamIDs []string
+	if needsDiscovery {
+		if s.sources.Inventory != nil {
+			addons, err = s.sources.Inventory.ListClusterAddons(ctx, s.db.Pool, orgID, "")
+			if err != nil {
+				return nil, err
+			}
+		}
+		if s.sources.Capabilities != nil {
+			capabilities, err = s.sources.Capabilities.ListForOrg(ctx, s.db.Pool, orgID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if s.sources.Teams != nil {
+			teams, err := s.sources.Teams.ListTeams(ctx, orgID)
+			if err != nil {
+				return nil, err
+			}
+			for _, team := range teams {
+				teamIDs = append(teamIDs, team.ID)
+			}
+		}
+	}
+	addonsByCluster := map[string][]*types.ClusterAddon{}
+	var fleetAddons []*types.ClusterAddon
+	for _, addon := range addons {
+		if addon.ClusterID == "*" {
+			fleetAddons = append(fleetAddons, addon)
+		} else {
+			addonsByCluster[addon.ClusterID] = append(addonsByCluster[addon.ClusterID], addon)
+		}
+	}
+	capabilitiesByCluster := map[string][]types.Capability{}
+	for _, capability := range capabilities {
+		capabilitiesByCluster[capability.ClusterID] = append(capabilitiesByCluster[capability.ClusterID], capability)
+	}
+	for _, target := range targets {
+		cluster := clusterByID[target.ResourceRef.ID]
+		if cluster == nil || cluster.OrgID != orgID {
+			return nil, ErrTargetNotFound
+		}
+		snapshot := ResourceSnapshot{Cluster: cluster, BaselineRepo: baselines[cluster.ID]}
+		if target.Capability() == CapabilityMonitoringGrafana {
+			snapshot.Addons = append(addonsByCluster[cluster.ID], fleetAddons...)
+			snapshot.Capabilities = capabilitiesByCluster[cluster.ID]
+			snapshot.TeamIDs = append([]string(nil), teamIDs...)
+		}
+		out[target.ID] = snapshot
+	}
+	return out, nil
 }
 
 func (s *Service) recordAudit(ctx context.Context, q db.Querier, orgID, actor, action, objectID string, payload map[string]any) error {

@@ -95,7 +95,22 @@ func (s *Store) List(ctx context.Context, q db.Querier, clusterID string) ([]typ
 	                    first_seen_at, last_seen_at, deleted_at
 	             FROM capabilities WHERE cluster_id = $1 AND deleted_at IS NULL
 	             ORDER BY kind, "group", name, version`
-	rows, err := q.Query(ctx, sql, clusterID)
+	return s.list(ctx, q, sql, clusterID)
+}
+
+// ListForOrg returns all live capabilities on the org's clusters in one
+// query, grouped by the caller using Capability.ClusterID.
+func (s *Store) ListForOrg(ctx context.Context, q db.Querier, orgID string) ([]types.Capability, error) {
+	const sql = `SELECT c.id, c.cluster_id, c.kind, c.name, c."group", c.version, c.schema, c.ui_hints, c.management_mode,
+	                    c.first_seen_at, c.last_seen_at, c.deleted_at
+	             FROM capabilities c JOIN clusters cl ON cl.id=c.cluster_id AND cl.org_id=$1
+	             WHERE c.deleted_at IS NULL
+	             ORDER BY c.cluster_id, c.kind, c."group", c.name, c.version`
+	return s.list(ctx, q, sql, orgID)
+}
+
+func (s *Store) list(ctx context.Context, q db.Querier, sql string, args ...any) ([]types.Capability, error) {
+	rows, err := q.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}

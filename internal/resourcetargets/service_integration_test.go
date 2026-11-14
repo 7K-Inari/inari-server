@@ -218,6 +218,28 @@ func TestServiceMonitoringAndDeploymentShareResolver(t *testing.T) {
 	}
 }
 
+func TestDisableTargetDoesNotRequireStaleEvidence(t *testing.T) {
+	svc, _, _, teamID, snapshot := serviceFixture(t)
+	ctx := context.Background()
+	target, err := svc.Create(ctx, "org:store", "user:admin", CreateInput{
+		Name: "Grafana", ResourceRef: TargetResourceRef{Kind: ResourceKindCluster, ID: "cluster:store"},
+		Capability: CapabilityMonitoringGrafana,
+		Config:     json.RawMessage(strings.Replace(string(validGrafanaConfig()), "team-1", teamID, 1)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Cluster.State = types.ClusterStateRevoked
+	enabled := false
+	updated, err := svc.Update(ctx, target.OrgID, target.ID, "user:admin", PatchInput{Enabled: &enabled, Revision: 1})
+	if err != nil {
+		t.Fatalf("disable with stale evidence: %v", err)
+	}
+	if updated.Enabled {
+		t.Fatal("target remained enabled")
+	}
+}
+
 func TestServiceManagerAndAuthorizationFailure(t *testing.T) {
 	svc, _, az, _, _ := serviceFixture(t)
 	ctx := context.Background()

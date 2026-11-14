@@ -176,12 +176,14 @@ func (s *Service) Update(ctx context.Context, orgID, targetID, actor string, in 
 	if target.IsDefault && !p.Describe().SupportsDefault {
 		return nil, invalid("isDefault", "provider does not support org defaults")
 	}
-	snapshot, err := s.loadSnapshot(ctx, target)
-	if err != nil {
-		return nil, err
-	}
-	if err := p.ValidateRegistration(snapshot, target.Config); err != nil {
-		return nil, err
+	if target.Enabled {
+		snapshot, err := s.loadSnapshot(ctx, target)
+		if err != nil {
+			return nil, err
+		}
+		if err := p.ValidateRegistration(snapshot, target.Config); err != nil {
+			return nil, err
+		}
 	}
 	previousRevision := target.Revision
 	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {

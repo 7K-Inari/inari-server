@@ -478,7 +478,6 @@ func (h *Handler) setSourceOrgVisibility(ctx context.Context, in *sourceOrgVisib
 }
 
 type sourceVisibilityInput struct {
-	Org     string `path:"org"`
 	Source  string `path:"source"`
 	Name    string `path:"name"`
 	Cluster string `query:"cluster"`

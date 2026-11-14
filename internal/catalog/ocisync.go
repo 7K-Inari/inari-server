@@ -458,7 +458,7 @@ func syncPlan(sourceID string, pkgs []Package) ([]*types.CatalogItem, []*types.C
 		}
 		ociRef := p.OCIRef
 		if ociRef == "" {
-			ociRef = "fixture://" + p.Name + ":" + p.Version
+			ociRef = "registry.local/core/" + p.Name + ":" + p.Version
 		}
 		items = append(items, &types.CatalogItem{
 			ID:              itemID,

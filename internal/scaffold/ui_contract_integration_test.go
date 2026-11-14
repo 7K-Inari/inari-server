@@ -170,13 +170,14 @@ func TestUIFullRunContract(t *testing.T) {
 	var list struct {
 		Schema    string `json:"$schema"` // huma OpenAPI schema link; ignored by the UI client
 		Templates []struct {
-			ID          string   `json:"id"`
-			Name        string   `json:"name"`
-			DisplayName string   `json:"displayName"`
-			Description string   `json:"description"`
-			Tags        []string `json:"tags"`
-			Version     string   `json:"version"`
-			Kind        string   `json:"kind"`
+			ID             string   `json:"id"`
+			Name           string   `json:"name"`
+			DisplayName    string   `json:"displayName"`
+			Description    string   `json:"description"`
+			Tags           []string `json:"tags"`
+			Version        string   `json:"version"`
+			PackageVersion string   `json:"packageVersion"`
+			Kind           string   `json:"kind"`
 		} `json:"templates"`
 	}
 	dec := json.NewDecoder(strings.NewReader(body))
@@ -186,6 +187,9 @@ func TestUIFullRunContract(t *testing.T) {
 	}
 	if len(list.Templates) != 1 || list.Templates[0].ID != "template:go-service" {
 		t.Fatalf("unexpected list: %s", body)
+	}
+	if list.Templates[0].PackageVersion != "1.0.0" {
+		t.Fatalf("packageVersion = %q, want 1.0.0", list.Templates[0].PackageVersion)
 	}
 
 	// Detail: TemplateDetail adds schema + uiSchema (RJSF wizard inputs).

@@ -107,7 +107,7 @@ func TestExportContainsFullRESTSurface(t *testing.T) {
 		"/api/v1/tenants/{org}/catalog/{source}/{name}/pin",
 		"/api/v1/tenants/{org}/catalog-visibility/{source}/{name}",
 		"/api/v1/admin/catalog/{source}/{name}/visibility",
-		"/api/v1/tenants/{org}/clusters/{c}/addons/{source}/{name}/adopt",
+		"/api/v1/tenants/{org}/clusters/{cluster}/addons/{source}/{name}/adopt",
 		// me
 		"/api/v1/me/permissions",
 		// platform admins (RBAC redesign Phase A)

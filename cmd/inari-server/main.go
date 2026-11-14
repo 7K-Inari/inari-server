@@ -1222,6 +1222,9 @@ func buildTrustedSourceSyncs(cfg *config.Config) ([]catalog.SourceSync, *artifac
 	}
 	backend := artifactadmission.NewCosignBackend(&oci.Fetcher{})
 	verifier := artifactadmission.NewVerifier(backend)
+	if cfg.TrustedSources.Catalog == nil {
+		return nil, verifier
+	}
 	var out []catalog.SourceSync
 	for _, source := range cfg.TrustedSources.Catalog.Sources {
 		out = append(out, catalog.SourceSync{

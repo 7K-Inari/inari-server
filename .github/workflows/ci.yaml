@@ -8,6 +8,8 @@ on:
   pull_request:
     paths-ignore:
       - "**.md"
+  # Manual retrigger: GitHub occasionally drops pull_request synchronize events.
+  workflow_dispatch:
   # Merge queue on main (H3): triggers for gh-readonly-queue/** staging
   # branches. Check names are job-derived (not ref-derived), so the required
   # checks configured for PRs apply unchanged to merge-queue runs. Enabling

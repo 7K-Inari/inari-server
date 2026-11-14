@@ -20,6 +20,7 @@ import (
 
 	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
 	"github.com/7K-Inari/inari-api/gen/go/inari/agent/v1/agentv1connect"
+	"github.com/7K-Inari/inari-api/gen/go/inari/extensions/v1/extensionsv1connect"
 	"github.com/7K-Inari/inari-server/internal/agentgateway"
 	"github.com/7K-Inari/inari-server/internal/authn"
 )
@@ -39,6 +40,14 @@ func (stubRegistration) RegisterCluster(_ context.Context, req *agentv1.Register
 	return &agentv1.RegisterClusterResponse{ClusterId: "c-qa"}, nil
 }
 
+type stubExtensionGateway struct {
+	extensionsv1connect.UnimplementedAgentGatewayHandler
+}
+
+func (stubExtensionGateway) InvokeAction(_ context.Context, req *agentv1.InvokeAction) (*agentv1.CommandAck, error) {
+	return &agentv1.CommandAck{CommandId: req.GetCommandId(), Result: agentv1.CommandResult_COMMAND_RESULT_APPLIED}, nil
+}
+
 type stubValidator struct{}
 
 func (stubValidator) Validate(_ context.Context, raw string) (*authn.Identity, error) {
@@ -54,15 +63,19 @@ func newQARouter() http.Handler {
 	authedAgentRPC := connect.NewServer(agentgateway.AuthInterceptor(stubValidator{}))
 	agentv1connect.RegisterEventStreamServiceHandler(authedAgentRPC, agentv1connect.UnimplementedEventStreamServiceHandler{})
 	agentv1connect.RegisterAgentCredentialsServiceHandler(authedAgentRPC, agentv1connect.UnimplementedAgentCredentialsServiceHandler{})
+	extensionRPC := connect.NewServer()
+	extensionsv1connect.RegisterAgentGatewayHandler(extensionRPC, stubExtensionGateway{})
 
 	rpcMux := http.NewServeMux()
 	connecthttp.Mount(rpcMux, agentRPC)
 	connecthttp.Mount(rpcMux, authedAgentRPC)
+	connecthttp.Mount(rpcMux, extensionRPC)
 
 	router := chi.NewRouter()
 	router.Handle("/"+agentv1connect.RegistrationServiceName+"/*", rpcMux)
 	router.Handle("/"+agentv1connect.EventStreamServiceName+"/*", rpcMux)
 	router.Handle("/"+agentv1connect.AgentCredentialsServiceName+"/*", rpcMux)
+	router.Handle("/"+extensionsv1connect.AgentGatewayName+"/*", rpcMux)
 	return router
 }
 
@@ -78,6 +91,21 @@ func TestQARoutingUnaryThroughChi(t *testing.T) {
 	}
 	if resp.ClusterId != "c-qa" {
 		t.Fatalf("unexpected response: %+v", resp)
+	}
+}
+
+func TestQARoutingExtensionGatewayThroughChi(t *testing.T) {
+	srv := httptest.NewServer(newQARouter())
+	t.Cleanup(srv.Close)
+
+	client := extensionsv1connect.NewAgentGatewayClient(
+		connect.NewClient(connecthttp.NewTransport(srv.Client(), srv.URL, connecthttp.WithReadMaxBytes(0))))
+	ack, err := client.InvokeAction(context.Background(), &agentv1.InvokeAction{CommandId: "command-qa"})
+	if err != nil {
+		t.Fatalf("extension InvokeAction through chi mount: %v", err)
+	}
+	if ack.GetCommandId() != "command-qa" || ack.GetResult() != agentv1.CommandResult_COMMAND_RESULT_APPLIED {
+		t.Fatalf("unexpected ack: %+v", ack)
 	}
 }
 

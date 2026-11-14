@@ -384,6 +384,7 @@ func TestExtensionInvokeMintsCredentialRef(t *testing.T) {
 		ClientID: "ext-argocd", State: types.ExtensionStateReady,
 	}
 	auth := &fakeExtAuth{byToken: map[string]*types.Extension{"ext-jwt": ext}}
+	r.gw.registerSession(cluster.ID, func() {})
 
 	mkReq := func() (*agentv1.InvokeAction, http.Header) {
 		header := http.Header{}

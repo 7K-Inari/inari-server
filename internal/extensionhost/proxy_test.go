@@ -142,6 +142,9 @@ func TestProxyAuthInjection(t *testing.T) {
 		if rec.Header().Get(HeaderReauth) != "argocd" {
 			t.Fatalf("reauth header = %q", rec.Header().Get(HeaderReauth))
 		}
+		if got := rec.Header().Get("Content-Type"); got != "application/json; charset=utf-8" {
+			t.Fatalf("reauth Content-Type = %q", got)
+		}
 	})
 
 	t.Run("fga denial carries distinct code", func(t *testing.T) {

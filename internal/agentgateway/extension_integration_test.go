@@ -5,13 +5,16 @@ package agentgateway
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	connect "connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 
 	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
+	"github.com/7K-Inari/inari-api/gen/go/inari/extensions/v1/extensionsv1connect"
 
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -52,6 +55,7 @@ func TestExtensionInvokeTunnel(t *testing.T) {
 		ClientID: "ext-argocd", State: types.ExtensionStateReady,
 	}
 	auth := &fakeExtAuth{byToken: map[string]*types.Extension{"ext-jwt": ext}}
+	r.gw.registerSession(cluster.ID, func() {})
 	path, handler := r.gw.ExtensionInvokeHandler(auth, 10*time.Second)
 	if handler == nil {
 		t.Fatal("handler nil with authenticator wired")
@@ -152,11 +156,139 @@ func TestExtensionInvokeTunnel(t *testing.T) {
 	}
 }
 
+func TestExtensionInvokeGeneratedHTTPRoundTrip(t *testing.T) {
+	r := newRig(t, false)
+	ctx := context.Background()
+	cluster, _ := r.registry.CreateCluster(ctx, "user-1", "org:1", "kind-dev", nil)
+	token, _, _ := r.registry.IssueToken(ctx, "user-1", cluster.ID)
+	if _, err := r.gw.RegisterCluster(ctx, registerReq(token)); err != nil {
+		t.Fatal(err)
+	}
+	ext := &types.Extension{ID: "extension:1", OrgID: "org:1", Name: "argocd", ClientID: "ext-argocd", State: types.ExtensionStateReady}
+	auth := &fakeExtAuth{byToken: map[string]*types.Extension{"ext-jwt": ext}}
+	r.gw.registerSession(cluster.ID, func() {})
+	path, handler := r.gw.ExtensionInvokeHandler(auth, 10*time.Second)
+	if path != extensionsv1connect.AgentGatewayInvokeActionProcedure {
+		t.Fatalf("path = %q", path)
+	}
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+	client := extensionsv1connect.NewAgentGatewayClient(connect.NewClient(connecthttp.NewTransport(ts.Client(), ts.URL)))
+	callCtx, info := connect.NewClientContext(ctx)
+	info.RequestHeader().Set("Authorization", "Bearer ext-jwt")
+	info.RequestHeader().Set(MetadataTenant, "org:1")
+	info.RequestHeader().Set(MetadataCluster, cluster.ID)
+
+	type result struct {
+		ack *agentv1.CommandAck
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		ack, err := client.InvokeAction(callCtx, &agentv1.InvokeAction{Action: "refresh"})
+		done <- result{ack: ack, err: err}
+	}()
+	for range 40 {
+		due, err := r.gw.Queue().Due(ctx, cluster.ID, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(due) == 1 {
+			if err := r.gw.Queue().Complete(ctx, due[0].ID, "acked", "refresh dispatched"); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("generated InvokeAction: %v", got.err)
+		}
+		if got.ack.GetResult() != agentv1.CommandResult_COMMAND_RESULT_APPLIED || got.ack.GetMessage() != "refresh dispatched" {
+			t.Fatalf("ack = %+v", got.ack)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("generated InvokeAction did not return")
+	}
+}
+
 // Disabled without an authenticator.
 func TestExtensionInvokeDisabledWithoutAuth(t *testing.T) {
 	r := newRig(t, false)
 	if _, h := r.gw.ExtensionInvokeHandler(nil, 0); h != nil {
 		t.Fatal("expected nil handler with no authenticator")
+	}
+}
+
+func TestExtensionInvokeDisconnectedFailsBeforeEnqueue(t *testing.T) {
+	r := newRig(t, false)
+	ctx := context.Background()
+	cluster, _ := r.registry.CreateCluster(ctx, "user-1", "org:1", "kind-dev", nil)
+	token, _, _ := r.registry.IssueToken(ctx, "user-1", cluster.ID)
+	if _, err := r.gw.RegisterCluster(ctx, registerReq(token)); err != nil {
+		t.Fatal(err)
+	}
+	ext := &types.Extension{ID: "extension:1", OrgID: "org:1", Name: "argocd", ClientID: "ext-argocd", State: types.ExtensionStateReady}
+	auth := &fakeExtAuth{byToken: map[string]*types.Extension{"ext-jwt": ext}}
+	header := http.Header{}
+	header.Set(MetadataCluster, cluster.ID)
+	header.Set(MetadataTenant, "org:1")
+	header.Set("Authorization", "Bearer ext-jwt")
+
+	_, err := r.gw.invokeExtension(ctx, &agentv1.InvokeAction{Action: "sync"}, header, auth, 50*time.Millisecond)
+	if connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("disconnected invoke err = %v, want UNAVAILABLE", err)
+	}
+	due, queueErr := r.gw.Queue().Due(ctx, cluster.ID, 10)
+	if queueErr != nil {
+		t.Fatal(queueErr)
+	}
+	if len(due) != 0 {
+		t.Fatalf("disconnected invoke enqueued %d commands", len(due))
+	}
+}
+
+func TestExtensionInvokeDisconnectDuringWait(t *testing.T) {
+	r := newRig(t, false)
+	ctx := context.Background()
+	cluster, _ := r.registry.CreateCluster(ctx, "user-1", "org:1", "kind-dev", nil)
+	token, _, _ := r.registry.IssueToken(ctx, "user-1", cluster.ID)
+	if _, err := r.gw.RegisterCluster(ctx, registerReq(token)); err != nil {
+		t.Fatal(err)
+	}
+	ext := &types.Extension{ID: "extension:1", OrgID: "org:1", Name: "argocd", ClientID: "ext-argocd", State: types.ExtensionStateReady}
+	auth := &fakeExtAuth{byToken: map[string]*types.Extension{"ext-jwt": ext}}
+	header := http.Header{}
+	header.Set(MetadataCluster, cluster.ID)
+	header.Set(MetadataTenant, "org:1")
+	header.Set("Authorization", "Bearer ext-jwt")
+	session := r.gw.registerSession(cluster.ID, func() {})
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.gw.invokeExtension(ctx, &agentv1.InvokeAction{Action: "sync"}, header, auth, 100*time.Millisecond)
+		done <- err
+	}()
+	var commandID string
+	for range 40 {
+		due, err := r.gw.Queue().Due(ctx, cluster.ID, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(due) == 1 {
+			commandID = due[0].ID
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if commandID == "" {
+		t.Fatal("invoke did not enqueue while connected")
+	}
+	r.gw.unregisterSession(cluster.ID, session)
+	if err := <-done; connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("disconnect during wait err = %v, want UNAVAILABLE", err)
 	}
 }
 
@@ -176,6 +308,7 @@ func TestExtensionInvokeUserCredentialRef(t *testing.T) {
 		ClientID: "ext-argocd", State: types.ExtensionStateReady,
 	}
 	auth := &fakeExtAuth{byToken: map[string]*types.Extension{"ext-jwt": ext}}
+	r.gw.registerSession(cluster.ID, func() {})
 
 	mkReq := func(ref string) (*agentv1.InvokeAction, http.Header) {
 		header := http.Header{}

@@ -36,6 +36,14 @@ func (g *Gateway) registerSession(clusterID string, cancel context.CancelFunc) *
 	return h
 }
 
+// hasLiveSession reports whether the cluster currently has an outbound agent
+// stream that can accept an imperative extension command.
+func (g *Gateway) hasLiveSession(clusterID string) bool {
+	g.sessionsMu.Lock()
+	defer g.sessionsMu.Unlock()
+	return g.sessions[clusterID] != nil
+}
+
 // unregisterSession removes h only if it is still the current session — an
 // evicted session's late unregister must never clobber its replacement.
 func (g *Gateway) unregisterSession(clusterID string, h *sessionHandle) {

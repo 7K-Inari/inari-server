@@ -3,6 +3,7 @@ package artifactadmission
 import (
 	"context"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,9 +16,11 @@ import (
 	gcremote "github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/sigstore/cosign/v3/pkg/cosign"
 	cosignremote "github.com/sigstore/cosign/v3/pkg/oci/remote"
+	cosigntypes "github.com/sigstore/cosign/v3/pkg/types"
 	"github.com/sigstore/sigstore-go/pkg/fulcio/certificate"
 	"github.com/sigstore/sigstore-go/pkg/root"
 
+	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
 	"github.com/7K-Inari/inari-server/internal/oci"
 )
 
@@ -157,21 +160,56 @@ func (b *CosignBackend) VerifyAttestations(ctx context.Context, ref string, expe
 			validationErrors = append(validationErrors, err)
 			continue
 		}
-		var envelope struct {
-			PredicateType string `json:"predicateType"`
-		}
-		if err := json.Unmarshal(payload, &envelope); err != nil {
+		verifiedPredicateType, statement, predicate, err := decodeVerifiedAttestation(payload)
+		if err != nil {
 			validationErrors = append(validationErrors, err)
 			continue
 		}
-		if envelope.PredicateType == predicateType {
-			out = append(out, Attestation{PredicateType: predicateType, Payload: payload})
+		if verifiedPredicateType != predicateType {
+			continue
 		}
+		evidencePayload := predicate
+		if predicateType == trustedsource.SLSAProvenancePredicateType {
+			evidencePayload = statement
+		}
+		out = append(out, Attestation{PredicateType: predicateType, Payload: evidencePayload})
 	}
 	if len(out) == 0 && len(validationErrors) > 0 {
 		return nil, &Error{Code: CodePublisherMismatch, Ref: ref, Err: errors.Join(validationErrors...)}
 	}
 	return out, nil
+}
+
+func decodeVerifiedAttestation(payload []byte) (string, []byte, []byte, error) {
+	var envelope struct {
+		PayloadType string `json:"payloadType"`
+		Payload     string `json:"payload"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return "", nil, nil, fmt.Errorf("decode DSSE envelope: %w", err)
+	}
+	if envelope.PayloadType != cosigntypes.IntotoPayloadType {
+		return "", nil, nil, fmt.Errorf("unexpected DSSE payload type %q", envelope.PayloadType)
+	}
+	statement, err := base64.StdEncoding.DecodeString(envelope.Payload)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("decode DSSE statement: %w", err)
+	}
+	var document struct {
+		Type          string          `json:"_type"`
+		PredicateType string          `json:"predicateType"`
+		Predicate     json.RawMessage `json:"predicate"`
+	}
+	if err := json.Unmarshal(statement, &document); err != nil {
+		return "", nil, nil, fmt.Errorf("decode in-toto statement: %w", err)
+	}
+	if document.Type != "https://in-toto.io/Statement/v1" {
+		return "", nil, nil, fmt.Errorf("unexpected in-toto statement type %q", document.Type)
+	}
+	if document.PredicateType == "" || len(document.Predicate) == 0 || string(document.Predicate) == "null" {
+		return "", nil, nil, errors.New("in-toto predicate and predicateType are required")
+	}
+	return document.PredicateType, statement, document.Predicate, nil
 }
 
 func validateCertificate(cert *x509.Certificate, expected PublisherExpectation) error {

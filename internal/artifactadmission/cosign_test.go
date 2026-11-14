@@ -4,6 +4,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"encoding/base64"
 	"errors"
 	"net/url"
 	"sync"
@@ -76,6 +77,30 @@ func TestCosignBackendUsesAndCachesTrustedMaterial(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("trusted material loader calls = %d, want exactly one", calls)
+	}
+}
+
+func TestDecodeVerifiedAttestation(t *testing.T) {
+	statement := []byte(`{"_type":"https://in-toto.io/Statement/v1","predicateType":"https://inari.dev/attestations/test-evidence/v1","predicate":{"schema":"test"}}`)
+	envelope := []byte(`{"payloadType":"application/vnd.in-toto+json","payload":"` + base64.StdEncoding.EncodeToString(statement) + `","signatures":[]}`)
+	predicateType, gotStatement, gotPredicate, err := decodeVerifiedAttestation(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if predicateType != "https://inari.dev/attestations/test-evidence/v1" {
+		t.Fatalf("predicateType = %q", predicateType)
+	}
+	if string(gotStatement) != string(statement) {
+		t.Fatalf("statement = %s, want %s", gotStatement, statement)
+	}
+	if string(gotPredicate) != `{"schema":"test"}` {
+		t.Fatalf("predicate = %s", gotPredicate)
+	}
+}
+
+func TestDecodeVerifiedAttestationRejectsMalformedEnvelope(t *testing.T) {
+	if _, _, _, err := decodeVerifiedAttestation([]byte(`{"payloadType":"application/vnd.in-toto+json","payload":"not-base64"}`)); err == nil {
+		t.Fatal("expected malformed DSSE payload error")
 	}
 }
 

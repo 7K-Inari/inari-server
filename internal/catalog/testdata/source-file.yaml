@@ -1,0 +1,28 @@
+environment: production
+catalog:
+  syncInterval: 5m
+  sources:
+    - id: community
+      indexRef: ghcr.io/7k-hiroba/argocd/catalog/index:latest
+      trustTier: reviewed
+      artifactPrefixes:
+        - ghcr.io/7k-hiroba/argocd/catalog/
+        - ghcr.io/7k-hiroba/argocd/charts/
+      publisher:
+        issuer: https://token.actions.githubusercontent.com
+        repository: 7k-hiroba/workflows
+        workflows:
+          index: .github/workflows/release.yml
+          catalogPackage: .github/workflows/release-oci.yml
+          template: .github/workflows/release-oci.yml
+          helmChart: .github/workflows/release-chart.yml
+          smokeSuite: .github/workflows/release-smoke-suite.yml
+        workflowSha: 0123456789abcdef0123456789abcdef01234567
+        sourceRepository: 7k-hiroba/argocd
+        sourceWorkflow: .github/workflows/release.yml
+        sourceRef: refs/heads/main
+        event: push
+        releaseEnvironment: release
+template:
+  syncInterval: 5m
+  sources: []

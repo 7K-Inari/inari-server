@@ -64,7 +64,7 @@ func (s *Service) AdmitVersion(ctx context.Context, itemID, version string, envi
 	descriptor := artifactadmission.ArtifactDescriptor{
 		Ref: ver.ArtifactRef, Digest: ver.ArtifactDigest, MediaType: entry.MediaType,
 		SourceSHA: entry.SourceSHA, ReleaseTag: entry.ReleaseTag,
-		PackageVersion: ver.PackageVersion, App: item.SourceID, Component: item.Name,
+		PackageVersion: ver.PackageVersion, App: evidenceApplication(source), Component: item.Name,
 		Producer: entry.Producer, Lanes: entry.Lanes, Compatibility: entry.Compatibility, Runtime: entry.Runtime,
 	}
 	if descriptor.PackageVersion == "" {
@@ -116,6 +116,14 @@ func (fixtureBackend) VerifySignature(context.Context, string, artifactadmission
 
 func (fixtureBackend) VerifyAttestations(context.Context, string, artifactadmission.PublisherExpectation, string) ([]artifactadmission.Attestation, error) {
 	return nil, nil
+}
+
+func evidenceApplication(source trustedsource.Source) string {
+	repository := strings.TrimSuffix(source.Publisher.SourceRepository, "/")
+	if slash := strings.LastIndex(repository, "/"); slash >= 0 {
+		return repository[slash+1:]
+	}
+	return repository
 }
 
 func admissionEntry(payload json.RawMessage) (trustedsource.IndexEntry, error) {

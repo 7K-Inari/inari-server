@@ -58,7 +58,7 @@ func (i testArtifactImage) RawManifest() ([]byte, error) {
 
 func pushArtifact(t *testing.T, registryHost, repo, tag, artifactType string, files map[string]string) string {
 	t.Helper()
-	var img v1.Image = empty.Image
+	img := empty.Image
 	for file, content := range files {
 		layer := static.NewLayer([]byte(content), types.MediaType("application/vnd.inari.catalog.package.v1+yaml"))
 		var err error
@@ -119,7 +119,7 @@ func helmChartBytes(t *testing.T) []byte {
 
 func pushHelmChart(t *testing.T, host string) string {
 	t.Helper()
-	var img v1.Image = empty.Image
+	img := empty.Image
 	layer := static.NewLayer(helmChartBytes(t), types.MediaType(trustedsource.HelmChartMediaType))
 	img, err := mutate.Append(img, mutate.Addendum{Layer: layer})
 	if err != nil {

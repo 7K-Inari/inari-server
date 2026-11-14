@@ -117,19 +117,6 @@ type chartChannel struct {
 	Digest  string `yaml:"digest"`
 }
 
-// catalogIndex mirrors catalog.yaml in inari-catalog.
-type catalogIndex struct {
-	Packages []struct {
-		Name        string `yaml:"name"`
-		Version     string `yaml:"version"`
-		Channel     string `yaml:"channel"`
-		Type        string `yaml:"type"`
-		Description string `yaml:"description"`
-		OCIRef      string `yaml:"ociRef"`
-		ChannelRef  string `yaml:"channelRef"`
-	} `yaml:"packages"`
-}
-
 // FixturePuller reads a local OCI-style layout:
 //
 //	<root>/<package>/<version>/metadata.json   (name, displayName, channel)
@@ -304,20 +291,6 @@ func immutableOCIRef(ref, digest string) string {
 		repository = repository[:colon]
 	}
 	return repository + "@" + digest
-}
-
-// fetchFile pulls an oras-style artifact and returns the content of the
-// layer titled filename.
-func (p *RegistryPuller) fetchFile(ctx context.Context, ref, filename string) ([]byte, error) {
-	files, err := p.fetchDir(ctx, ref)
-	if err != nil {
-		return nil, err
-	}
-	raw, ok := files[filename]
-	if !ok {
-		return nil, fmt.Errorf("catalog: %s: no layer named %q", ref, filename)
-	}
-	return raw, nil
 }
 
 // fetchDir pulls an oras directory-push artifact (shared helper).

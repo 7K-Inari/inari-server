@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
@@ -234,15 +233,4 @@ func (s *Store) tombstoneSource(ctx context.Context, q db.Querier, sourceID stri
 	}
 	_, err := q.Exec(ctx, `UPDATE catalog_items SET snapshot_present=false WHERE source_id=$1`, sourceID)
 	return err
-}
-
-func sanitizeSourceError(err error) string {
-	if err == nil {
-		return ""
-	}
-	message := strings.TrimSpace(err.Error())
-	if len(message) > 2048 {
-		message = message[:2048]
-	}
-	return message
 }

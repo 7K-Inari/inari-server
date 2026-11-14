@@ -839,7 +839,9 @@ func run() error {
 	}, log)
 
 	orchestratorSvc := orchestrator.NewService(database, invStore, catalogSvc, registry,
-		approvalsSvc, gateway.Queue(), git, auditStore).WithResourceTargets(resourceTargetsSvc)
+		approvalsSvc, gateway.Queue(), git, auditStore).
+		WithResourceTargets(resourceTargetsSvc).
+		WithOrgPermissions(authorizer)
 
 	// Multi-repo GitOps registry (Feature A): team-filtered repo CRUD with
 	// guarded unregister, over the same inventory store + a repo-aware git

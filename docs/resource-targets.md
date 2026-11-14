@@ -21,7 +21,7 @@ A team has at most one grant per target:
 - `use`: includes view and permits a use submission, such as a deployment.
 - `provision`: includes view and permits a provision submission, such as a later observability companion.
 
-Provider-specific actions prevent a deployment `use` grant from becoming a Grafana `provision` grant. Existing operation permissions still apply: for example, a deployment also requires org `deployments.create`.
+Provider-specific actions prevent a deployment `use` grant from becoming a Grafana `provision` grant. Existing operation permissions still apply: for example, a deployment also requires org `deployments.create`. Approval resume independently revalidates both that org permission and the target `use` grant as the original requester before any Git or agent side effect; either revocation produces a terminal `deploy.target_denied` audit outcome.
 
 List uses uncached OpenFGA `ListObjects`; get/resolve uses `Check`. A current-database membership/grant fence then narrows non-manager access. It can only deny, never grant. Consequently, a deleted or downgraded grant denies immediately even if an older cached OpenFGA allow still exists. New or upgraded grants fail closed until the `resource-target-authz` outbox consumer synchronizes them. Cache failures use the existing fail-open-to-OpenFGA path; an OpenFGA outage fails closed.
 

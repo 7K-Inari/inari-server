@@ -14,6 +14,7 @@ import (
 
 	"github.com/7K-Inari/inari-server/internal/approvals"
 	"github.com/7K-Inari/inari-server/internal/audit"
+	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/eventbus/eventbustest"
@@ -44,7 +45,7 @@ func itServerM3(t *testing.T, checker orchestrator.PolicyChecker) (*httptest.Ser
 	return itServerM3Targets(t, checker, &stubTargetResolver{})
 }
 
-func itServerM3Targets(t *testing.T, checker orchestrator.PolicyChecker, targets orchestrator.ResourceTargetResolver) (*httptest.Server, *db.DB, *gitprovider.Fake, *itQueue, *approvals.Service, *audit.Dispatcher) {
+func itServerM3Targets(t *testing.T, checker orchestrator.PolicyChecker, targets orchestrator.ResourceTargetResolver, resumeAuthz ...authz.Authorizer) (*httptest.Server, *db.DB, *gitprovider.Fake, *itQueue, *approvals.Service, *audit.Dispatcher) {
 	t.Helper()
 	ctx := context.Background()
 	pg, err := testutil.SharedPostgres(ctx)
@@ -84,6 +85,11 @@ func itServerM3Targets(t *testing.T, checker orchestrator.PolicyChecker, targets
 	queue := &itQueue{}
 	orchSvc := orchestrator.NewService(database, inventory.NewStore(), catalogSvc, itClusters{},
 		approvalsSvc, queue, git, auditStore).WithResourceTargets(targets)
+	resumePermissions := authz.Authorizer(itAuthorizer{allow: true})
+	if len(resumeAuthz) > 0 {
+		resumePermissions = resumeAuthz[0]
+	}
+	orchSvc = orchSvc.WithOrgPermissions(resumePermissions)
 	if checker != nil {
 		orchSvc = orchSvc.WithPolicyChecker(checker)
 	}

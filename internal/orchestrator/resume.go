@@ -97,6 +97,11 @@ func (h *ResumeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) error
 		h.log.Debug("orchestrator: resume: skipping lifecycle approval", "approval", p.ApprovalID, "action", req.Action)
 		return nil
 	}
+	if err := h.svc.authorizeResume(ctx, req.OrgID, req.Requester); terminalTargetError(err) {
+		return h.denyTarget(ctx, req)
+	} else if err != nil {
+		return fmt.Errorf("orchestrator: resume org permission check: %w", err)
+	}
 	deploy := DeployRequest{
 		OrgID: req.OrgID, ClusterID: req.ClusterID, ItemID: req.ItemID,
 		Version: req.Version, Channel: req.Channel, Name: req.Name,

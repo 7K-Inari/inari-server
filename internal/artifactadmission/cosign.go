@@ -3,6 +3,7 @@ package artifactadmission
 import (
 	"context"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,8 @@ import (
 	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
 	"github.com/7K-Inari/inari-server/internal/oci"
 )
+
+var oidDeploymentEnvironment = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1, 23}
 
 // CosignBackend verifies OCI content and keyless signatures/attestations.
 // Publisher checks happen after cosign has cryptographically verified each
@@ -212,6 +215,20 @@ func decodeVerifiedAttestation(payload []byte) (string, []byte, []byte, error) {
 	return document.PredicateType, statement, document.Predicate, nil
 }
 
+func certificateDeploymentEnvironment(cert *x509.Certificate) (string, error) {
+	for _, extension := range cert.Extensions {
+		if !extension.Id.Equal(oidDeploymentEnvironment) {
+			continue
+		}
+		var environment string
+		if err := certificate.ParseDERString(extension.Value, &environment); err != nil {
+			return "", fmt.Errorf("parse deployment environment: %w", err)
+		}
+		return environment, nil
+	}
+	return "", nil
+}
+
 func validateCertificate(cert *x509.Certificate, expected PublisherExpectation) error {
 	if cert == nil {
 		return errors.New("signature has no certificate")
@@ -257,9 +274,17 @@ func validateCertificate(cert *x509.Certificate, expected PublisherExpectation) 
 			return errors.New("run invocation mismatch")
 		}
 	}
-	// GitHub's deployment-environment claim is not standardized in the
-	// Fulcio extensions exposed by this cosign version. No alternate field is
-	// inferred. Producer fixtures must prove any additional environment claim
-	// before it can be enforced here.
+	if expected.Source.Publisher.ReleaseEnvironment != "" {
+		environment, err := certificateDeploymentEnvironment(cert)
+		if err != nil {
+			return err
+		}
+		if environment == "" {
+			return errors.New("certificate has no deployment-environment claim")
+		}
+		if environment != expected.Source.Publisher.ReleaseEnvironment {
+			return fmt.Errorf("deployment environment %q does not match %q", environment, expected.Source.Publisher.ReleaseEnvironment)
+		}
+	}
 	return nil
 }

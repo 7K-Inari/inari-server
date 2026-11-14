@@ -38,6 +38,7 @@ func certificateForExpectation(t *testing.T, expected PublisherExpectation) *x50
 			certificateExtension(t, certificate.OIDBuildTrigger, expected.Source.Publisher.Event),
 			certificateExtension(t, certificate.OIDSourceRepositoryRef, expected.Source.Publisher.SourceRef),
 			certificateExtension(t, certificate.OIDRunInvocationURI, expected.Producer.RunURI),
+			certificateExtension(t, asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1, 23}, expected.Source.Publisher.ReleaseEnvironment),
 		},
 	}
 }
@@ -139,6 +140,12 @@ func TestValidateCertificateNegatives(t *testing.T) {
 		}},
 		{"run", func(c *x509.Certificate) {
 			c.Extensions[8] = certificateExtension(t, certificate.OIDRunInvocationURI, "https://github.com/other/actions/runs/999")
+		}},
+		{"release environment", func(c *x509.Certificate) {
+			c.Extensions[9] = certificateExtension(t, asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1, 23}, "production")
+		}},
+		{"missing release environment", func(c *x509.Certificate) {
+			c.Extensions = c.Extensions[:9]
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

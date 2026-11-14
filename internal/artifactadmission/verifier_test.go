@@ -164,7 +164,7 @@ func TestVerifyIndexUsesIndexLaneWithoutDeployEvidence(t *testing.T) {
 	req.Artifact.MediaType = trustedsource.CatalogIndexMediaType
 	req.Artifact.Producer.WorkflowPath = ".github/workflows/release.yml"
 	backend := newTestBackend(req)
-	if err := NewVerifier(backend).VerifyIndex(context.Background(), req.Source, req.Artifact); err != nil {
+	if err := NewVerifier(backend).VerifyIndex(context.Background(), req.Source, req.Artifact, trustedsource.EnvironmentProduction); err != nil {
 		t.Fatalf("VerifyIndex: %v", err)
 	}
 	if len(backend.expect) != 1 || backend.expect[0].Role != trustedsource.ArtifactIndex {
@@ -172,6 +172,20 @@ func TestVerifyIndexUsesIndexLaneWithoutDeployEvidence(t *testing.T) {
 	}
 	if backend.attestCalls != 0 {
 		t.Fatalf("sync unexpectedly required deploy evidence")
+	}
+}
+
+func TestVerifyIndexRejectsUnsignedOutsideDevelopment(t *testing.T) {
+	for _, environment := range []trustedsource.Environment{"", trustedsource.EnvironmentProduction, trustedsource.EnvironmentStaging} {
+		req := validRequest()
+		req.Source.TrustTier = trustedsource.TrustExperimental
+		req.Source.AllowUnsigned = trustedsource.AllowUnsignedDevelopmentOnly
+		req.Role = trustedsource.ArtifactIndex
+		req.Artifact.MediaType = trustedsource.CatalogIndexMediaType
+		backend := newTestBackend(req)
+		if err := NewVerifier(backend).VerifyIndex(context.Background(), req.Source, req.Artifact, environment); !IsCode(err, CodeUnsignedProduction) {
+			t.Errorf("environment %q: error = %v, want unsigned production denial", environment, err)
+		}
 	}
 }
 

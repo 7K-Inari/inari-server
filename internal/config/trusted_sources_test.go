@@ -66,6 +66,26 @@ func TestLoadTrustedSourcesRejectsInvalidFile(t *testing.T) {
 	}
 }
 
+func TestLoadTrustedSourcesRejectsUnsignedOutsideDevelopment(t *testing.T) {
+	for _, environment := range []string{"production", "staging", ""} {
+		t.Run("environment="+environment, func(t *testing.T) {
+			yaml := strings.Replace(testTrustedSourcesYAML, "environment: development", "environment: "+environment, 1)
+			if environment == "" {
+				yaml = strings.Replace(yaml, "environment: \n", "", 1)
+			}
+			yaml = strings.Replace(yaml, "trustTier: official", "trustTier: experimental\n      allowUnsigned: development-only", 1)
+			path := filepath.Join(t.TempDir(), "sources.yaml")
+			if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("INARI_TRUSTED_SOURCES_FILE", path)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "requires environment development") {
+				t.Fatalf("error = %v, want development-only rejection", err)
+			}
+		})
+	}
+}
+
 func TestRemovedSourceEnvironmentVariablesFail(t *testing.T) {
 	for _, key := range []string{
 		"INARI_CATALOG_OCI_INDEX_REF",

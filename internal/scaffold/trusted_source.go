@@ -21,12 +21,13 @@ import (
 // exact artifact digests for scaffold rendering. It never follows a mutable
 // channel ref on a render-time cache miss.
 type RegistryTemplateSource struct {
-	IndexRef string
-	Source   trustedsource.Source
-	Verifier *artifactadmission.Verifier
-	CacheDir string
-	Keychain authn.Keychain
-	Insecure bool
+	IndexRef    string
+	Source      trustedsource.Source
+	Verifier    *artifactadmission.Verifier
+	CacheDir    string
+	Keychain    authn.Keychain
+	Insecure    bool
+	Environment trustedsource.Environment
 
 	mu          sync.Mutex
 	byID        map[string]*TemplatePackage
@@ -71,7 +72,7 @@ func (p *RegistryTemplateSource) pullCatalog(ctx context.Context) ([]catalog.Pac
 	if err := p.Verifier.VerifyIndex(ctx, p.Source, artifactadmission.ArtifactDescriptor{
 		Ref: p.IndexRef, Digest: indexArtifact.Digest, MediaType: trustedsource.TemplateIndexMediaType,
 		SourceSHA: idx.SourceSHA, Producer: idx.Producer,
-	}); err != nil {
+	}, p.Environment); err != nil {
 		return nil, fmt.Errorf("scaffold: verify template index %s: %w", p.IndexRef, err)
 	}
 	var out []catalog.Package
@@ -86,7 +87,7 @@ func (p *RegistryTemplateSource) pullCatalog(ctx context.Context) ([]catalog.Pac
 		}
 		if _, err := p.Verifier.AdmitArtifact(ctx, artifactadmission.Request{
 			Source: p.Source, Role: trustedsource.ArtifactTemplate, Artifact: descriptor,
-			TargetEnvironment: trustedsource.EnvironmentDevelopment, SyncOnly: true,
+			TargetEnvironment: p.Environment, SyncOnly: true,
 		}); err != nil {
 			return nil, fmt.Errorf("scaffold: verify template %s (%s): %w", entry.Name, ref, err)
 		}

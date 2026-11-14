@@ -207,7 +207,8 @@ type RegistryPuller struct {
 	// Keychain overrides registry auth (default: authn.DefaultKeychain).
 	Keychain authn.Keychain
 	// Insecure allows plain-HTTP registries (tests/dev).
-	Insecure bool
+	Insecure    bool
+	Environment trustedsource.Environment
 
 	mu          sync.RWMutex
 	indexDigest string
@@ -246,7 +247,7 @@ func (p *RegistryPuller) Pull(ctx context.Context) ([]Package, error) {
 		Ref: p.IndexRef, Digest: indexArtifact.Digest, MediaType: trustedsource.CatalogIndexMediaType,
 		SourceSHA: idx.SourceSHA, Producer: idx.Producer,
 	}
-	if err := p.Verifier.VerifyIndex(ctx, p.Source, indexDescriptor); err != nil {
+	if err := p.Verifier.VerifyIndex(ctx, p.Source, indexDescriptor, p.Environment); err != nil {
 		return nil, fmt.Errorf("catalog: verify index %s: %w", p.IndexRef, err)
 	}
 	var out []Package
@@ -259,7 +260,7 @@ func (p *RegistryPuller) Pull(ctx context.Context) ([]Package, error) {
 			Lanes: entry.Lanes, Compatibility: entry.Compatibility, Runtime: entry.Runtime,
 		}
 		if _, err := p.Verifier.AdmitArtifact(ctx, artifactadmission.Request{
-			Source: p.Source, Role: trustedsource.ArtifactCatalogPackage, Artifact: descriptor, TargetEnvironment: trustedsource.EnvironmentDevelopment, SyncOnly: true,
+			Source: p.Source, Role: trustedsource.ArtifactCatalogPackage, Artifact: descriptor, TargetEnvironment: p.Environment, SyncOnly: true,
 		}); err != nil {
 			return nil, fmt.Errorf("catalog: verify package %s (%s): %w", entry.Name, ref, err)
 		}
@@ -270,7 +271,7 @@ func (p *RegistryPuller) Pull(ctx context.Context) ([]Package, error) {
 			chartDescriptor.MediaType = trustedsource.HelmChartMediaType
 			chartDescriptor.Producer = *entry.ChartProducer
 			if _, err := p.Verifier.AdmitArtifact(ctx, artifactadmission.Request{
-				Source: p.Source, Role: trustedsource.ArtifactHelmChart, Artifact: chartDescriptor, TargetEnvironment: trustedsource.EnvironmentDevelopment, SyncOnly: true,
+				Source: p.Source, Role: trustedsource.ArtifactHelmChart, Artifact: chartDescriptor, TargetEnvironment: p.Environment, SyncOnly: true,
 			}); err != nil {
 				return nil, fmt.Errorf("catalog: verify chart for %s (%s): %w", entry.Name, entry.ChartRef, err)
 			}

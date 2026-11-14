@@ -76,7 +76,7 @@ templates:
 		AllowUnsigned: trustedsource.AllowUnsignedDevelopmentOnly, ArtifactPrefixes: []string{host + "/"},
 	}
 	return &RegistryTemplateSource{
-		IndexRef: source.IndexRef, Source: source, CacheDir: t.TempDir(), Insecure: true,
+		IndexRef: source.IndexRef, Source: source, CacheDir: t.TempDir(), Insecure: true, Environment: trustedsource.EnvironmentDevelopment,
 		Verifier: artifactadmission.NewVerifier(artifactadmission.NewCosignBackend(&oci.Fetcher{Insecure: true})),
 	}
 }

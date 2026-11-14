@@ -30,8 +30,11 @@ func NewVerifier(backend Backend) *Verifier {
 
 var admissionDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
-func (v *Verifier) VerifyIndex(ctx context.Context, source Source, artifact ArtifactDescriptor) error {
-	_, err := v.admit(ctx, Request{Source: source, Role: trustedsource.ArtifactIndex, Artifact: artifact, TargetEnvironment: trustedsource.EnvironmentDevelopment, SyncOnly: true})
+func (v *Verifier) VerifyIndex(ctx context.Context, source Source, artifact ArtifactDescriptor, environment trustedsource.Environment) error {
+	if environment == "" {
+		environment = trustedsource.EnvironmentProduction
+	}
+	_, err := v.admit(ctx, Request{Source: source, Role: trustedsource.ArtifactIndex, Artifact: artifact, TargetEnvironment: environment, SyncOnly: true})
 	return err
 }
 

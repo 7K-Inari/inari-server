@@ -905,10 +905,7 @@ func run() error {
 	// registration via the agent queue, component records via the catalog,
 	// and maintainer-team binding via tenancy (KC group → DB role → outbox
 	// → OpenFGA tuple).
-	scaffoldEnvironment := trustedsource.EnvironmentProduction
-	if cfg.TrustedSources != nil && cfg.TrustedSources.Environment != "" {
-		scaffoldEnvironment = cfg.TrustedSources.Environment
-	}
+	scaffoldEnvironment := trustedHubEnvironment(cfg)
 	scaffoldSvc := scaffold.NewService(database, scaffold.NewStore(), auditStore, catalogSvc,
 		scaffold.Config{MaxAttempts: int(cfg.ScaffoldStepMaxAttempts), GitOrg: cfg.ScaffoldGitOrg, Environment: scaffoldEnvironment, RunTTL: cfg.ScaffoldRunTTL}, log)
 	if templateSource != nil {
@@ -1238,6 +1235,13 @@ func (g deletionApprovalGate) RequestLifecycleApproval(ctx context.Context, orgI
 	return req.ID, nil
 }
 
+func trustedHubEnvironment(cfg *config.Config) trustedsource.Environment {
+	if cfg.TrustedSources != nil && cfg.TrustedSources.Environment != "" {
+		return cfg.TrustedSources.Environment
+	}
+	return trustedsource.EnvironmentProduction
+}
+
 func buildTrustedSourceSyncs(cfg *config.Config) ([]catalog.SourceSync, *artifactadmission.Verifier) {
 	if cfg.TrustedSources == nil {
 		return nil, nil
@@ -1248,10 +1252,11 @@ func buildTrustedSourceSyncs(cfg *config.Config) ([]catalog.SourceSync, *artifac
 		return nil, verifier
 	}
 	var out []catalog.SourceSync
+	environment := trustedHubEnvironment(cfg)
 	for _, source := range cfg.TrustedSources.Catalog.Sources {
 		out = append(out, catalog.SourceSync{
 			Kind: "catalog", Source: source,
-			Puller: &catalog.RegistryPuller{IndexRef: source.IndexRef, Source: source, Verifier: verifier},
+			Puller: &catalog.RegistryPuller{IndexRef: source.IndexRef, Source: source, Verifier: verifier, Environment: environment},
 		})
 	}
 	return out, verifier
@@ -1263,10 +1268,11 @@ func buildTrustedTemplateSyncs(cfg *config.Config, verifier *artifactadmission.V
 	}
 	var syncs []catalog.SourceSync
 	multi := &scaffold.MultiTemplateSource{}
+	environment := trustedHubEnvironment(cfg)
 	for _, source := range cfg.TrustedSources.Template.Sources {
 		registrySource := &scaffold.RegistryTemplateSource{
 			IndexRef: source.IndexRef, Source: source, Verifier: verifier,
-			CacheDir: cfg.ScaffoldTemplateCacheDir,
+			CacheDir: cfg.ScaffoldTemplateCacheDir, Environment: environment,
 		}
 		multi.Sources = append(multi.Sources, registrySource)
 		syncs = append(syncs, catalog.SourceSync{

@@ -222,7 +222,7 @@ func setupFakeCatalog(t *testing.T) *RegistryPuller {
 	pushArtifact(t, host, "catalog/index", "latest", "application/vnd.inari.catalog.index.v1+yaml", map[string]string{"catalog.yaml": testIndexYAML(host, entries)})
 	source := trustedSourceForRegistry(host)
 	return &RegistryPuller{
-		IndexRef: host + "/catalog/index:latest", Source: source, Insecure: true,
+		IndexRef: host + "/catalog/index:latest", Source: source, Insecure: true, Environment: trustedsource.EnvironmentDevelopment,
 		Verifier: artifactadmission.NewVerifier(artifactadmission.NewCosignBackend(&oci.Fetcher{Insecure: true})),
 	}
 }

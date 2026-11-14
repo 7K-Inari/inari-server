@@ -100,6 +100,8 @@ func newFixtureAuthority(t *testing.T, expected PublisherExpectation) *fixtureAu
 	leafTemplate.BasicConstraintsValid = true
 	leafTemplate.Extensions = append(leafTemplate.Extensions,
 		certificateExtension(t, certificate.OIDIssuerV2, expected.Source.Publisher.Issuer),
+		// Cosign's legacy identity matcher still reads the deprecated raw issuer extension.
+		//nolint:staticcheck
 		pkix.Extension{Id: certificate.OIDIssuer, Value: []byte(expected.Source.Publisher.Issuer)})
 	leafTemplate.ExtraExtensions = leafTemplate.Extensions
 	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, caCert, &leafKey.PublicKey, caKey)

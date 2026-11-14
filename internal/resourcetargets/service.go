@@ -134,7 +134,7 @@ func (s *Service) Create(ctx context.Context, orgID, actor string, in CreateInpu
 		}
 		// Decorate before commit so a provider or projection failure rolls back
 		// the insert instead of ambiguously reporting failure after success.
-		descriptor, err = s.describeSnapshot(ctx, target, actor, manager, snapshot)
+		descriptor, err = s.describeSnapshot(ctx, tx, target, actor, manager, snapshot)
 		if err != nil {
 			return err
 		}
@@ -223,7 +223,7 @@ func (s *Service) Update(ctx context.Context, orgID, targetID, actor string, in 
 		}
 		// As with create, decoration is part of the transaction: any error
 		// aborts the update and the default promotion, if one was requested.
-		descriptor, err = s.describeSnapshot(ctx, target, actor, manager, snapshot)
+		descriptor, err = s.describeSnapshot(ctx, tx, target, actor, manager, snapshot)
 		if err != nil {
 			return err
 		}
@@ -379,7 +379,7 @@ func (s *Service) isManager(ctx context.Context, orgID, subject string) (bool, e
 
 // authorize combines the OpenFGA decision with a current-DB narrowing fence.
 // The fence never grants access by itself.
-func (s *Service) authorize(ctx context.Context, orgID, subject, targetID string, action Action, manager bool) error {
+func (s *Service) authorize(ctx context.Context, q db.Querier, orgID, subject, targetID string, action Action, manager bool) error {
 	if manager {
 		return nil
 	}
@@ -394,7 +394,7 @@ func (s *Service) authorize(ctx context.Context, orgID, subject, targetID string
 	if !allowed {
 		return ErrTargetDenied
 	}
-	fence, err := s.store.GrantAllows(ctx, s.db.Pool, orgID, subject, []string{targetID}, action)
+	fence, err := s.store.GrantAllows(ctx, q, orgID, subject, []string{targetID}, action)
 	if err != nil {
 		return err
 	}
@@ -404,7 +404,7 @@ func (s *Service) authorize(ctx context.Context, orgID, subject, targetID string
 	return nil
 }
 
-func (s *Service) effectiveActions(ctx context.Context, target *Target, subject string, manager bool) ([]Action, error) {
+func (s *Service) effectiveActions(ctx context.Context, q db.Querier, target *Target, subject string, manager bool) ([]Action, error) {
 	p, err := s.provider(target.Capability())
 	if err != nil {
 		return nil, err
@@ -414,7 +414,7 @@ func (s *Service) effectiveActions(ctx context.Context, target *Target, subject 
 	}
 	var out []Action
 	for _, action := range p.Describe().Actions {
-		if err := s.authorize(ctx, target.OrgID, subject, target.ID, action, false); err == nil {
+		if err := s.authorize(ctx, q, target.OrgID, subject, target.ID, action, false); err == nil {
 			out = append(out, action)
 		} else if !errors.Is(err, ErrTargetDenied) {
 			return nil, err
@@ -428,10 +428,12 @@ func (s *Service) describe(ctx context.Context, target *Target, subject string, 
 	if err != nil {
 		return nil, err
 	}
-	return s.describeSnapshot(ctx, target, subject, manager, snapshot)
+	return s.describeSnapshot(ctx, s.db.Pool, target, subject, manager, snapshot)
 }
 
-func (s *Service) describeSnapshot(ctx context.Context, target *Target, subject string, manager bool, snapshot ResourceSnapshot) (*Target, error) {
+// describeSnapshot uses q for grant and revocation-fence reads. Mutation
+// decoration passes its open transaction so it never waits for a second DB connection.
+func (s *Service) describeSnapshot(ctx context.Context, q db.Querier, target *Target, subject string, manager bool, snapshot ResourceSnapshot) (*Target, error) {
 	p, err := s.provider(target.Capability())
 	if err != nil {
 		return nil, err
@@ -441,12 +443,12 @@ func (s *Service) describeSnapshot(ctx context.Context, target *Target, subject 
 	if err != nil {
 		return nil, err
 	}
-	out.EffectiveActions, err = s.effectiveActions(ctx, target, subject, manager)
+	out.EffectiveActions, err = s.effectiveActions(ctx, q, target, subject, manager)
 	if err != nil {
 		return nil, err
 	}
 	if manager {
-		out.Grants, err = s.store.ListGrants(ctx, s.db.Pool, target.OrgID, target.ID)
+		out.Grants, err = s.store.ListGrants(ctx, q, target.OrgID, target.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -575,7 +577,7 @@ func (s *Service) Get(ctx context.Context, orgID, subject, targetID string) (*Ta
 	if err != nil {
 		return nil, err
 	}
-	if err := s.authorize(ctx, orgID, subject, targetID, ActionView, manager); err != nil {
+	if err := s.authorize(ctx, s.db.Pool, orgID, subject, targetID, ActionView, manager); err != nil {
 		if errors.Is(err, ErrTargetDenied) {
 			return nil, ErrTargetNotFound
 		}
@@ -609,7 +611,7 @@ func (s *Service) Resolve(ctx context.Context, in ResolveInput) (*ResolvedTarget
 	if err != nil {
 		return nil, err
 	}
-	if err := s.authorize(ctx, in.OrgID, in.Subject, target.ID, in.Action, manager); err != nil {
+	if err := s.authorize(ctx, s.db.Pool, in.OrgID, in.Subject, target.ID, in.Action, manager); err != nil {
 		return nil, err
 	}
 	snapshot, err := s.loadSnapshot(ctx, target)

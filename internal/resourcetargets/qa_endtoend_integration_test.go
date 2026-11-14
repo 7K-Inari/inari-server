@@ -15,6 +15,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
@@ -365,6 +368,44 @@ func TestQAMutationResponsesContainComputedDescriptor(t *testing.T) {
 	assertManagerDescriptor("no-op update", noOp, 2)
 	if len(noOp.Grants) != 1 {
 		t.Errorf("no-op update response lost manager grants: %+v", noOp.Grants)
+	}
+}
+
+func TestQAMutationDecorationUsesTransactionConnection(t *testing.T) {
+	svc, database, az, teamID, _ := serviceFixture(t)
+	az.manager = true
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	config := database.Pool.Config()
+	config.MaxConns = 1
+	limited, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := database.Pool
+	database.Pool = limited
+	t.Cleanup(func() {
+		database.Pool = original
+		limited.Close()
+	})
+
+	target, err := svc.Create(ctx, "org:store", "user:admin", CreateInput{
+		Name: "single connection", ResourceRef: TargetResourceRef{Kind: ResourceKindCluster, ID: "cluster:store"},
+		Capability: CapabilityDeploymentCluster, Config: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("create with one database connection: %v", err)
+	}
+	if _, err := svc.SetGrant(ctx, target.OrgID, target.ID, teamID, ActionUse, "user:admin"); err != nil {
+		t.Fatal(err)
+	}
+	name := "still single connection"
+	updated, err := svc.Update(ctx, target.OrgID, target.ID, "user:admin", PatchInput{Name: &name, Revision: target.Revision})
+	if err != nil {
+		t.Fatalf("update with one database connection: %v", err)
+	}
+	if len(updated.Grants) != 1 || updated.Grants[0].Relation != ActionUse {
+		t.Fatalf("single-connection update grants = %+v", updated.Grants)
 	}
 }
 

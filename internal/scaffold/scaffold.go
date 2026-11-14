@@ -240,8 +240,6 @@ func (s *Service) summary(ctx context.Context, orgID string, it *catalog.ItemVie
 	}
 	if ver, err := s.catalog.GetVersion(ctx, it.ID, version); err == nil {
 		sum.ArtifactDigest = ver.ArtifactDigest
-	}
-	if ver, err := s.catalog.GetVersion(ctx, it.ID, version); err == nil {
 		sum.Tags = parseTags(ver.Payload)
 		sum.Kind = payloadKind(ver.Payload)
 	}

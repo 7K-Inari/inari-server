@@ -53,11 +53,17 @@ func (s *Store) ReplaceSource(ctx context.Context, q db.Querier, replacement Sou
 		return err
 	}
 	rows.Close()
+	seenVersions := map[string]bool{}
 	for _, version := range replacement.Versions {
 		if version == nil || version.ItemID == "" || version.Version == "" {
 			return errors.New("catalog: snapshot contains an empty version")
 		}
-		if old := previous[version.ItemID+"@"+version.Version]; old != "" && version.ArtifactDigest != "" && old != version.ArtifactDigest {
+		key := version.ItemID + "@" + version.Version
+		if seenVersions[key] {
+			return fmt.Errorf("catalog: duplicate snapshot version %s", key)
+		}
+		seenVersions[key] = true
+		if old := previous[key]; old != "" && version.ArtifactDigest != "" && old != version.ArtifactDigest {
 			return fmt.Errorf("catalog: immutable artifact violation for %s: digest changed from %s to %s", version.ItemID+"@"+version.Version, old, version.ArtifactDigest)
 		}
 	}

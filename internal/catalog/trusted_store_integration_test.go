@@ -92,4 +92,36 @@ func TestReplaceSourceAtomicLastGoodAndIndependentIdentity(t *testing.T) {
 	}
 }
 
+func TestReplaceSourceRejectsDuplicateVersionChannels(t *testing.T) {
+	ctx := context.Background()
+	pg, err := testutil.SharedPostgres(ctx)
+	if err != nil {
+		t.Skipf("testcontainers unavailable: %v", err)
+	}
+	database, err := testdb.NewDatabase(t, pg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := catalog.NewStore()
+	digest := "sha256:" + strings.Repeat("a", 64)
+	initial := replacementFor("core", digest, "stable")
+	if err := database.WithTx(ctx, func(tx pgx.Tx) error { return store.ReplaceSource(ctx, tx, initial) }); err != nil {
+		t.Fatal(err)
+	}
+	duplicate := replacementFor("core", digest, "stable")
+	clone := *duplicate.Versions[0]
+	clone.Channel = "incubating"
+	duplicate.Versions = append(duplicate.Versions, &clone)
+	if err := database.WithTx(ctx, func(tx pgx.Tx) error { return store.ReplaceSource(ctx, tx, duplicate) }); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("duplicate version error = %v, want duplicate rejection", err)
+	}
+	versions, err := store.ListVersions(ctx, database.Pool, "core/web-service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(versions) != 1 || versions[0].Channel != "stable" || versions[0].ArtifactDigest != digest {
+		t.Fatalf("duplicate replacement changed last-good versions: %+v", versions)
+	}
+}
+
 var errImmutableForTest = errors.New("same-version digest changed")

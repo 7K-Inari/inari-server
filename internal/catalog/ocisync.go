@@ -436,6 +436,7 @@ var ErrSyncNotConfigured = fmt.Errorf("catalog: sync not configured (no OCI pull
 func syncPlan(sourceID string, pkgs []Package) ([]*types.CatalogItem, []*types.CatalogItemVersion, error) {
 	items := make([]*types.CatalogItem, 0, len(pkgs))
 	versions := make([]*types.CatalogItemVersion, 0, len(pkgs))
+	seenVersions := map[string]bool{}
 	for _, p := range pkgs {
 		// Defense against unusable rows: a package without a version can
 		// never be deployed and renders as an empty '' row in every view
@@ -445,6 +446,11 @@ func syncPlan(sourceID string, pkgs []Package) ([]*types.CatalogItem, []*types.C
 			slog.Warn("catalog sync: skipping package with empty version", "name", p.Name, "ref", p.OCIRef)
 			continue
 		}
+		versionKey := itemIDForPackage(sourceID, p) + "@" + p.Version
+		if seenVersions[versionKey] {
+			return nil, nil, fmt.Errorf("catalog: duplicate snapshot version %s", versionKey)
+		}
+		seenVersions[versionKey] = true
 		if p.Entry.SourceSHA == "" {
 			p.Entry.SourceSHA = "0000000000000000000000000000000000000000"
 		}

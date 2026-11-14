@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/7K-Inari/inari-server/internal/artifactadmission"
 	"github.com/7K-Inari/inari-server/internal/impersonation"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -48,6 +49,35 @@ func (h *ResumeHandler) denyTarget(ctx context.Context, req *types.ApprovalReque
 	return nil
 }
 
+// terminalAdmissionDenial records permanent trust/evidence failures exactly
+// where approval resume stops. Temporary verification outages return false so
+// the caller preserves outbox retry semantics.
+func (h *ResumeHandler) terminalAdmissionDenial(ctx context.Context, req *types.ApprovalRequest, applyErr error) (bool, error) {
+	var admissionErr *artifactadmission.Error
+	if !errors.As(applyErr, &admissionErr) || admissionErr.Temporary {
+		return false, nil
+	}
+	payload := map[string]string{
+		"code": admissionErr.Code, "itemId": req.ItemID, "version": req.Version, "clusterId": req.ClusterID,
+	}
+	if req.InstanceID != "" {
+		payload["instanceId"] = req.InstanceID
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return true, fmt.Errorf("orchestrator: marshal admission denial audit: %w", err)
+	}
+	event := &types.AuditEvent{
+		OrgID: req.OrgID, Actor: impersonation.SystemActor("approvals"), Action: "deploy.admission_denied",
+		ObjectType: "approval_request", ObjectID: req.ID, Payload: raw,
+	}
+	if err := impersonation.Record(ctx, h.svc.audit, h.svc.db.Pool, event); err != nil {
+		return true, fmt.Errorf("orchestrator: record admission denial for approval %s: %w", req.ID, err)
+	}
+	h.log.Warn("orchestrator: resumed deploy blocked by artifact admission", "approval", req.ID, "code", admissionErr.Code)
+	return true, nil
+}
+
 func (h *ResumeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) error {
 	var p types.ApprovalPayload
 	if err := json.Unmarshal(ev.Payload, &p); err != nil {
@@ -72,6 +102,13 @@ func (h *ResumeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) error
 			return h.denyTarget(ctx, req)
 		}
 		if err != nil {
+			terminal, denialErr := h.terminalAdmissionDenial(ctx, req, err)
+			if denialErr != nil {
+				return denialErr
+			}
+			if terminal {
+				return nil
+			}
 			return fmt.Errorf("orchestrator: resume update approval %s: %w", p.ApprovalID, err)
 		}
 		h.log.Info("orchestrator: approval-gated spec update resumed", "approval", p.ApprovalID, "instance", req.InstanceID)
@@ -151,6 +188,13 @@ func (h *ResumeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) error
 		if errors.Is(applyErr, ErrInstanceExists) {
 			// Deployed meanwhile (e.g. duplicate delivery) — idempotent no-op.
 			h.log.Info("orchestrator: resume skipped, instance exists", "approval", p.ApprovalID)
+			return nil
+		}
+		terminal, denialErr := h.terminalAdmissionDenial(ctx, req, applyErr)
+		if denialErr != nil {
+			return denialErr
+		}
+		if terminal {
 			return nil
 		}
 		return fmt.Errorf("orchestrator: resume approval %s: %w", p.ApprovalID, applyErr)

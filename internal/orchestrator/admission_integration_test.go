@@ -8,6 +8,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/7K-Inari/inari-server/internal/approvals"
 	"github.com/7K-Inari/inari-server/internal/artifactadmission"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/inventory"
@@ -15,6 +16,16 @@ import (
 	"github.com/7K-Inari/inari-server/internal/testutil/testdb"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
+
+type recordingGate struct {
+	calls    int
+	approved bool
+}
+
+func (g *recordingGate) Gate(context.Context, approvals.GateInput) (*approvals.GateResult, error) {
+	g.calls++
+	return &approvals.GateResult{Approved: g.approved, ApprovalID: "approval-1"}, nil
+}
 
 func newAdmissionWorkflowFixture(t *testing.T, catalog *denialCatalog, gate *recordingGate) (*Service, *db.DB) {
 	t.Helper()

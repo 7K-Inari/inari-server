@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
-	"github.com/7K-Inari/inari-server/internal/approvals"
 	"github.com/7K-Inari/inari-server/internal/artifactadmission"
 	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -35,16 +34,6 @@ func (d *denialCatalog) AdmitVersion(context.Context, string, string, trustedsou
 		return nil, d.admitErr
 	}
 	return &catalog.AdmittedVersion{Version: d.version}, nil
-}
-
-type recordingGate struct {
-	calls    int
-	approved bool
-}
-
-func (g *recordingGate) Gate(context.Context, approvals.GateInput) (*approvals.GateResult, error) {
-	g.calls++
-	return &approvals.GateResult{Approved: g.approved, ApprovalID: "approval-1"}, nil
 }
 
 type admissionCluster struct{ org string }

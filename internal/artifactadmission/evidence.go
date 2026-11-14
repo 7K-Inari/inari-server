@@ -17,6 +17,7 @@ func (v *Verifier) verifyProvenance(ctx context.Context, ref string, req Request
 	if len(attestations) == 0 {
 		return &Error{Code: CodeProvenanceInvalid, Ref: ref, Err: errors.New("missing registry-referrer SLSA provenance")}
 	}
+	matched := false
 	for _, attestation := range attestations {
 		if attestation.PredicateType != trustedsource.SLSAProvenancePredicateType {
 			continue
@@ -28,6 +29,9 @@ func (v *Verifier) verifyProvenance(ctx context.Context, ref string, req Request
 		if err := validateProvenanceBinding(statement, req, expected); err != nil {
 			return &Error{Code: CodeProvenanceInvalid, Ref: ref, Err: err}
 		}
+		matched = true
+	}
+	if matched {
 		return nil
 	}
 	return &Error{Code: CodeProvenanceInvalid, Ref: ref, Err: errors.New("no SLSA provenance statement matched the required predicate")}
@@ -90,6 +94,7 @@ func (v *Verifier) verifyTestEvidence(ctx context.Context, ref string, req Reque
 	if len(attestations) == 0 {
 		return "", &Error{Code: CodeTestEvidenceInvalid, Ref: ref, Err: errors.New("missing signed test evidence")}
 	}
+	evidenceDigest := ""
 	for _, attestation := range attestations {
 		if attestation.PredicateType != trustedsource.TestEvidencePredicateType {
 			continue
@@ -108,7 +113,12 @@ func (v *Verifier) verifyTestEvidence(ctx context.Context, ref string, req Reque
 		if err := validateEvidenceBinding(evidence, req, expected); err != nil {
 			return "", &Error{Code: CodeTestEvidenceInvalid, Ref: ref, Err: err}
 		}
-		return evidence.EvidenceDigest, nil
+		if evidenceDigest == "" {
+			evidenceDigest = evidence.EvidenceDigest
+		}
+	}
+	if evidenceDigest != "" {
+		return evidenceDigest, nil
 	}
 	return "", &Error{Code: CodeTestEvidenceInvalid, Ref: ref, Err: errors.New("no test-evidence statement matched the required predicate")}
 }

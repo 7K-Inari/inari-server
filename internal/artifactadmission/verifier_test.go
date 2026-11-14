@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,16 +20,18 @@ const (
 )
 
 type fakeBackend struct {
-	request        Request
-	artifact       *oci.Artifact
-	fetchErr       error
-	signatureErr   error
-	attestErr      error
-	expect         []PublisherExpectation
-	attestCalls    int
-	slsaMutate     func(*trustedsource.Statement)
-	evidenceMutate func(*trustedsource.TestEvidence)
-	omit           map[string]bool
+	request                Request
+	artifact               *oci.Artifact
+	fetchErr               error
+	signatureErr           error
+	attestErr              error
+	expect                 []PublisherExpectation
+	attestCalls            int
+	slsaMutate             func(*trustedsource.Statement)
+	evidenceMutate         func(*trustedsource.TestEvidence)
+	omit                   map[string]bool
+	additionalAttestations map[string][]Attestation
+	additionalFirst        bool
 }
 
 func (f *fakeBackend) Fetch(context.Context, string) (*oci.Artifact, error) {
@@ -57,14 +60,27 @@ func (f *fakeBackend) VerifyAttestations(_ context.Context, _ string, expected P
 			f.slsaMutate(statement)
 		}
 		raw, _ := json.Marshal(statement)
-		return []Attestation{{PredicateType: predicateType, Payload: raw}}, nil
+		return f.withAdditionalAttestations(predicateType, Attestation{PredicateType: predicateType, Payload: raw}), nil
 	}
 	evidence := validEvidence(expected, f.request.Artifact)
 	if f.evidenceMutate != nil {
 		f.evidenceMutate(evidence)
 	}
 	raw, _ := json.Marshal(evidence)
-	return []Attestation{{PredicateType: predicateType, Payload: raw}}, nil
+	return f.withAdditionalAttestations(predicateType, Attestation{PredicateType: predicateType, Payload: raw}), nil
+}
+
+func (f *fakeBackend) withAdditionalAttestations(predicateType string, valid Attestation) []Attestation {
+	additional := f.additionalAttestations[predicateType]
+	out := make([]Attestation, 0, len(additional)+1)
+	if f.additionalFirst {
+		out = append(out, additional...)
+	}
+	out = append(out, valid)
+	if !f.additionalFirst {
+		out = append(out, additional...)
+	}
+	return out
 }
 
 func validRequest() Request {
@@ -194,6 +210,37 @@ func TestAdmissionRejectsBadProvenanceAndMissingTests(t *testing.T) {
 	backend.omit[trustedsource.TestEvidencePredicateType] = true
 	if _, err := NewVerifier(backend).AdmitArtifact(context.Background(), req); !IsCode(err, CodeTestEvidenceInvalid) {
 		t.Fatalf("error = %v, want test_evidence_invalid", err)
+	}
+}
+
+func TestAdmissionRejectsContradictoryEvidenceInEitherOrder(t *testing.T) {
+	for _, predicateType := range []string{trustedsource.SLSAProvenancePredicateType, trustedsource.TestEvidencePredicateType} {
+		for _, additionalFirst := range []bool{false, true} {
+			t.Run(predicateType+"/first="+strconv.FormatBool(additionalFirst), func(t *testing.T) {
+				req := validRequest()
+				backend := newTestBackend(req)
+				backend.additionalFirst = additionalFirst
+				expected := PublisherExpectation{Source: req.Source, Role: req.Role, SourceSHA: req.Artifact.SourceSHA, Producer: req.Artifact.Producer}
+				var raw []byte
+				wantCode := CodeProvenanceInvalid
+				if predicateType == trustedsource.SLSAProvenancePredicateType {
+					contradiction := validSLSA(expected, req.Artifact)
+					contradiction.Predicate.RunDetails.Builder.ID = "https://github.com/untrusted/workflow@main"
+					raw, _ = json.Marshal(contradiction)
+				} else {
+					contradiction := validEvidence(expected, req.Artifact)
+					contradiction.Lanes[0].Status = "failed"
+					raw, _ = json.Marshal(contradiction)
+					wantCode = CodeTestEvidenceInvalid
+				}
+				backend.additionalAttestations = map[string][]Attestation{
+					predicateType: {{PredicateType: predicateType, Payload: raw}},
+				}
+				if _, err := NewVerifier(backend).AdmitArtifact(context.Background(), req); !IsCode(err, wantCode) {
+					t.Fatalf("error = %v, want %s for contradictory evidence in either order", err, wantCode)
+				}
+			})
+		}
 	}
 }
 

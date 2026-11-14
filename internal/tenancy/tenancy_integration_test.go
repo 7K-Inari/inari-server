@@ -238,8 +238,8 @@ func TestCreateTenantEndToEnd(t *testing.T) {
 	if err := eventbustest.DispatchOnce(ctx, disp); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
-	// 20+14+5+1 team→org permission tuples + 2 creator memberships.
-	if len(rec.written) != 20+14+5+1+2 {
+	// 21+15+5+1 team→org permission tuples + 2 creator memberships.
+	if len(rec.written) != 21+15+5+1+2 {
 		t.Fatalf("tuples written = %v", rec.written)
 	}
 	if rec.written[0].Object != authz.OrgObject(org.ID) {

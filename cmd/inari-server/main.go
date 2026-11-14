@@ -54,6 +54,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/platformresources"
 	"github.com/7K-Inari/inari-server/internal/policyservice"
 	"github.com/7K-Inari/inari-server/internal/rbacmaterialize"
+	"github.com/7K-Inari/inari-server/internal/resourcetargets"
 	"github.com/7K-Inari/inari-server/internal/restsurface"
 	"github.com/7K-Inari/inari-server/internal/scaffold"
 	"github.com/7K-Inari/inari-server/internal/secrets"
@@ -825,8 +826,23 @@ func run() error {
 	if cfg.PlatformGitOpsRepo != "" {
 		platformResourcesSvc.WithGitOps(cfg.PlatformGitOpsRepo, gitPerRepo)
 	}
+	resourceTargetStore := resourcetargets.NewStore()
+	resourceTargetsSvc := resourcetargets.NewService(database, resourceTargetStore, resourcetargets.DefaultRegistry(), authorizer, auditStore,
+		resourcetargets.Sources{Clusters: registry, Inventory: invStore, Capabilities: capsStore, Teams: svc})
+	resourceTargetAuthz := resourcetargets.NewAuthzSync(database, resourceTargetStore, fgaInvalidating)
+	// Backfilled deployment targets have no historical outbox events. Converge
+	// them before accepting traffic; a failure must not silently disable grants.
+	if err := resourceTargetAuthz.SyncAll(ctx); err != nil {
+		return fmt.Errorf("resource target initial authz sync: %w", err)
+	}
+	go leaderlease.Run(ctx, leaser, "resource-target-authz-sync", func(lctx context.Context) {
+		resourceTargetAuthz.Run(lctx, cfg.OrgGroupSyncInterval)
+	}, log)
+
 	orchestratorSvc := orchestrator.NewService(database, invStore, catalogSvc, registry,
-		approvalsSvc, gateway.Queue(), git, auditStore)
+		approvalsSvc, gateway.Queue(), git, auditStore).
+		WithResourceTargets(resourceTargetsSvc).
+		WithOrgPermissions(authorizer)
 
 	// Multi-repo GitOps registry (Feature A): team-filtered repo CRUD with
 	// guarded unregister, over the same inventory store + a repo-aware git
@@ -1042,6 +1058,7 @@ func run() error {
 	dispatcher, err := audit.NewDispatcher(ctx, database, bus, cfg.OutboxPollInterval,
 		[]audit.NamedHandler{
 			audit.Named("authz-tuple-writer", authz.NewTupleWriter(fgaInvalidating)),
+			audit.Named("resource-target-authz", resourceTargetAuthz),
 			audit.Named("notifications", notificationsSvc),
 			audit.Named("orchestrator-resume", orchestrator.NewResumeHandler(orchestratorSvc, approvalsSvc, log)),
 			audit.Named("policy-distribute", policyservice.NewDistributeHandler(policySvc, log)),
@@ -1102,6 +1119,7 @@ func run() error {
 		PlatformResources: platformResourcesSvc,
 		Orchestrator:      orchestratorSvc,
 		GitRepos:          gitReposSvc,
+		ResourceTargets:   resourceTargetsSvc,
 		GitWebhook:        webhookIngress,
 		Addons:            addonsSvc,
 		CloudAccounts:     cloudAccountsSvc,

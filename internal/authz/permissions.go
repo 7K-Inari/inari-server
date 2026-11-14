@@ -31,6 +31,7 @@ const (
 	PermCatalogManage             = "catalog.manage"
 	PermDeploymentsCreate         = "deployments.create"
 	PermApprovalsManage           = "approvals.manage"
+	PermResourceTargetsManage     = "resourcetargets.manage"
 )
 
 // FGA relation constants for the organization permission relations (the
@@ -49,17 +50,18 @@ const (
 	RelationClustersKubectl           = "clusters_kubectl"
 	// RelationKubectl is the cluster-object relation the kubeproxy PEP
 	// checks per proxied request (derived from clusters_kubectl via parent).
-	RelationKubectl             = "kubectl"
-	RelationCloudAccountsManage = "cloudaccounts_manage"
-	RelationZonesManage         = "zones_manage"
-	RelationFleetManage         = "fleet_manage"
-	RelationPoliciesManage      = "policies_manage"
-	RelationSecretStoresManage  = "secretstores_manage"
-	RelationExtensionsManage    = "extensions_manage"
-	RelationExtensionsInvoke    = "extensions_invoke"
-	RelationCatalogManage       = "catalog_manage"
-	RelationDeploymentsCreate   = "deployments_create"
-	RelationApprovalsManage     = "approvals_manage"
+	RelationKubectl               = "kubectl"
+	RelationCloudAccountsManage   = "cloudaccounts_manage"
+	RelationZonesManage           = "zones_manage"
+	RelationFleetManage           = "fleet_manage"
+	RelationPoliciesManage        = "policies_manage"
+	RelationSecretStoresManage    = "secretstores_manage"
+	RelationExtensionsManage      = "extensions_manage"
+	RelationExtensionsInvoke      = "extensions_invoke"
+	RelationCatalogManage         = "catalog_manage"
+	RelationDeploymentsCreate     = "deployments_create"
+	RelationApprovalsManage       = "approvals_manage"
+	RelationResourceTargetsManage = "resourcetargets_manage"
 )
 
 // Permission is one catalog entry served to the role editor UI.
@@ -99,6 +101,7 @@ func PermissionCatalog() []Permission {
 		{PermCatalogManage, "Manage catalog", "Publish and edit org catalog items", "workloads", "editor"},
 		{PermDeploymentsCreate, "Deploy workloads", "Deploy, update, roll back, and undeploy instances; run scaffolds", "workloads", "editor"},
 		{PermApprovalsManage, "Manage approvals", "Decide approval requests and configure approval policy", "workloads", ""},
+		{PermResourceTargetsManage, "Manage resource targets", "Register shared resource targets and manage their team grants", "infrastructure", ""},
 	}
 }
 
@@ -187,7 +190,7 @@ func BuiltinRoles() []BuiltinRole {
 		PermClustersRegister, PermClustersKubectl, PermCloudAccountsManage, PermZonesManage,
 		PermFleetManage, PermPoliciesManage, PermSecretStoresManage,
 		PermExtensionsManage, PermExtensionsInvoke,
-		PermCatalogManage, PermDeploymentsCreate, PermApprovalsManage,
+		PermCatalogManage, PermDeploymentsCreate, PermApprovalsManage, PermResourceTargetsManage,
 	}
 	editor := []string{
 		PermTenantRead, PermCatalogManage, PermDeploymentsCreate,

@@ -19,6 +19,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/inventory"
 	gitgithub "github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider/github"
+	"github.com/7K-Inari/inari-server/internal/resourcetargets"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/tenancy/gitkeys"
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -254,6 +255,27 @@ type deployOutput struct {
 	}
 }
 
+func resourceTargetError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var validation *resourcetargets.ValidationError
+	switch {
+	case errors.Is(err, resourcetargets.ErrTargetDenied):
+		return huma.Error403Forbidden("resource target grant required")
+	case errors.Is(err, resourcetargets.ErrTargetNotFound):
+		return huma.Error404NotFound("resource target not found")
+	case errors.Is(err, resourcetargets.ErrStaleRevision):
+		return huma.Error409Conflict("resource target changed; repeat preflight")
+	case errors.Is(err, resourcetargets.ErrUnavailable), errors.Is(err, resourcetargets.ErrConflict):
+		return huma.Error409Conflict(err.Error())
+	case errors.Is(err, resourcetargets.ErrInvalidInput), errors.As(err, &validation):
+		return huma.Error422UnprocessableEntity(err.Error())
+	default:
+		return nil
+	}
+}
+
 func (h *Handler) deploy(ctx context.Context, in *deployInput) (*deployOutput, error) {
 	org, id, err := h.authorizeOrg(ctx, in.Org, authz.RelationDeploymentsCreate)
 	if err != nil {
@@ -268,6 +290,9 @@ func (h *Handler) deploy(ctx context.Context, in *deployInput) (*deployOutput, e
 		Namespace: in.Body.Namespace, OwnerTeam: in.Body.OwnerTeam,
 		Spec: in.Body.Spec, Requester: "user:" + id.Subject, RepoID: in.Body.RepoID,
 	})
+	if targetErr := resourceTargetError(err); targetErr != nil {
+		return nil, targetErr
+	}
 	var pve *PolicyViolationError
 	if errors.As(err, &pve) {
 		return nil, huma.Error422UnprocessableEntity(pve.Error())
@@ -332,6 +357,9 @@ func (h *Handler) upgrade(ctx context.Context, in *upgradeInput) (*deployOutput,
 		return nil, err
 	}
 	res, err := h.svc.Upgrade(ctx, org.ID, in.ID, in.Body.ToVersion, in.Body.RepoID, "user:"+id.Subject)
+	if targetErr := resourceTargetError(err); targetErr != nil {
+		return nil, targetErr
+	}
 	var pve *PolicyViolationError
 	if errors.As(err, &pve) {
 		return nil, huma.Error422UnprocessableEntity(pve.Error())
@@ -362,6 +390,9 @@ func (h *Handler) upgrade(ctx context.Context, in *upgradeInput) (*deployOutput,
 // instanceMutationError maps the shared instance-mutation service errors to
 // HTTP statuses (update/rollback/delete share the same mapping).
 func instanceMutationError(err error) error {
+	if targetErr := resourceTargetError(err); targetErr != nil {
+		return targetErr
+	}
 	var pve *PolicyViolationError
 	if errors.As(err, &pve) {
 		return huma.Error422UnprocessableEntity(pve.Error())

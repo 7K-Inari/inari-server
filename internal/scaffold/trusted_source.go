@@ -3,6 +3,7 @@ package scaffold
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -160,7 +161,7 @@ func (p *RegistryTemplateSource) Get(_ context.Context, name, version string) (*
 
 // GetArtifact resolves one exact OCI template artifact. The caller has
 // already admitted this exact ref/digest through catalog.AdmitVersion.
-func (p *RegistryTemplateSource) GetArtifact(ctx context.Context, ref, version, expectedSkeletonDigest string) (*TemplatePackage, error) {
+func (p *RegistryTemplateSource) GetArtifact(ctx context.Context, ref, version, expectedSkeletonDigest string, expectedManifest []byte) (*TemplatePackage, error) {
 	if p.CacheDir == "" {
 		return nil, errors.New("scaffold: OCI template source needs a cache dir (INARI_SCAFFOLD_TEMPLATE_CACHE_DIR)")
 	}
@@ -196,6 +197,15 @@ func (p *RegistryTemplateSource) GetArtifact(ctx context.Context, ref, version, 
 	if pkg.Manifest.Version != version {
 		return nil, fmt.Errorf("scaffold: template %s version %s does not match manifest %s", name, version, pkg.Manifest.Version)
 	}
+	if len(expectedManifest) > 0 {
+		manifest, err := json.Marshal(pkg.Manifest)
+		if err != nil {
+			return nil, fmt.Errorf("scaffold: encode template manifest %s: %w", name, err)
+		}
+		if !bytes.Equal(manifest, expectedManifest) {
+			return nil, fmt.Errorf("scaffold: template %s manifest digest mismatch", name)
+		}
+	}
 	if expectedSkeletonDigest != "" && pkg.SkeletonDigest != expectedSkeletonDigest {
 		return nil, fmt.Errorf("scaffold: template %s skeleton digest mismatch", name)
 	}
@@ -223,9 +233,9 @@ func (p *RegistryTemplateSource) extractAndValidate(name string, artifact *oci.A
 	if err != nil {
 		return nil, nil, err
 	}
-	manifestRaw, err := os.ReadFile(filepath.Join(dir, "template.yaml"))
+	manifestRaw, err := json.Marshal(pkg.Manifest)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("scaffold: encode template manifest %s: %w", name, err)
 	}
 	return pkg, manifestRaw, nil
 }

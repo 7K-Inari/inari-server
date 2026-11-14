@@ -3,6 +3,7 @@ package catalog
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -542,12 +543,45 @@ func (s *Service) SyncKind(ctx context.Context, kind string) (int, error) {
 	return total, errors.Join(syncErrors...)
 }
 
+func sourceLockID(kind, sourceID string) int64 {
+	sum := sha256.Sum256([]byte(kind + "\x00" + sourceID))
+	return int64(binary.BigEndian.Uint64(sum[:8]))
+}
+
+func (s *Service) lockSource(ctx context.Context, kind, sourceID string) (func(), error) {
+	if s.db == nil || s.db.Pool == nil {
+		return nil, errors.New("catalog: source sync requires a database")
+	}
+	conn, err := s.db.Pool.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	lockID := sourceLockID(kind, sourceID)
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, lockID); err != nil {
+		conn.Release()
+		return nil, err
+	}
+	return func() {
+		if _, err := conn.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, lockID); err != nil {
+			slog.Error("trusted source unlock failed; closing connection", "source", sourceID, "error", err)
+			_ = conn.Hijack().Close(context.Background())
+			return
+		}
+		conn.Release()
+	}, nil
+}
+
 func (s *Service) syncOne(ctx context.Context, sourceSync SourceSync) (count int, returnErr error) {
 	source := sourceSync.Source
 	kind := sourceSync.Kind
 	if kind == "" {
 		kind = "catalog"
 	}
+	unlock, err := s.lockSource(ctx, kind, source.ID)
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
 	fingerprint, err := (&trustedsource.File{}).Fingerprint(source)
 	if err != nil {
 		return 0, err

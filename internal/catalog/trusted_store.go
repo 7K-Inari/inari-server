@@ -63,7 +63,7 @@ func (s *Store) ReplaceSource(ctx context.Context, q db.Querier, replacement Sou
 	}
 
 	var generation int64
-	err = q.QueryRow(ctx, `SELECT generation FROM trusted_source_states WHERE kind=$1 AND source_id=$2`, replacement.Kind, replacement.Source.ID).Scan(&generation)
+	err = q.QueryRow(ctx, `SELECT generation FROM trusted_source_states WHERE kind=$1 AND source_id=$2 FOR UPDATE`, replacement.Kind, replacement.Source.ID).Scan(&generation)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}

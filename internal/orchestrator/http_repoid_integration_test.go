@@ -276,7 +276,8 @@ func itServerM3WithRepoResolver(t *testing.T) (*httptest.Server, *db.DB, *gitpro
 	invStore := inventory.NewStore()
 	repoResolver := gitprovider.NewRepoResolver(repoStoreAdapter{invStore, database}, nil, resolver)
 	orchSvc := orchestrator.NewService(database, invStore, catalogSvc, itClusters{},
-		approvalsSvc, q, resolver, auditStore).WithRepoResolver(repoResolver).WithResourceTargets(&stubTargetResolver{})
+		approvalsSvc, q, resolver, auditStore).WithRepoResolver(repoResolver).WithResourceTargets(&stubTargetResolver{}).
+		WithOrgPermissions(itAuthorizer{allow: true})
 	dispatcher := eventbustest.Dispatcher(t, database, time.Millisecond,
 		audit.Named("orchestrator-resume", orchestrator.NewResumeHandler(orchSvc, approvalsSvc, slog.Default())))
 

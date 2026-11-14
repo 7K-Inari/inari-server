@@ -23,6 +23,7 @@ import (
 
 	"github.com/7K-Inari/inari-server/internal/approvals"
 	"github.com/7K-Inari/inari-server/internal/audit"
+	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/impersonation"
 	"github.com/7K-Inari/inari-server/internal/inventory"
@@ -112,6 +113,14 @@ var ErrClusterNotActive = fmt.Errorf("orchestrator: cluster is not active")
 // silently bypassing target grants.
 var ErrTargetResolverRequired = fmt.Errorf("orchestrator: resource target resolver is not configured")
 
+// ErrOrgPermissionsRequired prevents an approval resume from bypassing the
+// org operation-permission check when live wiring is incomplete.
+var ErrOrgPermissionsRequired = fmt.Errorf("orchestrator: org permission checker is not configured")
+
+// ErrDeploymentPermissionDenied is a terminal post-approval denial when the
+// original requester no longer holds org deployments.create.
+var ErrDeploymentPermissionDenied = fmt.Errorf("orchestrator: deployments.create required")
+
 // ErrClusterMismatch is returned when the cluster belongs to another tenant
 // (reads as not-found to the caller).
 var ErrClusterMismatch = fmt.Errorf("orchestrator: cluster does not belong to tenant")
@@ -160,15 +169,16 @@ type DeployResult struct {
 
 // Service is the Orchestrator module.
 type Service struct {
-	db        *db.DB
-	instances *inventory.Store
-	catalog   CatalogResolver
-	clusters  ClusterResolver
-	targets   ResourceTargetResolver
-	gate      Gate
-	policy    PolicyChecker // nil = no policy enforcement
-	queue     Queue
-	git       gitprovider.Resolver
+	db             *db.DB
+	instances      *inventory.Store
+	catalog        CatalogResolver
+	clusters       ClusterResolver
+	targets        ResourceTargetResolver
+	orgPermissions authz.Authorizer
+	gate           Gate
+	policy         PolicyChecker // nil = no policy enforcement
+	queue          Queue
+	git            gitprovider.Resolver
 	// gitRepos is the repo-aware resolver (Feature A). nil = legacy
 	// single-repo mode: deploys resolve via git.ForTenant(GitConfig(org)).
 	gitRepos *gitprovider.RepoResolver
@@ -195,6 +205,28 @@ func (s *Service) WithResourceTargets(targets ResourceTargetResolver) *Service {
 	return s
 }
 
+// WithOrgPermissions wires the independent org operation-permission PEP used
+// when an approval resumes without the original HTTP request context.
+func (s *Service) WithOrgPermissions(permissions authz.Authorizer) *Service {
+	s.orgPermissions = permissions
+	return s
+}
+
+func (s *Service) authorizeResume(ctx context.Context, orgID, requester string) error {
+	if s.orgPermissions == nil {
+		return ErrOrgPermissionsRequired
+	}
+	allowed, err := s.orgPermissions.Check(ctx, authz.UserObject(strings.TrimPrefix(requester, "user:")),
+		authz.RelationDeploymentsCreate, authz.OrgObject(orgID))
+	if err != nil {
+		return fmt.Errorf("orchestrator: check resume deployments.create: %w", err)
+	}
+	if !allowed {
+		return ErrDeploymentPermissionDenied
+	}
+	return nil
+}
+
 func (s *Service) resolveDeploymentCluster(ctx context.Context, orgID, clusterID, subject string) (*types.Cluster, error) {
 	if s.targets == nil {
 		return nil, ErrTargetResolverRequired
@@ -211,7 +243,8 @@ func (s *Service) resolveDeploymentCluster(ctx context.Context, orgID, clusterID
 }
 
 func terminalTargetError(err error) bool {
-	return errors.Is(err, resourcetargets.ErrTargetDenied) ||
+	return errors.Is(err, ErrDeploymentPermissionDenied) ||
+		errors.Is(err, resourcetargets.ErrTargetDenied) ||
 		errors.Is(err, resourcetargets.ErrTargetNotFound) ||
 		errors.Is(err, resourcetargets.ErrUnavailable) ||
 		errors.Is(err, resourcetargets.ErrStaleRevision)
@@ -223,7 +256,7 @@ func (s *Service) auditTargetDenial(ctx context.Context, orgID, requester, clust
 	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		ev := &types.AuditEvent{OrgID: orgID, Actor: requester, Impersonator: impersonation.FromContext(ctx),
 			Action: "deploy.target_denied", ObjectType: "cluster", ObjectID: clusterID,
-			Payload: json.RawMessage(`{"reason":"target grant revoked or target unavailable"}`)}
+			Payload: json.RawMessage(`{"reason":"deployment permission or target grant revoked, or target unavailable"}`)}
 		if err := impersonation.Stamp(ctx, ev); err != nil {
 			return err
 		}
@@ -867,6 +900,9 @@ func (s *Service) UpdateSpecResumeAs(ctx context.Context, orgID, instanceID stri
 	if existing.OrgID != orgID {
 		return inventory.ErrInstanceNotFound
 	}
+	if err := s.authorizeResume(ctx, orgID, authorizationSubject); err != nil {
+		return err
+	}
 	if _, err := s.resolveDeploymentCluster(ctx, orgID, existing.ClusterID, authorizationSubject); err != nil {
 		return err
 	}
@@ -928,6 +964,9 @@ func (s *Service) DeleteInstanceResumeAs(ctx context.Context, orgID, instanceID,
 	}
 	if existing.OrgID != orgID {
 		return inventory.ErrInstanceNotFound
+	}
+	if err := s.authorizeResume(ctx, orgID, authorizationSubject); err != nil {
+		return err
 	}
 	if _, err := s.resolveDeploymentCluster(ctx, orgID, existing.ClusterID, authorizationSubject); err != nil {
 		return err

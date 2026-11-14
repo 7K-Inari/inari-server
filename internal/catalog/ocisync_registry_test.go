@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
-	"sort"
 	"strings"
 	"testing"
 
@@ -251,13 +250,11 @@ func TestRegistryPuller(t *testing.T) {
 			web = append(web, pkg)
 		}
 	}
-	if len(external) != 2 || len(web) != 1 {
+	if len(external) != 1 || len(web) != 1 {
 		t.Fatalf("packages = %d external / %d web", len(external), len(web))
 	}
-	channels := []string{external[0].Channel, external[1].Channel}
-	sort.Strings(channels)
-	if channels[0] != "incubating" || channels[1] != "stable" {
-		t.Errorf("channels = %v", channels)
+	if external[0].Channel != "stable" {
+		t.Errorf("channel = %q, want only the signed stable entry", external[0].Channel)
 	}
 	for _, pkg := range external {
 		if pkg.Version != "0.10.5" || pkg.Chart == nil || pkg.Chart.Digest == "" || pkg.Entry.PackageVersion != "1.0.0" {
@@ -295,13 +292,14 @@ func TestSyncPlanCanonicalIdentityAndChannels(t *testing.T) {
 			t.Errorf("non-canonical mapping: %+v / %+v", items[i], version)
 		}
 	}
-	for _, channel := range []string{"stable", "incubating"} {
-		got, err := resolveChannelVersion("", versionsByItem["core/external-secrets"], "core/external-secrets", channel)
-		if err != nil || got != "0.10.5" {
-			t.Errorf("channel %s resolved %q, %v", channel, got, err)
-		}
+	got, err := resolveChannelVersion("", versionsByItem["core/external-secrets"], "core/external-secrets", "stable")
+	if err != nil || got != "0.10.5" {
+		t.Errorf("stable resolved %q, %v", got, err)
 	}
-	got, err := resolveChannelVersion("", versionsByItem["core/web-service"], "core/web-service", "incubating")
+	if _, err := resolveChannelVersion("", versionsByItem["core/external-secrets"], "core/external-secrets", "incubating"); err == nil {
+		t.Error("an index entry must not create unsigned versions in other channels")
+	}
+	got, err = resolveChannelVersion("", versionsByItem["core/web-service"], "core/web-service", "incubating")
 	if err != nil || got != "0.1.0" {
 		t.Errorf("web-service resolved %q, %v", got, err)
 	}

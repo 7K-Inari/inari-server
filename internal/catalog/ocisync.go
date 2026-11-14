@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -269,7 +268,7 @@ func (p *RegistryPuller) Pull(ctx context.Context) ([]Package, error) {
 		if err != nil {
 			return nil, fmt.Errorf("catalog: pull package %s (%s): %w", entry.Name, ref, err)
 		}
-		pkgs, err := packageFromFiles(entry.Name, entry.Type, entry.Description, ref, files)
+		pkgs, err := packageFromFiles(entry, ref, files)
 		if err != nil {
 			return nil, err
 		}
@@ -302,27 +301,35 @@ func (p *RegistryPuller) fetchDir(ctx context.Context, ref string) (map[string][
 // Platform apps expand chart.yaml channels into one Package per channel
 // (the chart version is what deploys resolve); other package types yield a
 // single Package at their package.yaml version/channel.
-func packageFromFiles(name, typ, indexDesc, ref string, files map[string][]byte) ([]Package, error) {
-	base := Package{Name: name, Type: typ, Description: indexDesc, OCIRef: ref}
-	if raw, ok := files["package.yaml"]; ok {
-		var py packageYAML
-		if err := yaml.Unmarshal(raw, &py); err != nil {
-			return nil, fmt.Errorf("catalog: %s: package.yaml: %w", ref, err)
-		}
-		if py.Type != "" {
-			base.Type = py.Type
-		}
-		if base.Description == "" {
-			base.Description = py.Description
-		}
-		base.Version = py.Version
-		base.Channel = py.Channel
-		base.Category = py.Category
+func packageFromFiles(entry trustedsource.IndexEntry, ref string, files map[string][]byte) ([]Package, error) {
+	base := Package{Name: entry.Name, Type: entry.Type, Description: entry.Description, OCIRef: ref}
+	rawPackage, ok := files["package.yaml"]
+	if !ok {
+		return nil, fmt.Errorf("catalog: %s: package.yaml is required", ref)
 	}
+	var py packageYAML
+	if err := yaml.Unmarshal(rawPackage, &py); err != nil {
+		return nil, fmt.Errorf("catalog: %s: package.yaml: %w", ref, err)
+	}
+	if py.Type != "" && py.Type != entry.Type {
+		return nil, fmt.Errorf("catalog: %s: package type %q does not match signed index type %q", ref, py.Type, entry.Type)
+	}
+	if py.Version != entry.PackageVersion || (entry.Type != "platform-app" && py.Version != entry.Version) {
+		return nil, fmt.Errorf("catalog: %s: package version %q does not match signed index version metadata", ref, py.Version)
+	}
+	if py.Channel != "" && py.Channel != entry.Channel {
+		return nil, fmt.Errorf("catalog: %s: package channel %q does not match signed index channel %q", ref, py.Channel, entry.Channel)
+	}
+	if base.Description == "" {
+		base.Description = py.Description
+	}
+	base.Category = py.Category
+	base.Version = entry.Version
+	base.Channel = entry.Channel
 	base.Schema = files["schema.json"]
 	// Platform-app packages vendor the upstream chart's values.schema.json
 	// (day-one adopt/update validation, decision 4); use it when no
-	// schema.json layer exists.
+	// schema.json instance schema exists.
 	if len(base.Schema) == 0 {
 		base.Schema = files["values.schema.json"]
 	}
@@ -348,39 +355,62 @@ func packageFromFiles(name, typ, indexDesc, ref string, files map[string][]byte)
 			}
 		}
 	}
-	if raw, ok := files["chart.yaml"]; ok {
-		var cy chartYAML
-		if err := yaml.Unmarshal(raw, &cy); err != nil {
-			return nil, fmt.Errorf("catalog: %s: chart.yaml: %w", ref, err)
+	rawChart, hasChart := files["chart.yaml"]
+	if entry.Type != "platform-app" {
+		if hasChart {
+			return nil, fmt.Errorf("catalog: %s: chart.yaml is valid only for platform-app entries", ref)
 		}
-		base.Chart = &ChartRef{RepoURL: cy.RepoURL, Chart: cy.Chart, Namespace: cy.Namespace}
-		if len(cy.Channels) == 0 {
-			return nil, fmt.Errorf("catalog: %s: chart.yaml has no channels", ref)
+		if raw, ok := files["rgd.yaml"]; ok {
+			base.RGD = raw
 		}
-		channels := make([]string, 0, len(cy.Channels))
-		for ch := range cy.Channels {
-			channels = append(channels, ch)
-		}
-		sort.Strings(channels)
-		out := make([]Package, 0, len(channels))
-		for _, ch := range channels {
-			pkg := base
-			channel := cy.Channels[ch]
-			pkg.Channel = ch
-			pkg.Version = channel.Version
-			pkg.Chart.OCIRef = channel.OCIRef
-			pkg.Chart.Digest = channel.Digest
-			out = append(out, pkg)
-		}
-		return out, nil
+		return []Package{base}, nil
 	}
-	if raw, ok := files["rgd.yaml"]; ok {
-		base.RGD = raw
+	if !hasChart {
+		return nil, fmt.Errorf("catalog: %s: platform-app requires chart.yaml", ref)
 	}
-	if base.Channel == "" {
-		base.Channel = "stable"
+	var cy chartYAML
+	if err := yaml.Unmarshal(rawChart, &cy); err != nil {
+		return nil, fmt.Errorf("catalog: %s: chart.yaml: %w", ref, err)
 	}
+	if !strings.HasPrefix(cy.RepoURL, "oci://") || cy.Chart == "" {
+		return nil, fmt.Errorf("catalog: %s: chart.yaml requires OCI-only repository and chart coordinates", ref)
+	}
+	channel, ok := cy.Channels[entry.Channel]
+	if !ok {
+		return nil, fmt.Errorf("catalog: %s: chart.yaml does not declare signed channel %q", ref, entry.Channel)
+	}
+	if channel.Version != entry.Version {
+		return nil, fmt.Errorf("catalog: %s: chart version %q does not match signed index version %q", ref, channel.Version, entry.Version)
+	}
+	if channel.Digest != entry.ChartDigest || immutableOCIRef(strings.TrimPrefix(channel.OCIRef, "oci://"), channel.Digest) != immutableOCIRef(strings.TrimPrefix(entry.ChartRef, "oci://"), entry.ChartDigest) {
+		return nil, fmt.Errorf("catalog: %s: chart coordinates do not match the signed index", ref)
+	}
+	repoURL, chartName, err := signedChartCoordinates(entry.ChartRef)
+	if err != nil {
+		return nil, fmt.Errorf("catalog: %s: %w", ref, err)
+	}
+	if cy.RepoURL != repoURL || cy.Chart != chartName {
+		return nil, fmt.Errorf("catalog: %s: chart repository/name does not match the signed index", ref)
+	}
+	base.Chart = &ChartRef{RepoURL: repoURL, Chart: chartName, Namespace: cy.Namespace, OCIRef: entry.ChartRef, Digest: entry.ChartDigest}
 	return []Package{base}, nil
+}
+
+func signedChartCoordinates(ref string) (string, string, error) {
+	repository := strings.TrimPrefix(ref, "oci://")
+	if repository == ref {
+		return "", "", fmt.Errorf("signed chart ref %q is not OCI-qualified", ref)
+	}
+	if at := strings.Index(repository, "@"); at >= 0 {
+		repository = repository[:at]
+	} else if colon := strings.LastIndex(repository, ":"); colon > strings.LastIndex(repository, "/") {
+		repository = repository[:colon]
+	}
+	slash := strings.LastIndex(repository, "/")
+	if slash <= 0 || slash == len(repository)-1 {
+		return "", "", fmt.Errorf("signed chart ref %q has no repository/chart", ref)
+	}
+	return "oci://" + repository[:slash], repository[slash+1:], nil
 }
 
 // ErrSyncNotConfigured is returned when no OCI puller is wired (no

@@ -1234,14 +1234,18 @@ func (s *Service) RerenderFleetAddons(ctx context.Context, orgID string) error {
 // needed: the ApplicationSet CR is unchanged in name/namespace, and ArgoCD
 // picks up the new manifest from git on the next sync.
 func (s *Service) rerenderFleetAddon(ctx context.Context, row *types.ClusterAddon) error {
-	repo, provider, _, err := s.git.ResolveRepo(ctx, row.OrgID, row.RepoID)
+	targets, err := s.resolveFleetTargets(ctx, row.OrgID, row.ClusterSelector)
 	if err != nil {
 		return err
 	}
-	targets, err := s.resolveFleetTargets(ctx, row.OrgID, row.ClusterSelector)
-	if errors.Is(err, ErrEmptyFleet) {
-		return nil // fleet drained to zero: keep the last render (deletion is a separate flow)
+	version := row.ChartVersion
+	if version == "" && row.Source.Helm != nil {
+		version = row.Source.Helm.Version
 	}
+	if err := s.admitVersion(ctx, row.CatalogItem, version, targets); err != nil {
+		return err
+	}
+	repo, provider, _, err := s.git.ResolveRepo(ctx, row.OrgID, row.RepoID)
 	if err != nil {
 		return err
 	}

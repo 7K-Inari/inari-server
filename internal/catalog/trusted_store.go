@@ -137,7 +137,11 @@ func (s *Store) RecordSourceFailure(ctx context.Context, q db.Querier, kind stri
 		VALUES ($1,$2,$3,'failed',0,0,$4,$5,$6,$4)
 		ON CONFLICT (kind, source_id) DO UPDATE SET
 		  fingerprint=EXCLUDED.fingerprint,
-		  state=CASE WHEN trusted_source_states.last_success_at IS NULL THEN 'failed' ELSE 'stale' END,
+		  state=CASE
+		    WHEN trusted_source_states.state = 'policy-changed' THEN 'policy-changed'
+		    WHEN trusted_source_states.last_success_at IS NULL THEN 'failed'
+		    ELSE 'stale'
+		  END,
 		  last_attempt_at=EXCLUDED.last_attempt_at, last_error_code=EXCLUDED.last_error_code,
 		  last_error=EXCLUDED.last_error, updated_at=EXCLUDED.updated_at`,
 		kind, source.ID, fingerprint, now, code, message)

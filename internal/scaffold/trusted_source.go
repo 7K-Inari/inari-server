@@ -99,12 +99,18 @@ func (p *RegistryTemplateSource) pullCatalog(ctx context.Context) ([]catalog.Pac
 		if err != nil {
 			return nil, err
 		}
+		if pkg.Manifest.Version != entry.Version || pkg.Manifest.Version != entry.PackageVersion {
+			return nil, fmt.Errorf("scaffold: template %s manifest version %q does not match signed index version/packageVersion %q/%q", entry.Name, pkg.Manifest.Version, entry.Version, entry.PackageVersion)
+		}
+		if pkg.Manifest.Channel != entry.Channel {
+			return nil, fmt.Errorf("scaffold: template %s manifest channel %q does not match signed index channel %q", entry.Name, pkg.Manifest.Channel, entry.Channel)
+		}
 		nextByID[entry.Name+"@"+pkg.Manifest.Version] = pkg
 		out = append(out, catalog.Package{
 			Name: entry.Name, DisplayName: pkg.Manifest.DisplayName, Description: pkg.Manifest.Description,
 			Type: "template", Version: pkg.Manifest.Version, Channel: entry.Channel,
 			OCIRef: ref, Entry: entry, IndexDigest: indexArtifact.Digest,
-			ManifestJSON: manifestRaw, SkeletonDigest: pkg.SkeletonDigest,
+			ManifestJSON: manifestRaw, SkeletonDigest: pkg.SkeletonDigest, ApprovalPolicy: approvalPolicyFor(pkg.Manifest.Scaffold),
 			Schema: pkg.Schema, UIHints: pkg.UIHints,
 		})
 	}

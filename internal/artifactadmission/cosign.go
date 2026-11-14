@@ -115,7 +115,7 @@ func (b *CosignBackend) VerifySignature(ctx context.Context, ref string, expecte
 	opts.RegistryClientOpts = append(opts.RegistryClientOpts, cosignremote.WithRemoteOptions(gcremote.WithContext(ctx)))
 	signatures, _, err := cosign.VerifyImageSignatures(ctx, r, opts)
 	if err != nil {
-		return &Error{Code: CodeSignatureInvalid, Ref: ref, Err: err}
+		return signatureError(ref, err)
 	}
 	if len(signatures) == 0 {
 		return &Error{Code: CodeSignatureInvalid, Ref: ref, Err: errors.New("artifact has no signatures")}
@@ -196,6 +196,13 @@ func (b *CosignBackend) VerifyAttestations(ctx context.Context, ref string, expe
 func isTemporaryRegistryError(err error) bool {
 	var temporary interface{ Temporary() bool }
 	return errors.As(err, &temporary) && temporary.Temporary()
+}
+
+func signatureError(ref string, err error) error {
+	if isTemporaryRegistryError(err) {
+		return &Error{Code: CodeUnavailable, Ref: ref, Err: err, Temporary: true}
+	}
+	return &Error{Code: CodeSignatureInvalid, Ref: ref, Err: err}
 }
 
 func attestationError(predicateType, ref string, err error) error {

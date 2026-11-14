@@ -360,6 +360,9 @@ func (h *Handler) retryRun(ctx context.Context, in *runPathInput) (*retryRunOutp
 		return nil, err
 	}
 	run, steps, err := h.svc.RetryRun(ctx, id.Subject, org.ID, in.RunID)
+	if mapped := scaffoldAdmissionError(err); mapped != nil {
+		return nil, mapped
+	}
 	if errors.Is(err, ErrRunNotFound) {
 		return nil, huma.Error404NotFound("scaffold run not found")
 	}

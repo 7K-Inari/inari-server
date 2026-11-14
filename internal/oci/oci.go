@@ -143,29 +143,45 @@ func (f *Fetcher) Fetch(ctx context.Context, ref string) (*Artifact, error) {
 		if err != nil {
 			return nil, err
 		}
-		totalBytes += int64(len(raw))
-		if totalBytes > limits.MaxTotalBytes {
-			return nil, fmt.Errorf("oci: %s: uncompressed content exceeds %d bytes", ref, limits.MaxTotalBytes)
-		}
 		// oras directory-pushes store the whole directory as one tar(+gzip)
 		// layer flagged io.deis.oras.content.unpack; expand it into
 		// per-file entries (paths like "packages/<pkg>/package.yaml").
 		if ld.Annotations["io.deis.oras.content.unpack"] == "true" ||
 			strings.Contains(string(ld.MediaType), "tar") {
-			tarFiles, err := untarWithLimits(raw, limits)
+			if len(files) >= limits.MaxFiles || totalBytes >= limits.MaxTotalBytes {
+				return nil, fmt.Errorf("oci: %s: artifact exceeds the global file/content limits", ref)
+			}
+			remaining := limits
+			remaining.MaxFiles = limits.MaxFiles - len(files)
+			remaining.MaxTotalBytes = limits.MaxTotalBytes - totalBytes
+			tarFiles, err := untarWithLimits(raw, remaining)
 			if err != nil {
 				return nil, fmt.Errorf("oci: %s: unpack layer %s: %w", ref, title, err)
+			}
+			if len(files)+len(tarFiles) > limits.MaxFiles {
+				return nil, fmt.Errorf("oci: %s: artifact contains more than %d files", ref, limits.MaxFiles)
 			}
 			for name, content := range tarFiles {
 				if _, exists := files[name]; exists {
 					return nil, fmt.Errorf("oci: %s: duplicate file path %q", ref, name)
 				}
+				totalBytes += int64(len(content))
 				files[name] = content
 			}
 			continue
 		}
 		if title == "" {
 			continue
+		}
+		if len(files) >= limits.MaxFiles {
+			return nil, fmt.Errorf("oci: %s: artifact contains more than %d files", ref, limits.MaxFiles)
+		}
+		if int64(len(raw)) > limits.MaxFileBytes {
+			return nil, fmt.Errorf("oci: %s: file %q exceeds %d bytes", ref, title, limits.MaxFileBytes)
+		}
+		totalBytes += int64(len(raw))
+		if totalBytes > limits.MaxTotalBytes {
+			return nil, fmt.Errorf("oci: %s: uncompressed content exceeds %d bytes", ref, limits.MaxTotalBytes)
 		}
 		clean, err := cleanArtifactPath(title)
 		if err != nil {

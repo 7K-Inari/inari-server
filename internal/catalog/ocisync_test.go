@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
+	"github.com/7K-Inari/inari-server/internal/types"
 )
 
 func TestSyncWithoutPuller(t *testing.T) {
@@ -142,8 +143,8 @@ func TestPackageFromFilesBindsSignedIndexMetadata(t *testing.T) {
 	}
 }
 
-func TestSyncPlanPersistsCategory(t *testing.T) {
-	items, _, err := syncPlan("core", []Package{{Name: "postgres-aws", Version: "1.1.0", Category: "database"}})
+func TestSyncPlanPersistsPackageMetadata(t *testing.T) {
+	items, _, err := syncPlan("core", []Package{{Name: "postgres-aws", Version: "1.1.0", Category: "database", ApprovalPolicy: types.ApprovalPolicyPlatformAdmin}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,5 +153,8 @@ func TestSyncPlanPersistsCategory(t *testing.T) {
 	}
 	if items[0].Category != "database" {
 		t.Errorf("item category = %q, want database", items[0].Category)
+	}
+	if items[0].ApprovalPolicy != types.ApprovalPolicyPlatformAdmin {
+		t.Errorf("approval policy = %q, want platform-admin", items[0].ApprovalPolicy)
 	}
 }

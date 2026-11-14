@@ -3,7 +3,17 @@ package oci
 import (
 	"archive/tar"
 	"bytes"
+	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/registry"
+	"github.com/google/go-containerregistry/pkg/v1/empty"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/static"
+	"github.com/google/go-containerregistry/pkg/v1/types"
 )
 
 func tarBytes(t *testing.T, entries []tar.Header, contents [][]byte) []byte {
@@ -84,4 +94,77 @@ func TestUntarRejectsTooManyFiles(t *testing.T) {
 	if _, err := untarWithLimits(raw, limits); err == nil {
 		t.Fatal("expected file count limit to fail")
 	}
+}
+
+type boundedTestLayer struct {
+	title     string
+	mediaType string
+	raw       []byte
+}
+
+func pushBoundedTestArtifact(t *testing.T, layers []boundedTestLayer) string {
+	t.Helper()
+	srv := httptest.NewServer(registry.New())
+	t.Cleanup(srv.Close)
+	img := empty.Image
+	var err error
+	for _, layer := range layers {
+		img, err = mutate.Append(img, mutate.Addendum{
+			Layer:       static.NewLayer(layer.raw, types.MediaType(layer.mediaType)),
+			Annotations: map[string]string{"org.opencontainers.image.title": layer.title},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	host := strings.TrimPrefix(srv.URL, "http://")
+	ref, err := name.ParseReference(host+"/bounded/artifact:latest", name.Insecure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.Write(ref, img); err != nil {
+		t.Fatal(err)
+	}
+	return ref.String()
+}
+
+func boundedTar(t *testing.T, name string, content []byte) []byte {
+	t.Helper()
+	return tarBytes(t, []tar.Header{{Name: name, Typeflag: tar.TypeReg, Size: int64(len(content)), Mode: 0o600}}, [][]byte{content})
+}
+
+func TestFetchEnforcesLimitsAcrossLayers(t *testing.T) {
+	const tarMediaType = "application/vnd.inari.test.tar"
+	t.Run("global file count", func(t *testing.T) {
+		ref := pushBoundedTestArtifact(t, []boundedTestLayer{
+			{title: "first.tar", mediaType: tarMediaType, raw: tarBytes(t,
+				[]tar.Header{{Name: "a", Typeflag: tar.TypeReg, Size: 1, Mode: 0o600}, {Name: "b", Typeflag: tar.TypeReg, Size: 1, Mode: 0o600}},
+				[][]byte{{'a'}, {'b'}},
+			)},
+			{title: "second.tar", mediaType: tarMediaType, raw: boundedTar(t, "c", []byte{'c'})},
+		})
+		fetcher := Fetcher{Insecure: true, Limits: Limits{MaxFiles: 2, MaxFileBytes: 4, MaxTotalBytes: 8, MaxLayerBytes: 8192}}
+		if _, err := fetcher.Fetch(t.Context(), ref); err == nil || !strings.Contains(err.Error(), "global file/content limits") {
+			t.Fatalf("error = %v, want aggregate file-count rejection", err)
+		}
+	})
+	t.Run("global uncompressed bytes", func(t *testing.T) {
+		ref := pushBoundedTestArtifact(t, []boundedTestLayer{
+			{title: "first.tar", mediaType: tarMediaType, raw: boundedTar(t, "a", bytes.Repeat([]byte{'a'}, 6))},
+			{title: "second.tar", mediaType: tarMediaType, raw: boundedTar(t, "b", bytes.Repeat([]byte{'b'}, 6))},
+		})
+		fetcher := Fetcher{Insecure: true, Limits: Limits{MaxFiles: 10, MaxFileBytes: 6, MaxTotalBytes: 8, MaxLayerBytes: 8192}}
+		if _, err := fetcher.Fetch(t.Context(), ref); err == nil || !strings.Contains(err.Error(), "archive exceeds") {
+			t.Fatalf("error = %v, want aggregate uncompressed-size rejection", err)
+		}
+	})
+	t.Run("plain file bytes", func(t *testing.T) {
+		ref := pushBoundedTestArtifact(t, []boundedTestLayer{
+			{title: "large.txt", mediaType: "application/octet-stream", raw: bytes.Repeat([]byte{'x'}, 5)},
+		})
+		fetcher := Fetcher{Insecure: true, Limits: Limits{MaxFiles: 10, MaxFileBytes: 4, MaxTotalBytes: 8, MaxLayerBytes: 8192}}
+		if _, err := fetcher.Fetch(t.Context(), ref); err == nil || !strings.Contains(err.Error(), `file "large.txt" exceeds 4 bytes`) {
+			t.Fatalf("error = %v, want plain-file size rejection", err)
+		}
+	})
 }

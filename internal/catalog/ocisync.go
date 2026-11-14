@@ -58,6 +58,7 @@ type Package struct {
 	// Template metadata is used only by software-template sources.
 	ManifestJSON   []byte
 	SkeletonDigest string
+	ApprovalPolicy types.ApprovalPolicy
 	// Schema is the OpenAPI v3 schema for the instance form; when absent it
 	// is derived from the RGD's generated CRD spec at deploy time.
 	Schema  []byte
@@ -493,6 +494,7 @@ func syncPlan(sourceID string, pkgs []Package) ([]*types.CatalogItem, []*types.C
 			Description:     p.Description,
 			Category:        p.Category,
 			OCIRef:          ociRef,
+			ApprovalPolicy:  p.ApprovalPolicy,
 			SnapshotPresent: true,
 		})
 		packageVersion := p.Entry.PackageVersion

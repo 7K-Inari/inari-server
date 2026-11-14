@@ -16,14 +16,22 @@ import (
 	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
 	"github.com/7K-Inari/inari-server/internal/artifactadmission"
 	"github.com/7K-Inari/inari-server/internal/oci"
+	"github.com/7K-Inari/inari-server/internal/types"
 )
 
-func setupTrustedTemplateRegistry(t *testing.T) *RegistryTemplateSource {
+func setupTrustedTemplateRegistry(t *testing.T, manifest ...string) *RegistryTemplateSource {
 	t.Helper()
+	if len(manifest) > 1 {
+		t.Fatal("setup accepts at most one manifest override")
+	}
 	srv := httptest.NewServer(registry.New())
 	t.Cleanup(srv.Close)
 	host := strings.TrimPrefix(srv.URL, "http://")
-	pushTemplate(t, host, "templates/go-service", "1.0.0", TemplateMediaType, templateFiles())
+	files := templateFiles()
+	if len(manifest) == 1 {
+		files["template.yaml"] = manifest[0]
+	}
+	pushTemplate(t, host, "templates/go-service", "1.0.0", TemplateMediaType, files)
 	ref, err := name.ParseReference(host+"/templates/go-service:1.0.0", name.Insecure)
 	if err != nil {
 		t.Fatal(err)
@@ -126,5 +134,34 @@ func TestRegistryTemplateSourceDetectsCacheTamper(t *testing.T) {
 	}
 	if _, err := source.Get(context.Background(), "missing", "1.0.0"); err == nil {
 		t.Fatal("missing template unexpectedly triggered an index refresh or succeeded")
+	}
+}
+
+func TestRegistryTemplateSourceBindsSignedVersionAndChannel(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		manifest string
+	}{
+		{name: "version", manifest: strings.Replace(testTemplateYAML, "version: 1.0.0", "version: 2.0.0", 1)},
+		{name: "channel", manifest: strings.Replace(testTemplateYAML, "channel: stable", "channel: edge", 1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := setupTrustedTemplateRegistry(t, tc.manifest)
+			if _, err := (CatalogTemplatePuller{source}).Pull(context.Background()); err == nil || !strings.Contains(err.Error(), "signed index") {
+				t.Fatalf("error = %v, want signed index/manifest mismatch", err)
+			}
+		})
+	}
+}
+
+func TestCatalogTemplatePullerPreservesApprovalPolicy(t *testing.T) {
+	manifest := testTemplateYAML + "scaffold:\n  requiresApproval: true\n"
+	source := setupTrustedTemplateRegistry(t, manifest)
+	packages, err := (CatalogTemplatePuller{source}).Pull(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(packages) != 1 || packages[0].ApprovalPolicy != types.ApprovalPolicyPlatformAdmin {
+		t.Fatalf("packages = %+v, want platform-admin approval policy", packages)
 	}
 }

@@ -138,6 +138,19 @@ func TestSyncSourcesIndependentFailuresAndLastGood(t *testing.T) {
 	if byID["community"] != "policy-changed" || byID["broken"] != "unconfigured" {
 		t.Fatalf("reconciled states = %+v", byID)
 	}
+	changedFingerprint := "sha256:" + strings.Repeat("f", 64)
+	if err := catalog.NewStore().RecordSourceFailure(ctx, database.Pool, "catalog", goodSource, changedFingerprint, "registry_unavailable", good.err, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	states, err = service.ListTrustedSourceStates(ctx, "catalog")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range states {
+		if state.SourceID == "community" && state.State != "policy-changed" {
+			t.Fatalf("failed sync under a changed policy must not advertise stale last-good content: %+v", state)
+		}
+	}
 }
 
 type blockingPuller struct {

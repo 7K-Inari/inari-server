@@ -85,6 +85,17 @@ func TestCosignBackendUsesAndCachesTrustedMaterial(t *testing.T) {
 	}
 }
 
+func TestSignatureErrorSeparatesOutagesFromInvalidSignatures(t *testing.T) {
+	outage := signatureError("repo@sha256:digest", &transport.Error{StatusCode: http.StatusServiceUnavailable})
+	if !IsTemporary(outage) || !IsCode(outage, CodeUnavailable) {
+		t.Fatalf("registry outage = %v, want temporary unavailable", outage)
+	}
+	invalid := signatureError("repo@sha256:digest", errors.New("bad signature"))
+	if IsTemporary(invalid) || !IsCode(invalid, CodeSignatureInvalid) {
+		t.Fatalf("signature failure = %v, want non-temporary signature_invalid", invalid)
+	}
+}
+
 func TestAttestationErrorSeparatesOutagesFromInvalidEvidence(t *testing.T) {
 	outage := attestationError(trustedsource.TestEvidencePredicateType, "repo@sha256:digest", &transport.Error{StatusCode: http.StatusServiceUnavailable})
 	if !IsTemporary(outage) || !IsCode(outage, CodeUnavailable) {

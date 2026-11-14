@@ -18,6 +18,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/7K-Inari/inari-server/internal/artifactadmission"
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/authz"
@@ -485,5 +486,42 @@ func TestHTTPRunLifecycle(t *testing.T) {
 	}
 	if code, _ := f.req(t, "POST", "/api/v1/tenants/acme/scaffold-runs/"+created2.Run.ID+"/cancel", "good", ""); code != http.StatusConflict {
 		t.Fatalf("want 409 cancelling terminal run, got %d", code)
+	}
+}
+
+func TestHTTPRetryRunMapsAdmissionFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		temporary bool
+		want      int
+	}{
+		{name: "denied", want: http.StatusUnprocessableEntity},
+		{name: "unavailable", temporary: true, want: http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newITFixture(t)
+			digest := "sha256:52ccaee6d4dd272e54bfccda77738b42e1edf0e4a20c27e23f0b6c15d01aef79"
+			run := &types.ScaffoldRun{
+				ID: "run:admission-" + tc.name, OrgID: "org:acme", TemplateItemID: "core/go-service",
+				TemplateVersion: "1.0.0", TemplateDigest: digest, Phase: types.ScaffoldPhaseFailed, CreatedBy: "dev-1",
+			}
+			if _, err := f.db.Pool.Exec(context.Background(), `INSERT INTO catalog_items
+				(id, source, source_id, trust_tier, name, display_name, description, snapshot_present)
+				VALUES ('core/go-service', 'template', 'core', 'experimental', 'go-service', 'Go Service', 'Minimal Go HTTP service', true)`); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.svc.store.CreateRun(context.Background(), f.db.Pool, run, nil); err != nil {
+				t.Fatal(err)
+			}
+			cat := newStubCatalog()
+			cat.byID["core/go-service"] = &types.CatalogItem{ID: "core/go-service", SourceID: "core", Name: "go-service", Source: types.CatalogSourceTemplate}
+			cat.admitErr = &artifactadmission.Error{Code: artifactadmission.CodeSignatureInvalid, Err: errors.New("verification failed"), Temporary: tc.temporary}
+			f.svc.catalog = cat
+			f.svc.WithExecEnv(&ExecEnv{Catalog: cat})
+			code, body := f.req(t, http.MethodPost, "/api/v1/tenants/acme/scaffold-runs/"+run.ID+"/retry", "good", "")
+			if code != tc.want {
+				t.Fatalf("status = %d, want %d: %s", code, tc.want, body)
+			}
+		})
 	}
 }

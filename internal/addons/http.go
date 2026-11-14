@@ -71,7 +71,7 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 	huma.Register(api, huma.Operation{
 		OperationID: "listClusterAddons",
 		Method:      http.MethodGet,
-		Path:        "/api/v1/tenants/{org}/clusters/{c}/addons",
+		Path:        "/api/v1/tenants/{org}/clusters/{clusterId}/addons",
 		Summary:     "List discovered + managed addons for a cluster (team-filtered, with available versions)",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.list)
@@ -79,7 +79,7 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 	huma.Register(api, huma.Operation{
 		OperationID: "adoptAddon",
 		Method:      http.MethodPost,
-		Path:        "/api/v1/tenants/{org}/clusters/{c}/addons/{catalogItem}/adopt",
+		Path:        "/api/v1/tenants/{org}/clusters/{clusterId}/addons/{catalogItem}/adopt",
 		Summary:     "Adopt a (discovered or declared) addon into GitOps management",
 		Security:    httpserver.SecurityRequirement(),
 	}, h.adopt)
@@ -241,7 +241,7 @@ func addonError(err error) error {
 
 type listAddonsInput struct {
 	Org     string `path:"org"`
-	Cluster string `path:"c"`
+	Cluster string `path:"clusterId"`
 }
 
 type listAddonsOutput struct {
@@ -273,7 +273,7 @@ func (h *Handler) list(ctx context.Context, in *listAddonsInput) (*listAddonsOut
 
 type adoptInput struct {
 	Org         string `path:"org"`
-	Cluster     string `path:"c"`
+	Cluster     string `path:"clusterId"`
 	CatalogItem string `path:"catalogItem"`
 	Body        struct {
 		RepoID          string            `json:"repoId,omitempty" doc:"tenant_git_repos row id; empty = the cluster's bound baseline"`

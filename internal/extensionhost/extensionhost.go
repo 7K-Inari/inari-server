@@ -154,9 +154,9 @@ func (s *Store) list(ctx context.Context, q db.Querier, orgID string) ([]types.E
 	return out, rows.Err()
 }
 
-func (s *Store) setState(ctx context.Context, q db.Querier, id, state string) error {
-	const sql = `UPDATE extensions SET state = $2, updated_at = now() WHERE id = $1`
-	_, err := q.Exec(ctx, sql, id, state)
+func (s *Store) setState(ctx context.Context, q db.Querier, id, state, reason, detail string) error {
+	const sql = `UPDATE extensions SET state = $2, degraded_reason = $3, degraded_detail = $4, updated_at = now() WHERE id = $1`
+	_, err := q.Exec(ctx, sql, id, state, reason, detail)
 	return err
 }
 
@@ -356,28 +356,51 @@ func (s *Service) List(ctx context.Context, orgID string) ([]types.Extension, er
 }
 
 // SetState transitions the extension state (supervisor-driven) with audit +
-// outbox on change. No-op when the state is unchanged.
+// outbox on change. Supervisor-originated degraded transitions use process_exited;
+// ready/pending/stopped transitions clear degraded metadata.
 func (s *Service) SetState(ctx context.Context, actor, id, state string) error {
+	reason := ""
+	if state == types.ExtensionStateDegraded {
+		reason = string(extensionv1.DegradedProcessExited)
+	}
+	return s.SetStateWithReason(ctx, actor, id, state, reason, "")
+}
+
+// SetStateWithReason transitions state and persists typed degraded metadata.
+func (s *Service) SetStateWithReason(ctx context.Context, actor, id, state, reason, detail string) error {
 	e, err := s.store.get(ctx, s.db.Pool, id)
 	if err != nil {
 		return err
-	}
-	if e.State == state {
-		return nil
 	}
 	switch state {
 	case types.ExtensionStatePending, types.ExtensionStateReady, types.ExtensionStateDegraded, types.ExtensionStateStopped:
 	default:
 		return fmt.Errorf("%w: unknown state %q", ErrInvalidInput, state)
 	}
+	if state != types.ExtensionStateDegraded {
+		reason, detail = "", ""
+	} else {
+		if reason == "" {
+			reason = string(extensionv1.DegradedHandshakeFailed)
+		}
+		switch extensionv1.ExtensionDegradedReason(reason) {
+		case extensionv1.DegradedContractUnsupported, extensionv1.DegradedHandshakeFailed,
+			extensionv1.DegradedIdentityMismatch, extensionv1.DegradedChecksumMismatch, extensionv1.DegradedProcessExited:
+		default:
+			return fmt.Errorf("%w: unknown degraded reason %q", ErrInvalidInput, reason)
+		}
+	}
+	if e.State == state && e.DegradedReason == reason && e.DegradedDetail == detail {
+		return nil
+	}
 	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
-		if err := s.store.setState(ctx, tx, id, state); err != nil {
+		if err := s.store.setState(ctx, tx, id, state, reason, detail); err != nil {
 			return err
 		}
 		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
 			OrgID: e.OrgID, Actor: actor, Action: "extension.state_changed",
 			ObjectType: "extension", ObjectID: id,
-			Payload: json.RawMessage(fmt.Sprintf(`{"state":%q}`, state)),
+			Payload: json.RawMessage(fmt.Sprintf(`{"state":%q,"reason":%q}`, state, reason)),
 		}); err != nil {
 			return err
 		}
@@ -399,8 +422,13 @@ func (s *Service) Verify(ctx context.Context, actor, orgID, id string) (*types.E
 	if e.Endpoint == "" {
 		return nil, fmt.Errorf("%w: endpoint is required for verification", ErrInvalidInput)
 	}
-	if _, err := VerifyHandshake(ctx, e.Endpoint, e); err != nil {
-		if serr := s.SetState(ctx, actor, id, types.ExtensionStateDegraded); serr != nil {
+	if _, err := VerifyHandshakeWithPolicy(ctx, e.Endpoint, e, s.policy); err != nil {
+		reason := string(extensionv1.DegradedHandshakeFailed)
+		var handshakeErr *HandshakeError
+		if errors.As(err, &handshakeErr) && handshakeErr.Reason != "" {
+			reason = handshakeErr.Reason
+		}
+		if serr := s.SetStateWithReason(ctx, actor, id, types.ExtensionStateDegraded, reason, err.Error()); serr != nil {
 			return nil, serr
 		}
 		return nil, err
@@ -562,7 +590,7 @@ func (s *Service) RegisterUi(ctx context.Context, actor string, in RegisterUiInp
 				}
 				return err
 			}
-			if err := s.store.setState(ctx, tx, e.ID, types.ExtensionStateReady); err != nil {
+			if err := s.store.setState(ctx, tx, e.ID, types.ExtensionStateReady, "", ""); err != nil {
 				return err
 			}
 		} else if err := s.store.touchVersion(ctx, tx, e.ID, in.Version); err != nil {

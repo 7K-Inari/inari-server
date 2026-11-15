@@ -140,11 +140,11 @@ func newQADeploymentEnvironment(t *testing.T) *qaDeploymentEnvironment {
 
 func (e *qaDeploymentEnvironment) requestApproval(t *testing.T) string {
 	t.Helper()
-	if _, err := e.database.Pool.Exec(context.Background(), `UPDATE catalog_items SET approval_policy='peer' WHERE id='curated:web-service'`); err != nil {
+	if _, err := e.database.Pool.Exec(context.Background(), `UPDATE catalog_items SET approval_policy='peer' WHERE id='core/web-service'`); err != nil {
 		t.Fatal(err)
 	}
 	code, body := itReq(t, e.srv, http.MethodPost, "/api/v1/tenants/acme/deploys", "good",
-		`{"itemId":"curated:web-service","version":"0.1.0","clusterId":"cluster-1","name":"web","spec":{"hostname":"app.example.com"}}`)
+		`{"itemId":"core/web-service","version":"0.1.0","clusterId":"cluster-1","name":"web","spec":{"hostname":"app.example.com"}}`)
 	if code != http.StatusOK {
 		t.Fatalf("request deployment approval = %d %s", code, body)
 	}

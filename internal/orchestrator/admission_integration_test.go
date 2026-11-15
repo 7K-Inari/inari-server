@@ -12,6 +12,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/artifactadmission"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/inventory"
+	"github.com/7K-Inari/inari-server/internal/resourcetargets"
 	"github.com/7K-Inari/inari-server/internal/testutil"
 	"github.com/7K-Inari/inari-server/internal/testutil/testdb"
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -25,6 +26,26 @@ type recordingGate struct {
 func (g *recordingGate) Gate(context.Context, approvals.GateInput) (*approvals.GateResult, error) {
 	g.calls++
 	return &approvals.GateResult{Approved: g.approved, ApprovalID: "approval-1"}, nil
+}
+
+type admissionTargetResolver struct{}
+
+func (admissionTargetResolver) ResolveResource(ctx context.Context, orgID, _, _ string, _ resourcetargets.Action,
+	ref resourcetargets.TargetResourceRef, _ json.RawMessage) (*resourcetargets.ResolvedTarget, error) {
+	cluster, err := (admissionCluster{org: orgID}).GetCluster(ctx, ref.ID)
+	if err != nil {
+		return nil, err
+	}
+	return &resourcetargets.ResolvedTarget{Cluster: cluster}, nil
+}
+
+type admissionPermissions struct{}
+
+func (admissionPermissions) Check(context.Context, string, string, string) (bool, error) {
+	return true, nil
+}
+func (admissionPermissions) ListObjects(context.Context, string, string, string) ([]string, error) {
+	return nil, nil
 }
 
 func newAdmissionWorkflowFixture(t *testing.T, catalog *denialCatalog, gate *recordingGate) (*Service, *db.DB) {
@@ -51,7 +72,9 @@ func newAdmissionWorkflowFixture(t *testing.T, catalog *denialCatalog, gate *rec
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return NewService(database, instances, catalog, admissionCluster{org: "org:1"}, gate, nil, nil, nil), database
+	service := NewService(database, instances, catalog, admissionCluster{org: "org:1"}, gate, nil, nil, nil).
+		WithResourceTargets(admissionTargetResolver{}).WithOrgPermissions(admissionPermissions{})
+	return service, database
 }
 
 func TestAdmissionDenialPrecedesEveryApprovalGate(t *testing.T) {

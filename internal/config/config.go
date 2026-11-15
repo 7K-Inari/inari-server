@@ -539,6 +539,24 @@ func Load() (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("config: parse INARI_TRUSTED_SOURCES_FILE %q: %w", c.TrustedSourcesFile, err)
 		}
+		if sources.Environment != trustedsource.EnvironmentDevelopment {
+			for _, group := range []struct {
+				name  string
+				group *trustedsource.SourceGroup
+			}{
+				{name: "catalog", group: sources.Catalog},
+				{name: "template", group: sources.Template},
+			} {
+				if group.group == nil {
+					continue
+				}
+				for i, source := range group.group.Sources {
+					if source.AllowUnsigned != "" {
+						return nil, fmt.Errorf("config: INARI_TRUSTED_SOURCES_FILE %q: %s.sources[%d].allowUnsigned requires environment development", c.TrustedSourcesFile, group.name, i)
+					}
+				}
+			}
+		}
 		c.TrustedSources = sources
 		if sources.Catalog != nil && sources.Catalog.SyncInterval != "" {
 			interval, err := time.ParseDuration(sources.Catalog.SyncInterval)

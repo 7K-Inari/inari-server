@@ -59,6 +59,47 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
+func TestExtensionContractDefaultsAndOverrides(t *testing.T) {
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.SupportedPluginContracts) != 1 || c.SupportedPluginContracts[0] != "inari.plugin.v1" {
+		t.Fatalf("SupportedPluginContracts = %v", c.SupportedPluginContracts)
+	}
+	if len(c.SupportedUIHostAPIs) != 1 || c.SupportedUIHostAPIs[0] != "inari.ui.v1" {
+		t.Fatalf("SupportedUIHostAPIs = %v", c.SupportedUIHostAPIs)
+	}
+	if c.ExtensionContractsRequired {
+		t.Fatal("contracts must be optional during the initial deprecation phase")
+	}
+	if c.ServerVersion == "" {
+		t.Fatal("ServerVersion must not be empty")
+	}
+
+	t.Setenv("INARI_SUPPORTED_PLUGIN_CONTRACTS", "inari.plugin.v2, inari.plugin.v1")
+	t.Setenv("INARI_SUPPORTED_UI_HOST_APIS", "inari.ui.v2,inari.ui.v1")
+	t.Setenv("INARI_EXTENSION_CONTRACTS_REQUIRED", "true")
+	t.Setenv("INARI_SERVER_VERSION", "4.1.0-test")
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.SupportedPluginContracts) != 2 || c.SupportedPluginContracts[0] != "inari.plugin.v1" || c.SupportedPluginContracts[1] != "inari.plugin.v2" {
+		t.Fatalf("override plugin contracts = %v", c.SupportedPluginContracts)
+	}
+	if len(c.SupportedUIHostAPIs) != 2 || !c.ExtensionContractsRequired || c.ServerVersion != "4.1.0-test" {
+		t.Fatalf("override UI/required/version = %v %v %q", c.SupportedUIHostAPIs, c.ExtensionContractsRequired, c.ServerVersion)
+	}
+}
+
+func TestExtensionContractInvalidSupportSetFails(t *testing.T) {
+	t.Setenv("INARI_SUPPORTED_PLUGIN_CONTRACTS", "not-a-contract")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected malformed supported plugin contract failure")
+	}
+}
+
 func TestLoadEnvOverride(t *testing.T) {
 	t.Setenv("INARI_HTTP_ADDR", ":9090")
 	t.Setenv("INARI_OUTBOX_POLL_INTERVAL", "5s")

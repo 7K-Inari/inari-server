@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	extensionv1 "github.com/7K-Inari/inari-api/contract/extension/v1"
 	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
 	"github.com/blang/semver"
 )
@@ -92,7 +93,12 @@ type Config struct {
 	// ext-<name> client with this audience may invoke actions. The interim
 	// shared INARI_EXTENSION_GATEWAY_TOKEN was removed (issue #75).
 	ExtensionGatewayAudience string
-	ESOSecretStore           string
+	// Supported extension contract sets and declaration enforcement policy.
+	SupportedPluginContracts   []string
+	SupportedUIHostAPIs        []string
+	ExtensionContractsRequired bool
+	ServerVersion              string
+	ESOSecretStore             string
 	// ESOSecretNamespace overrides the namespace the agent-gateway handshake
 	// advertises for the ESO-delivered OIDC client secret (plan §5.3).
 	// Empty keeps the agentgateway default (inari-system) — correct for real
@@ -440,6 +446,10 @@ func Load() (*Config, error) {
 		AgentImageRepo:             env("INARI_AGENT_IMAGE_REPO", "ghcr.io/7k-inari/inari-agent"),
 		AgentGatewayAddress:        env("INARI_AGENT_GATEWAY_ADDRESS", "https://inari-server.example.com"),
 		ExtensionGatewayAudience:   env("INARI_EXTENSION_GATEWAY_AUDIENCE", "inari-extension-gateway"),
+		SupportedPluginContracts:   listEnv("INARI_SUPPORTED_PLUGIN_CONTRACTS", []string{extensionv1.BackendContractV1}),
+		SupportedUIHostAPIs:        listEnv("INARI_SUPPORTED_UI_HOST_APIS", []string{extensionv1.UIHostAPIV1}),
+		ExtensionContractsRequired: boolEnv("INARI_EXTENSION_CONTRACTS_REQUIRED", false),
+		ServerVersion:              env("INARI_SERVER_VERSION", "dev"),
 		ESOSecretStore:             env("INARI_ESO_SECRET_STORE", "inari-platform"),
 		ESOSecretNamespace:         env("INARI_ESO_SECRET_NAMESPACE", ""),
 
@@ -572,6 +582,18 @@ func Load() (*Config, error) {
 			}
 			c.TemplateSyncInterval = interval
 		}
+	}
+	var err error
+	c.SupportedPluginContracts, err = extensionv1.NormalizeSupportSet(c.SupportedPluginContracts)
+	if err != nil {
+		return nil, fmt.Errorf("config: INARI_SUPPORTED_PLUGIN_CONTRACTS: %w", err)
+	}
+	c.SupportedUIHostAPIs, err = extensionv1.NormalizeSupportSet(c.SupportedUIHostAPIs)
+	if err != nil {
+		return nil, fmt.Errorf("config: INARI_SUPPORTED_UI_HOST_APIS: %w", err)
+	}
+	if c.ServerVersion == "" {
+		return nil, fmt.Errorf("config: INARI_SERVER_VERSION must not be empty")
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("config: INARI_DATABASE_URL must not be empty")

@@ -11,6 +11,7 @@ import (
 
 	extensionv1 "github.com/7K-Inari/inari-api/contract/extension/v1"
 	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
+	"github.com/7K-Inari/inari-server/internal/buildinfo"
 	"github.com/blang/semver"
 )
 
@@ -449,7 +450,7 @@ func Load() (*Config, error) {
 		SupportedPluginContracts:   listEnv("INARI_SUPPORTED_PLUGIN_CONTRACTS", []string{extensionv1.BackendContractV1}),
 		SupportedUIHostAPIs:        listEnv("INARI_SUPPORTED_UI_HOST_APIS", []string{extensionv1.UIHostAPIV1}),
 		ExtensionContractsRequired: boolEnv("INARI_EXTENSION_CONTRACTS_REQUIRED", false),
-		ServerVersion:              env("INARI_SERVER_VERSION", "dev"),
+		ServerVersion:              env("INARI_SERVER_VERSION", buildinfo.Version),
 		ESOSecretStore:             env("INARI_ESO_SECRET_STORE", "inari-platform"),
 		ESOSecretNamespace:         env("INARI_ESO_SECRET_NAMESPACE", ""),
 

@@ -1,4 +1,6 @@
 BINARY := bin/inari-server
+VERSION ?= dev
+VERSION_PACKAGE := github.com/7K-Inari/inari-server/internal/buildinfo
 
 .PHONY: build test test-integration lint actionlint run migrate docker export-openapi
 
@@ -7,7 +9,7 @@ export-openapi:
 	go run ./cmd/export-openapi dist/openapi.yaml
 
 build:
-	go build -o $(BINARY) ./cmd/inari-server
+	go build -ldflags="-X $(VERSION_PACKAGE).Version=$(VERSION)" -o $(BINARY) ./cmd/inari-server
 
 test:
 	go test ./...

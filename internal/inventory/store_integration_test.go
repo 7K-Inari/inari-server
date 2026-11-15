@@ -160,6 +160,32 @@ func TestGitRepoCRUD(t *testing.T) {
 	}
 }
 
+func TestListClusterBaselineRepos(t *testing.T) {
+	database, ctx := setupStoreTest(t)
+	seedOrg(t, database, ctx, "org:1", "acme")
+	fallbackCluster := seedCluster(t, database, ctx, "org:1", "fallback")
+	boundCluster := seedCluster(t, database, ctx, "org:1", "bound")
+	s := NewStore()
+	fallback := &types.TenantGitRepo{OrgID: "org:1", Name: "fallback", Repo: "acme/fallback", Scope: types.GitRepoScopePlatform, IsDefault: true}
+	bound := &types.TenantGitRepo{OrgID: "org:1", Name: "bound", Repo: "acme/bound", Scope: types.GitRepoScopePlatform}
+	if err := s.UpsertGitRepo(ctx, database.Pool, fallback); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertGitRepo(ctx, database.Pool, bound); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BindClusterBaseline(ctx, database.Pool, boundCluster, bound.ID); err != nil {
+		t.Fatal(err)
+	}
+	repos, err := s.ListClusterBaselineRepos(ctx, database.Pool, "org:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != 2 || repos[fallbackCluster].ID != fallback.ID || repos[boundCluster].ID != bound.ID {
+		t.Fatalf("baseline bindings = %+v, want fallback and bound repos", repos)
+	}
+}
+
 func TestSetDefaultGitRepo(t *testing.T) {
 	database, ctx := setupStoreTest(t)
 	seedOrg(t, database, ctx, "org:1", "acme")

@@ -134,7 +134,7 @@ func itServerWithGit(t *testing.T, git gitprovider.Resolver) (*httptest.Server, 
 	inventorySvc := inventory.NewService(database, inventory.NewStore(), auditStore, catalogSvc)
 	queue := &itQueue{}
 	orchSvc := orchestrator.NewService(database, inventory.NewStore(), catalogSvc, itClusters{},
-		approvalsSvc, queue, git, auditStore)
+		approvalsSvc, queue, git, auditStore).WithResourceTargets(&stubTargetResolver{})
 
 	router, api := httpserver.NewRouter(slog.Default(), itValidator{}, database)
 	catalog.NewHandler(catalogSvc, itTenants{"acme": {ID: "org:1", Slug: "acme"}}, itAuthorizer{allow: true}).RegisterRoutes(api)

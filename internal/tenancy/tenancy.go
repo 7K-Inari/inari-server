@@ -925,6 +925,23 @@ func (s *Service) UpdateTeam(ctx context.Context, actor, slug, name, displayName
 	return updated, nil
 }
 
+func resourceTargetGrantsForTeam(ctx context.Context, q db.Querier, teamID string) ([]types.ResourceTargetGrant, error) {
+	rows, err := q.Query(ctx, `SELECT target_id, team_id, relation FROM resource_target_grants WHERE team_id=$1 ORDER BY target_id`, teamID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []types.ResourceTargetGrant
+	for rows.Next() {
+		var grant types.ResourceTargetGrant
+		if err := rows.Scan(&grant.TargetID, &grant.TeamID, &grant.Relation); err != nil {
+			return nil, err
+		}
+		out = append(out, grant)
+	}
+	return out, rows.Err()
+}
+
 // DeleteTeam removes a non-default team: membership rows, the DB row, and
 // the Keycloak group. The outbox team.deleted event retracts the team's
 // org permission tuples from OpenFGA. The admin guardrail is re-checked
@@ -969,7 +986,10 @@ func (s *Service) DeleteTeam(ctx context.Context, actor, slug, name string) erro
 		if err := s.store.LockOrgForGuardrail(ctx, tx, org.ID); err != nil {
 			return err
 		}
-		var err error
+		targetGrants, err := resourceTargetGrantsForTeam(ctx, tx, existing.ID)
+		if err != nil {
+			return err
+		}
 		deleted, err = s.store.DeleteTeam(ctx, tx, org.ID, name)
 		if err != nil {
 			return err
@@ -989,7 +1009,7 @@ func (s *Service) DeleteTeam(ctx context.Context, actor, slug, name string) erro
 		}
 		return audit.AppendOutbox(ctx, tx, org.ID, types.EventTeamDeleted, types.TeamCreatedPayload{
 			OrgID: org.ID, TeamID: deleted.ID, Name: deleted.Name,
-			RoleID: role.ID, RoleName: role.Name, Permissions: role.Permissions,
+			RoleID: role.ID, RoleName: role.Name, Permissions: role.Permissions, TargetGrants: targetGrants,
 		})
 	})
 	if err != nil {

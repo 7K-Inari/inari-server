@@ -37,6 +37,7 @@ type organization
     define catalog_manage: [team#member]
     define deployments_create: [team#member]
     define approvals_manage: [team#member]
+    define resourcetargets_manage: [team#member]
 
 type cluster
   relations
@@ -97,3 +98,14 @@ type drift_event
   relations
     define parent: [organization]
     define viewer: tenant_read from parent
+
+type resource_target
+  relations
+    define parent: [organization]
+    define manage: resourcetargets_manage from parent
+    define view_grant: [team#member]
+    define use_grant: [team#member]
+    define provision_grant: [team#member]
+    define viewer: view_grant or use_grant or provision_grant or manage
+    define use: use_grant or manage
+    define provision: provision_grant or manage

@@ -20,6 +20,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/orchestrator"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
+	"github.com/7K-Inari/inari-server/internal/resourcetargets"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -59,6 +60,14 @@ func (e2eClusters) GetCluster(_ context.Context, id string) (*types.Cluster, err
 	return nil, inventory.ErrInstanceNotFound
 }
 
+type e2eTargets struct{}
+
+func (e2eTargets) ResolveResource(ctx context.Context, _, _, _ string, _ resourcetargets.Action,
+	ref resourcetargets.TargetResourceRef, _ json.RawMessage) (*resourcetargets.ResolvedTarget, error) {
+	cluster, err := (e2eClusters{}).GetCluster(ctx, ref.ID)
+	return &resourcetargets.ResolvedTarget{Cluster: cluster}, err
+}
+
 func newE2EServer(t *testing.T) *e2eFixture {
 	t.Helper()
 	f := newITServer(t) // seeds org/roles/teams/cluster, wires gitrepos routes
@@ -78,7 +87,7 @@ func newE2EServer(t *testing.T) *e2eFixture {
 	resolver := gitprovider.StaticResolver{P: f.git}
 	repoResolver := gitprovider.NewRepoResolver(e2eRepoStoreAdapter{invStore, f.database}, nil, resolver)
 	orchSvc := orchestrator.NewService(f.database, invStore, catalogSvc, e2eClusters{},
-		approvalsSvc, f.queue, resolver, auditStore).WithRepoResolver(repoResolver)
+		approvalsSvc, f.queue, resolver, auditStore).WithRepoResolver(repoResolver).WithResourceTargets(e2eTargets{})
 
 	// Rebuild the router with both modules mounted.
 	router, api := httpserver.NewRouter(slog.Default(), itValidator{}, f.database)

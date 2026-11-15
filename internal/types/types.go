@@ -126,6 +126,7 @@ const (
 	EventApprovalExpired          = "approval.expired"
 	EventApprovalConfigUpdated    = "approvals.config.updated"
 	EventDeployRequested          = "deploy.requested"
+	EventDeployTargetDenied       = "deploy.target_denied"
 	EventInstanceCreated          = "instance.created"
 	EventInstanceStatus           = "instance.status"
 	EventInstanceUpgraded         = "instance.upgraded"
@@ -182,6 +183,11 @@ const (
 
 	EventPlatformResourceStatus    = "platform_resource.status"
 	EventPlatformResourceReconcile = "platform_resource.reconcile_requested"
+
+	EventResourceTargetCreated      = "resource_target.created"
+	EventResourceTargetUpdated      = "resource_target.updated"
+	EventResourceTargetDeleted      = "resource_target.deleted"
+	EventResourceTargetGrantChanged = "resource_target.grant_changed"
 )
 
 // ClusterState is the cluster lifecycle state (plan §5.11).
@@ -1054,6 +1060,22 @@ type PlatformResourceReconcilePayload struct {
 	ClustersNotified     int    `json:"clustersNotified"`
 }
 
+// ResourceTargetGrant is an exact target/team relation snapshot for authz
+// reconciliation and lifecycle cleanup.
+type ResourceTargetGrant struct {
+	TargetID string `json:"targetId"`
+	TeamID   string `json:"teamId"`
+	Relation string `json:"relation"`
+}
+
+// ResourceTargetPayload drives current-state target authz reconciliation.
+type ResourceTargetPayload struct {
+	OrgID    string                `json:"orgId"`
+	TargetID string                `json:"targetId"`
+	Deleted  bool                  `json:"deleted,omitempty"`
+	Grants   []ResourceTargetGrant `json:"grants,omitempty"`
+}
+
 // TeamSeed is one default team to create with a tenant and the permission
 // bundle its role grants (snapshot at event time, so tuple consumers never
 // need DB reads).
@@ -1077,11 +1099,12 @@ type TenantCreatedPayload struct {
 // (cluster, cloud_account, cluster_set, policy_pack, extension, rollout,
 // drift_event, tenant_zone) to the org's object ids of that type.
 type TenantDeletingPayload struct {
-	OrgID   string              `json:"orgId"`
-	Slug    string              `json:"slug"`
-	Teams   []TeamSeed          `json:"teams"`
-	Members []MembershipPayload `json:"members"`
-	Objects map[string][]string `json:"objects"`
+	OrgID        string                `json:"orgId"`
+	Slug         string                `json:"slug"`
+	Teams        []TeamSeed            `json:"teams"`
+	Members      []MembershipPayload   `json:"members"`
+	Objects      map[string][]string   `json:"objects"`
+	TargetGrants []ResourceTargetGrant `json:"targetGrants,omitempty"`
 }
 
 // TenantDeletedPayload is the outbox payload for EventTenantDeleted.
@@ -1121,12 +1144,13 @@ type TenantDeletion struct {
 // EventTeamDeleted; Permissions is the team's role bundle snapshot driving
 // the per-permission org tuple write/retraction.
 type TeamCreatedPayload struct {
-	OrgID       string   `json:"orgId"`
-	TeamID      string   `json:"teamId"`
-	Name        string   `json:"name"`
-	RoleID      string   `json:"roleId"`
-	RoleName    string   `json:"roleName"`
-	Permissions []string `json:"permissions"`
+	OrgID        string                `json:"orgId"`
+	TeamID       string                `json:"teamId"`
+	Name         string                `json:"name"`
+	RoleID       string                `json:"roleId"`
+	RoleName     string                `json:"roleName"`
+	Permissions  []string              `json:"permissions"`
+	TargetGrants []ResourceTargetGrant `json:"targetGrants,omitempty"`
 }
 
 // MembershipPayload is the outbox payload for membership add/remove events.

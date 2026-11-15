@@ -18,6 +18,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/7K-Inari/inari-server/internal/artifactadmission"
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/authz"
@@ -152,7 +153,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	f := newITFixture(t)
 	ctx := context.Background()
 
-	run, steps, existed, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "go-service", "", "", json.RawMessage(`{"name":"payments-api","replicas":2}`))
+	run, steps, existed, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "template:go-service", "", "", json.RawMessage(`{"name":"payments-api","replicas":2}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,11 +254,11 @@ func TestCreateRunIdempotent(t *testing.T) {
 	ctx := context.Background()
 	values := json.RawMessage(`{"name":"payments-api"}`)
 
-	r1, _, existed1, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "go-service", "", "", values)
+	r1, _, existed1, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "template:go-service", "", "", values)
 	if err != nil || existed1 {
 		t.Fatalf("first create: existed=%v err=%v", existed1, err)
 	}
-	r2, steps2, existed2, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "go-service", "", "", values)
+	r2, steps2, existed2, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "template:go-service", "", "", values)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +274,7 @@ func TestCreateRunIdempotent(t *testing.T) {
 		t.Fatalf("want exactly 1 run row, got %d (%v)", n, err)
 	}
 	// Different values derive a different key → a new run.
-	r3, _, existed3, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "go-service", "", "", json.RawMessage(`{"name":"orders-api"}`))
+	r3, _, existed3, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "template:go-service", "", "", json.RawMessage(`{"name":"orders-api"}`))
 	if err != nil || existed3 || r3.ID == r1.ID {
 		t.Fatalf("different values must create a new run: %q existed=%v err=%v", r3.ID, existed3, err)
 	}
@@ -300,7 +301,7 @@ func TestCreateRunConcurrentIdempotent(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			r, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "go-service", "", "", values)
+			r, _, _, err := f.svc.CreateRun(ctx, "dev-1", "org:acme", "template:go-service", "", "", values)
 			ids[i], errs[i] = "", err
 			if r != nil {
 				ids[i] = r.ID
@@ -345,7 +346,7 @@ func TestHTTPAuthz(t *testing.T) {
 	if code, _ := f.req(t, "GET", "/api/v1/tenants/acme/templates", "good", ""); code != http.StatusOK {
 		t.Fatalf("want 200 for viewer-allowed list, got %d", code)
 	}
-	if code, _ := f.req(t, "POST", "/api/v1/tenants/acme/templates/go-service/runs", "good", `{"values":{"name":"payments-api"}}`); code != http.StatusForbidden {
+	if code, _ := f.req(t, "POST", "/api/v1/tenants/acme/templates/template:go-service/runs", "good", `{"values":{"name":"payments-api"}}`); code != http.StatusForbidden {
 		t.Fatalf("want 403 when developer denied, got %d", code)
 	}
 	f.az.deny[authz.RelationDeploymentsCreate] = false
@@ -371,7 +372,7 @@ func TestHTTPTemplates(t *testing.T) {
 		t.Fatalf("want manifest tags, got %v", list.Templates[0].Tags)
 	}
 
-	code, body = f.req(t, "GET", "/api/v1/tenants/acme/templates/go-service", "good", "")
+	code, body = f.req(t, "GET", "/api/v1/tenants/acme/templates/template:go-service", "good", "")
 	if code != http.StatusOK {
 		t.Fatalf("want 200, got %d: %s", code, body)
 	}
@@ -394,7 +395,7 @@ func TestHTTPRunLifecycle(t *testing.T) {
 	f := newITFixture(t)
 
 	// 422 on schema violations, before any run row exists.
-	code, body := f.req(t, "POST", "/api/v1/tenants/acme/templates/go-service/runs", "good", `{"values":{"name":"x","bogus":1}}`)
+	code, body := f.req(t, "POST", "/api/v1/tenants/acme/templates/template:go-service/runs", "good", `{"values":{"name":"x","bogus":1}}`)
 	if code != http.StatusUnprocessableEntity {
 		t.Fatalf("want 422, got %d: %s", code, body)
 	}
@@ -404,12 +405,12 @@ func TestHTTPRunLifecycle(t *testing.T) {
 	}
 
 	// Unknown version → 400.
-	if code, _ := f.req(t, "POST", "/api/v1/tenants/acme/templates/go-service/runs", "good", `{"version":"9.9.9","values":{"name":"payments-api"}}`); code != http.StatusBadRequest {
+	if code, _ := f.req(t, "POST", "/api/v1/tenants/acme/templates/template:go-service/runs", "good", `{"version":"9.9.9","values":{"name":"payments-api"}}`); code != http.StatusBadRequest {
 		t.Fatalf("want 400 for unknown version, got %d", code)
 	}
 
 	// Valid create → 201 with the UI contract shape.
-	code, body = f.req(t, "POST", "/api/v1/tenants/acme/templates/go-service/runs", "good", `{"values":{"name":"payments-api","replicas":2}}`)
+	code, body = f.req(t, "POST", "/api/v1/tenants/acme/templates/template:go-service/runs", "good", `{"values":{"name":"payments-api","replicas":2}}`)
 	if code != http.StatusCreated {
 		t.Fatalf("want 201, got %d: %s", code, body)
 	}
@@ -438,7 +439,7 @@ func TestHTTPRunLifecycle(t *testing.T) {
 	}
 
 	// Idempotent replay → 200 with the same run id.
-	code, body = f.req(t, "POST", "/api/v1/tenants/acme/templates/go-service/runs", "good", `{"values":{"name":"payments-api","replicas":2}}`)
+	code, body = f.req(t, "POST", "/api/v1/tenants/acme/templates/template:go-service/runs", "good", `{"values":{"name":"payments-api","replicas":2}}`)
 	if code != http.StatusOK {
 		t.Fatalf("want 200 on replay, got %d: %s", code, body)
 	}
@@ -468,7 +469,7 @@ func TestHTTPRunLifecycle(t *testing.T) {
 		t.Fatalf("want 404 cancelling unknown run, got %d", code)
 	}
 	// Terminal run → 409 (fresh run; the cancelled one above is a no-op).
-	code, body = f.req(t, "POST", "/api/v1/tenants/acme/templates/go-service/runs", "good", `{"values":{"name":"orders-api"}}`)
+	code, body = f.req(t, "POST", "/api/v1/tenants/acme/templates/template:go-service/runs", "good", `{"values":{"name":"orders-api"}}`)
 	if code != http.StatusCreated {
 		t.Fatalf("want 201, got %d: %s", code, body)
 	}
@@ -485,5 +486,42 @@ func TestHTTPRunLifecycle(t *testing.T) {
 	}
 	if code, _ := f.req(t, "POST", "/api/v1/tenants/acme/scaffold-runs/"+created2.Run.ID+"/cancel", "good", ""); code != http.StatusConflict {
 		t.Fatalf("want 409 cancelling terminal run, got %d", code)
+	}
+}
+
+func TestHTTPRetryRunMapsAdmissionFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		temporary bool
+		want      int
+	}{
+		{name: "denied", want: http.StatusUnprocessableEntity},
+		{name: "unavailable", temporary: true, want: http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newITFixture(t)
+			digest := "sha256:52ccaee6d4dd272e54bfccda77738b42e1edf0e4a20c27e23f0b6c15d01aef79"
+			run := &types.ScaffoldRun{
+				ID: "run:admission-" + tc.name, OrgID: "org:acme", TemplateItemID: "core/go-service",
+				TemplateVersion: "1.0.0", TemplateDigest: digest, Phase: types.ScaffoldPhaseFailed, CreatedBy: "dev-1",
+			}
+			if _, err := f.db.Pool.Exec(context.Background(), `INSERT INTO catalog_items
+				(id, source, source_id, trust_tier, name, display_name, description, snapshot_present)
+				VALUES ('core/go-service', 'template', 'core', 'experimental', 'go-service', 'Go Service', 'Minimal Go HTTP service', true)`); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.svc.store.CreateRun(context.Background(), f.db.Pool, run, nil); err != nil {
+				t.Fatal(err)
+			}
+			cat := newStubCatalog()
+			cat.byID["core/go-service"] = &types.CatalogItem{ID: "core/go-service", SourceID: "core", Name: "go-service", Source: types.CatalogSourceTemplate}
+			cat.admitErr = &artifactadmission.Error{Code: artifactadmission.CodeSignatureInvalid, Err: errors.New("verification failed"), Temporary: tc.temporary}
+			f.svc.catalog = cat
+			f.svc.WithExecEnv(&ExecEnv{Catalog: cat})
+			code, body := f.req(t, http.MethodPost, "/api/v1/tenants/acme/scaffold-runs/"+run.ID+"/retry", "good", "")
+			if code != tc.want {
+				t.Fatalf("status = %d, want %d: %s", code, tc.want, body)
+			}
+		})
 	}
 }

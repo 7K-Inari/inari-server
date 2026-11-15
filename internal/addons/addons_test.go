@@ -433,7 +433,7 @@ func TestUpdatePicksUpTargetVersionCoordinates(t *testing.T) {
 	if got := upd.Addon.Source.Helm.RepoURL; got != "https://charts.example.com/moved" {
 		t.Errorf("stored source repoURL = %q, want the target version's coordinates", got)
 	}
-	app := git.Files("acme/state", "main")["addons/cert-manager/application.yaml"]
+	app := git.Files("acme/state", "main")["addons/platform:cert-manager/application.yaml"]
 	if !strings.Contains(app, "repoURL: https://charts.example.com/moved") ||
 		!strings.Contains(app, "targetRevision: v1.17.0") {
 		t.Errorf("re-rendered application must use the new version's coordinates:\n%s", app)
@@ -491,7 +491,7 @@ func TestAdoptApplicationDirectPolicy(t *testing.T) {
 	}
 	row := res.Addon
 	if row.State != types.AddonStateManaged || row.RepoID != "repo-baseline" ||
-		row.RepoPath != "addons/cert-manager" || row.ChartVersion != "v1.16.2" ||
+		row.RepoPath != "addons/platform:cert-manager" || row.ChartVersion != "v1.16.2" ||
 		row.PruneEnabled || row.Namespace != "cert-manager" {
 		t.Errorf("unexpected row: %+v", row)
 	}
@@ -500,7 +500,7 @@ func TestAdoptApplicationDirectPolicy(t *testing.T) {
 	}
 
 	files := git.Files("acme/acme-inari-state", "main")
-	app, ok := files["addons/cert-manager/application.yaml"]
+	app, ok := files["addons/platform:cert-manager/application.yaml"]
 	if !ok {
 		t.Fatalf("application.yaml not committed; have %v", keysOf(files))
 	}
@@ -513,7 +513,7 @@ func TestAdoptApplicationDirectPolicy(t *testing.T) {
 	if !strings.Contains(app, "targetRevision: v1.16.2") {
 		t.Error("chart version must be the application targetRevision")
 	}
-	vals := files["addons/cert-manager/values.yaml"]
+	vals := files["addons/platform:cert-manager/values.yaml"]
 	if !strings.Contains(vals, "enabled: true") {
 		t.Errorf("values.yaml = %q", vals)
 	}
@@ -575,7 +575,7 @@ func TestAdoptApplicationSet(t *testing.T) {
 		t.Errorf("appset name = %q", row.ArgoCDApp)
 	}
 	files := git.Files("acme/acme-inari-state", "main")
-	appset, ok := files["addons/cert-manager/applicationset.yaml"]
+	appset, ok := files["addons/platform:cert-manager/applicationset.yaml"]
 	if !ok {
 		t.Fatalf("applicationset.yaml not committed; have %v", keysOf(files))
 	}
@@ -813,11 +813,11 @@ func TestUpdateVersionAndValues(t *testing.T) {
 	if upd.Addon.ChartVersion != "v1.16.2" || upd.CommitSHA == "" {
 		t.Errorf("update result: %+v", upd)
 	}
-	app := git.Files("acme/state", "main")["addons/cert-manager/application.yaml"]
+	app := git.Files("acme/state", "main")["addons/platform:cert-manager/application.yaml"]
 	if !strings.Contains(app, "targetRevision: v1.16.2") {
 		t.Error("re-rendered application must pin the new chart version")
 	}
-	vals := git.Files("acme/state", "main")["addons/cert-manager/values.yaml"]
+	vals := git.Files("acme/state", "main")["addons/platform:cert-manager/values.yaml"]
 	if !strings.Contains(vals, "enabled: false") {
 		t.Errorf("values.yaml = %q", vals)
 	}
@@ -839,7 +839,7 @@ func TestUpdateVersionAndValues(t *testing.T) {
 		}
 	}
 	// The failed validation must not have touched git.
-	if strings.Contains(git.Files("acme/state", "main")["addons/cert-manager/values.yaml"], "replicaCount") {
+	if strings.Contains(git.Files("acme/state", "main")["addons/platform:cert-manager/values.yaml"], "replicaCount") {
 		t.Error("rejected update must not commit")
 	}
 
@@ -883,7 +883,7 @@ func TestVersionBumpRevalidatesStoredValues(t *testing.T) {
 		t.Errorf("field-level errors required, got %+v", ve)
 	}
 	// The rejection is pre-commit: git and the row stay on the old version.
-	app := git.Files("acme/state", "main")["addons/cert-manager/application.yaml"]
+	app := git.Files("acme/state", "main")["addons/platform:cert-manager/application.yaml"]
 	if !strings.Contains(app, "targetRevision: v1.16.1") {
 		t.Error("rejected bump must not rewrite the committed application")
 	}
@@ -926,7 +926,7 @@ func TestEnablePrune(t *testing.T) {
 	if !pr.Addon.PruneEnabled {
 		t.Error("prune_enabled must be set")
 	}
-	app := git.Files("acme/state", "main")["addons/cert-manager/application.yaml"]
+	app := git.Files("acme/state", "main")["addons/platform:cert-manager/application.yaml"]
 	if !strings.Contains(app, "prune: true") {
 		t.Error("re-rendered application must enable prune")
 	}
@@ -1060,7 +1060,7 @@ func TestFleetReconcilerRerendersOnMembershipChange(t *testing.T) {
 	}, "user:u1"); err != nil {
 		t.Fatal(err)
 	}
-	baseline1 := git.Files("acme/state", "main")["addons/cert-manager/applicationset.yaml"]
+	baseline1 := git.Files("acme/state", "main")["addons/platform:cert-manager/applicationset.yaml"]
 	if strings.Contains(baseline1, "prod-us") {
 		t.Fatal("precondition: one element")
 	}
@@ -1073,7 +1073,7 @@ func TestFleetReconcilerRerendersOnMembershipChange(t *testing.T) {
 	if err := reconciler.Handle(ctx, ev); err != nil {
 		t.Fatal(err)
 	}
-	updated := git.Files("acme/state", "main")["addons/cert-manager/applicationset.yaml"]
+	updated := git.Files("acme/state", "main")["addons/platform:cert-manager/applicationset.yaml"]
 	if !strings.Contains(updated, "cluster: prod-us") {
 		t.Error("fleet re-render must add the new cluster to the list generator")
 	}

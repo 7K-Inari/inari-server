@@ -50,7 +50,7 @@ func TestRenderArgoCDApplication(t *testing.T) {
 		Name:           "inari-my-db",
 		Project:        "default",
 		RepoURL:        "https://github.com/inari-dev/acme-inari-state",
-		Path:           "clusters/c1/postgres-aws/inst-1",
+		Path:           "clusters/c1/curated:postgres-aws/inst-1",
 		TargetRevision: "main",
 		DestNamespace:  "apps",
 	})
@@ -71,7 +71,7 @@ func TestRenderArgoCDApplication(t *testing.T) {
 
 func TestRepoPathDeterministic(t *testing.T) {
 	p := RepoPath("c1", "curated:postgres-aws", "inst-1")
-	if p != "clusters/c1/postgres-aws/inst-1" {
+	if p != "clusters/c1/curated:postgres-aws/inst-1" {
 		t.Errorf("RepoPath = %q", p)
 	}
 }

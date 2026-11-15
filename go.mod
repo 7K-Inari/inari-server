@@ -4,7 +4,7 @@ go 1.26.3
 
 require (
 	connectrpc.com/connect/v2 v2.0.2
-	github.com/7K-Inari/inari-api v0.7.0-f0bdbad.0.20261113203746-9a6851832000
+	github.com/7K-Inari/inari-api v0.7.0
 	github.com/aws/aws-sdk-go-v2 v1.47.3
 	github.com/aws/aws-sdk-go-v2/config v1.33.9
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.9
@@ -32,6 +32,8 @@ require (
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/sigstore/cosign/v3 v3.1.3
+	github.com/sigstore/sigstore v1.10.8
+	github.com/sigstore/sigstore-go v1.2.2
 	github.com/testcontainers/testcontainers-go v0.44.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.44.0
 	go.opentelemetry.io/otel v1.47.0
@@ -183,8 +185,6 @@ require (
 	github.com/sigstore/protobuf-specs v0.5.1 // indirect
 	github.com/sigstore/rekor v1.5.3 // indirect
 	github.com/sigstore/rekor-tiles/v2 v2.3.0 // indirect
-	github.com/sigstore/sigstore v1.10.8 // indirect
-	github.com/sigstore/sigstore-go v1.2.2 // indirect
 	github.com/sigstore/timestamp-authority/v2 v2.1.2 // indirect
 	github.com/sirupsen/logrus v1.10.2 // indirect
 	github.com/skeema/knownhosts v1.3.1 // indirect

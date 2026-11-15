@@ -1,0 +1,257 @@
+package scaffold
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/registry"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"net/http/httptest"
+
+	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
+	"github.com/7K-Inari/inari-server/internal/artifactadmission"
+	"github.com/7K-Inari/inari-server/internal/oci"
+	"github.com/7K-Inari/inari-server/internal/types"
+)
+
+func setupTrustedTemplateRegistry(t *testing.T, manifest ...string) *RegistryTemplateSource {
+	t.Helper()
+	if len(manifest) > 1 {
+		t.Fatal("setup accepts at most one manifest override")
+	}
+	srv := httptest.NewServer(registry.New())
+	t.Cleanup(srv.Close)
+	host := strings.TrimPrefix(srv.URL, "http://")
+	files := templateFiles()
+	if len(manifest) == 1 {
+		files["template.yaml"] = manifest[0]
+	}
+	pushTemplate(t, host, "templates/go-service", "1.0.0", TemplateMediaType, files)
+	ref, err := name.ParseReference(host+"/templates/go-service:1.0.0", name.Insecure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := remote.Head(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := descriptor.Digest.String()
+	index := fmt.Sprintf(`apiVersion: inari.dev/v1
+kind: TemplateIndex
+mediaType: application/vnd.inari.template.index.v1+yaml
+sourceSha: abcdef0123456789abcdef0123456789abcdef01
+sourceRef: refs/heads/main
+producer:
+  workflowPath: .github/workflows/release.yml
+  workflowSha: 0123456789abcdef0123456789abcdef01234567
+  runId: "123"
+  runAttempt: 1
+  runUri: https://github.com/7k-hiroba/argocd/actions/runs/123
+templates:
+  - name: go-service
+    version: "1.0.0"
+    packageVersion: "1.0.0"
+    channel: stable
+    type: template
+    description: Minimal Go HTTP service
+    ociRef: %s/templates/go-service:1.0.0
+    digest: %s
+    sourceSha: abcdef0123456789abcdef0123456789abcdef01
+    releaseTag: go-service-v1.0.0
+    mediaType: application/vnd.inari.template.v1
+    producer:
+      workflowPath: .github/workflows/release-oci.yml
+      workflowSha: 0123456789abcdef0123456789abcdef01234567
+      runId: "123"
+      runAttempt: 1
+      runUri: https://github.com/7k-hiroba/argocd/actions/runs/123
+    lanes:
+      - name: validate-template
+        required: true
+        status: passed
+        runId: "123"
+        jobId: "456"
+        sourceSha: abcdef0123456789abcdef0123456789abcdef01
+`, host, digest)
+	pushTemplate(t, host, "templates/index", "latest", trustedsource.TemplateIndexMediaType, map[string]string{"templates.yaml": index})
+	source := trustedsource.Source{
+		IndexRef: host + "/templates/index:latest", TrustTier: trustedsource.TrustExperimental,
+		AllowUnsigned: trustedsource.AllowUnsignedDevelopmentOnly, ArtifactPrefixes: []string{host + "/"},
+	}
+	return &RegistryTemplateSource{
+		IndexRef: source.IndexRef, Source: source, CacheDir: t.TempDir(), Insecure: true, Environment: trustedsource.EnvironmentDevelopment,
+		Verifier: artifactadmission.NewVerifier(artifactadmission.NewCosignBackend(&oci.Fetcher{Insecure: true})),
+	}
+}
+
+func TestRegistryTemplateSourceSyncAndExactGet(t *testing.T) {
+	source := setupTrustedTemplateRegistry(t)
+	packages, err := source.Pull(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(packages) != 1 || packages[0].Manifest.Name != "go-service" {
+		t.Fatalf("packages = %+v", packages)
+	}
+	catalogPackages, err := (CatalogTemplatePuller{source}).Pull(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(catalogPackages) != 1 || catalogPackages[0].Type != "template" || len(catalogPackages[0].ManifestJSON) == 0 || catalogPackages[0].SkeletonDigest == "" {
+		t.Fatalf("catalog packages = %+v", catalogPackages)
+	}
+	entry := catalogPackages[0].Entry
+	pkg, err := source.GetArtifact(context.Background(), entry.OCIRef+"@"+entry.Digest, "1.0.0", catalogPackages[0].SkeletonDigest, catalogPackages[0].ManifestJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pkg.Manifest.Name != "go-service" || pkg.SkeletonDigest != catalogPackages[0].SkeletonDigest {
+		t.Fatalf("exact package = %+v", pkg)
+	}
+}
+
+func TestRegistryTemplateSourceDetectsCacheTamper(t *testing.T) {
+	source := setupTrustedTemplateRegistry(t)
+	catalogPackages, err := (CatalogTemplatePuller{source}).Pull(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg, err := source.Get(context.Background(), "go-service", "1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg.Dir, "skeleton", "deploy", "app.yaml"), []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entry := catalogPackages[0].Entry
+	if _, err := source.GetArtifact(context.Background(), entry.OCIRef+"@"+entry.Digest, "1.0.0", catalogPackages[0].SkeletonDigest, catalogPackages[0].ManifestJSON); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
+		t.Fatalf("error = %v, want skeleton digest mismatch", err)
+	}
+	if _, err := source.Get(context.Background(), "missing", "1.0.0"); err == nil {
+		t.Fatal("missing template unexpectedly triggered an index refresh or succeeded")
+	}
+}
+
+func TestRegistryTemplateSourceBindsSignedVersionAndChannel(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		manifest string
+	}{
+		{name: "version", manifest: strings.Replace(testTemplateYAML, "version: 1.0.0", "version: 2.0.0", 1)},
+		{name: "channel", manifest: strings.Replace(testTemplateYAML, "channel: stable", "channel: edge", 1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := setupTrustedTemplateRegistry(t, tc.manifest)
+			if _, err := (CatalogTemplatePuller{source}).Pull(context.Background()); err == nil || !strings.Contains(err.Error(), "signed index") {
+				t.Fatalf("error = %v, want signed index/manifest mismatch", err)
+			}
+		})
+	}
+}
+
+func TestCatalogTemplatePullerPreservesApprovalPolicy(t *testing.T) {
+	manifest := testTemplateYAML + "scaffold:\n  requiresApproval: true\n"
+	source := setupTrustedTemplateRegistry(t, manifest)
+	packages, err := (CatalogTemplatePuller{source}).Pull(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(packages) != 1 || packages[0].ApprovalPolicy != types.ApprovalPolicyPlatformAdmin {
+		t.Fatalf("packages = %+v, want platform-admin approval policy", packages)
+	}
+}
+
+func TestRegistryTemplateSourceRejectsPreseededCachePoison(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		poison func(map[string]string)
+	}{
+		{name: "altered bytes", poison: func(files map[string]string) {
+			files["skeleton/deploy/app.yaml"] = "kind: Pod\n"
+		}},
+		{name: "unexpected file", poison: func(files map[string]string) {
+			files["skeleton/unexpected.yaml"] = "kind: Pod\n"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := setupTrustedTemplateRegistry(t)
+			indexArtifact, err := source.fetcher().Fetch(context.Background(), source.IndexRef)
+			if err != nil {
+				t.Fatal(err)
+			}
+			index, err := trustedsource.DecodeIndex(indexArtifact.Files["templates.yaml"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			entry := index.Templates[0]
+			digestDir := strings.NewReplacer(":", "-", "/", "-").Replace(entry.Digest)
+			dir := filepath.Join(source.CacheDir, entry.Name, digestDir)
+			files := templateFiles()
+			tc.poison(files)
+			for name, content := range files {
+				path := filepath.Join(dir, name)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(dir, ".extracted"), []byte(entry.Digest), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := (CatalogTemplatePuller{source}).Pull(context.Background()); err == nil || !strings.Contains(err.Error(), "cache") {
+				t.Fatalf("error = %v, want pre-seeded cache rejection", err)
+			}
+			if _, err := source.Get(context.Background(), entry.Name, entry.Version); err == nil {
+				t.Fatal("poisoned cache was published into the synced source")
+			}
+		})
+	}
+}
+
+func TestTemplatePackageForRunRejectsCachedManifestTamper(t *testing.T) {
+	manifest := testTemplateYAML + "scaffold:\n  requiresApproval: true\n"
+	source := setupTrustedTemplateRegistry(t, manifest)
+	catalogPackages, err := (CatalogTemplatePuller{source}).Pull(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := catalogPackages[0].Entry
+	payload, err := json.Marshal(map[string]any{
+		"manifest": json.RawMessage(catalogPackages[0].ManifestJSON), "skeletonDigest": catalogPackages[0].SkeletonDigest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := newStubCatalog()
+	catalog.byID["core/go-service"] = &types.CatalogItem{ID: "core/go-service", SourceID: "core", Name: "go-service", Source: types.CatalogSourceTemplate}
+	catalog.versions["core/go-service@1.0.0"] = &types.CatalogItemVersion{
+		ItemID: "core/go-service", Version: "1.0.0", ArtifactRef: entry.OCIRef + "@" + entry.Digest,
+		ArtifactDigest: entry.Digest, Payload: payload,
+	}
+	run := &types.ScaffoldRun{TemplateItemID: "core/go-service", TemplateVersion: "1.0.0", TemplateDigest: entry.Digest}
+	env := &ExecEnv{Templates: source, Catalog: catalog, Environment: trustedsource.EnvironmentDevelopment}
+	if _, err := templatePackageForRun(context.Background(), env, run); err != nil {
+		t.Fatalf("verified package rejected before tampering: %v", err)
+	}
+
+	pkg, err := source.Get(context.Background(), "go-service", "1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := strings.Replace(manifest, "requiresApproval: true", "requiresApproval: false", 1)
+	if err := os.WriteFile(filepath.Join(pkg.Dir, "template.yaml"), []byte(tampered), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := templatePackageForRun(context.Background(), env, run)
+	if err == nil && !got.Manifest.Scaffold.requiresApproval() {
+		t.Fatal("cached manifest tampering disabled approval without invalidating the run")
+	}
+}

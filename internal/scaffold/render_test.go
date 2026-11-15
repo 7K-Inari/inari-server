@@ -102,6 +102,62 @@ func renderStepRun(values string) *types.ScaffoldRun {
 	}
 }
 
+type countingCatalog struct {
+	*stubCatalog
+	itemCalls int
+}
+
+func (c *countingCatalog) GetItemByID(ctx context.Context, itemID string) (*types.CatalogItem, error) {
+	c.itemCalls++
+	return c.stubCatalog.GetItemByID(ctx, itemID)
+}
+
+func TestTemplatePackageForRunRejectsLegacyExternalIDBeforeLookup(t *testing.T) {
+	catalog := &countingCatalog{stubCatalog: newStubCatalog()}
+	run := renderStepRun(`{"name":"payments-api"}`)
+	_, err := templatePackageForRun(context.Background(), &ExecEnv{Catalog: catalog, Templates: &FilePuller{Root: t.TempDir()}}, run)
+	if err == nil || !strings.Contains(err.Error(), "legacy_identity_unsupported") {
+		t.Fatalf("error = %v, want legacy_identity_unsupported", err)
+	}
+	if catalog.itemCalls != 0 {
+		t.Fatalf("legacy run performed catalog lookup %d times", catalog.itemCalls)
+	}
+}
+
+func TestTemplatePackageForRunRequiresPersistedDigest(t *testing.T) {
+	catalog := &countingCatalog{stubCatalog: newStubCatalog()}
+	catalog.byID["core/go-service"] = &types.CatalogItem{ID: "core/go-service", SourceID: "core", Name: "go-service", Source: types.CatalogSourceTemplate}
+	run := renderStepRun(`{"name":"payments-api"}`)
+	run.TemplateItemID = "core/go-service"
+	run.TemplateDigest = ""
+	_, err := templatePackageForRun(context.Background(), &ExecEnv{Catalog: catalog, Templates: &FilePuller{Root: t.TempDir()}}, run)
+	if err == nil || !strings.Contains(err.Error(), "template digest is required") {
+		t.Fatalf("error = %v, want missing digest rejection", err)
+	}
+	if catalog.itemCalls != 0 || catalog.admitCalls != 0 {
+		t.Fatalf("missing digest caused lookups: item=%d admit=%d", catalog.itemCalls, catalog.admitCalls)
+	}
+}
+
+func TestTemplatePackageForRunRejectsAdmittedDigestMismatch(t *testing.T) {
+	catalog := &countingCatalog{stubCatalog: newStubCatalog()}
+	catalog.byID["core/go-service"] = &types.CatalogItem{ID: "core/go-service", SourceID: "core", Name: "go-service", Source: types.CatalogSourceTemplate}
+	catalog.versions["core/go-service@1.0.0"] = &types.CatalogItemVersion{
+		ItemID: "core/go-service", Version: "1.0.0", ArtifactRef: "registry.local/core/go-service@sha256:" + strings.Repeat("a", 64),
+		ArtifactDigest: "sha256:" + strings.Repeat("a", 64), Payload: json.RawMessage(`{"skeletonDigest":"sha256:skeleton"}`),
+	}
+	run := renderStepRun(`{"name":"payments-api"}`)
+	run.TemplateItemID = "core/go-service"
+	run.TemplateDigest = "sha256:" + strings.Repeat("b", 64)
+	_, err := templatePackageForRun(context.Background(), &ExecEnv{Catalog: catalog, Templates: &FilePuller{Root: t.TempDir()}}, run)
+	if err == nil || !strings.Contains(err.Error(), "template digest mismatch") {
+		t.Fatalf("error = %v, want admitted digest mismatch", err)
+	}
+	if catalog.admitCalls != 1 {
+		t.Fatalf("admission calls = %d, want 1", catalog.admitCalls)
+	}
+}
+
 func TestStepRenderingRendersAndIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	writeFixtureTemplate(t, dir, "go-service", "1.0.0", map[string]string{

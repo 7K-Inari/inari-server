@@ -1,0 +1,33 @@
+{
+  "schema": "https://inari.dev/schemas/test-evidence-v1.schema.json",
+  "app": "argocd",
+  "component": "web-service",
+  "trustTier": "reviewed",
+  "sourceRepository": "7k-hiroba/argocd",
+  "sourceSha": "abcdef0123456789abcdef0123456789abcdef01",
+  "releaseTag": "web-service-v1.2.0",
+  "artifact": {
+    "repository": "ghcr.io/7k-hiroba/argocd/catalog/web-service",
+    "digest": "sha256:52ccaee6d4dd272e54bfccda77738b42e1edf0e4a20c27e23f0b6c15d01aef79",
+    "mediaType": "application/vnd.inari.catalog.package.v1+yaml"
+  },
+  "producer": {
+    "workflowPath": ".github/workflows/release-oci.yml",
+    "workflowSha": "0123456789abcdef0123456789abcdef01234567",
+    "runId": "123",
+    "runAttempt": 1,
+    "runUri": "https://github.com/7k-hiroba/argocd/actions/runs/123"
+  },
+  "lanes": [
+    {
+      "name": "test-packages",
+      "required": true,
+      "status": "passed",
+      "runId": "123",
+      "jobId": "456",
+      "sourceSha": "abcdef0123456789abcdef0123456789abcdef01"
+    }
+  ],
+  "finishedAt": "2026-11-13T12:00:00Z",
+  "evidenceDigest": "sha256:52ccaee6d4dd272e54bfccda77738b42e1edf0e4a20c27e23f0b6c15d01aef79"
+}

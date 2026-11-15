@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -254,8 +253,7 @@ func (s *Service) maybeGate(ctx context.Context, run *types.ScaffoldRun, steps m
 	if env.Gate == nil || env.Templates == nil {
 		return false, nil
 	}
-	name := strings.TrimPrefix(run.TemplateItemID, "template:")
-	pkg, err := env.Templates.Get(ctx, name, run.TemplateVersion)
+	pkg, err := templatePackageForRun(ctx, env, run)
 	if err != nil {
 		return false, err
 	}
@@ -400,7 +398,7 @@ func (s *Service) recordGitFallback(ctx context.Context, rc *RunContext, fb GitF
 		}
 		return audit.AppendOutbox(ctx, tx, run.OrgID, types.EventScaffoldGitFallback, types.ScaffoldGitFallbackPayload{
 			OrgID: run.OrgID, RunID: run.ID,
-			TemplateName: strings.TrimPrefix(run.TemplateItemID, "template:"),
+			TemplateName: run.TemplateItemID,
 			UserSub:      fb.UserSub, Reason: fb.Reason, Fallback: "platform_app",
 		})
 	})

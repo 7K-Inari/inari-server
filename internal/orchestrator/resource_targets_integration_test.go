@@ -52,11 +52,11 @@ func TestApprovalResumeRevalidatesOriginalRequesterTargetGrant(t *testing.T) {
 	srv, database, git, queue, _, dispatcher := itServerM3Targets(t, nil, targets)
 	defer srv.Close()
 	ctx := context.Background()
-	if _, err := database.Pool.Exec(ctx, `UPDATE catalog_items SET approval_policy='peer' WHERE id='curated:web-service'`); err != nil {
+	if _, err := database.Pool.Exec(ctx, `UPDATE catalog_items SET approval_policy='peer' WHERE id='core/web-service'`); err != nil {
 		t.Fatal(err)
 	}
 	code, body := itReq(t, srv, "POST", "/api/v1/tenants/acme/deploys", "good",
-		`{"itemId":"curated:web-service","clusterId":"cluster-1","name":"web","channel":"incubating","spec":{"hostname":"app.example.com"}}`)
+		`{"itemId":"core/web-service","clusterId":"cluster-1","name":"web","channel":"incubating","spec":{"hostname":"app.example.com"}}`)
 	if code != http.StatusOK {
 		t.Fatalf("request approval: %d %s", code, body)
 	}

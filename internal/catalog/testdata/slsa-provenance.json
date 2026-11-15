@@ -1,0 +1,44 @@
+{
+  "_type": "https://in-toto.io/Statement/v1",
+  "subject": [
+    {
+      "name": "ghcr.io/7k-hiroba/argocd/catalog/web-service",
+      "digest": {
+        "sha256": "52ccaee6d4dd272e54bfccda77738b42e1edf0e4a20c27e23f0b6c15d01aef79"
+      }
+    }
+  ],
+  "predicateType": "https://slsa.dev/provenance/v1",
+  "predicate": {
+    "buildDefinition": {
+      "buildType": "https://actions.github.io/buildtypes/workflow/v1",
+      "externalParameters": {
+        "repository": "7k-hiroba/argocd",
+        "sourceSha": "abcdef0123456789abcdef0123456789abcdef01",
+        "releaseTag": "web-service-v1.2.0",
+        "packageVersion": "1.2.0",
+        "event": "push",
+        "sourceRef": "refs/heads/main",
+        "environment": "release",
+        "runId": "123",
+        "runAttempt": 1
+      },
+      "resolvedDependencies": [
+        {
+          "uri": "https://github.com/7k-hiroba/workflows/.github/workflows/release-oci.yml",
+          "digest": {
+            "sha": "0123456789abcdef0123456789abcdef01234567"
+          }
+        }
+      ]
+    },
+    "runDetails": {
+      "builder": {
+        "id": "https://github.com/7k-hiroba/workflows/.github/workflows/release-oci.yml@0123456789abcdef0123456789abcdef01234567"
+      },
+      "metadata": {
+        "invocationId": "https://github.com/7k-hiroba/argocd/actions/runs/123"
+      }
+    }
+  }
+}

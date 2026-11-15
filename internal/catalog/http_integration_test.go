@@ -284,7 +284,7 @@ func TestOrgVisibilityOverlay(t *testing.T) {
 	srv, database := itServer(t)
 	defer srv.Close()
 	ctx := context.Background()
-	const item = "curated:postgres-aws"
+	const item = "core/postgres-aws"
 
 	// Default: no overlay row, platform-public → visible.
 	if e := visEntry(t, srv, "viewer", item); !e.Visible || e.OrgHidden || e.PlatformHidden {
@@ -348,7 +348,39 @@ func TestOrgVisibilityOverlay(t *testing.T) {
 	if code, _ := itReq(t, srv, "GET", "/api/v1/tenants/acme/catalog-visibility", "", ""); code != http.StatusUnauthorized {
 		t.Errorf("no token GET: got %d, want 401", code)
 	}
-	if code, _ := itReq(t, srv, "PUT", "/api/v1/tenants/acme/catalog-visibility/curated:nope", "admin", `{"visible":false}`); code != http.StatusNotFound {
+	if code, _ := itReq(t, srv, "PUT", "/api/v1/tenants/acme/catalog-visibility/core/nope", "admin", `{"visible":false}`); code != http.StatusNotFound {
 		t.Errorf("unknown item PUT: got %d, want 404", code)
+	}
+}
+
+func TestSourceAdminAuthorization(t *testing.T) {
+	srv, _ := itServer(t)
+	defer srv.Close()
+	for _, tc := range []struct {
+		name, method, path string
+		wantAdmin          int
+	}{
+		{name: "catalog health", method: http.MethodGet, path: "/api/v1/admin/catalog/sources", wantAdmin: http.StatusOK},
+		{name: "template health", method: http.MethodGet, path: "/api/v1/admin/templates/sources", wantAdmin: http.StatusOK},
+		{name: "catalog sync", method: http.MethodPost, path: "/api/v1/admin/catalog/sync", wantAdmin: http.StatusOK},
+		{name: "template sync unconfigured", method: http.MethodPost, path: "/api/v1/admin/templates/sync", wantAdmin: http.StatusConflict},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, denied := range []struct {
+				token string
+				want  int
+			}{
+				{token: "", want: http.StatusUnauthorized},
+				{token: "viewer", want: http.StatusForbidden},
+				{token: "outsider", want: http.StatusForbidden},
+			} {
+				if code, body := itReq(t, srv, tc.method, tc.path, denied.token, ""); code != denied.want {
+					t.Errorf("%s %s token %q: status = %d, want %d: %s", tc.method, tc.path, denied.token, code, denied.want, body)
+				}
+			}
+			if code, body := itReq(t, srv, tc.method, tc.path, "admin", ""); code != tc.wantAdmin {
+				t.Errorf("admin %s %s: status = %d, want %d: %s", tc.method, tc.path, code, tc.wantAdmin, body)
+			}
+		})
 	}
 }

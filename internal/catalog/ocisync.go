@@ -2,16 +2,25 @@ package catalog
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
+	"strings"
+	"sync"
 
 	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/jackc/pgx/v5"
 	"gopkg.in/yaml.v3"
 
+	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
+	"github.com/7K-Inari/inari-server/internal/artifactadmission"
+	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/oci"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -22,6 +31,8 @@ type ChartRef struct {
 	RepoURL   string `json:"repoURL"`
 	Chart     string `json:"chart"`
 	Namespace string `json:"namespace"`
+	OCIRef    string `json:"ociRef"`
+	Digest    string `json:"digest"`
 }
 
 // Package is one curated package version pulled from the catalog registry.
@@ -35,36 +46,38 @@ type Package struct {
 	Version  string
 	Channel  string
 	Category string
-	// OCIRef is the image reference this package version was pulled from.
+	// OCIRef is the immutable image reference this package version was pulled from.
 	OCIRef string
+	// Entry is the signed index entry used for later deploy/render admission.
+	Entry       trustedsource.IndexEntry
+	IndexDigest string
 	// Chart is set for platform-app packages.
 	Chart *ChartRef
 	// RGD is the raw KRO ResourceGraphDefinition YAML.
 	RGD []byte
+	// Template metadata is used only by software-template sources.
+	ManifestJSON   []byte
+	SkeletonDigest string
+	ApprovalPolicy types.ApprovalPolicy
 	// Schema is the OpenAPI v3 schema for the instance form; when absent it
 	// is derived from the RGD's generated CRD spec at deploy time.
 	Schema  []byte
 	UIHints []byte
 }
 
-// itemIDForPackage maps a pulled package to its catalog item ID. Platform
-// apps reconcile with the items seeded by SeedPlatformApps
-// ("platform:<name>", e.g. platform:external-secrets); all other curated
-// packages keep the "curated:<name>" prefix. Software-template items (M8
-// scaffolding) use the "template:<name>" prefix with the
-// types.CatalogSourceTemplate source; they are not written by this sync
-// path.
-func itemIDForPackage(p Package) string {
-	if p.Type == "platform-app" {
-		return "platform:" + p.Name
-	}
-	return "curated:" + p.Name
+// itemIDForPackage maps a pulled package to its canonical server-assigned
+// source-qualified ID. Index metadata cannot replace this identity.
+func itemIDForPackage(sourceID string, p Package) string {
+	return sourceID + "/" + p.Name
 }
 
 // sourceForPackage preserves the seeded platform source for platform apps.
 func sourceForPackage(p Package) types.CatalogSource {
 	if p.Type == "platform-app" {
 		return types.CatalogSourcePlatform
+	}
+	if p.Type == "template" {
+		return types.CatalogSourceTemplate
 	}
 	return types.CatalogSourceCurated
 }
@@ -94,23 +107,16 @@ type packageYAML struct {
 
 // chartYAML mirrors packages/<name>/chart.yaml (platform apps only).
 type chartYAML struct {
-	RepoURL   string            `yaml:"repoURL"`
-	Chart     string            `yaml:"chart"`
-	Namespace string            `yaml:"namespace"`
-	Channels  map[string]string `yaml:"channels"`
+	RepoURL   string                  `yaml:"repoURL"`
+	Chart     string                  `yaml:"chart"`
+	Namespace string                  `yaml:"namespace"`
+	Channels  map[string]chartChannel `yaml:"channels"`
 }
 
-// catalogIndex mirrors catalog.yaml in inari-catalog.
-type catalogIndex struct {
-	Packages []struct {
-		Name        string `yaml:"name"`
-		Version     string `yaml:"version"`
-		Channel     string `yaml:"channel"`
-		Type        string `yaml:"type"`
-		Description string `yaml:"description"`
-		OCIRef      string `yaml:"ociRef"`
-		ChannelRef  string `yaml:"channelRef"`
-	} `yaml:"packages"`
+type chartChannel struct {
+	Version string `yaml:"version"`
+	OCIRef  string `yaml:"ociRef"`
+	Digest  string `yaml:"digest"`
 }
 
 // FixturePuller reads a local OCI-style layout:
@@ -197,10 +203,22 @@ func readPackageDir(dir string) (*Package, error) {
 type RegistryPuller struct {
 	// IndexRef is the OCI reference of the catalog index artifact.
 	IndexRef string
+	Source   trustedsource.Source
+	Verifier *artifactadmission.Verifier
 	// Keychain overrides registry auth (default: authn.DefaultKeychain).
 	Keychain authn.Keychain
 	// Insecure allows plain-HTTP registries (tests/dev).
-	Insecure bool
+	Insecure    bool
+	Environment trustedsource.Environment
+
+	mu          sync.RWMutex
+	indexDigest string
+}
+
+func (p *RegistryPuller) LastIndexDigest() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.indexDigest
 }
 
 func (p *RegistryPuller) fetcher() *oci.Fetcher {
@@ -208,48 +226,86 @@ func (p *RegistryPuller) fetcher() *oci.Fetcher {
 }
 
 func (p *RegistryPuller) Pull(ctx context.Context) ([]Package, error) {
-	indexRaw, err := p.fetchFile(ctx, p.IndexRef, "catalog.yaml")
+	if p.Verifier == nil {
+		return nil, errors.New("catalog: trusted source verifier is required")
+	}
+	indexArtifact, err := p.fetcher().Fetch(ctx, p.IndexRef)
 	if err != nil {
 		return nil, fmt.Errorf("catalog: pull index %s: %w", p.IndexRef, err)
 	}
-	var idx catalogIndex
-	if err := yaml.Unmarshal(indexRaw, &idx); err != nil {
+	indexRaw, ok := indexArtifact.Files["catalog.yaml"]
+	if !ok {
+		return nil, fmt.Errorf("catalog: index %s has no catalog.yaml layer", p.IndexRef)
+	}
+	idx, err := trustedsource.DecodeIndex(indexRaw)
+	if err != nil {
 		return nil, fmt.Errorf("catalog: parse index %s: %w", p.IndexRef, err)
+	}
+	if idx.Kind != trustedsource.CatalogIndexKind {
+		return nil, fmt.Errorf("catalog: index %s has kind %s", p.IndexRef, idx.Kind)
+	}
+	indexDescriptor := artifactadmission.ArtifactDescriptor{
+		Ref: p.IndexRef, Digest: indexArtifact.Digest, MediaType: trustedsource.CatalogIndexMediaType,
+		SourceSHA: idx.SourceSHA, Producer: idx.Producer,
+	}
+	if err := p.Verifier.VerifyIndex(ctx, p.Source, indexDescriptor, p.Environment); err != nil {
+		return nil, fmt.Errorf("catalog: verify index %s: %w", p.IndexRef, err)
 	}
 	var out []Package
 	for _, entry := range idx.Packages {
-		ref := entry.ChannelRef
-		if ref == "" {
-			ref = entry.OCIRef
+		ref := immutableOCIRef(entry.OCIRef, entry.Digest)
+		descriptor := artifactadmission.ArtifactDescriptor{
+			Ref: ref, Digest: entry.Digest, MediaType: entry.MediaType, SourceSHA: entry.SourceSHA,
+			ReleaseTag: entry.ReleaseTag, PackageVersion: entry.PackageVersion,
+			App: p.Source.ID, Component: entry.Name, Producer: entry.Producer,
+			Lanes: entry.Lanes, Compatibility: entry.Compatibility, Runtime: entry.Runtime,
 		}
-		if ref == "" {
-			return nil, fmt.Errorf("catalog: index package %q has no ociRef", entry.Name)
+		if _, err := p.Verifier.AdmitArtifact(ctx, artifactadmission.Request{
+			Source: p.Source, Role: trustedsource.ArtifactCatalogPackage, Artifact: descriptor, TargetEnvironment: p.Environment, SyncOnly: true,
+		}); err != nil {
+			return nil, fmt.Errorf("catalog: verify package %s (%s): %w", entry.Name, ref, err)
+		}
+		if entry.Type == "platform-app" {
+			chartDescriptor := descriptor
+			chartDescriptor.Ref = entry.ChartRef
+			chartDescriptor.Digest = entry.ChartDigest
+			chartDescriptor.MediaType = trustedsource.HelmChartMediaType
+			chartDescriptor.Producer = *entry.ChartProducer
+			if _, err := p.Verifier.AdmitArtifact(ctx, artifactadmission.Request{
+				Source: p.Source, Role: trustedsource.ArtifactHelmChart, Artifact: chartDescriptor, TargetEnvironment: p.Environment, SyncOnly: true,
+			}); err != nil {
+				return nil, fmt.Errorf("catalog: verify chart for %s (%s): %w", entry.Name, entry.ChartRef, err)
+			}
 		}
 		files, err := p.fetchDir(ctx, ref)
 		if err != nil {
 			return nil, fmt.Errorf("catalog: pull package %s (%s): %w", entry.Name, ref, err)
 		}
-		pkgs, err := packageFromFiles(entry.Name, entry.Type, entry.Description, ref, files)
+		pkgs, err := packageFromFiles(entry, ref, files)
 		if err != nil {
 			return nil, err
 		}
+		for i := range pkgs {
+			pkgs[i].Entry = entry
+			pkgs[i].IndexDigest = indexArtifact.Digest
+			pkgs[i].OCIRef = ref
+		}
 		out = append(out, pkgs...)
 	}
+	p.mu.Lock()
+	p.indexDigest = indexArtifact.Digest
+	p.mu.Unlock()
 	return out, nil
 }
 
-// fetchFile pulls an oras-style artifact and returns the content of the
-// layer titled filename.
-func (p *RegistryPuller) fetchFile(ctx context.Context, ref, filename string) ([]byte, error) {
-	files, err := p.fetchDir(ctx, ref)
-	if err != nil {
-		return nil, err
+func immutableOCIRef(ref, digest string) string {
+	repository := ref
+	if at := strings.Index(repository, "@"); at >= 0 {
+		repository = repository[:at]
+	} else if colon := strings.LastIndex(repository, ":"); colon > strings.LastIndex(repository, "/") {
+		repository = repository[:colon]
 	}
-	raw, ok := files[filename]
-	if !ok {
-		return nil, fmt.Errorf("catalog: %s: no layer named %q", ref, filename)
-	}
-	return raw, nil
+	return repository + "@" + digest
 }
 
 // fetchDir pulls an oras directory-push artifact (shared helper).
@@ -261,27 +317,35 @@ func (p *RegistryPuller) fetchDir(ctx context.Context, ref string) (map[string][
 // Platform apps expand chart.yaml channels into one Package per channel
 // (the chart version is what deploys resolve); other package types yield a
 // single Package at their package.yaml version/channel.
-func packageFromFiles(name, typ, indexDesc, ref string, files map[string][]byte) ([]Package, error) {
-	base := Package{Name: name, Type: typ, Description: indexDesc, OCIRef: ref}
-	if raw, ok := files["package.yaml"]; ok {
-		var py packageYAML
-		if err := yaml.Unmarshal(raw, &py); err != nil {
-			return nil, fmt.Errorf("catalog: %s: package.yaml: %w", ref, err)
-		}
-		if py.Type != "" {
-			base.Type = py.Type
-		}
-		if base.Description == "" {
-			base.Description = py.Description
-		}
-		base.Version = py.Version
-		base.Channel = py.Channel
-		base.Category = py.Category
+func packageFromFiles(entry trustedsource.IndexEntry, ref string, files map[string][]byte) ([]Package, error) {
+	base := Package{Name: entry.Name, Type: entry.Type, Description: entry.Description, OCIRef: ref}
+	rawPackage, ok := files["package.yaml"]
+	if !ok {
+		return nil, fmt.Errorf("catalog: %s: package.yaml is required", ref)
 	}
+	var py packageYAML
+	if err := yaml.Unmarshal(rawPackage, &py); err != nil {
+		return nil, fmt.Errorf("catalog: %s: package.yaml: %w", ref, err)
+	}
+	if py.Type != "" && py.Type != entry.Type {
+		return nil, fmt.Errorf("catalog: %s: package type %q does not match signed index type %q", ref, py.Type, entry.Type)
+	}
+	if py.Version != entry.PackageVersion || (entry.Type != "platform-app" && py.Version != entry.Version) {
+		return nil, fmt.Errorf("catalog: %s: package version %q does not match signed index version metadata", ref, py.Version)
+	}
+	if py.Channel != "" && py.Channel != entry.Channel {
+		return nil, fmt.Errorf("catalog: %s: package channel %q does not match signed index channel %q", ref, py.Channel, entry.Channel)
+	}
+	if base.Description == "" {
+		base.Description = py.Description
+	}
+	base.Category = py.Category
+	base.Version = entry.Version
+	base.Channel = entry.Channel
 	base.Schema = files["schema.json"]
 	// Platform-app packages vendor the upstream chart's values.schema.json
 	// (day-one adopt/update validation, decision 4); use it when no
-	// schema.json layer exists.
+	// schema.json instance schema exists.
 	if len(base.Schema) == 0 {
 		base.Schema = files["values.schema.json"]
 	}
@@ -307,36 +371,62 @@ func packageFromFiles(name, typ, indexDesc, ref string, files map[string][]byte)
 			}
 		}
 	}
-	if raw, ok := files["chart.yaml"]; ok {
-		var cy chartYAML
-		if err := yaml.Unmarshal(raw, &cy); err != nil {
-			return nil, fmt.Errorf("catalog: %s: chart.yaml: %w", ref, err)
+	rawChart, hasChart := files["chart.yaml"]
+	if entry.Type != "platform-app" {
+		if hasChart {
+			return nil, fmt.Errorf("catalog: %s: chart.yaml is valid only for platform-app entries", ref)
 		}
-		base.Chart = &ChartRef{RepoURL: cy.RepoURL, Chart: cy.Chart, Namespace: cy.Namespace}
-		if len(cy.Channels) == 0 {
-			return nil, fmt.Errorf("catalog: %s: chart.yaml has no channels", ref)
+		if raw, ok := files["rgd.yaml"]; ok {
+			base.RGD = raw
 		}
-		channels := make([]string, 0, len(cy.Channels))
-		for ch := range cy.Channels {
-			channels = append(channels, ch)
-		}
-		sort.Strings(channels)
-		out := make([]Package, 0, len(channels))
-		for _, ch := range channels {
-			pkg := base
-			pkg.Channel = ch
-			pkg.Version = cy.Channels[ch]
-			out = append(out, pkg)
-		}
-		return out, nil
+		return []Package{base}, nil
 	}
-	if raw, ok := files["rgd.yaml"]; ok {
-		base.RGD = raw
+	if !hasChart {
+		return nil, fmt.Errorf("catalog: %s: platform-app requires chart.yaml", ref)
 	}
-	if base.Channel == "" {
-		base.Channel = "stable"
+	var cy chartYAML
+	if err := yaml.Unmarshal(rawChart, &cy); err != nil {
+		return nil, fmt.Errorf("catalog: %s: chart.yaml: %w", ref, err)
 	}
+	if !strings.HasPrefix(cy.RepoURL, "oci://") || cy.Chart == "" {
+		return nil, fmt.Errorf("catalog: %s: chart.yaml requires OCI-only repository and chart coordinates", ref)
+	}
+	channel, ok := cy.Channels[entry.Channel]
+	if !ok {
+		return nil, fmt.Errorf("catalog: %s: chart.yaml does not declare signed channel %q", ref, entry.Channel)
+	}
+	if channel.Version != entry.Version {
+		return nil, fmt.Errorf("catalog: %s: chart version %q does not match signed index version %q", ref, channel.Version, entry.Version)
+	}
+	if channel.Digest != entry.ChartDigest || immutableOCIRef(strings.TrimPrefix(channel.OCIRef, "oci://"), channel.Digest) != immutableOCIRef(strings.TrimPrefix(entry.ChartRef, "oci://"), entry.ChartDigest) {
+		return nil, fmt.Errorf("catalog: %s: chart coordinates do not match the signed index", ref)
+	}
+	repoURL, chartName, err := signedChartCoordinates(entry.ChartRef)
+	if err != nil {
+		return nil, fmt.Errorf("catalog: %s: %w", ref, err)
+	}
+	if cy.RepoURL != repoURL || cy.Chart != chartName {
+		return nil, fmt.Errorf("catalog: %s: chart repository/name does not match the signed index", ref)
+	}
+	base.Chart = &ChartRef{RepoURL: repoURL, Chart: chartName, Namespace: cy.Namespace, OCIRef: entry.ChartRef, Digest: entry.ChartDigest}
 	return []Package{base}, nil
+}
+
+func signedChartCoordinates(ref string) (string, string, error) {
+	repository := strings.TrimPrefix(ref, "oci://")
+	if repository == ref {
+		return "", "", fmt.Errorf("signed chart ref %q is not OCI-qualified", ref)
+	}
+	if at := strings.Index(repository, "@"); at >= 0 {
+		repository = repository[:at]
+	} else if colon := strings.LastIndex(repository, ":"); colon > strings.LastIndex(repository, "/") {
+		repository = repository[:colon]
+	}
+	slash := strings.LastIndex(repository, "/")
+	if slash <= 0 || slash == len(repository)-1 {
+		return "", "", fmt.Errorf("signed chart ref %q has no repository/chart", ref)
+	}
+	return "oci://" + repository[:slash], repository[slash+1:], nil
 }
 
 // ErrSyncNotConfigured is returned when no OCI puller is wired (no
@@ -345,9 +435,10 @@ var ErrSyncNotConfigured = fmt.Errorf("catalog: sync not configured (no OCI pull
 
 // syncPlan turns pulled packages into item + version upserts. Pure — kept
 // separate from Sync so tests can assert the mapping without a database.
-func syncPlan(pkgs []Package) ([]*types.CatalogItem, []*types.CatalogItemVersion, error) {
+func syncPlan(sourceID string, pkgs []Package) ([]*types.CatalogItem, []*types.CatalogItemVersion, error) {
 	items := make([]*types.CatalogItem, 0, len(pkgs))
 	versions := make([]*types.CatalogItemVersion, 0, len(pkgs))
+	seenVersions := map[string]bool{}
 	for _, p := range pkgs {
 		// Defense against unusable rows: a package without a version can
 		// never be deployed and renders as an empty '' row in every view
@@ -357,8 +448,29 @@ func syncPlan(pkgs []Package) ([]*types.CatalogItem, []*types.CatalogItemVersion
 			slog.Warn("catalog sync: skipping package with empty version", "name", p.Name, "ref", p.OCIRef)
 			continue
 		}
-		itemID := itemIDForPackage(p)
-		payload := map[string]any{}
+		versionKey := itemIDForPackage(sourceID, p) + "@" + p.Version
+		if seenVersions[versionKey] {
+			return nil, nil, fmt.Errorf("catalog: duplicate snapshot version %s", versionKey)
+		}
+		seenVersions[versionKey] = true
+		if p.Entry.SourceSHA == "" {
+			p.Entry.SourceSHA = "0000000000000000000000000000000000000000"
+		}
+		if p.Entry.Digest == "" {
+			sum := sha256.Sum256([]byte(p.Name + "@" + p.Version))
+			p.Entry.Digest = "sha256:" + hex.EncodeToString(sum[:])
+		}
+		if p.Entry.MediaType == "" {
+			p.Entry.MediaType = trustedsource.CatalogPackageMediaType
+		}
+		itemID := itemIDForPackage(sourceID, p)
+		payload := map[string]any{
+			"admission": p.Entry,
+		}
+		if p.Type == "template" {
+			payload["manifest"] = json.RawMessage(p.ManifestJSON)
+			payload["skeletonDigest"] = p.SkeletonDigest
+		}
 		if len(p.RGD) > 0 {
 			payload["rgd"] = string(p.RGD)
 		}
@@ -371,49 +483,203 @@ func syncPlan(pkgs []Package) ([]*types.CatalogItem, []*types.CatalogItemVersion
 		}
 		ociRef := p.OCIRef
 		if ociRef == "" {
-			ociRef = "fixture://" + p.Name + ":" + p.Version
+			ociRef = "registry.local/core/" + p.Name + ":" + p.Version
 		}
 		items = append(items, &types.CatalogItem{
-			ID:          itemID,
-			Source:      sourceForPackage(p),
-			Name:        p.Name,
-			DisplayName: p.DisplayName,
-			Description: p.Description,
-			Category:    p.Category,
-			OCIRef:      ociRef,
+			ID:              itemID,
+			Source:          sourceForPackage(p),
+			SourceID:        sourceID,
+			Name:            p.Name,
+			DisplayName:     p.DisplayName,
+			Description:     p.Description,
+			Category:        p.Category,
+			OCIRef:          ociRef,
+			ApprovalPolicy:  p.ApprovalPolicy,
+			SnapshotPresent: true,
 		})
+		packageVersion := p.Entry.PackageVersion
+		if packageVersion == "" {
+			packageVersion = p.Version
+		}
 		versions = append(versions, &types.CatalogItemVersion{
-			ItemID:  itemID,
-			Version: p.Version,
-			Channel: p.Channel,
-			Schema:  p.Schema,
-			UIHints: p.UIHints,
-			Payload: raw,
+			ItemID:          itemID,
+			Version:         p.Version,
+			PackageVersion:  packageVersion,
+			Channel:         p.Channel,
+			ArtifactRef:     ociRef,
+			ArtifactDigest:  p.Entry.Digest,
+			SnapshotPresent: true,
+			Schema:          p.Schema,
+			UIHints:         p.UIHints,
+			Payload:         raw,
 		})
+		if p.Chart != nil {
+			versions[len(versions)-1].ChartRef = p.Chart.OCIRef
+			versions[len(versions)-1].ChartDigest = p.Chart.Digest
+		}
 	}
 	return items, versions, nil
 }
 
-// Sync pulls curated packages and upserts them as catalog items (one item
-// per package name, one version row per package version). Idempotent.
+// Sync pulls and atomically replaces every configured source independently.
+// A failed source records its own status and cannot block another source's
+// valid generation. All errors are returned for observability.
 func (s *Service) Sync(ctx context.Context) (int, error) {
-	if s.puller == nil {
+	return s.SyncKind(ctx, "")
+}
+
+func (s *Service) SyncKind(ctx context.Context, kind string) (int, error) {
+	if len(s.sources) == 0 {
 		return 0, ErrSyncNotConfigured
 	}
-	pkgs, err := s.puller.Pull(ctx)
-	if err != nil {
-		return 0, err
-	}
-	items, versions, err := syncPlan(pkgs)
-	if err != nil {
-		return 0, err
-	}
-	count := 0
-	for i := range items {
-		if err := s.UpsertItem(ctx, items[i], versions[i]); err != nil {
-			return count, err
+	total := 0
+	matched := 0
+	var syncErrors []error
+	for _, sourceSync := range s.sources {
+		if kind != "" && sourceSync.Kind != "" && sourceSync.Kind != kind {
+			continue
 		}
-		count++
+		matched++
+		count, err := s.syncOne(ctx, sourceSync)
+		total += count
+		if err != nil {
+			syncErrors = append(syncErrors, fmt.Errorf("%s %s: %w", sourceSync.Kind, sourceSync.Source.ID, err))
+		}
 	}
-	return count, nil
+	if matched == 0 {
+		return 0, ErrSyncNotConfigured
+	}
+	return total, errors.Join(syncErrors...)
+}
+
+func sourceLockID(kind, sourceID string) int64 {
+	sum := sha256.Sum256([]byte(kind + "\x00" + sourceID))
+	return int64(binary.BigEndian.Uint64(sum[:8]))
+}
+
+func (s *Service) lockSource(ctx context.Context, kind, sourceID string) (func(), error) {
+	if s.db == nil || s.db.Pool == nil {
+		return nil, errors.New("catalog: source sync requires a database")
+	}
+	conn, err := s.db.Pool.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	lockID := sourceLockID(kind, sourceID)
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, lockID); err != nil {
+		conn.Release()
+		return nil, err
+	}
+	return func() {
+		if _, err := conn.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, lockID); err != nil {
+			slog.Error("trusted source unlock failed; closing connection", "source", sourceID, "error", err)
+			_ = conn.Hijack().Close(context.Background())
+			return
+		}
+		conn.Release()
+	}, nil
+}
+
+func (s *Service) syncOne(ctx context.Context, sourceSync SourceSync) (count int, returnErr error) {
+	source := sourceSync.Source
+	kind := sourceSync.Kind
+	if kind == "" {
+		kind = "catalog"
+	}
+	unlock, err := s.lockSource(ctx, kind, source.ID)
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
+	fingerprint, err := (&trustedsource.File{}).Fingerprint(source)
+	if err != nil {
+		return 0, err
+	}
+	defer func() {
+		if returnErr != nil {
+			code := "sync_failed"
+			var admissionErr *artifactadmission.Error
+			if errors.As(returnErr, &admissionErr) {
+				code = admissionErr.Code
+			}
+			if err := s.store.RecordSourceFailure(ctx, s.db.Pool, kind, source, fingerprint, code, returnErr, s.now()); err != nil {
+				slog.Error("trusted source failure status write failed", "source", source.ID, "error", err)
+			}
+		}
+	}()
+	pkgs, err := sourceSync.Puller.Pull(ctx)
+	if err != nil {
+		return 0, err
+	}
+	items, versions, err := syncPlan(source.ID, pkgs)
+	if err != nil {
+		return 0, err
+	}
+	replacement := SourceReplacement{
+		Kind: kind, Source: source, Fingerprint: fingerprint, Items: items, Versions: versions,
+		LastGoodIndexRef: source.IndexRef, Now: s.now(),
+	}
+	if len(pkgs) > 0 {
+		replacement.IndexDigest = pkgs[0].IndexDigest
+	}
+	if tracker, ok := sourceSync.Puller.(interface{ LastIndexDigest() string }); ok && tracker.LastIndexDigest() != "" {
+		replacement.IndexDigest = tracker.LastIndexDigest()
+	}
+	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		if err := s.store.ReplaceSource(ctx, tx, replacement); err != nil {
+			return err
+		}
+		for _, item := range items {
+			if err := s.audit.Record(ctx, tx, &types.AuditEvent{
+				OrgID: "platform", Actor: "system:catalog-sync", Action: "catalog.item_upserted",
+				ObjectType: "catalog_item", ObjectID: item.ID,
+			}); err != nil {
+				return err
+			}
+			if err := audit.AppendOutbox(ctx, tx, "platform", types.EventCatalogItemUpserted, types.CatalogItemPayload{
+				OrgID: item.OrgID, ItemID: item.ID, Source: string(item.Source),
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return len(items), nil
+}
+
+func (s *Service) ListTrustedSourceStates(ctx context.Context, kind string) ([]types.TrustedSourceStatus, error) {
+	states, err := s.store.ListTrustedSourceStates(ctx, s.db.Pool, kind, s.now())
+	if err != nil {
+		return nil, err
+	}
+	for i := range states {
+		if source, ok := s.policies[states[i].SourceID]; ok {
+			states[i].IndexRef = source.IndexRef
+			states[i].TrustTier = string(source.TrustTier)
+			states[i].Unsigned = source.AllowUnsigned != ""
+		}
+	}
+	return states, nil
+}
+
+func (s *Service) sourceStateMap(ctx context.Context) (map[string]string, error) {
+	out := map[string]string{}
+	if len(s.policies) == 0 {
+		return out, nil
+	}
+	states, err := s.store.ListTrustedSourceStates(ctx, s.db.Pool, "", s.now())
+	if err != nil {
+		return nil, err
+	}
+	for _, state := range states {
+		out[state.SourceID] = state.State
+	}
+	return out, nil
+}
+
+func (s *Service) ReconcileSourcePolicies(ctx context.Context, kind string, expected map[string]string) error {
+	return s.store.ReconcileSourcePolicies(ctx, s.db.Pool, kind, expected)
 }

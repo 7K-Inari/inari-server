@@ -187,7 +187,7 @@ func componentCatalogPlan(rc *RunContext, component, repoURL string) (*types.Cat
 		"component":  component,
 		"repoUrl":    repoURL,
 		"owningTeam": componentMaintainersTeam(component),
-		"template":   strings.TrimPrefix(rc.Run.TemplateItemID, "template:"),
+		"template":   rc.Run.TemplateItemID,
 		"runId":      rc.Run.ID,
 	})
 	if err != nil {

@@ -20,7 +20,7 @@ func TestMigrationBackfillsDeploymentTargetsAndRoleGrants(t *testing.T) {
 	if err != nil {
 		t.Skipf("testcontainers unavailable: %v", err)
 	}
-	database, err := testdb.NewDatabase(t, pg)
+	database, err := testdb.NewUnmigratedDatabase(t, pg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,6 +30,11 @@ func TestMigrationBackfillsDeploymentTargetsAndRoleGrants(t *testing.T) {
 	provider, err := goose.NewProvider(goose.DialectPostgres, sqlDB, os.DirFS("../db/migrations"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Exercise the resource-target migration without crossing the newer,
+	// intentionally irreversible trusted-source migration.
+	if _, err := provider.UpTo(ctx, 40); err != nil {
+		t.Fatalf("up to 0040: %v", err)
 	}
 	if _, err := provider.DownTo(ctx, 39); err != nil {
 		t.Fatalf("down to 0039: %v", err)

@@ -6,6 +6,8 @@ package types
 import (
 	"encoding/json"
 	"time"
+
+	extensionv1 "github.com/7K-Inari/inari-api/contract/extension/v1"
 )
 
 // Role is an org-scoped, admin-customizable bundle of permission slugs
@@ -1565,16 +1567,19 @@ type UiExtensionDescriptor struct {
 // the sidecar HTTP base URL the authenticated reverse proxy targets. Checksum
 // is the sha256 of the plugin binary/artifact verified at handshake.
 type Extension struct {
-	ID       string                 `json:"id"`
-	OrgID    string                 `json:"orgId,omitempty"` // empty = platform-global
-	Name     string                 `json:"name"`
-	Version  string                 `json:"version"`
-	Kind     string                 `json:"kind"`
-	Manifest json.RawMessage        `json:"manifest,omitempty"`
-	Ui       *UiExtensionDescriptor `json:"ui,omitempty"`
-	Endpoint string                 `json:"endpoint"`
-	Checksum string                 `json:"checksum"`
-	State    string                 `json:"state"`
+	ID             string                 `json:"id"`
+	OrgID          string                 `json:"orgId,omitempty"` // empty = platform-global
+	Name           string                 `json:"name"`
+	Version        string                 `json:"version"`
+	Kind           string                 `json:"kind"`
+	Manifest       json.RawMessage        `json:"manifest,omitempty"`
+	Contracts      *extensionv1.Contracts `json:"contracts,omitempty"`
+	Ui             *UiExtensionDescriptor `json:"ui,omitempty"`
+	Endpoint       string                 `json:"endpoint"`
+	Checksum       string                 `json:"checksum"`
+	State          string                 `json:"state"`
+	DegradedReason string                 `json:"degradedReason,omitempty"`
+	DegradedDetail string                 `json:"degradedDetail,omitempty"`
 	// ClientID is the dedicated Keycloak service-account client (ext-<name>)
 	// gating the extension-gateway tunnel (ADR-0008). The secret is never
 	// persisted — returned once at provision/rotate.

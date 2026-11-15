@@ -56,4 +56,5 @@ WHERE item_id LIKE 'curated:%' OR item_id LIKE 'platform:%' OR item_id LIKE 'tem
 DO $$
 BEGIN
     RAISE EXCEPTION 'migration 0041_trusted_sources is irreversible';
-END $$;
+END;
+$$;

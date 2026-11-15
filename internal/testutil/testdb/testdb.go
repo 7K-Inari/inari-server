@@ -22,6 +22,20 @@ var dbSeq atomic.Uint64
 // per-test container pattern provided.
 func NewDatabase(t *testing.T, pg *testutil.SharedPG) (*db.DB, error) {
 	t.Helper()
+	database, err := NewUnmigratedDatabase(t, pg)
+	if err != nil {
+		return nil, err
+	}
+	if err := database.Migrate(context.Background()); err != nil {
+		return nil, err
+	}
+	return database, nil
+}
+
+// NewUnmigratedDatabase creates an isolated database for migration tests that
+// must select their own starting schema version.
+func NewUnmigratedDatabase(t *testing.T, pg *testutil.SharedPG) (*db.DB, error) {
+	t.Helper()
 	ctx := context.Background()
 
 	dsn, err := pg.CreateDatabase(ctx, fmt.Sprintf("it_%d", dbSeq.Add(1)))
@@ -30,10 +44,6 @@ func NewDatabase(t *testing.T, pg *testutil.SharedPG) (*db.DB, error) {
 	}
 	database, err := db.Connect(ctx, dsn)
 	if err != nil {
-		return nil, err
-	}
-	if err := database.Migrate(ctx); err != nil {
-		database.Close()
 		return nil, err
 	}
 	t.Cleanup(database.Close)

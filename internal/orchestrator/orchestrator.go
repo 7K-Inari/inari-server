@@ -744,9 +744,9 @@ func (s *Service) FinalizePRMerge(ctx context.Context, orgID, prURL, mergeSHA st
 		return false, err
 	}
 	if helmSource {
-		manifest, err := target.provider.ReadFile(ctx, target.repo, mergeSHA, RepoPath(inst.ClusterID, inst.CatalogItemID, inst.ID)+"/application.yaml")
-		if err != nil {
-			return false, err
+		manifest, readErr := target.provider.ReadFile(ctx, target.repo, mergeSHA, RepoPath(inst.ClusterID, inst.CatalogItemID, inst.ID)+"/application.yaml")
+		if readErr != nil {
+			return false, readErr
 		}
 		err = s.enqueueAppManifestRegistration(ctx, inst.ClusterID, inst.ID, []byte(manifest))
 	} else {

@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"gopkg.in/yaml.v3"
 
+	observability "github.com/7K-Inari/inari-api/contract/observability/v1"
 	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
 	"github.com/7K-Inari/inari-server/internal/artifactadmission"
 	"github.com/7K-Inari/inari-server/internal/audit"
@@ -58,7 +59,11 @@ type Package struct {
 	// Template metadata is used only by software-template sources.
 	ManifestJSON   []byte
 	SkeletonDigest string
-	ApprovalPolicy types.ApprovalPolicy
+	// Observability carries the exact signed capability document. The package
+	// reference is retained separately so normalization can cross-check it.
+	Observability    []byte
+	ObservabilityRef *observability.PackReference
+	ApprovalPolicy   types.ApprovalPolicy
 	// Schema is the OpenAPI v3 schema for the instance form; when absent it
 	// is derived from the RGD's generated CRD spec at deploy time.
 	Schema  []byte
@@ -98,11 +103,12 @@ type packageMetadata struct {
 
 // packageYAML mirrors packages/<name>/package.yaml in inari-catalog.
 type packageYAML struct {
-	Version     string `yaml:"version"`
-	Channel     string `yaml:"channel"`
-	Type        string `yaml:"type"`
-	Description string `yaml:"description"`
-	Category    string `yaml:"category"`
+	Version       string                       `yaml:"version"`
+	Channel       string                       `yaml:"channel"`
+	Type          string                       `yaml:"type"`
+	Description   string                       `yaml:"description"`
+	Category      string                       `yaml:"category"`
+	Observability *observability.PackReference `yaml:"observability"`
 }
 
 // chartYAML mirrors packages/<name>/chart.yaml (platform apps only).
@@ -340,6 +346,8 @@ func packageFromFiles(entry trustedsource.IndexEntry, ref string, files map[stri
 		base.Description = py.Description
 	}
 	base.Category = py.Category
+	base.Observability = files["observability.yaml"]
+	base.ObservabilityRef = py.Observability
 	base.Version = entry.Version
 	base.Channel = entry.Channel
 	base.Schema = files["schema.json"]
@@ -470,6 +478,12 @@ func syncPlan(sourceID string, pkgs []Package) ([]*types.CatalogItem, []*types.C
 		if p.Type == "template" {
 			payload["manifest"] = json.RawMessage(p.ManifestJSON)
 			payload["skeletonDigest"] = p.SkeletonDigest
+		}
+		if len(p.Observability) > 0 {
+			payload["observabilityYaml"] = string(p.Observability)
+		}
+		if p.ObservabilityRef != nil {
+			payload["observabilityRef"] = p.ObservabilityRef
 		}
 		if len(p.RGD) > 0 {
 			payload["rgd"] = string(p.RGD)

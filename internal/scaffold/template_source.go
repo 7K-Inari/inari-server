@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -101,6 +102,12 @@ func validKind(raw string) bool {
 	return raw == "" || raw == KindComponent || raw == KindGitOpsRepo
 }
 
+// TemplateObservability declares the exact capability manifest carried by a
+// deployment-capable component template. Pure scaffolds omit it.
+type TemplateObservability struct {
+	Manifest string `yaml:"manifest" json:"manifest"`
+}
+
 // TemplateManifest mirrors <template>/template.yaml.
 type TemplateManifest struct {
 	Name        string   `yaml:"name" json:"name"`
@@ -112,7 +119,8 @@ type TemplateManifest struct {
 	// Kind selects the run pipeline (empty → component).
 	Kind string `yaml:"kind" json:"kind,omitempty"`
 	// Scaffold holds the per-phase params + the approval gate flag.
-	Scaffold *ScaffoldConfig `yaml:"scaffold" json:"scaffold,omitempty"`
+	Scaffold      *ScaffoldConfig        `yaml:"scaffold" json:"scaffold,omitempty"`
+	Observability *TemplateObservability `yaml:"observability" json:"observability,omitempty"`
 }
 
 // kind reports the effective template kind (empty → component).
@@ -135,6 +143,8 @@ type TemplatePackage struct {
 	// SkeletonDigest is a content-addressed digest ("sha256:...") of the
 	// skeleton/ file tree; skeleton bytes stay on disk.
 	SkeletonDigest string
+	// Observability is the exact declared manifest content, when present.
+	Observability []byte
 	// Dir is the absolute template directory (for file:// refs).
 	Dir string
 }
@@ -242,6 +252,21 @@ func readTemplateDir(dir, dirName string) (*TemplatePackage, error) {
 	if m.kind() == KindGitOpsRepo && m.Scaffold.scope() == ScopeUser {
 		return nil, fmt.Errorf("scaffold: %s: template.yaml: kind %q does not support scaffold.scope %q (team repos are platform-app writes)", dirName, KindGitOpsRepo, ScopeUser)
 	}
+	var observabilityManifest []byte
+	if m.Observability != nil {
+		if m.kind() != KindComponent {
+			return nil, fmt.Errorf("scaffold: %s: observability is supported only for component templates", dirName)
+		}
+		manifestName := m.Observability.Manifest
+		clean := filepath.Clean(manifestName)
+		if manifestName == "" || filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("scaffold: %s: observability.manifest escapes the template package", dirName)
+		}
+		observabilityManifest, err = os.ReadFile(filepath.Join(dir, clean))
+		if err != nil {
+			return nil, fmt.Errorf("scaffold: %s: observability.manifest: %w", dirName, err)
+		}
+	}
 	schema, err := readJSONFile(dir, "schema.json", true)
 	if err != nil {
 		return nil, fmt.Errorf("scaffold: %s: %w", dirName, err)
@@ -259,6 +284,7 @@ func readTemplateDir(dir, dirName string) (*TemplatePackage, error) {
 		Schema:         schema,
 		UIHints:        uiHints,
 		SkeletonDigest: digest,
+		Observability:  observabilityManifest,
 		Dir:            dir,
 	}, nil
 }
@@ -351,10 +377,14 @@ func templateSyncPlan(pkgs []TemplatePackage) ([]*types.CatalogItem, []*types.Ca
 	versions := make([]*types.CatalogItemVersion, 0, len(pkgs))
 	for _, p := range pkgs {
 		itemID := "template:" + p.Manifest.Name
-		payload, err := json.Marshal(map[string]any{
+		payloadMap := map[string]any{
 			"manifest":       p.Manifest,
 			"skeletonDigest": p.SkeletonDigest,
-		})
+		}
+		if len(p.Observability) > 0 {
+			payloadMap["observabilityYaml"] = string(p.Observability)
+		}
+		payload, err := json.Marshal(payloadMap)
 		if err != nil {
 			return nil, nil, err
 		}

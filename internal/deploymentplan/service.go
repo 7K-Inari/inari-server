@@ -12,6 +12,7 @@ import (
 	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
 	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/oci"
 	"github.com/7K-Inari/inari-server/internal/resourcetargets"
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -42,19 +43,35 @@ type ChartFetcher interface {
 }
 
 type AppExecutor interface {
-	Execute(ctx context.Context, orgID, subject string, plan *Plan) (instanceID, scaffoldRunID string, err error)
+	Execute(ctx context.Context, orgID, subject string, plan *Plan) (*Execution, error)
+}
+
+type InstanceResolver interface {
+	Get(ctx context.Context, orgID, id string) (*inventory.InstanceView, error)
+}
+
+type TeamLister interface {
+	ListTeams(ctx context.Context, orgID string) ([]types.Team, error)
+}
+
+type TeamListerFunc func(context.Context, string) ([]types.Team, error)
+
+func (f TeamListerFunc) ListTeams(ctx context.Context, orgID string) ([]types.Team, error) {
+	return f(ctx, orgID)
 }
 
 type Service struct {
-	db       *db.DB
-	store    Store
-	catalog  Catalog
-	targets  Targets
-	charts   ChartFetcher
-	executor AppExecutor
-	gate     GateStatus
-	now      func() time.Time
-	newID    func() string
+	db        *db.DB
+	store     Store
+	catalog   Catalog
+	targets   Targets
+	charts    ChartFetcher
+	executor  AppExecutor
+	instances InstanceResolver
+	teams     TeamLister
+	gate      GateStatus
+	now       func() time.Time
+	newID     func() string
 }
 
 func NewService(d *db.DB, store Store) *Service {
@@ -64,6 +81,35 @@ func NewService(d *db.DB, store Store) *Service {
 func (s *Service) WithDependencies(cat Catalog, targets Targets, charts ChartFetcher, executor AppExecutor) *Service {
 	s.catalog, s.targets, s.charts, s.executor = cat, targets, charts, executor
 	return s
+}
+
+func (s *Service) WithInstances(instances InstanceResolver) *Service {
+	s.instances = instances
+	return s
+}
+
+func (s *Service) WithTeams(teams TeamLister) *Service {
+	s.teams = teams
+	return s
+}
+
+func (s *Service) validateOwnerTeam(ctx context.Context, orgID, ownerTeam string) error {
+	if ownerTeam == "" {
+		return errors.New("ownerTeam is required for observability provisioning")
+	}
+	if s.teams == nil {
+		return errors.New("team resolver is not configured")
+	}
+	teams, err := s.teams.ListTeams(ctx, orgID)
+	if err != nil {
+		return err
+	}
+	for _, team := range teams {
+		if team.ID == ownerTeam || team.Name == ownerTeam {
+			return nil
+		}
+	}
+	return errors.New("ownerTeam must be a team in the current org")
 }
 
 // WithGate is intended for contract tests and for the independently confirmed
@@ -89,6 +135,18 @@ func targetConfig(target resourcetargets.Target) (grafanaTargetConfig, error) {
 		return config, err
 	}
 	return config, nil
+}
+
+func templateNamespace(orgSlug, component string) string {
+	namespace := orgSlug + "--" + component
+	if len(namespace) <= 63 {
+		return namespace
+	}
+	keep := 63 - len(orgSlug) - 2
+	if keep < 1 {
+		return strings.TrimRight(orgSlug[:63], "-")
+	}
+	return namespace[:len(orgSlug)+2] + strings.TrimRight(component[:keep], "-")
 }
 
 func supportsEvaluation(capability *observability.Capability, evaluation observability.Evaluation) bool {
@@ -123,7 +181,7 @@ func defaultTargetIntent(target resourcetargets.Target, capability *observabilit
 	return &TargetIntent{ID: target.ID, Revision: target.Revision, Selection: selection}, true
 }
 
-func (s *Service) existingRequest(ctx context.Context, req PlanRequest, orgID string) (PlanRequest, *Plan, error) {
+func (s *Service) existingRequest(ctx context.Context, req PlanRequest, orgID, subject string) (PlanRequest, *Plan, error) {
 	if req.Operation != OperationProvisionExisting {
 		return req, nil, nil
 	}
@@ -131,8 +189,35 @@ func (s *Service) existingRequest(ctx context.Context, req PlanRequest, orgID st
 		return req, nil, errors.New("instanceId is required for existing-instance provisioning")
 	}
 	original, err := s.store.LatestPlanForInstance(ctx, orgID, req.InstanceID)
+	if err == nil {
+		req.Source = &original.Source
+		req.Deployment = original.Deployment
+		return req, original, nil
+	}
+	if !errors.Is(err, ErrPlanNotFound) || s.instances == nil {
+		return req, nil, err
+	}
+	instance, err := s.instances.Get(ctx, orgID, req.InstanceID)
 	if err != nil {
 		return req, nil, err
+	}
+	if instance.ArtifactDigest == "" {
+		return req, nil, errors.New("capability_unavailable: legacy instance has no recorded artifact digest")
+	}
+	targets, err := s.targets.List(ctx, orgID, subject, resourcetargets.ListFilter{Capability: resourcetargets.CapabilityDeploymentCluster, Action: resourcetargets.ActionUse, ResourceRef: &resourcetargets.TargetResourceRef{Kind: resourcetargets.ResourceKindCluster, ID: instance.ClusterID}})
+	if err != nil || len(targets) == 0 {
+		return req, nil, errors.New("capability_unavailable: legacy instance has no entitled deployment target")
+	}
+	target := targets[0]
+	name := instance.ResourceRef.Name
+	if name == "" {
+		name = instance.ID
+	}
+	original = &Plan{
+		OrgID: orgID, Operation: OperationDeploy, Source: Source{Kind: SourceCatalog, ItemID: instance.CatalogItemID, Version: instance.Version},
+		App: ArtifactPin{ItemID: instance.CatalogItemID, Version: instance.Version, Digest: instance.ArtifactDigest}, AppInstanceID: instance.ID,
+		Deployment:    DeploymentInput{TargetID: target.ID, TargetRevision: target.Revision, RepoID: instance.RepoID, Name: name, Namespace: instance.ResourceRef.Namespace, OwnerTeam: instance.OwnerTeam, Spec: instance.Spec, DisplayName: name},
+		Observability: ObservabilityInput{Mode: ModeSkip}, CreatedAt: instance.CreatedAt, UpdatedAt: instance.UpdatedAt,
 	}
 	req.Source = &original.Source
 	req.Deployment = original.Deployment
@@ -143,7 +228,7 @@ func (s *Service) Preflight(ctx context.Context, req PlanRequest, orgID, orgSlug
 	if s.targets == nil {
 		return nil, errors.New("resource target resolver is not configured")
 	}
-	req, original, err := s.existingRequest(ctx, req, orgID)
+	req, original, err := s.existingRequest(ctx, req, orgID, subject)
 	if err != nil {
 		return nil, err
 	}
@@ -167,14 +252,23 @@ func (s *Service) Preflight(ctx context.Context, req PlanRequest, orgID, orgSlug
 		}
 	}
 	if original != nil {
-		if original.App.Version != normalized.app.Version || original.App.Digest != normalized.app.Digest || original.CapabilityDigest != normalized.capabilityDigest {
+		if original.App.Version != normalized.app.Version || original.App.Digest != normalized.app.Digest || (original.CapabilityDigest != "" && original.CapabilityDigest != normalized.capabilityDigest) {
 			return nil, errors.New("original application pin or capability changed; review a fresh deployment plan")
+		}
+	}
+	deployment := req.Deployment
+	if normalized.source.Kind == SourceTemplate && deployment.Name != "" {
+		if deployment.OwnerTeam == "" {
+			deployment.OwnerTeam = deployment.Name + "-maintainers"
+		}
+		if deployment.Namespace == "" {
+			deployment.Namespace = templateNamespace(orgSlug, deployment.Name)
 		}
 	}
 	now := s.now()
 	plan := &Plan{
 		ID: s.newID(), OrgID: orgID, OrgSlug: orgSlug, Requester: subject, IdempotencyKey: req.IdempotencyKey,
-		Operation: req.Operation, Source: normalized.source, Deployment: req.Deployment, App: normalized.app,
+		Operation: req.Operation, Source: normalized.source, Deployment: deployment, App: normalized.app,
 		Capability: normalized.capability, CapabilityDigest: normalized.capabilityDigest, Gate: s.gate,
 		State: "preflight", AppClusterID: req.Deployment.TargetID, CreatedAt: now, UpdatedAt: now,
 	}
@@ -193,6 +287,11 @@ func (s *Service) Preflight(ctx context.Context, req PlanRequest, orgID, orgSlug
 	}
 	if plan.Observability.Mode != ModeNone && plan.Observability.Mode != ModeSkip && plan.Observability.Mode != ModeProvision {
 		return nil, errors.New("observability mode must be none, skip, or provision")
+	}
+	if plan.Observability.Mode == ModeProvision && plan.Deployment.OwnerTeam != "" {
+		if err := s.validateOwnerTeam(ctx, orgID, plan.Deployment.OwnerTeam); err != nil {
+			return nil, err
+		}
 	}
 	if normalized.managedChart && plan.Capability != nil {
 		overlaid, err := ApplyManagedChartOverlay(plan.Deployment.Spec)
@@ -239,7 +338,7 @@ func (s *Service) Preflight(ctx context.Context, req PlanRequest, orgID, orgSlug
 				}
 			}
 		}
-		if plan.Observability.Target != nil && len(plan.Observability.Target.Selection) > 0 {
+		if plan.Observability.Target != nil && len(plan.Observability.Target.Selection) > 0 && plan.Deployment.OwnerTeam != "" {
 			intent, err := BuildPackRenderIntent(plan.Capability, plan.Observability.Target.Selection, orgSlug, plan.Deployment.OwnerTeam)
 			if err != nil {
 				return nil, err
@@ -261,7 +360,7 @@ func (s *Service) Preflight(ctx context.Context, req PlanRequest, orgID, orgSlug
 	if err != nil {
 		return nil, err
 	}
-	return &Preflight{Plan: *plan, DeploymentTargets: deploymentTargets, MonitoringTargets: monitoringTargets, CompatiblePacks: packs, Providers: s.targets.Providers()}, nil
+	return &Preflight{Plan: *plan, Schema: normalized.version.Schema, UIHints: normalized.version.UIHints, DeploymentTargets: deploymentTargets, MonitoringTargets: monitoringTargets, CompatiblePacks: packs, Providers: s.targets.Providers()}, nil
 }
 
 func (s *Service) Submit(ctx context.Context, req PlanRequest, orgID, orgSlug, subject string) (*Plan, error) {
@@ -287,6 +386,9 @@ func (s *Service) Submit(ctx context.Context, req PlanRequest, orgID, orgSlug, s
 	}
 	plan.State = "submitted"
 	if plan.Observability.Mode == ModeProvision {
+		if err := s.validateOwnerTeam(ctx, orgID, plan.Deployment.OwnerTeam); err != nil {
+			return nil, err
+		}
 		if plan.Observability.Pack == nil || plan.Observability.Target == nil {
 			return nil, errors.New("provision requires an exact compatible pack and monitoring target")
 		}
@@ -344,7 +446,7 @@ func (s *Service) Submit(ctx context.Context, req PlanRequest, orgID, orgSlug, s
 	if plan.RenderIntent != nil && len(plan.RenderIntent.AppSpec) > 0 {
 		plan.Deployment.Spec = plan.RenderIntent.AppSpec
 	}
-	instanceID, runID, err := s.executor.Execute(ctx, orgID, subject, plan)
+	execution, err := s.executor.Execute(ctx, orgID, subject, plan)
 	if err != nil {
 		plan.State = "failed"
 		plan.ErrorCode = "application_execution_failed"
@@ -353,11 +455,12 @@ func (s *Service) Submit(ctx context.Context, req PlanRequest, orgID, orgSlug, s
 		_ = s.store.UpdatePlan(ctx, plan)
 		return nil, err
 	}
-	plan.AppInstanceID, plan.ScaffoldRunID = instanceID, runID
+	plan.AppInstanceID, plan.ScaffoldRunID = execution.InstanceID, execution.ScaffoldRunID
+	plan.CommitSHA, plan.PRURL, plan.ApprovalID = execution.CommitSHA, execution.PRURL, execution.ApprovalID
 	plan.UpdatedAt = s.now()
 	if plan.Companion != nil {
-		plan.Companion.AppInstanceID = instanceID
-		plan.Companion.ScaffoldRunID = runID
+		plan.Companion.AppInstanceID = execution.InstanceID
+		plan.Companion.ScaffoldRunID = execution.ScaffoldRunID
 		plan.Companion.UpdatedAt = plan.UpdatedAt
 	}
 	if err := s.store.UpdatePlan(ctx, plan); err != nil {

@@ -941,7 +941,9 @@ func run() error {
 	// of the external companion renderer. The default gate remains closed and
 	// no multi-target renderer or deployed verifier is wired here.
 	deploymentPlanSvc := deploymentplan.NewService(database, deploymentplan.NewSQLStore(database)).
-		WithDependencies(catalogSvc, resourceTargetsSvc, &oci.Fetcher{}, deploymentplan.NewExecutor(orchestratorSvc, scaffoldSvc))
+		WithDependencies(catalogSvc, resourceTargetsSvc, &oci.Fetcher{}, deploymentplan.NewExecutor(orchestratorSvc, scaffoldSvc)).
+		WithInstances(inventorySvc).
+		WithTeams(svc)
 
 	// Fleet Manager (plan §5.11): owns ClusterSets (policy service consumes
 	// them via the SetResolver seam), staged rollouts, agent channels,

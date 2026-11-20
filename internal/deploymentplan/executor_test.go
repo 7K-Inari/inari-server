@@ -32,16 +32,16 @@ func TestExecutorDelegatesExactCatalogAndTemplatePins(t *testing.T) {
 		App:    ArtifactPin{ItemID: "hiroba/payments-api", Version: "1.4.0"}, AppClusterID: "cluster-1",
 		Deployment: DeploymentInput{Name: "payments", Namespace: "payments", OwnerTeam: "team-1", Spec: json.RawMessage(`{"replicas":2}`)},
 	}
-	instanceID, runID, err := executor.Execute(context.Background(), "org-1", "user-1", plan)
-	if err != nil || instanceID != "app-1" || runID != "" {
-		t.Fatalf("execute = %q %q %v", instanceID, runID, err)
+	execution, err := executor.Execute(context.Background(), "org-1", "user-1", plan)
+	if err != nil || execution.InstanceID != "app-1" || execution.ScaffoldRunID != "" {
+		t.Fatalf("execute = %#v, %v", execution, err)
 	}
 	if deployer.request.ItemID != plan.App.ItemID || deployer.request.Version != "1.4.0" || deployer.request.ClusterID != "cluster-1" || deployer.request.Requester != "user:user-1" {
 		t.Fatalf("deploy request = %#v", deployer.request)
 	}
 	plan.Source = Source{Kind: SourceTemplate, ItemID: "hiroba/service", Version: "1.4.0", DisplayName: "Payments"}
-	instanceID, runID, err = executor.Execute(context.Background(), "org-1", "user-1", plan)
-	if err != nil || instanceID != "" || runID != "run-1" || scaffolder.name != "hiroba/service" || scaffolder.version != "1.4.0" || scaffolder.displayName != "Payments" {
-		t.Fatalf("template execute = %q %q %v, scaffold %#v", instanceID, runID, err, scaffolder)
+	execution, err = executor.Execute(context.Background(), "org-1", "user-1", plan)
+	if err != nil || execution.InstanceID != "" || execution.ScaffoldRunID != "run-1" || scaffolder.name != "hiroba/service" || scaffolder.version != "1.4.0" || scaffolder.displayName != "Payments" {
+		t.Fatalf("template execute = %#v, %v, scaffold %#v", execution, err, scaffolder)
 	}
 }

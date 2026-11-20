@@ -11,6 +11,7 @@ import (
 	observability "github.com/7K-Inari/inari-api/contract/observability/v1"
 	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
 	"github.com/7K-Inari/inari-server/internal/catalog"
+	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/oci"
 	"github.com/7K-Inari/inari-server/internal/resourcetargets"
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -124,15 +125,24 @@ type fakeExecutor struct {
 	instanceID string
 }
 
-func (f *fakeExecutor) Execute(_ context.Context, _, _ string, plan *Plan) (string, string, error) {
+func (f *fakeExecutor) Execute(_ context.Context, _, _ string, plan *Plan) (*Execution, error) {
 	f.calls++
 	if plan.Source.Kind == SourceTemplate {
-		return "", "run-1", nil
+		return &Execution{ScaffoldRunID: "run-1"}, nil
 	}
 	if f.instanceID != "" {
-		return f.instanceID, "", nil
+		return &Execution{InstanceID: f.instanceID}, nil
 	}
-	return "app-1", "", nil
+	return &Execution{InstanceID: "app-1"}, nil
+}
+
+type fakeInstances struct{ view *inventory.InstanceView }
+
+func (f *fakeInstances) Get(_ context.Context, orgID, id string) (*inventory.InstanceView, error) {
+	if f.view == nil || f.view.OrgID != orgID || f.view.ID != id {
+		return nil, inventory.ErrInstanceNotFound
+	}
+	return f.view, nil
 }
 
 type fakeCharts struct {
@@ -173,7 +183,10 @@ spec:
 	targets := &fakeTargets{appTarget: appTarget, monTarget: monTarget}
 	executor := &fakeExecutor{}
 	store := NewMemoryStore()
-	svc := NewService(nil, store).WithDependencies(cat, targets, &fakeCharts{metadata: []byte(metadata), digest: testDigest}, executor)
+	svc := NewService(nil, store).WithDependencies(cat, targets, &fakeCharts{metadata: []byte(metadata), digest: testDigest}, executor).
+		WithTeams(TeamListerFunc(func(context.Context, string) ([]types.Team, error) {
+			return []types.Team{{ID: "team-1", Name: "payments-api-maintainers", OrgID: "org-1"}}, nil
+		}))
 	svc.now = func() time.Time { return time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC) }
 	return svc, cat, targets, executor, store
 }
@@ -362,6 +375,30 @@ func TestVerificationGatesReadyLinksAndRejectsBlockedIntent(t *testing.T) {
 	}
 	if len(status.Companion.Links) != 1 || !strings.Contains(status.Companion.Links[0].URL, "var-namespace=payments") {
 		t.Fatalf("ready links = %#v", status.Companion.Links)
+	}
+}
+
+func TestLegacyCatalogInstanceCanProvisionFromRecordedPin(t *testing.T) {
+	svc, _, _, _, _ := serviceFixture(t)
+	svc.WithInstances(&fakeInstances{view: &inventory.InstanceView{ResourceInstance: types.ResourceInstance{
+		ID: "legacy-1", OrgID: "org-1", ClusterID: "cluster-app", CatalogItemID: "hiroba/payments-api", Version: "1.4.0", ArtifactDigest: testDigest,
+		OwnerTeam: "payments-api-maintainers", Spec: json.RawMessage(`{"replicas":2}`), ResourceRef: types.ResourceRef{Name: "payments", Namespace: "payments"}, RepoID: "repo-1",
+	}}})
+	preflight, err := svc.Preflight(context.Background(), PlanRequest{Operation: OperationProvisionExisting, InstanceID: "legacy-1", Observability: ObservabilityInput{Mode: ModeProvision}}, "org-1", "acme-inc", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preflight.Plan.AppInstanceID != "legacy-1" || preflight.Plan.App.Digest != testDigest || preflight.Plan.Capability == nil || preflight.Plan.Deployment.TargetID != "rt-app" {
+		t.Fatalf("legacy preflight = %#v", preflight.Plan)
+	}
+}
+
+func TestProvisionRejectsUnknownOwnerTeam(t *testing.T) {
+	svc, _, _, _, _ := serviceFixture(t)
+	req := deployRequest()
+	req.Deployment.OwnerTeam = "other-team"
+	if _, err := svc.Preflight(context.Background(), req, "org-1", "acme-inc", "user-1"); err == nil || !strings.Contains(err.Error(), "current org") {
+		t.Fatalf("error = %v", err)
 	}
 }
 

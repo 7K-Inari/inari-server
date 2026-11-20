@@ -18,6 +18,14 @@ type Scaffolder interface {
 	CreateRun(ctx context.Context, actor, orgID, name, version, displayName string, values json.RawMessage) (*types.ScaffoldRun, []types.ScaffoldRunStep, bool, error)
 }
 
+type Execution struct {
+	InstanceID    string
+	ScaffoldRunID string
+	CommitSHA     string
+	PRURL         string
+	ApprovalID    string
+}
+
 type Executor struct {
 	deployer   Deployer
 	scaffolder Scaffolder
@@ -27,11 +35,11 @@ func NewExecutor(deployer Deployer, scaffolder Scaffolder) *Executor {
 	return &Executor{deployer: deployer, scaffolder: scaffolder}
 }
 
-func (e *Executor) Execute(ctx context.Context, orgID, subject string, plan *Plan) (string, string, error) {
+func (e *Executor) Execute(ctx context.Context, orgID, subject string, plan *Plan) (*Execution, error) {
 	switch plan.Source.Kind {
 	case SourceCatalog, SourceChart:
 		if e.deployer == nil {
-			return "", "", errors.New("catalog deployer is not configured")
+			return nil, errors.New("catalog deployer is not configured")
 		}
 		result, err := e.deployer.Deploy(ctx, orchestrator.DeployRequest{
 			OrgID: orgID, ClusterID: plan.AppClusterID, ItemID: plan.App.ItemID, Version: plan.App.Version,
@@ -39,12 +47,12 @@ func (e *Executor) Execute(ctx context.Context, orgID, subject string, plan *Pla
 			Spec: plan.Deployment.Spec, Requester: "user:" + strings.TrimPrefix(subject, "user:"), RepoID: plan.Deployment.RepoID,
 		})
 		if err != nil {
-			return "", "", err
+			return nil, err
 		}
-		return result.InstanceID, "", nil
+		return &Execution{InstanceID: result.InstanceID, CommitSHA: result.CommitSHA, PRURL: result.PRURL, ApprovalID: result.ApprovalID}, nil
 	case SourceTemplate:
 		if e.scaffolder == nil {
-			return "", "", errors.New("template scaffolder is not configured")
+			return nil, errors.New("template scaffolder is not configured")
 		}
 		displayName := plan.Source.DisplayName
 		if displayName == "" {
@@ -52,10 +60,10 @@ func (e *Executor) Execute(ctx context.Context, orgID, subject string, plan *Pla
 		}
 		run, _, _, err := e.scaffolder.CreateRun(ctx, subject, orgID, plan.Source.ItemID, plan.Source.Version, displayName, plan.Deployment.Spec)
 		if err != nil {
-			return "", "", err
+			return nil, err
 		}
-		return "", run.ID, nil
+		return &Execution{ScaffoldRunID: run.ID}, nil
 	default:
-		return "", "", errors.New("unsupported application source")
+		return nil, errors.New("unsupported application source")
 	}
 }

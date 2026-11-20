@@ -156,6 +156,9 @@ type Plan struct {
 	AppInstanceID    string                    `json:"appInstanceId,omitempty"`
 	AppClusterID     string                    `json:"appClusterId,omitempty"`
 	ScaffoldRunID    string                    `json:"scaffoldRunId,omitempty"`
+	CommitSHA        string                    `json:"commitSha,omitempty"`
+	PRURL            string                    `json:"prUrl,omitempty"`
+	ApprovalID       string                    `json:"approvalId,omitempty"`
 	Companion        *Companion                `json:"companion,omitempty"`
 	ErrorCode        string                    `json:"errorCode,omitempty"`
 	ErrorMessage     string                    `json:"errorMessage,omitempty"`
@@ -165,6 +168,8 @@ type Plan struct {
 
 type Preflight struct {
 	Plan              Plan                                 `json:"plan"`
+	Schema            json.RawMessage                      `json:"schema,omitempty"`
+	UIHints           json.RawMessage                      `json:"uiHints,omitempty"`
 	DeploymentTargets []resourcetargets.Target             `json:"deploymentTargets"`
 	MonitoringTargets []resourcetargets.Target             `json:"monitoringTargets"`
 	CompatiblePacks   []PackPin                            `json:"compatiblePacks"`

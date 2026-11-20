@@ -21,14 +21,25 @@ type TenantResolver interface {
 	GetTenant(ctx context.Context, slug string) (*types.Organization, error)
 }
 
+type RepoWriteEnforcer interface {
+	EnforceRepoWrite(ctx context.Context, id *authn.Identity, orgID, repoID string) error
+	EnforceRecordedRepoWrite(ctx context.Context, id *authn.Identity, orgID, instanceID string) error
+}
+
 type Handler struct {
-	svc     *Service
-	tenants TenantResolver
-	authz   authz.Authorizer
+	svc       *Service
+	tenants   TenantResolver
+	authz     authz.Authorizer
+	repoWrite RepoWriteEnforcer
 }
 
 func NewHandler(svc *Service, tenants TenantResolver, az authz.Authorizer) *Handler {
 	return &Handler{svc: svc, tenants: tenants, authz: az}
+}
+
+func (h *Handler) WithRepoWriteEnforcement(enforcer RepoWriteEnforcer) *Handler {
+	h.repoWrite = enforcer
+	return h
 }
 
 func (h *Handler) RegisterRoutes(api huma.API) {
@@ -141,6 +152,16 @@ func (h *Handler) submit(ctx context.Context, in *submitInput) (*submitOutput, e
 	}
 	if in.Body.IdempotencyKey == "" {
 		return nil, huma.Error400BadRequest("idempotencyKey is required")
+	}
+	if h.repoWrite != nil {
+		if in.Body.Operation == OperationProvisionExisting {
+			err = h.repoWrite.EnforceRecordedRepoWrite(ctx, id, org.ID, in.Body.InstanceID)
+		} else {
+			err = h.repoWrite.EnforceRepoWrite(ctx, id, org.ID, in.Body.Deployment.RepoID)
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 	plan, err := h.svc.Submit(ctx, in.Body, org.ID, org.Slug, id.Subject)
 	if err != nil {

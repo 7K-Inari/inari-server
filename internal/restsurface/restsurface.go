@@ -133,13 +133,13 @@ func Register(api huma.API, d Deps) {
 	approvals.NewHandler(d.Approvals, d.Tenancy, d.Authz, d.Tenancy).RegisterRoutes(api)
 	inventory.NewHandler(d.Inventory, d.Tenancy, d.Authz).RegisterRoutes(api)
 	platformresources.NewHandler(d.PlatformResources, d.Tenancy, d.Authz).RegisterRoutes(api)
-	orchestrator.NewHandler(d.Orchestrator, d.Tenancy, d.Authz).
+	orchestratorHandler := orchestrator.NewHandler(d.Orchestrator, d.Tenancy, d.Authz).
 		WithAllowedAPIBases(d.AllowedAPIBases).
-		WithRepoWriteEnforcement(d.OrchestratorTeams, d.OrchestratorRepos, d.OrchestratorInstances).
-		RegisterRoutes(api)
+		WithRepoWriteEnforcement(d.OrchestratorTeams, d.OrchestratorRepos, d.OrchestratorInstances)
+	orchestratorHandler.RegisterRoutes(api)
 	gitrepos.NewHandler(d.GitRepos, d.Tenancy, d.Authz).RegisterRoutes(api)
 	resourcetargets.NewHandler(d.ResourceTargets, d.Tenancy, d.Authz).RegisterRoutes(api)
-	deploymentplan.NewHandler(d.DeploymentPlans, d.Tenancy, d.Authz).RegisterRoutes(api)
+	deploymentplan.NewHandler(d.DeploymentPlans, d.Tenancy, d.Authz).WithRepoWriteEnforcement(orchestratorHandler).RegisterRoutes(api)
 	gitwebhook.NewHandler(d.GitWebhook).RegisterRoutes(api)
 	// Addons reuse the orchestrator's repo-write enforcement seams
 	// (Feature A decision 5b applies to addon writes too).

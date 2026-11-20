@@ -22,14 +22,6 @@ func TestTrustedSourcesDownIsExplicitlyIrreversible(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	if err := database.Migrate(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := database.Pool.Exec(ctx, `INSERT INTO catalog_items
-		(id, source, name, display_name, description, snapshot_present)
-		VALUES ('template:legacy', 'template', 'legacy', 'Legacy', 'legacy', false)`); err != nil {
-		t.Fatal(err)
-	}
 	sub, err := fs.Sub(migrationsFS, "migrations")
 	if err != nil {
 		t.Fatal(err)
@@ -40,8 +32,13 @@ func TestTrustedSourcesDownIsExplicitlyIrreversible(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.Down(ctx); err != nil {
-		t.Fatalf("reversible 0042 Down failed before reaching 0041: %v", err)
+	if _, err := provider.UpTo(ctx, 41); err != nil {
+		t.Fatalf("up to 0041: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx, `INSERT INTO catalog_items
+		(id, source, name, display_name, description, snapshot_present)
+		VALUES ('template:legacy', 'template', 'legacy', 'Legacy', 'legacy', false)`); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := provider.Down(ctx); err == nil || !strings.Contains(err.Error(), "irreversible") {
 		t.Fatalf("0041 Down error = %v, want explicit irreversible rejection", err)

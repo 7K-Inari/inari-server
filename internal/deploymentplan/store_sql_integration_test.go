@@ -4,8 +4,12 @@ package deploymentplan_test
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/pressly/goose/v3"
 
 	observability "github.com/7K-Inari/inari-api/contract/observability/v1"
 	"github.com/7K-Inari/inari-server/internal/deploymentplan"
@@ -59,5 +63,42 @@ func TestMigrationAndSQLStoreRoundTrip(t *testing.T) {
 	}
 	if err := store.SaveVerification(ctx, "oc-1", result); err != nil {
 		t.Fatalf("duplicate verification was not idempotent: %v", err)
+	}
+}
+
+func TestDeploymentObservabilityDownLeavesExistingTables(t *testing.T) {
+	ctx := context.Background()
+	pg, err := testutil.SharedPostgres(ctx)
+	if err != nil {
+		t.Skipf("testcontainers unavailable: %v", err)
+	}
+	database, err := testdb.NewDatabase(t, pg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB := stdlib.OpenDBFromPool(database.Pool)
+	defer sqlDB.Close()
+	provider, err := goose.NewProvider(goose.DialectPostgres, sqlDB, os.DirFS("../db/migrations"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.Down(ctx); err != nil {
+		t.Fatalf("down 0043: %v", err)
+	}
+	for _, table := range []string{"deployment_plans", "observability_companions", "observability_verification_results"} {
+		var exists *string
+		if err := database.Pool.QueryRow(ctx, `SELECT to_regclass($1)`, table).Scan(&exists); err != nil {
+			t.Fatal(err)
+		}
+		if exists != nil && *exists != "" {
+			t.Fatalf("table %s survived down migration", table)
+		}
+	}
+	var targets *string
+	if err := database.Pool.QueryRow(ctx, `SELECT to_regclass('resource_targets')`).Scan(&targets); err != nil {
+		t.Fatal(err)
+	}
+	if targets == nil || *targets == "" {
+		t.Fatal("down migration removed existing resource targets")
 	}
 }

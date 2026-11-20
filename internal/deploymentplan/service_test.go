@@ -1,0 +1,380 @@
+package deploymentplan
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	observability "github.com/7K-Inari/inari-api/contract/observability/v1"
+	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
+	"github.com/7K-Inari/inari-server/internal/catalog"
+	"github.com/7K-Inari/inari-server/internal/oci"
+	"github.com/7K-Inari/inari-server/internal/resourcetargets"
+	"github.com/7K-Inari/inari-server/internal/types"
+)
+
+type fakeCatalog struct {
+	item        *types.CatalogItem
+	version     *types.CatalogItemVersion
+	packItem    *types.CatalogItem
+	packVersion *types.CatalogItemVersion
+	admitErr    error
+	admitted    []string
+}
+
+func (f *fakeCatalog) GetItemByID(_ context.Context, id string) (*types.CatalogItem, error) {
+	if f.item != nil && id == f.item.ID {
+		return f.item, nil
+	}
+	if f.packItem != nil && id == f.packItem.ID {
+		return f.packItem, nil
+	}
+	return nil, catalog.ErrItemNotFound
+}
+func (f *fakeCatalog) EffectiveVersion(_ context.Context, _, id, _ string) (string, error) {
+	if f.item != nil && id == f.item.ID {
+		return f.version.Version, nil
+	}
+	if f.packItem != nil && id == f.packItem.ID {
+		return f.packVersion.Version, nil
+	}
+	return "", catalog.ErrVersionNotFound
+}
+func (f *fakeCatalog) GetVersion(_ context.Context, id, version string) (*types.CatalogItemVersion, error) {
+	if f.item != nil && id == f.item.ID && version == f.version.Version {
+		return f.version, nil
+	}
+	if f.packItem != nil && id == f.packItem.ID && version == f.packVersion.Version {
+		return f.packVersion, nil
+	}
+	return nil, catalog.ErrVersionNotFound
+}
+func (f *fakeCatalog) ListVersions(_ context.Context, id string) ([]types.CatalogItemVersion, error) {
+	if f.packItem != nil && id == f.packItem.ID {
+		return []types.CatalogItemVersion{*f.packVersion}, nil
+	}
+	if f.item != nil && id == f.item.ID {
+		return []types.CatalogItemVersion{*f.version}, nil
+	}
+	return nil, catalog.ErrItemNotFound
+}
+func (f *fakeCatalog) ListVisible(_ context.Context, _ string, _ types.CatalogListOptions) ([]catalog.ItemView, int, error) {
+	if f.item == nil {
+		return nil, 0, nil
+	}
+	return []catalog.ItemView{{CatalogItem: *f.item, Versions: []types.CatalogItemVersion{*f.version}}}, 1, nil
+}
+func (f *fakeCatalog) EnsureVisible(context.Context, string, string, string) error { return nil }
+func (f *fakeCatalog) AdmitVersion(_ context.Context, id, version string, _ trustedsource.Environment) (*catalog.AdmittedVersion, error) {
+	if f.admitErr != nil {
+		return nil, f.admitErr
+	}
+	f.admitted = append(f.admitted, id+"@"+version)
+	versionRow, err := f.GetVersion(context.Background(), id, version)
+	if err != nil {
+		return nil, err
+	}
+	return &catalog.AdmittedVersion{Version: versionRow}, nil
+}
+
+type fakeTargets struct {
+	appTarget    *resourcetargets.Target
+	monTarget    *resourcetargets.Target
+	provisionErr error
+	resolveCalls []string
+}
+
+func (f *fakeTargets) List(_ context.Context, _, _ string, filter resourcetargets.ListFilter) ([]resourcetargets.Target, error) {
+	if filter.Capability == resourcetargets.CapabilityDeploymentCluster && filter.Action == resourcetargets.ActionUse {
+		return []resourcetargets.Target{*f.appTarget}, nil
+	}
+	if filter.Capability == resourcetargets.CapabilityMonitoringGrafana && filter.Action == resourcetargets.ActionProvision {
+		return []resourcetargets.Target{*f.monTarget}, nil
+	}
+	return []resourcetargets.Target{}, nil
+}
+func (f *fakeTargets) Get(_ context.Context, _, _, id string) (*resourcetargets.Target, error) {
+	if f.monTarget != nil && id == f.monTarget.ID {
+		copy := *f.monTarget
+		copy.EffectiveActions = []resourcetargets.Action{resourcetargets.ActionView}
+		return &copy, nil
+	}
+	return nil, resourcetargets.ErrTargetNotFound
+}
+func (f *fakeTargets) Resolve(_ context.Context, in resourcetargets.ResolveInput) (*resourcetargets.ResolvedTarget, error) {
+	f.resolveCalls = append(f.resolveCalls, in.TargetID+":"+string(in.Action))
+	if in.TargetID == f.appTarget.ID {
+		return &resourcetargets.ResolvedTarget{Target: *f.appTarget, Cluster: &types.Cluster{ID: "cluster-app", OrgID: "org-1", State: types.ClusterStateActive, Labels: map[string]string{"inari.dev/environment": "production"}}}, nil
+	}
+	if in.TargetID == f.monTarget.ID {
+		if f.provisionErr != nil {
+			return nil, f.provisionErr
+		}
+		return &resourcetargets.ResolvedTarget{Target: *f.monTarget, Selection: in.Selection, Cluster: &types.Cluster{ID: "cluster-mon", OrgID: "org-1", State: types.ClusterStateActive, Labels: map[string]string{"inari.dev/environment": "production"}}}, nil
+	}
+	return nil, resourcetargets.ErrTargetNotFound
+}
+func (f *fakeTargets) Providers() []resourcetargets.ProviderDescriptor { return nil }
+
+type fakeExecutor struct {
+	calls      int
+	instanceID string
+}
+
+func (f *fakeExecutor) Execute(_ context.Context, _, _ string, plan *Plan) (string, string, error) {
+	f.calls++
+	if plan.Source.Kind == SourceTemplate {
+		return "", "run-1", nil
+	}
+	if f.instanceID != "" {
+		return f.instanceID, "", nil
+	}
+	return "app-1", "", nil
+}
+
+type fakeCharts struct {
+	metadata []byte
+	digest   string
+	calls    int
+}
+
+func (f *fakeCharts) Fetch(_ context.Context, _ string) (*oci.Artifact, error) {
+	f.calls++
+	return &oci.Artifact{Digest: f.digest, Files: map[string][]byte{"Chart.yaml": []byte("version: 1.4.0\n"), "inari/observability.yaml": f.metadata}}, nil
+}
+
+func serviceFixture(t *testing.T) (*Service, *fakeCatalog, *fakeTargets, *fakeExecutor, *MemoryStore) {
+	t.Helper()
+	metadata := capabilityYAML(t)
+	payload, _ := json.Marshal(map[string]any{"observabilityYaml": metadata, "observabilityRef": observability.PackReference{Package: "observability-pack", VersionRange: ">=0.2.0 <0.3.0"}, "admission": map[string]any{"type": "platform-app"}})
+	packPayload, _ := json.Marshal(map[string]any{"rgd": `apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  annotations:
+    inari.dev/observability-render-contract: inari.observability-pack/v2
+spec:
+  schema:
+    spec: {org: string, namespace: string, app: string, team: string, folder: string, datasource: string, render: string, rulesLocal: boolean, rulesCentral: boolean}
+  resources:
+    - includeWhen: ['${schema.spec.rulesLocal}']
+    - includeWhen: ['${schema.spec.rulesCentral}']
+`, "admission": map[string]any{"type": "kro-rgd"}})
+	cat := &fakeCatalog{
+		item:        &types.CatalogItem{ID: "hiroba/payments-api", SourceID: "hiroba", Name: "payments-api"},
+		version:     &types.CatalogItemVersion{ItemID: "hiroba/payments-api", Version: "1.4.0", ArtifactRef: "ghcr.io/7k-hiroba/payments-api/catalog/payments-api:1.4.0", ArtifactDigest: testDigest, ChartRef: "oci://ghcr.io/7k-hiroba/payments-api/charts/payments-api:1.4.0", ChartDigest: testDigest, Payload: payload},
+		packItem:    &types.CatalogItem{ID: "hiroba/observability-pack", SourceID: "hiroba", Name: "observability-pack", Category: "observability"},
+		packVersion: &types.CatalogItemVersion{ItemID: "hiroba/observability-pack", Version: "0.2.0", ArtifactRef: "ghcr.io/7k-hiroba/payments-api/catalog/observability-pack:0.2.0", ArtifactDigest: testDigest, Payload: packPayload},
+	}
+	appTarget := &resourcetargets.Target{ID: "rt-app", Revision: 4, ResourceRef: resourcetargets.TargetResourceRef{Kind: "cluster", ID: "cluster-app"}, Capabilities: []string{resourcetargets.CapabilityDeploymentCluster}, Enabled: true, Readiness: resourcetargets.Readiness{State: resourcetargets.ReadinessReady}}
+	monTarget := &resourcetargets.Target{ID: "rt-mon", Revision: 7, IsDefault: true, ResourceRef: resourcetargets.TargetResourceRef{Kind: "cluster", ID: "cluster-mon"}, Capabilities: []string{resourcetargets.CapabilityMonitoringGrafana}, Enabled: true, Readiness: resourcetargets.Readiness{State: resourcetargets.ReadinessReady}, Config: json.RawMessage(`{"baseUrl":"https://grafana.team.example","evaluation":"central","folderPrefixes":["acme-inc"],"datasources":[{"name":"metrics-central","type":"prometheus"}]}`)}
+	targets := &fakeTargets{appTarget: appTarget, monTarget: monTarget}
+	executor := &fakeExecutor{}
+	store := NewMemoryStore()
+	svc := NewService(nil, store).WithDependencies(cat, targets, &fakeCharts{metadata: []byte(metadata), digest: testDigest}, executor)
+	svc.now = func() time.Time { return time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC) }
+	return svc, cat, targets, executor, store
+}
+
+func deployRequest() PlanRequest {
+	return PlanRequest{
+		Operation: OperationDeploy, Source: &Source{Kind: SourceCatalog, ItemID: "hiroba/payments-api", Version: "1.4.0"},
+		Deployment:    DeploymentInput{TargetID: "rt-app", TargetRevision: 4, Name: "payments", Namespace: "payments", OwnerTeam: "payments-api-maintainers", Spec: json.RawMessage(`{"replicas":2}`)},
+		Observability: ObservabilityInput{Mode: ModeProvision}, IdempotencyKey: "request-1",
+	}
+}
+
+func TestPreflightNormalizesAssetsPinsAndPolicyDefault(t *testing.T) {
+	svc, _, _, _, _ := serviceFixture(t)
+	preflight, err := svc.Preflight(context.Background(), deployRequest(), "org-1", "acme-inc", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := preflight.Plan
+	if plan.Capability == nil || len(plan.Capability.Dashboards) != 1 || plan.App.Digest != testDigest || plan.App.Version != "1.4.0" {
+		t.Fatalf("plan = %#v", plan)
+	}
+	if len(preflight.CompatiblePacks) != 1 || preflight.CompatiblePacks[0].Version != "0.2.0" || preflight.CompatiblePacks[0].RenderContract != observability.PackRenderContractV2 {
+		t.Fatalf("packs = %#v", preflight.CompatiblePacks)
+	}
+	if len(preflight.MonitoringTargets) != 1 || plan.Observability.Target == nil || plan.Observability.Target.ID != "rt-mon" {
+		t.Fatalf("targets/default = %#v / %#v", preflight.MonitoringTargets, plan.Observability.Target)
+	}
+	if plan.Observability.Pack == nil || plan.PlanFingerprint == "" || plan.Gate.CompanionRendering {
+		t.Fatalf("plan pins/gate = %#v", plan)
+	}
+}
+
+func TestSubmitSkipExecutesAppWithoutCompanion(t *testing.T) {
+	svc, _, _, executor, _ := serviceFixture(t)
+	req := deployRequest()
+	req.Observability.Mode = ModeSkip
+	plan, err := svc.Submit(context.Background(), req, "org-1", "acme-inc", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executor.calls != 1 || plan.AppInstanceID != "app-1" || plan.Companion != nil {
+		t.Fatalf("submit = %#v, calls %d", plan, executor.calls)
+	}
+	var spec map[string]any
+	if err := json.Unmarshal(plan.RenderIntent.AppSpec, &spec); err != nil {
+		t.Fatal(err)
+	}
+	if spec["observability"].(map[string]any)["enabled"] != false {
+		t.Fatalf("chart-native overlay missing: %#v", spec)
+	}
+}
+
+func TestSubmitProvisionClosedGateRevalidatesAndHasNoLinks(t *testing.T) {
+	svc, cat, targets, executor, _ := serviceFixture(t)
+	plan, err := svc.Submit(context.Background(), deployRequest(), "org-1", "acme-inc", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executor.calls != 1 || plan.Companion == nil || plan.Companion.State != "blocked_external_gate" || len(plan.Companion.Links) != 0 {
+		t.Fatalf("plan = %#v", plan)
+	}
+	if len(cat.admitted) != 2 || len(targets.resolveCalls) != 2 {
+		t.Fatalf("admission/target revalidation = %v / %v", cat.admitted, targets.resolveCalls)
+	}
+	if plan.RenderIntent == nil || plan.RenderIntent.PackSpec["rulesCentral"] != true || plan.RenderIntent.PackSpec["rulesLocal"] != false {
+		t.Fatalf("render intent = %#v", plan.RenderIntent)
+	}
+}
+
+func TestSubmitRevokedProvisionGrantStopsBeforeExecution(t *testing.T) {
+	svc, _, targets, executor, _ := serviceFixture(t)
+	targets.provisionErr = resourcetargets.ErrTargetDenied
+	if _, err := svc.Submit(context.Background(), deployRequest(), "org-1", "acme-inc", "user-1"); !errors.Is(err, resourcetargets.ErrTargetDenied) {
+		t.Fatalf("error = %v", err)
+	}
+	if executor.calls != 0 {
+		t.Fatal("app executed after companion authorization failure")
+	}
+}
+
+func TestDirectChartAndDeploymentCapableTemplateNormalize(t *testing.T) {
+	for _, source := range []Source{
+		{Kind: SourceChart, SourceID: "hiroba", Ref: "oci://ghcr.io/7k-hiroba/payments-api/charts/payments-api", Version: "1.4.0", Digest: testDigest},
+		{Kind: SourceTemplate, ItemID: "hiroba/payments-api", Version: "1.4.0"},
+	} {
+		t.Run(string(source.Kind), func(t *testing.T) {
+			svc, cat, _, _, _ := serviceFixture(t)
+			if source.Kind == SourceTemplate {
+				payload, _ := json.Marshal(map[string]any{"manifest": map[string]any{"kind": "component", "observability": map[string]any{"manifest": "observability/observability.yaml"}}, "observabilityYaml": capabilityYAML(t)})
+				cat.version.Payload = payload
+				cat.version.ChartRef = ""
+				cat.version.ChartDigest = ""
+			}
+			req := deployRequest()
+			req.Source = &source
+			preflight, err := svc.Preflight(context.Background(), req, "org-1", "acme-inc", "user-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if preflight.Plan.Capability == nil || preflight.Plan.App.Version != "1.4.0" || preflight.Plan.App.Digest != testDigest {
+				t.Fatalf("normalized %s plan = %#v", source.Kind, preflight.Plan)
+			}
+		})
+	}
+}
+
+func TestPureTemplateHasNoObservabilityCapability(t *testing.T) {
+	svc, cat, _, _, _ := serviceFixture(t)
+	payload, _ := json.Marshal(map[string]any{"manifest": map[string]any{"kind": "gitops-repo"}})
+	cat.version.ChartRef = ""
+	cat.version.ChartDigest = ""
+	cat.version.Payload = payload
+	req := deployRequest()
+	req.Source = &Source{Kind: SourceTemplate, ItemID: cat.item.ID, Version: "1.4.0"}
+	preflight, err := svc.Preflight(context.Background(), req, "org-1", "acme-inc", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preflight.Plan.Capability != nil || preflight.Plan.Observability.Mode != ModeNone || len(preflight.MonitoringTargets) != 0 || len(preflight.CompatiblePacks) != 0 {
+		t.Fatalf("pure template preflight = %#v", preflight)
+	}
+}
+
+func TestExistingInstanceCanProvisionFromOriginalPins(t *testing.T) {
+	svc, _, _, _, _ := serviceFixture(t)
+	req := deployRequest()
+	req.Observability.Mode = ModeSkip
+	original, err := svc.Submit(context.Background(), req, "org-1", "acme-inc", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflight, err := svc.Preflight(context.Background(), PlanRequest{Operation: OperationProvisionExisting, InstanceID: original.AppInstanceID, Observability: ObservabilityInput{Mode: ModeProvision}}, "org-1", "acme-inc", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preflight.Plan.App.Digest != original.App.Digest || preflight.Plan.App.Version != original.App.Version || preflight.Plan.Capability == nil {
+		t.Fatalf("existing plan = %#v", preflight.Plan)
+	}
+	submitted, err := svc.Submit(context.Background(), PlanRequest{Operation: OperationProvisionExisting, InstanceID: original.AppInstanceID, Observability: preflight.Plan.Observability, PlanFingerprint: preflight.Plan.PlanFingerprint, IdempotencyKey: "request-2"}, "org-1", "acme-inc", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if submitted.Companion == nil || submitted.Companion.AppInstanceID != original.AppInstanceID {
+		t.Fatalf("existing companion = %#v", submitted.Companion)
+	}
+}
+
+func TestVerificationGatesReadyLinksAndRejectsBlockedIntent(t *testing.T) {
+	svc, _, _, _, store := serviceFixture(t)
+	plan, err := svc.Submit(context.Background(), deployRequest(), "org-1", "acme-inc", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := verifiedResult(t, plan.Capability)
+	result.Companion.ID = plan.Companion.ID
+	result.Companion.Generation = plan.Companion.Generation
+	result.Target.ID = plan.Companion.TargetID
+	result.Target.Revision = plan.Companion.TargetRevision
+	result.Target.ClusterID = plan.Companion.TargetClusterID
+	result.App.PlanID = plan.ID
+	result.App.InstanceID = plan.AppInstanceID
+	result.App.SourceDigest = plan.App.Digest
+	result.App.Revision = plan.Companion.AppRevision
+	result.Pack.ItemID = plan.Companion.Pack.ItemID
+	result.Pack.Version = plan.Companion.Pack.Version
+	result.Pack.Digest = plan.Companion.Pack.Digest
+	if _, err := svc.ApplyVerification(context.Background(), "org-1", result); err == nil {
+		t.Fatal("blocked intent accepted deployed verification")
+	}
+	plan.Companion.CompanionInstanceID = "companion-1"
+	plan.Companion.State = "verification_pending"
+	if err := store.UpdatePlan(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	companion, err := svc.ApplyVerification(context.Background(), "org-1", result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if companion.State != "ready" {
+		t.Fatalf("companion state = %s", companion.State)
+	}
+	status, err := svc.InstanceObservability(context.Background(), "org-1", plan.AppInstanceID, "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Companion.Links) != 1 || !strings.Contains(status.Companion.Links[0].URL, "var-namespace=payments") {
+		t.Fatalf("ready links = %#v", status.Companion.Links)
+	}
+}
+
+func TestVerificationRejectsWrongGeneration(t *testing.T) {
+	svc, _, _, _, _ := serviceFixture(t)
+	plan, err := svc.Submit(context.Background(), deployRequest(), "org-1", "acme-inc", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := verifiedResult(t, plan.Capability)
+	result.Companion.ID = plan.Companion.ID
+	result.Companion.Generation = plan.Companion.Generation + 1
+	if _, err := svc.ApplyVerification(context.Background(), "org-1", result); err == nil {
+		t.Fatal("wrong-generation verification accepted")
+	}
+}

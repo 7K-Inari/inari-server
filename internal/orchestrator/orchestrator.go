@@ -543,14 +543,12 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 		}
 	}
 
-	// Render through the source-agnostic pipeline (kro handler): the
-	// descriptor carries the catalog-backed RGD ref + the user spec; the
-	// handler materializes instance.yaml and the git-path Application —
-	// byte-identical to the pre-migration render.go output (parity-pinned
-	// by render_parity_test.go and the renderer golden tests).
-	desc := types.SourceDescriptor{
-		Kind: types.SourceKindKRO,
-		KRO:  &types.KROSource{RGDRef: rgdRef(req.ItemID, version), Instance: req.Spec},
+	// Resolve the source from the admitted catalog version on every initial
+	// render and approval resume. KRO output remains byte-identical; platform
+	// apps and direct charts use exact-digest Helm multi-source rendering.
+	desc, helmSource, err := s.sourceDescriptor(ctx, req, version)
+	if err != nil {
+		return nil, err
 	}
 	path := RepoPath(req.ClusterID, req.ItemID, instanceID)
 	// NOTE: for team-repo deploys the tenant ArgoCD needs repo-creds for
@@ -563,6 +561,7 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 		Clusters:   []renderer.ClusterTarget{{ID: req.ClusterID, Name: req.ClusterID}},
 		Prune:      true, // instance deploys keep their historical prune-on policy
 		Project:    "default",
+		Values:     req.Spec,
 		RepoURL:    RepoURL(target.repo), BaseBranch: target.branch,
 		Path: path,
 	})
@@ -572,13 +571,16 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 	var manifest []byte
 	files := make([]gitprovider.File, 0, len(rendered))
 	for _, f := range rendered {
-		if strings.HasSuffix(f.Path, "/instance.yaml") {
+		if !helmSource && strings.HasSuffix(f.Path, "/instance.yaml") {
+			manifest = f.Content
+		}
+		if helmSource && strings.HasSuffix(f.Path, "/application.yaml") {
 			manifest = f.Content
 		}
 		files = append(files, gitprovider.File{Path: f.Path, Content: f.Content})
 	}
 	if manifest == nil {
-		return nil, fmt.Errorf("orchestrator: kro render produced no instance manifest")
+		return nil, fmt.Errorf("orchestrator: %s render produced no policy/registration manifest", desc.Kind)
 	}
 	if err := s.renderCheck(ctx, req.OrgID, manifest); err != nil {
 		return nil, err
@@ -598,7 +600,12 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 	// For pull-request policy the app registers after the PR merges (M2:
 	// documented gap; the merge webhook wiring lands with Fleet Manager).
 	if gitResult.PRURL == "" {
-		if err := s.enqueueAppRegistration(ctx, req.ClusterID, instanceID, target, path, namespace); err != nil {
+		if helmSource {
+			err = s.enqueueAppManifestRegistration(ctx, req.ClusterID, instanceID, manifest)
+		} else {
+			err = s.enqueueAppRegistration(ctx, req.ClusterID, instanceID, target, path, namespace)
+		}
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -607,13 +614,18 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 	if existing != nil {
 		state = types.InstanceStateUpgrading
 	}
+	resourceRef := types.ResourceRef{Group: "kro.run", Kind: kindOf(manifest), Name: name, Namespace: namespace}
+	if helmSource {
+		resourceRef.Group = "helm.sh"
+		resourceRef.Kind = "HelmRelease"
+	}
 	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		if existing == nil {
 			inst := &types.ResourceInstance{
 				ID: instanceID, OrgID: req.OrgID, ClusterID: req.ClusterID,
 				CatalogItemID: req.ItemID, Version: version, ArtifactDigest: req.ArtifactDigest, OwnerTeam: req.OwnerTeam,
 				Spec:        req.Spec,
-				ResourceRef: types.ResourceRef{Group: "kro.run", Kind: kindOf(manifest), Name: name, Namespace: namespace},
+				ResourceRef: resourceRef,
 				Health:      "unknown", State: state, ManagementMode: types.ManagementModeAdopt,
 				CommitSHA: gitResult.CommitSHA, PRURL: gitResult.PRURL, RepoID: target.repoID, Generation: 1,
 			}
@@ -724,12 +736,24 @@ func (s *Service) FinalizePRMerge(ctx context.Context, orgID, prURL, mergeSHA st
 	if err != nil {
 		return false, err
 	}
-	// Enqueue before marking: the command ID is deterministic
-	// (register-argocd-app:<instanceID>), so a crash after enqueue but
-	// before the mark redelivers and re-enqueues idempotently — the
-	// reverse order could lose the registration entirely.
-	if err := s.enqueueAppRegistration(ctx, inst.ClusterID, inst.ID, target,
-		RepoPath(inst.ClusterID, inst.CatalogItemID, inst.ID), inst.ResourceRef.Namespace); err != nil {
+	// Enqueue before marking: command IDs are deterministic, so a crash after
+	// enqueue redelivers idempotently. Helm reads the exact merged multi-source
+	// Application rather than reconstructing a legacy single-source app.
+	_, helmSource, err := s.sourceDescriptor(ctx, DeployRequest{ItemID: inst.CatalogItemID, Spec: inst.Spec}, inst.Version)
+	if err != nil {
+		return false, err
+	}
+	if helmSource {
+		manifest, err := target.provider.ReadFile(ctx, target.repo, mergeSHA, RepoPath(inst.ClusterID, inst.CatalogItemID, inst.ID)+"/application.yaml")
+		if err != nil {
+			return false, err
+		}
+		err = s.enqueueAppManifestRegistration(ctx, inst.ClusterID, inst.ID, []byte(manifest))
+	} else {
+		err = s.enqueueAppRegistration(ctx, inst.ClusterID, inst.ID, target,
+			RepoPath(inst.ClusterID, inst.CatalogItemID, inst.ID), inst.ResourceRef.Namespace)
+	}
+	if err != nil {
 		return false, err
 	}
 	if err := s.markInstancePRMerged(ctx, orgID, inst.ID, prURL, mergeSHA); err != nil {

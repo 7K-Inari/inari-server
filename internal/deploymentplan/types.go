@@ -139,6 +139,9 @@ type Companion struct {
 type Plan struct {
 	ID               string                    `json:"id"`
 	OrgID            string                    `json:"orgId"`
+	OrgSlug          string                    `json:"orgSlug"`
+	Requester        string                    `json:"-"`
+	IdempotencyKey   string                    `json:"-"`
 	Operation        Operation                 `json:"operation"`
 	Source           Source                    `json:"source"`
 	Deployment       DeploymentInput           `json:"deployment"`
@@ -151,6 +154,7 @@ type Plan struct {
 	State            string                    `json:"state"`
 	Gate             GateStatus                `json:"gate"`
 	AppInstanceID    string                    `json:"appInstanceId,omitempty"`
+	AppClusterID     string                    `json:"appClusterId,omitempty"`
 	ScaffoldRunID    string                    `json:"scaffoldRunId,omitempty"`
 	Companion        *Companion                `json:"companion,omitempty"`
 	ErrorCode        string                    `json:"errorCode,omitempty"`

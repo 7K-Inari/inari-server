@@ -1,10 +1,11 @@
 # syntax=docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
 FROM golang:1.27@sha256:820153096fda4de6ac1b7194d12e416b7dd8f4e9a33d17e0345b111b945162d8 AS build
+ARG VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/inari-server ./cmd/inari-server
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/7K-Inari/inari-server/internal/buildinfo.Version=${VERSION}" -o /out/inari-server ./cmd/inari-server
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/inari-kubeproxy ./cmd/inari-kubeproxy
 
 # Kubectl gateway data plane (plan §7.2, ADR-0014). Published by this repo's

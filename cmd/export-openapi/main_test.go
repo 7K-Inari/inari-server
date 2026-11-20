@@ -83,6 +83,7 @@ func TestExportContainsFullRESTSurface(t *testing.T) {
 	}
 	spec := buf.String()
 	paths := []string{
+		"/api/v1/meta/contracts",
 		// Legacy surface (original 12 assertions).
 		"/api/v1/tenants",
 		"/api/v1/tenants/{org}/clusters",

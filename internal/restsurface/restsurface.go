@@ -79,6 +79,11 @@ type Deps struct {
 	AllowedAPIBases []string
 	RemoteEntries   *extensionhost.RemoteEntryFetcher
 
+	SupportedPluginContracts   []string
+	SupportedUIHostAPIs        []string
+	ExtensionContractsRequired bool
+	ServerVersion              string
+
 	// PlatformAdminGroup is the Keycloak realm group backing the platform
 	// admins API (config INARI_PLATFORM_ADMIN_GROUP).
 	PlatformAdminGroup string
@@ -148,6 +153,11 @@ func Register(api huma.API, d Deps) {
 	extensionhost.NewHandler(d.Extensions, d.Tenancy, d.Authz).
 		WithRemoteEntryFetcher(d.RemoteEntries).
 		WithSessionStore(d.ExtensionSessions).RegisterRoutes(api)
+	contractPolicy, err := extensionhost.NewContractPolicy(d.SupportedPluginContracts, d.SupportedUIHostAPIs, d.ExtensionContractsRequired)
+	if err != nil {
+		contractPolicy = extensionhost.DefaultContractPolicy()
+	}
+	extensionhost.NewMetaHandler(contractPolicy, d.ServerVersion).RegisterRoutes(api)
 	usergit.NewHandler(d.UserGit, d.Tenancy, d.Authz).RegisterRoutes(api)
 	featureflags.NewHandler(d.FeatureFlags, d.FeatureFlagsResolver, d.Tenancy, d.Clusters, d.Authz, d.FeatureFlagEnvOverrides).RegisterRoutes(api)
 	auditapi.NewHandler(d.DB, d.AuditStore, d.Tenancy, d.Authz).RegisterRoutes(api)

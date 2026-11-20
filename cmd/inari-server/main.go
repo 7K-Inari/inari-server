@@ -959,7 +959,12 @@ func run() error {
 
 	// Extension Host (plan §5.8): plugin registry + authenticated reverse
 	// proxy for verified sidecars.
+	contractPolicy, err := extensionhost.NewContractPolicy(cfg.SupportedPluginContracts, cfg.SupportedUIHostAPIs, cfg.ExtensionContractsRequired)
+	if err != nil {
+		return fmt.Errorf("extension contract policy: %w", err)
+	}
 	extSvc := extensionhost.NewService(database, extensionhost.NewStore(), auditStore).
+		WithContractPolicy(contractPolicy).
 		WithExtensionClientManager(idp, cfg.ExtensionGatewayAudience)
 	// Tunnel authentication (ADR-0008): extension backends present
 	// client_credentials JWTs minted for their own ext-<name> client; the
@@ -1126,6 +1131,11 @@ func run() error {
 		OIDCIssuerURL:     cfg.OIDCIssuerURL,
 		AllowedAPIBases:   cfg.GitHubAllowedAPIBases,
 		RemoteEntries:     remoteEntries,
+
+		SupportedPluginContracts:   cfg.SupportedPluginContracts,
+		SupportedUIHostAPIs:        cfg.SupportedUIHostAPIs,
+		ExtensionContractsRequired: cfg.ExtensionContractsRequired,
+		ServerVersion:              cfg.ServerVersion,
 
 		PlatformAdminGroup: cfg.PlatformAdminGroup,
 

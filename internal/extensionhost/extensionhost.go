@@ -19,6 +19,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	extensionv1 "github.com/7K-Inari/inari-api/contract/extension/v1"
+
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -58,13 +60,13 @@ type Store struct{}
 
 func NewStore() *Store { return &Store{} }
 
-const extCols = `id, COALESCE(org_id, ''), name, version, kind, manifest, ui, endpoint, checksum, state, client_id, created_at, updated_at`
+const extCols = `id, COALESCE(org_id, ''), name, version, kind, manifest, contracts, ui, endpoint, checksum, state, degraded_reason, degraded_detail, client_id, created_at, updated_at`
 
 func scanExtension(row interface{ Scan(...any) error }) (*types.Extension, error) {
 	var e types.Extension
-	var ui json.RawMessage
-	err := row.Scan(&e.ID, &e.OrgID, &e.Name, &e.Version, &e.Kind, &e.Manifest, &ui,
-		&e.Endpoint, &e.Checksum, &e.State, &e.ClientID, &e.CreatedAt, &e.UpdatedAt)
+	var ui, contracts json.RawMessage
+	err := row.Scan(&e.ID, &e.OrgID, &e.Name, &e.Version, &e.Kind, &e.Manifest, &contracts, &ui,
+		&e.Endpoint, &e.Checksum, &e.State, &e.DegradedReason, &e.DegradedDetail, &e.ClientID, &e.CreatedAt, &e.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -75,14 +77,33 @@ func scanExtension(row interface{ Scan(...any) error }) (*types.Extension, error
 		}
 		e.Ui = &d
 	}
+	if len(contracts) > 0 && string(contracts) != "null" {
+		var c extensionv1.Contracts
+		if err := json.Unmarshal(contracts, &c); err != nil {
+			return nil, fmt.Errorf("extensionhost: decode contracts: %w", err)
+		}
+		e.Contracts = &c
+	}
 	return &e, nil
 }
 
+func marshalContracts(contracts *extensionv1.Contracts) (json.RawMessage, error) {
+	if contracts == nil {
+		return nil, nil
+	}
+	raw, err := json.Marshal(contracts)
+	return json.RawMessage(raw), err
+}
+
 func (s *Store) create(ctx context.Context, q db.Querier, e *types.Extension) error {
-	const sql = `INSERT INTO extensions (id, org_id, name, version, kind, manifest, endpoint, checksum, client_id)
-	             VALUES ($1, NULLIF($2,''), $3, $4, $5, $6, $7, $8, $9)
+	contracts, err := marshalContracts(e.Contracts)
+	if err != nil {
+		return err
+	}
+	const sql = `INSERT INTO extensions (id, org_id, name, version, kind, manifest, contracts, endpoint, checksum, client_id)
+	             VALUES ($1, NULLIF($2,''), $3, $4, $5, $6, $7, $8, $9, $10)
 	             RETURNING state, created_at, updated_at`
-	return q.QueryRow(ctx, sql, e.ID, e.OrgID, e.Name, e.Version, e.Kind, e.Manifest, e.Endpoint, e.Checksum, e.ClientID).
+	return q.QueryRow(ctx, sql, e.ID, e.OrgID, e.Name, e.Version, e.Kind, e.Manifest, contracts, e.Endpoint, e.Checksum, e.ClientID).
 		Scan(&e.State, &e.CreatedAt, &e.UpdatedAt)
 }
 
@@ -133,9 +154,9 @@ func (s *Store) list(ctx context.Context, q db.Querier, orgID string) ([]types.E
 	return out, rows.Err()
 }
 
-func (s *Store) setState(ctx context.Context, q db.Querier, id, state string) error {
-	const sql = `UPDATE extensions SET state = $2, updated_at = now() WHERE id = $1`
-	_, err := q.Exec(ctx, sql, id, state)
+func (s *Store) setState(ctx context.Context, q db.Querier, id, state, reason, detail string) error {
+	const sql = `UPDATE extensions SET state = $2, degraded_reason = $3, degraded_detail = $4, updated_at = now() WHERE id = $1`
+	_, err := q.Exec(ctx, sql, id, state, reason, detail)
 	return err
 }
 
@@ -148,6 +169,16 @@ func (s *Store) touchVersion(ctx context.Context, q db.Querier, id, version stri
 func (s *Store) setUi(ctx context.Context, q db.Querier, id string, ui json.RawMessage) error {
 	const sql = `UPDATE extensions SET ui = $2, updated_at = now() WHERE id = $1`
 	_, err := q.Exec(ctx, sql, id, ui)
+	return err
+}
+
+func (s *Store) setContracts(ctx context.Context, q db.Querier, id string, contracts *extensionv1.Contracts) error {
+	raw, err := marshalContracts(contracts)
+	if err != nil {
+		return err
+	}
+	const sql = `UPDATE extensions SET contracts = $2, updated_at = now() WHERE id = $1`
+	_, err = q.Exec(ctx, sql, id, raw)
 	return err
 }
 
@@ -183,10 +214,17 @@ type Service struct {
 	// leaves registrations without a tunnel identity (dev/fake mode).
 	clients         ExtensionClientManager
 	gatewayAudience string
+	policy          ContractPolicy
 }
 
 func NewService(d *db.DB, store *Store, auditStore *audit.Store) *Service {
-	return &Service{db: d, store: store, audit: auditStore}
+	return &Service{db: d, store: store, audit: auditStore, policy: DefaultContractPolicy()}
+}
+
+// WithContractPolicy sets the server-owned declaration and runtime policy.
+func (s *Service) WithContractPolicy(policy ContractPolicy) *Service {
+	s.policy = policy
+	return s
 }
 
 // RegisterInput is one extension registration. Endpoint is the sidecar HTTP
@@ -225,6 +263,10 @@ func (s *Service) Register(ctx context.Context, actor string, in RegisterInput) 
 	if len(manifest) == 0 {
 		manifest = json.RawMessage(`{}`)
 	}
+	contracts, err := s.policy.ValidateBackendManifest(manifest)
+	if err != nil {
+		return nil, nil, err
+	}
 	var creds *types.ExtensionCredentials
 	clientID := ""
 	// Fast-path name conflict against the registry so a duplicate fails
@@ -244,10 +286,10 @@ func (s *Service) Register(ctx context.Context, actor string, in RegisterInput) 
 	}
 	e := &types.Extension{
 		ID: "extension:" + newUUID(), OrgID: in.OrgID, Name: in.Name, Version: in.Version,
-		Kind: kind, Manifest: manifest, Endpoint: in.Endpoint, Checksum: in.Checksum,
+		Kind: kind, Manifest: manifest, Contracts: contracts, Endpoint: in.Endpoint, Checksum: in.Checksum,
 		ClientID: clientID,
 	}
-	err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
+	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		if err := s.store.create(ctx, tx, e); err != nil {
 			if isUniqueViolation(err) {
 				return ErrConflict
@@ -314,28 +356,51 @@ func (s *Service) List(ctx context.Context, orgID string) ([]types.Extension, er
 }
 
 // SetState transitions the extension state (supervisor-driven) with audit +
-// outbox on change. No-op when the state is unchanged.
+// outbox on change. Supervisor-originated degraded transitions use process_exited;
+// ready/pending/stopped transitions clear degraded metadata.
 func (s *Service) SetState(ctx context.Context, actor, id, state string) error {
+	reason := ""
+	if state == types.ExtensionStateDegraded {
+		reason = string(extensionv1.DegradedProcessExited)
+	}
+	return s.SetStateWithReason(ctx, actor, id, state, reason, "")
+}
+
+// SetStateWithReason transitions state and persists typed degraded metadata.
+func (s *Service) SetStateWithReason(ctx context.Context, actor, id, state, reason, detail string) error {
 	e, err := s.store.get(ctx, s.db.Pool, id)
 	if err != nil {
 		return err
-	}
-	if e.State == state {
-		return nil
 	}
 	switch state {
 	case types.ExtensionStatePending, types.ExtensionStateReady, types.ExtensionStateDegraded, types.ExtensionStateStopped:
 	default:
 		return fmt.Errorf("%w: unknown state %q", ErrInvalidInput, state)
 	}
+	if state != types.ExtensionStateDegraded {
+		reason, detail = "", ""
+	} else {
+		if reason == "" {
+			reason = string(extensionv1.DegradedHandshakeFailed)
+		}
+		switch extensionv1.ExtensionDegradedReason(reason) {
+		case extensionv1.DegradedContractUnsupported, extensionv1.DegradedHandshakeFailed,
+			extensionv1.DegradedIdentityMismatch, extensionv1.DegradedChecksumMismatch, extensionv1.DegradedProcessExited:
+		default:
+			return fmt.Errorf("%w: unknown degraded reason %q", ErrInvalidInput, reason)
+		}
+	}
+	if e.State == state && e.DegradedReason == reason && e.DegradedDetail == detail {
+		return nil
+	}
 	return s.db.WithTx(ctx, func(tx pgx.Tx) error {
-		if err := s.store.setState(ctx, tx, id, state); err != nil {
+		if err := s.store.setState(ctx, tx, id, state, reason, detail); err != nil {
 			return err
 		}
 		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
 			OrgID: e.OrgID, Actor: actor, Action: "extension.state_changed",
 			ObjectType: "extension", ObjectID: id,
-			Payload: json.RawMessage(fmt.Sprintf(`{"state":%q}`, state)),
+			Payload: json.RawMessage(fmt.Sprintf(`{"state":%q,"reason":%q}`, state, reason)),
 		}); err != nil {
 			return err
 		}
@@ -357,8 +422,13 @@ func (s *Service) Verify(ctx context.Context, actor, orgID, id string) (*types.E
 	if e.Endpoint == "" {
 		return nil, fmt.Errorf("%w: endpoint is required for verification", ErrInvalidInput)
 	}
-	if _, err := VerifyHandshake(ctx, e.Endpoint, e); err != nil {
-		if serr := s.SetState(ctx, actor, id, types.ExtensionStateDegraded); serr != nil {
+	if _, err := VerifyHandshakeWithPolicy(ctx, e.Endpoint, e, s.policy); err != nil {
+		reason := string(extensionv1.DegradedHandshakeFailed)
+		var handshakeErr *HandshakeError
+		if errors.As(err, &handshakeErr) && handshakeErr.Reason != "" {
+			reason = handshakeErr.Reason
+		}
+		if serr := s.SetStateWithReason(ctx, actor, id, types.ExtensionStateDegraded, reason, err.Error()); serr != nil {
 			return nil, serr
 		}
 		return nil, err
@@ -426,6 +496,7 @@ type RegisterUiInput struct {
 	OrgID              string
 	Name               string
 	Version            string
+	Contracts          *extensionv1.Contracts
 	RemoteEntry        string
 	RemoteEntryOci     string
 	Checksum           string
@@ -466,6 +537,10 @@ func (s *Service) RegisterUi(ctx context.Context, actor string, in RegisterUiInp
 	if err := validateUiInput(in); err != nil {
 		return nil, err
 	}
+	contracts, err := s.policy.ValidateUIContracts(in.Contracts)
+	if err != nil {
+		return nil, err
+	}
 	e, err := s.store.getByName(ctx, s.db.Pool, in.Name)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return nil, err
@@ -495,8 +570,14 @@ func (s *Service) RegisterUi(ctx context.Context, actor string, in RegisterUiInp
 	if created {
 		e = &types.Extension{
 			ID: "extension:" + newUUID(), OrgID: in.OrgID, Name: in.Name, Version: in.Version,
-			Kind: types.ExtensionKindUI, Manifest: json.RawMessage(`{}`),
+			Kind: types.ExtensionKindUI, Manifest: json.RawMessage(`{}`), Contracts: contracts,
 		}
+	} else if contracts != nil {
+		merged := &extensionv1.Contracts{UI: contracts.UI}
+		if e.Contracts != nil {
+			merged.Backend = append([]string(nil), e.Contracts.Backend...)
+		}
+		e.Contracts = merged
 	}
 	if e.OrgID != in.OrgID {
 		return nil, ErrNotFound
@@ -509,13 +590,16 @@ func (s *Service) RegisterUi(ctx context.Context, actor string, in RegisterUiInp
 				}
 				return err
 			}
-			if err := s.store.setState(ctx, tx, e.ID, types.ExtensionStateReady); err != nil {
+			if err := s.store.setState(ctx, tx, e.ID, types.ExtensionStateReady, "", ""); err != nil {
 				return err
 			}
 		} else if err := s.store.touchVersion(ctx, tx, e.ID, in.Version); err != nil {
 			return err
 		}
 		if err := s.store.setUi(ctx, tx, e.ID, uiJSON); err != nil {
+			return err
+		}
+		if err := s.store.setContracts(ctx, tx, e.ID, e.Contracts); err != nil {
 			return err
 		}
 		if err := s.audit.Record(ctx, tx, &types.AuditEvent{

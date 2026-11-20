@@ -14,6 +14,8 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 
+	extensionv1 "github.com/7K-Inari/inari-api/contract/extension/v1"
+
 	"github.com/7K-Inari/inari-server/internal/authn"
 	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
@@ -167,6 +169,10 @@ func (h *Handler) authorizeOrg(ctx context.Context, slug, relation string) (*typ
 }
 
 func mapErr(err error) error {
+	var contractErr *extensionv1.ContractError
+	if errors.As(err, &contractErr) {
+		return huma.Error422UnprocessableEntity(err.Error())
+	}
 	switch {
 	case err == nil:
 		return nil
@@ -193,7 +199,9 @@ type registerInput struct {
 }
 
 type extensionOutput struct {
-	Body struct {
+	Deprecation string `header:"Deprecation"`
+	Warning     string `header:"Warning"`
+	Body        struct {
 		Extension types.Extension `json:"extension"`
 		// Credentials carries the extension's Keycloak client secret exactly
 		// once (register responses only); it is never persisted server-side
@@ -217,6 +225,10 @@ func (h *Handler) register(ctx context.Context, in *registerInput) (*extensionOu
 	out := &extensionOutput{}
 	out.Body.Extension = *e
 	out.Body.Credentials = creds
+	if e.Contracts == nil {
+		out.Deprecation = "true"
+		out.Warning = `299 inari "extension contract declarations will become required in a future stable release"`
+	}
 	return out, nil
 }
 
@@ -319,6 +331,7 @@ type UiExtensionRemote struct {
 	Title              string                   `json:"title,omitempty"`
 	Description        string                   `json:"description,omitempty"`
 	RemoteEntryURL     string                   `json:"remoteEntryUrl"`
+	Contracts          *extensionv1.Contracts   `json:"contracts,omitempty"`
 	Slots              []types.UiSlotDescriptor `json:"slots"`
 	RequiredPermission string                   `json:"requiredPermission,omitempty"`
 	Enabled            bool                     `json:"enabled"`
@@ -329,6 +342,7 @@ func uiRemote(orgSlug string, e *types.Extension) UiExtensionRemote {
 	return UiExtensionRemote{
 		Name: e.Name, Version: e.Version, Title: d.Title, Description: d.Description,
 		RemoteEntryURL: "/api/v1/tenants/" + orgSlug + "/extensions/ui/" + e.Name + "/remoteEntry.js",
+		Contracts:      e.Contracts,
 		Slots:          d.Slots, RequiredPermission: d.RequiredPermission, Enabled: d.Enabled,
 	}
 }
@@ -371,6 +385,7 @@ type registerUiInput struct {
 		RemoteEntryURL     string                   `json:"remoteEntryUrl,omitempty"`
 		RemoteEntry        string                   `json:"remoteEntry,omitempty"`
 		RemoteEntryOci     string                   `json:"remoteEntryOci,omitempty"`
+		Contracts          *extensionv1.Contracts   `json:"contracts,omitempty"`
 		Checksum           string                   `json:"checksum,omitempty"`
 		Title              string                   `json:"title,omitempty"`
 		Description        string                   `json:"description,omitempty"`
@@ -381,7 +396,9 @@ type registerUiInput struct {
 }
 
 type uiExtensionOutput struct {
-	Body struct {
+	Deprecation string `header:"Deprecation"`
+	Warning     string `header:"Warning"`
+	Body        struct {
 		Extension UiExtensionRemote `json:"extension"`
 	}
 }
@@ -411,12 +428,17 @@ func (h *Handler) registerUi(ctx context.Context, in *registerUiInput) (*uiExten
 		RemoteEntry: remoteEntry, RemoteEntryOci: in.Body.RemoteEntryOci,
 		Checksum: in.Body.Checksum, Title: in.Body.Title, Description: in.Body.Description,
 		RequiredPermission: in.Body.RequiredPermission, Slots: in.Body.Slots, Enabled: in.Body.Enabled,
+		Contracts: in.Body.Contracts,
 	})
 	if err != nil {
 		return nil, mapErr(err)
 	}
 	out := &uiExtensionOutput{}
 	out.Body.Extension = uiRemote(org.Slug, e)
+	if e.Contracts == nil {
+		out.Deprecation = "true"
+		out.Warning = `299 inari "extension contract declarations will become required in a future stable release"`
+	}
 	return out, nil
 }
 

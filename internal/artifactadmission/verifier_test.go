@@ -272,6 +272,59 @@ func TestAdmissionRejectsStaleReviewedCompatibility(t *testing.T) {
 	}
 }
 
+func TestReviewedUICompatibilityBoundaries(t *testing.T) {
+	now := time.Date(2026, 11, 13, 12, 30, 0, 0, time.UTC)
+	valid := func() *trustedsource.Compatibility {
+		return &trustedsource.Compatibility{
+			Matrix: map[string]string{"stable": "passed", "previous-stable": "passed"}, Result: "passed",
+			CompletedAt: now.Add(-7 * 24 * time.Hour).Format(time.RFC3339), Browser: "passed", Slots: []string{"cluster-tab:health"},
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		mutate  func(*trustedsource.Compatibility) *trustedsource.Compatibility
+		wantErr bool
+	}{
+		{"exact seven days", func(c *trustedsource.Compatibility) *trustedsource.Compatibility { return c }, false},
+		{"one second stale", func(c *trustedsource.Compatibility) *trustedsource.Compatibility {
+			c.CompletedAt = now.Add(-7*24*time.Hour - time.Second).Format(time.RFC3339)
+			return c
+		}, true},
+		{"future", func(c *trustedsource.Compatibility) *trustedsource.Compatibility {
+			c.CompletedAt = now.Add(6 * time.Minute).Format(time.RFC3339)
+			return c
+		}, true},
+		{"missing", func(c *trustedsource.Compatibility) *trustedsource.Compatibility { return nil }, true},
+		{"failed result", func(c *trustedsource.Compatibility) *trustedsource.Compatibility { c.Result = "failed"; return c }, true},
+		{"failed browser", func(c *trustedsource.Compatibility) *trustedsource.Compatibility { c.Browser = "failed"; return c }, true},
+		{"missing stable", func(c *trustedsource.Compatibility) *trustedsource.Compatibility {
+			delete(c.Matrix, "stable")
+			return c
+		}, true},
+		{"missing previous stable", func(c *trustedsource.Compatibility) *trustedsource.Compatibility {
+			delete(c.Matrix, "previous-stable")
+			return c
+		}, true},
+		{"missing slots", func(c *trustedsource.Compatibility) *trustedsource.Compatibility { c.Slots = nil; return c }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := validRequest()
+			req.Source.TrustTier = trustedsource.TrustReviewed
+			req.RequireUICompatibility = true
+			req.Now = now
+			req.Artifact.Compatibility = tc.mutate(valid())
+			backend := newTestBackend(req)
+			_, err := NewVerifier(backend).AdmitArtifact(context.Background(), req)
+			if tc.wantErr && !IsCode(err, CodeTestEvidenceInvalid) {
+				t.Fatalf("error = %v, want test_evidence_invalid", err)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("valid boundary evidence rejected: %v", err)
+			}
+		})
+	}
+}
+
 func TestUnsignedDevelopmentOnly(t *testing.T) {
 	for _, environment := range []trustedsource.Environment{trustedsource.EnvironmentDevelopment} {
 		req := validRequest()

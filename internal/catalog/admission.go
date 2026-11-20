@@ -72,6 +72,7 @@ func (s *Service) AdmitVersion(ctx context.Context, itemID, version string, envi
 	}
 	packageEvidence, err := s.admission.AdmitArtifact(ctx, artifactadmission.Request{
 		Source: source, Role: role, Artifact: descriptor, TargetEnvironment: environment, Now: s.now(),
+		RequireUICompatibility: requiresUICompatibility(entry),
 	})
 	if err != nil {
 		return nil, err
@@ -88,6 +89,7 @@ func (s *Service) AdmitVersion(ctx context.Context, itemID, version string, envi
 		chartDescriptor.Producer = *entry.ChartProducer
 		chartEvidence, err := s.admission.AdmitArtifact(ctx, artifactadmission.Request{
 			Source: source, Role: trustedsource.ArtifactHelmChart, Artifact: chartDescriptor, TargetEnvironment: environment, Now: s.now(),
+			RequireUICompatibility: requiresUICompatibility(entry),
 		})
 		if err != nil {
 			return nil, err
@@ -124,6 +126,18 @@ func evidenceApplication(source trustedsource.Source) string {
 		return repository[slash+1:]
 	}
 	return repository
+}
+
+func requiresUICompatibility(entry trustedsource.IndexEntry) bool {
+	if entry.Compatibility != nil {
+		return true
+	}
+	for _, lane := range entry.Lanes {
+		if lane.Name == "ui" || lane.Name == "browser" {
+			return true
+		}
+	}
+	return false
 }
 
 func admissionEntry(payload json.RawMessage) (trustedsource.IndexEntry, error) {

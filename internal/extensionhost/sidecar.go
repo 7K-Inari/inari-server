@@ -12,12 +12,14 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
 	"connectrpc.com/connect/v2"
 	"connectrpc.com/connect/v2/connecthttp"
 
+	extensionv1 "github.com/7K-Inari/inari-api/contract/extension/v1"
 	pluginv1 "github.com/7K-Inari/inari-api/gen/go/inari/plugin/v1"
 	"github.com/7K-Inari/inari-api/gen/go/inari/plugin/v1/pluginv1connect"
 
@@ -32,6 +34,17 @@ const (
 	MagicCookieValue = "inari-plugin-v1"
 )
 
+// HandshakeError classifies a failed handshake without string parsing.
+type HandshakeError struct {
+	Reason    string
+	Actual    string
+	Supported []string
+	Err       error
+}
+
+func (e *HandshakeError) Error() string { return e.Err.Error() }
+func (e *HandshakeError) Unwrap() error { return e.Err }
+
 // handshakeTimeout bounds the GetInfo verification call.
 const handshakeTimeout = 5 * time.Second
 
@@ -40,23 +53,41 @@ const handshakeTimeout = 5 * time.Second
 // the registry record (defense against a rogue process squatting on the
 // endpoint).
 func VerifyHandshake(ctx context.Context, endpoint string, ext *types.Extension) (*pluginv1.PluginInfo, error) {
+	return VerifyHandshakeWithPolicy(ctx, endpoint, ext, DefaultContractPolicy())
+}
+
+// VerifyHandshakeWithPolicy verifies the actual plugin contract against the
+// configured server policy and the registration declaration.
+func VerifyHandshakeWithPolicy(ctx context.Context, endpoint string, ext *types.Extension, policy ContractPolicy) (*pluginv1.PluginInfo, error) {
+	policy = policy.withDefaults()
 	client := pluginv1connect.NewPluginContractServiceClient(connect.NewClient(connecthttp.NewTransport(http.DefaultClient, endpoint, connecthttp.WithReadMaxBytes(0))))
 	hctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
 	resp, err := client.GetInfo(hctx, &pluginv1.GetInfoRequest{})
 	if err != nil {
-		return nil, fmt.Errorf("extensionhost: handshake getinfo: %w", err)
+		return nil, &HandshakeError{Reason: string(extensionv1.DegradedHandshakeFailed), Err: fmt.Errorf("extensionhost: handshake getinfo: %w", err)}
 	}
 	info := resp.GetInfo()
 	if info == nil {
-		return nil, fmt.Errorf("extensionhost: handshake: empty plugin info")
+		return nil, &HandshakeError{Reason: string(extensionv1.DegradedHandshakeFailed), Err: fmt.Errorf("extensionhost: handshake: empty plugin info")}
 	}
-	if info.GetApiVersion() != SupportedProtocolVersion {
-		return nil, fmt.Errorf("%w: got %q want %q", ErrProtocolVersion, info.GetApiVersion(), SupportedProtocolVersion)
+	actual := info.GetApiVersion()
+	supported := policy.PluginContracts()
+	declared := supported
+	if ext.Contracts != nil {
+		declared = ext.Contracts.Backend
+	}
+	if !extensionv1.Intersects([]string{actual}, supported) || !extensionv1.Intersects([]string{actual}, declared) {
+		return nil, &HandshakeError{
+			Reason: string(extensionv1.DegradedContractUnsupported), Actual: actual, Supported: supported,
+			Err: fmt.Errorf("%w: got %q; server supports [%s]; registration declares [%s]", ErrProtocolVersion, actual, strings.Join(supported, ", "), strings.Join(declared, ", ")),
+		}
 	}
 	if info.GetName() != ext.Name || info.GetVersion() != ext.Version {
-		return nil, fmt.Errorf("%w: plugin reports %s@%s, registry has %s@%s",
-			ErrPluginIdentity, info.GetName(), info.GetVersion(), ext.Name, ext.Version)
+		return nil, &HandshakeError{
+			Reason: string(extensionv1.DegradedIdentityMismatch), Actual: actual, Supported: supported,
+			Err: fmt.Errorf("%w: plugin reports %s@%s, registry has %s@%s", ErrPluginIdentity, info.GetName(), info.GetVersion(), ext.Name, ext.Version),
+		}
 	}
 	return info, nil
 }

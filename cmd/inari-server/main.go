@@ -36,6 +36,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/config"
 	"github.com/7K-Inari/inari-server/internal/cryptoenvelope"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/deploymentplan"
 	"github.com/7K-Inari/inari-server/internal/eventbus"
 	"github.com/7K-Inari/inari-server/internal/extensionhost"
 	"github.com/7K-Inari/inari-server/internal/featureflags"
@@ -936,6 +937,12 @@ func run() error {
 		go scaffoldSvc.RunReconcileLoop(ctx, cfg.ScaffoldReconcileInterval)
 	}
 
+	// DeploymentPlan normalization and readiness are available independently
+	// of the external companion renderer. The default gate remains closed and
+	// no multi-target renderer or deployed verifier is wired here.
+	deploymentPlanSvc := deploymentplan.NewService(database, deploymentplan.NewSQLStore(database)).
+		WithDependencies(catalogSvc, resourceTargetsSvc, &oci.Fetcher{}, deploymentplan.NewExecutor(orchestratorSvc, scaffoldSvc))
+
 	// Fleet Manager (plan §5.11): owns ClusterSets (policy service consumes
 	// them via the SetResolver seam), staged rollouts, agent channels,
 	// drift detection and bulk ops.
@@ -1113,6 +1120,7 @@ func run() error {
 		Orchestrator:      orchestratorSvc,
 		GitRepos:          gitReposSvc,
 		ResourceTargets:   resourceTargetsSvc,
+		DeploymentPlans:   deploymentPlanSvc,
 		GitWebhook:        webhookIngress,
 		Addons:            addonsSvc,
 		CloudAccounts:     cloudAccountsSvc,

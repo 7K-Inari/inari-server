@@ -25,6 +25,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/config"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/deploymentplan"
 	"github.com/7K-Inari/inari-server/internal/extensionhost"
 	"github.com/7K-Inari/inari-server/internal/featureflags"
 	"github.com/7K-Inari/inari-server/internal/fleetmanager"
@@ -59,6 +60,7 @@ type Deps struct {
 	Orchestrator       *orchestrator.Service
 	GitRepos           *gitrepos.Service
 	ResourceTargets    *resourcetargets.Service
+	DeploymentPlans    *deploymentplan.Service
 	GitWebhook         *gitwebhook.Ingress
 	Addons             *addons.Service
 	CloudAccounts      *cloudaccounts.Service
@@ -137,6 +139,7 @@ func Register(api huma.API, d Deps) {
 		RegisterRoutes(api)
 	gitrepos.NewHandler(d.GitRepos, d.Tenancy, d.Authz).RegisterRoutes(api)
 	resourcetargets.NewHandler(d.ResourceTargets, d.Tenancy, d.Authz).RegisterRoutes(api)
+	deploymentplan.NewHandler(d.DeploymentPlans, d.Tenancy, d.Authz).RegisterRoutes(api)
 	gitwebhook.NewHandler(d.GitWebhook).RegisterRoutes(api)
 	// Addons reuse the orchestrator's repo-write enforcement seams
 	// (Feature A decision 5b applies to addon writes too).

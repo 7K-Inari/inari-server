@@ -1,0 +1,63 @@
+//go:build integration
+
+package deploymentplan_test
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	observability "github.com/7K-Inari/inari-api/contract/observability/v1"
+	"github.com/7K-Inari/inari-server/internal/deploymentplan"
+	"github.com/7K-Inari/inari-server/internal/testutil"
+	"github.com/7K-Inari/inari-server/internal/testutil/testdb"
+)
+
+const integrationDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+func TestMigrationAndSQLStoreRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	pg, err := testutil.SharedPostgres(ctx)
+	if err != nil {
+		t.Skipf("testcontainers unavailable: %v", err)
+	}
+	database, err := testdb.NewDatabase(t, pg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Pool.Exec(ctx, `INSERT INTO organizations (id, slug, display_name, keycloak_org_id) VALUES ('org:1','acme','Acme','kc-1')`); err != nil {
+		t.Fatal(err)
+	}
+	store := deploymentplan.NewSQLStore(database)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	plan := &deploymentplan.Plan{
+		ID: "dp-1", OrgID: "org:1", OrgSlug: "acme", Requester: "user:1", IdempotencyKey: "key-1",
+		Operation: deploymentplan.OperationDeploy, Source: deploymentplan.Source{Kind: deploymentplan.SourceCatalog, ItemID: "hiroba/payments-api", Version: "1.4.0"},
+		App:             deploymentplan.ArtifactPin{ItemID: "hiroba/payments-api", Version: "1.4.0", Digest: integrationDigest},
+		Observability:   deploymentplan.ObservabilityInput{Mode: deploymentplan.ModeProvision, Pack: &deploymentplan.PackPin{ArtifactPin: deploymentplan.ArtifactPin{ItemID: "hiroba/observability-pack", Version: "0.2.0", Digest: integrationDigest}, RenderContract: observability.PackRenderContractV2}},
+		PlanFingerprint: integrationDigest, State: "submitted", CreatedAt: now, UpdatedAt: now,
+		Companion: &deploymentplan.Companion{ID: "oc-1", PlanID: "dp-1", TargetRevision: 7, TargetClusterID: "cluster-mon", TargetSelection: []byte(`{"folder":"acme/payments-api","datasource":"metrics","evaluation":"central"}`), AppSourceDigest: integrationDigest, AppRevision: "1.4.0@" + integrationDigest, Pack: deploymentplan.PackPin{ArtifactPin: deploymentplan.ArtifactPin{ItemID: "hiroba/observability-pack", Version: "0.2.0", Digest: integrationDigest}, RenderContract: observability.PackRenderContractV2}, CapabilityDigest: integrationDigest, State: "blocked_external_gate", Generation: 1, Links: []deploymentplan.Link{}, CreatedAt: now, UpdatedAt: now},
+	}
+	if err := store.CreatePlan(ctx, plan); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetPlan(ctx, "org:1", "dp-1")
+	if err != nil || got.Requester != "user:1" || got.Companion.ID != "oc-1" {
+		t.Fatalf("plan = %#v, %v", got, err)
+	}
+	byKey, err := store.GetPlanByIdempotency(ctx, "org:1", "user:1", "key-1")
+	if err != nil || byKey.ID != "dp-1" {
+		t.Fatalf("idempotency = %#v, %v", byKey, err)
+	}
+	companion, err := store.GetCompanion(ctx, "org:1", "oc-1")
+	if err != nil || companion.State != "blocked_external_gate" {
+		t.Fatalf("companion = %#v, %v", companion, err)
+	}
+	result := &observability.VerificationResult{Companion: observability.CompanionIdentity{ID: "oc-1", Generation: 1}, Target: observability.TargetIdentity{Revision: 7}, App: observability.AppIdentity{Revision: companion.AppRevision}, Pack: observability.PackIdentity{Digest: integrationDigest}, CapabilityDigest: integrationDigest, Suite: observability.SuiteIdentity{Digest: integrationDigest, Profile: observability.ReadOnlyProfile}, Run: observability.RunIdentity{ID: "vr-1", Attempt: 1, FinishedAt: now}, Result: "failed", Checks: observability.VerificationChecks{}, ExpiresAt: now.Add(time.Hour)}
+	if err := store.SaveVerification(ctx, "oc-1", result); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveVerification(ctx, "oc-1", result); err != nil {
+		t.Fatalf("duplicate verification was not idempotent: %v", err)
+	}
+}

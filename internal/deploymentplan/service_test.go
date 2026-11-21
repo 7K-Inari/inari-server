@@ -520,6 +520,40 @@ func TestInstanceLinksRejectPersistedEvidenceThatDoesNotMatchSelection(t *testin
 	}
 }
 
+func TestInstanceStatusNeverUsesCompanionFromOlderPlan(t *testing.T) {
+	svc, _, _, _, store := serviceFixture(t)
+	original, err := svc.Submit(context.Background(), deployRequest(), "org-1", "acme-inc", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original.Companion.CompanionInstanceID = "companion-1"
+	original.Companion.State = "verification_pending"
+	if err := store.UpdatePlan(context.Background(), original); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ApplyVerification(context.Background(), "org-1", resultForPlan(t, original)); err != nil {
+		t.Fatal(err)
+	}
+	now := svc.now()
+	svc.now = func() time.Time { return now.Add(time.Second) }
+	request := PlanRequest{Operation: OperationProvisionExisting, InstanceID: original.AppInstanceID, Observability: ObservabilityInput{Mode: ModeSkip}, IdempotencyKey: "request-skip"}
+	review, err := svc.Preflight(context.Background(), request, "org-1", "acme-inc", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.PlanFingerprint = review.Plan.PlanFingerprint
+	if _, err := svc.Submit(context.Background(), request, "org-1", "acme-inc", "user-1"); err != nil {
+		t.Fatal(err)
+	}
+	status, err := svc.InstanceObservability(context.Background(), "org-1", original.AppInstanceID, "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Mode != ModeSkip || status.Companion != nil {
+		t.Fatalf("newer skip plan inherited an older companion: %#v", status)
+	}
+}
+
 func TestLegacyCatalogInstanceCanProvisionFromRecordedPin(t *testing.T) {
 	svc, _, _, _, _ := serviceFixture(t)
 	svc.WithInstances(&fakeInstances{view: &inventory.InstanceView{ResourceInstance: types.ResourceInstance{

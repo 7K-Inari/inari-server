@@ -537,6 +537,9 @@ func (s *Service) InstanceObservability(ctx context.Context, orgID, instanceID, 
 	if err != nil {
 		return nil, err
 	}
+	if companion.PlanID != plan.ID {
+		return out, nil
+	}
 	out.Companion = companion
 	companion.Links = []Link{}
 	if companion.State != "ready" || companion.Verification == nil || plan.Capability == nil {

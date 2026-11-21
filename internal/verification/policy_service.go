@@ -234,10 +234,12 @@ func (s *Service) PutGrant(ctx context.Context, actor string, grant *SuiteGrant)
 	grant.SuiteReleaseID = release.ID
 	if grant.ID != "" {
 		current, err := s.store.GetGrant(ctx, s.db.Pool, grant.OrgID, grant.ID)
-		if err != nil && !errors.Is(err, ErrNotFound) {
+		if err != nil {
 			return nil, err
 		}
-		if err == nil && grant.Revision != current.Revision+1 {
+		if grant.Revision != current.Revision+1 || grant.EnvironmentPolicyID != current.EnvironmentPolicyID ||
+			grant.SuiteDigest != current.SuiteDigest || grant.Profile != current.Profile {
+			// Environment and digest+profile are immutable grant identity fields.
 			return nil, ErrConflict
 		}
 	} else if grant.Revision != 1 {
@@ -338,6 +340,16 @@ func (s *Service) PreviewPolicy(ctx context.Context, orgID, subject string, poli
 	}
 	// Instance identity is server-bound; clients cannot claim another UID/org.
 	policy.OrgID, policy.InstanceUID = orgID, instance.UID
+	if policy.Binding.SpecDigest == "" {
+		// Derive from the server's exact stored JSON instead of asking a browser
+		// to reproduce Go's number-preserving canonicalization. This also lets a
+		// team intentionally rebind after a spec-only change.
+		digest, err := contract.DigestJSON(instance.Spec)
+		if err != nil {
+			return nil, err
+		}
+		policy.Binding.SpecDigest = digest
+	}
 	if err := policy.Validate(); err != nil {
 		return nil, err
 	}
@@ -427,7 +439,10 @@ func (s *Service) PreviewPolicy(ctx context.Context, orgID, subject string, poli
 	if suitePreview.Release.ContentDigest != release.ContentDigest {
 		return nil, errors.New("verification_stale: suite content or source policy changed")
 	}
-	if _, err := BuildRun(policy, grant.Revision, instance, policy.Trigger(contract.TriggerManual, "preview"), s.now()); err != nil {
+	// Policy preview validates the exact desired binding. It is not a manual
+	// execution request and may legitimately precede the first observed sync;
+	// manual/cron preflight applies its stricter sync rule separately.
+	if _, err := BuildRun(policy, grant.Revision, instance, policy.Trigger(contract.TriggerOnRevisionChange, ""), s.now()); err != nil {
 		return nil, err
 	}
 	wouldCreate := []string{}
@@ -513,7 +528,7 @@ func (s *Service) GetVerification(ctx context.Context, orgID, instanceID string)
 	return &VerificationView{VerificationPolicy: policy, Gate: s.GateStatus(), Runs: runs}, nil
 }
 
-func (s *Service) CreateManualRun(ctx context.Context, orgID, subject, instanceID, requestKey string) (*Run, error) {
+func (s *Service) PreviewManualRun(ctx context.Context, orgID, subject, instanceID, requestKey string) (*PolicyPreview, error) {
 	if strings.TrimSpace(requestKey) == "" {
 		return nil, errors.New("idempotencyKey is required")
 	}
@@ -524,7 +539,22 @@ func (s *Service) CreateManualRun(ctx context.Context, orgID, subject, instanceI
 	if !policy.Enabled || !policy.Triggers.Manual.Enabled {
 		return nil, errors.New("manual trigger is disabled")
 	}
-	if _, err := s.PreviewPolicy(ctx, orgID, subject, policy); err != nil {
+	preview, err := s.PreviewPolicy(ctx, orgID, subject, policy)
+	if err != nil {
+		return nil, err
+	}
+	instance, err := s.instances.Get(ctx, s.db.Pool, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := BuildRun(policy, preview.Grant.Revision, instance, policy.Trigger(contract.TriggerManual, requestKey), s.now()); err != nil {
+		return nil, err
+	}
+	return preview, nil
+}
+
+func (s *Service) CreateManualRun(ctx context.Context, orgID, subject, instanceID, requestKey string) (*Run, error) {
+	if _, err := s.PreviewManualRun(ctx, orgID, subject, instanceID, requestKey); err != nil {
 		return nil, err
 	}
 	// Deliberately no hidden gate override or stale queued run. The future

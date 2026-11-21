@@ -65,10 +65,25 @@ func TestBuildRunFailsClosedForStaleSync(t *testing.T) {
 		t.Fatal("stale sync operation was accepted")
 	}
 	instance.ObservedRevision = ""
-	if _, err := verification.BuildRun(policy, 1, instance, policy.Trigger(contract.TriggerManual, "req-1"), time.Now()); err != nil {
-		t.Fatalf("manual run should be plannable in waiting_for_sync: %v", err)
-	} else if run, _ := verification.BuildRun(policy, 1, instance, policy.Trigger(contract.TriggerManual, "req-1"), time.Now()); run.Disposition != "waiting_for_sync" {
+	if _, err := verification.BuildRun(policy, 1, instance, policy.Trigger(contract.TriggerOnRevisionChange, ""), time.Now()); err != nil {
+		t.Fatalf("revision-change run should be plannable in waiting_for_sync: %v", err)
+	} else if run, _ := verification.BuildRun(policy, 1, instance, policy.Trigger(contract.TriggerOnRevisionChange, ""), time.Now()); run.Disposition != "waiting_for_sync" {
 		t.Fatalf("disposition = %q", run.Disposition)
+	}
+}
+
+func TestBuildRunRequiresCurrentSyncForManualAndCron(t *testing.T) {
+	instance := syncedInstance()
+	instance.ObservedRevision = ""
+	policy := validRunPolicy(t, instance)
+	policy.Triggers.Cron.ScheduleSetID = "nightly"
+	for _, trigger := range []contract.Trigger{
+		policy.Trigger(contract.TriggerManual, "req-1"),
+		policy.Trigger(contract.TriggerCron, "2026-11-21T02:00:00Z"),
+	} {
+		if _, err := verification.BuildRun(policy, 1, instance, trigger, time.Now()); err == nil {
+			t.Fatalf("unsynced %s run was plannable", trigger.Kind)
+		}
 	}
 }
 

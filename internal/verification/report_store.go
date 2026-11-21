@@ -45,24 +45,32 @@ type reportMutation struct {
 	startedAt, finishedAt, observedAt    *time.Time
 }
 
-func (s *Store) applyReport(ctx context.Context, q db.Querier, run *Run, report *agentv1.VerificationReport, payloadDigest string, mutation reportMutation) (bool, error) {
+func (s *Store) recordReportReceipt(ctx context.Context, q db.Querier, clusterID string, run *Run, report *agentv1.VerificationReport, payloadDigest string) (bool, error) {
 	tag, err := q.Exec(ctx, `INSERT INTO verification_report_receipts
 		(cluster_id, workflow_uid, resource_version, run_id, attempt, payload_digest)
 		VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
-		mutation.clusterID, report.Workflow.Uid, report.ResourceVersion, run.ID, report.Attempt, payloadDigest)
+		clusterID, report.Workflow.Uid, report.ResourceVersion, run.ID, report.Attempt, payloadDigest)
 	if err != nil {
 		return false, err
 	}
-	if tag.RowsAffected() == 0 {
-		var existingDigest string
-		if err := q.QueryRow(ctx, `SELECT payload_digest FROM verification_report_receipts WHERE cluster_id=$1 AND workflow_uid=$2 AND resource_version=$3`,
-			mutation.clusterID, report.Workflow.Uid, report.ResourceVersion).Scan(&existingDigest); err != nil {
-			return false, err
-		}
-		if existingDigest != payloadDigest {
-			return false, ErrConflict
-		}
-		return false, nil
+	if tag.RowsAffected() == 1 {
+		return true, nil
+	}
+	var existingDigest string
+	if err := q.QueryRow(ctx, `SELECT payload_digest FROM verification_report_receipts WHERE cluster_id=$1 AND workflow_uid=$2 AND resource_version=$3`,
+		clusterID, report.Workflow.Uid, report.ResourceVersion).Scan(&existingDigest); err != nil {
+		return false, err
+	}
+	if existingDigest != payloadDigest {
+		return false, ErrConflict
+	}
+	return false, nil
+}
+
+func (s *Store) applyReport(ctx context.Context, q db.Querier, run *Run, report *agentv1.VerificationReport, payloadDigest string, mutation reportMutation) (bool, error) {
+	inserted, err := s.recordReportReceipt(ctx, q, mutation.clusterID, run, report, payloadDigest)
+	if err != nil || !inserted {
+		return false, err
 	}
 	var outcome any
 	if len(mutation.outcome) > 0 {
@@ -74,7 +82,7 @@ func (s *Store) applyReport(ctx context.Context, q db.Querier, run *Run, report 
 		mutation.outcomeDigest, mutation.expiresAt, report.Attempt); err != nil {
 		return false, err
 	}
-	_, err = q.Exec(ctx, `INSERT INTO verification_run_attempts
+	tag, err := q.Exec(ctx, `INSERT INTO verification_run_attempts
 		(run_id, attempt, workflow_name, workflow_namespace, workflow_uid, cluster_id, render_fingerprint,
 		 outcome_digest, outcome, state, message, started_at, finished_at, observed_at, expires_at, links_expire_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
@@ -82,12 +90,20 @@ func (s *Store) applyReport(ctx context.Context, q db.Querier, run *Run, report 
 		workflow_namespace=EXCLUDED.workflow_namespace, workflow_uid=EXCLUDED.workflow_uid, cluster_id=EXCLUDED.cluster_id,
 		render_fingerprint=EXCLUDED.render_fingerprint, outcome_digest=EXCLUDED.outcome_digest, outcome=EXCLUDED.outcome,
 		state=EXCLUDED.state, message=EXCLUDED.message, started_at=EXCLUDED.started_at, finished_at=EXCLUDED.finished_at,
-		observed_at=EXCLUDED.observed_at, expires_at=EXCLUDED.expires_at, links_expire_at=EXCLUDED.links_expire_at`,
+		observed_at=EXCLUDED.observed_at, expires_at=EXCLUDED.expires_at, links_expire_at=EXCLUDED.links_expire_at
+		WHERE verification_run_attempts.workflow_uid = '' OR
+		  (verification_run_attempts.workflow_uid = EXCLUDED.workflow_uid AND
+		   verification_run_attempts.workflow_name = EXCLUDED.workflow_name AND
+		   verification_run_attempts.workflow_namespace = EXCLUDED.workflow_namespace AND
+		   verification_run_attempts.cluster_id = EXCLUDED.cluster_id)`,
 		run.ID, report.Attempt, report.Workflow.Name, report.Workflow.Namespace, report.Workflow.Uid, mutation.clusterID,
 		report.RenderFingerprint, mutation.outcomeDigest, outcome, mutation.status, mutation.message,
 		mutation.startedAt, mutation.finishedAt, mutation.observedAt, mutation.expiresAt, mutation.linksExpireAt)
 	if err != nil {
 		return false, err
+	}
+	if tag.RowsAffected() == 0 {
+		return false, errors.New("verification_report_denied: Workflow identity does not match the run attempt")
 	}
 	return true, nil
 }

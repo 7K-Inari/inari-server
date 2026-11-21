@@ -229,15 +229,15 @@ func (g *SuiteGrant) ValidateGrant(environmentPolicy *EnvironmentPolicy) error {
 			}
 		}
 	}
-	if environmentPolicy.Environment == trustedsource.EnvironmentProduction && g.SideEffect != SideEffectReadOnly {
+	if g.SideEffect != SideEffectReadOnly {
 		if !dnsLabelPattern.MatchString(g.FixtureNamespace) || !g.CleanupRequired {
-			return errors.New("synthetic or mutating production runs require an isolated fixture namespace and cleanup")
+			return errors.New("synthetic or mutating runs require an isolated fixture namespace and cleanup")
 		}
 		if !g.RequirePerRunApproval || len(g.ApproverTeamIDs) == 0 {
-			return errors.New("synthetic or mutating production runs require explicit named-team approval")
+			return errors.New("synthetic or mutating runs require explicit named-team approval")
 		}
 		if strings.TrimSpace(g.ChangeWindow) == "" {
-			return errors.New("synthetic or mutating production runs require a changeWindow")
+			return errors.New("synthetic or mutating runs require a changeWindow")
 		}
 	}
 	grantTimeout, err := time.ParseDuration(g.MaxTimeout)
@@ -291,8 +291,11 @@ func (p *VerificationPolicy) ValidateAgainstGrant(environment *EnvironmentPolicy
 	if p.Retention.WorkflowTTLSeconds < environment.MinWorkflowTTLSeconds || p.Retention.WorkflowTTLSeconds > environment.MaxWorkflowTTLSeconds || p.Retention.ResultDays > environment.MaxResultDays {
 		return errors.New("retention exceeds the environment policy")
 	}
-	if grant.SideEffect == SideEffectMutating && (p.Triggers.OnRevisionChange.Enabled || p.Triggers.OnSync.Enabled || p.Triggers.Cron.Enabled) {
-		return errors.New("side_effect_denied: mutating profiles allow approved manual runs only")
+	if grant.SideEffect != SideEffectReadOnly && (p.Triggers.OnRevisionChange.Enabled || p.Triggers.OnSync.Enabled || p.Triggers.Cron.Enabled) {
+		// There is no per-run approval/change-window token on automatic trigger
+		// events. Keep synthetic and mutating profiles manual-only rather than
+		// letting a signed suite turn its declarations into that authority.
+		return errors.New("side_effect_denied: synthetic or mutating profiles allow approved manual runs only")
 	}
 	if p.Binding.Profile == ProfileProd && grant.SideEffect != SideEffectReadOnly {
 		if p.Triggers.OnRevisionChange.Enabled || p.Triggers.OnSync.Enabled || p.Triggers.Cron.Enabled || !grant.RequirePerRunApproval {

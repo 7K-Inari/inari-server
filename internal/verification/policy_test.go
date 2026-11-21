@@ -149,6 +149,25 @@ func TestGrantProductionGuardrails(t *testing.T) {
 	}
 }
 
+func TestNonProductionSideEffectsStillRequireApprovalAndFixtures(t *testing.T) {
+	staging := validEnvironment(trustedsource.EnvironmentStaging)
+	grant := validGrant()
+	grant.SideEffect = verification.SideEffectSyntheticWrite
+	if err := grant.ValidateGrant(staging); err == nil || !strings.Contains(err.Error(), "isolated fixture") {
+		t.Fatalf("staging synthetic grant without isolated cleanup fixtures error = %v", err)
+	}
+	grant.FixtureNamespace = "verify-fixtures"
+	grant.CleanupRequired = true
+	if err := grant.ValidateGrant(staging); err == nil || !strings.Contains(err.Error(), "approval") {
+		t.Fatalf("staging synthetic grant without named approval error = %v", err)
+	}
+	grant.RequirePerRunApproval = true
+	grant.ApproverTeamIDs = []string{"security"}
+	if err := grant.ValidateGrant(staging); err == nil || !strings.Contains(err.Error(), "changeWindow") {
+		t.Fatalf("staging synthetic grant without change window error = %v", err)
+	}
+}
+
 func TestMutatingStagePolicyRejectsAutomaticTriggers(t *testing.T) {
 	policy := validPolicy()
 	environment := validEnvironment(trustedsource.EnvironmentStaging)

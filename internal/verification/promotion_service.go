@@ -102,6 +102,43 @@ func (s *Service) PreviewPromotion(ctx context.Context, orgID, targetInstanceID,
 		return nil, err
 	}
 	decision := EvaluatePromotionEvidence(policy, runs, toDigest, s.now())
+	if decision.Allowed {
+		var selected *Run
+		for i := range runs {
+			if runs[i].ID == decision.SourceRunID {
+				selected = &runs[i]
+				break
+			}
+		}
+		if selected == nil {
+			return nil, errors.New("verification evidence selected an unknown run")
+		}
+		runPolicy, _, err := s.store.GetPolicyRevision(ctx, s.db.Pool, orgID, selected.InstanceID, selected.PolicyRevision)
+		if err != nil {
+			return nil, err
+		}
+		grant, err := s.store.GetGrant(ctx, s.db.Pool, orgID, runPolicy.Binding.SuiteGrantID)
+		if err != nil {
+			return nil, err
+		}
+		if runPolicy.Binding.AppArtifactDigest != selected.AppArtifactDigest || runPolicy.Binding.SuiteDigest != selected.SuiteDigest || runPolicy.Binding.Profile != selected.Profile {
+			decision.Allowed, decision.ReasonCode = false, "verification_binding_missing"
+		} else if grant.RevokedAt != nil || (grant.ExpiresAt != nil && !s.now().Before(*grant.ExpiresAt)) {
+			// Revocation and expiry immediately invalidate even previously passed
+			// evidence; evaluating only run.status would leave a promotion bypass.
+			decision.Allowed, decision.ReasonCode = false, "suite_grant_denied"
+		} else if grant.Revision != selected.GrantRevision || grant.SuiteDigest != selected.SuiteDigest || grant.Profile != selected.Profile {
+			decision.Allowed, decision.ReasonCode = false, "verification_stale"
+		} else {
+			release, err := s.store.GetSuiteRelease(ctx, s.db.Pool, orgID, selected.SuiteDigest)
+			if err != nil {
+				return nil, err
+			}
+			if release.ID != grant.SuiteReleaseID || release.Eligibility != "application" || release.LegacyException || release.Unsigned {
+				decision.Allowed, decision.ReasonCode = false, "suite_ci_only"
+			}
+		}
+	}
 	return &PromotionPreview{Policy: policy, Decision: decision, TargetVersion: toVersion, TargetDigest: toDigest}, nil
 }
 

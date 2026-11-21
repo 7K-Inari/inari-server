@@ -53,6 +53,12 @@ func BuildRun(policy *VerificationPolicy, grantRevision int64, instance *types.R
 			return nil, errors.New("app_revision_not_synced: sync operation does not match the current deployed revision")
 		}
 	}
+	// Only revision-change runs may wait for a future observed sync. Manual and
+	// cron requests verify an already deployed exact revision and fail closed
+	// while that observation is absent or ambiguous.
+	if trigger.Kind != contract.TriggerOnRevisionChange && !synced {
+		return nil, errors.New("app_revision_not_synced: an exact currently synced revision is required")
+	}
 	if synced {
 		disposition = "admission_pending"
 	}

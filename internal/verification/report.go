@@ -88,7 +88,12 @@ func (s *Service) ApplyReport(ctx context.Context, orgID, clusterID string, repo
 	if startedAt != nil && finishedAt != nil && startedAt.After(*finishedAt) || finishedAt != nil && finishedAt.After(observedAt.Add(5*time.Minute)) {
 		return errors.New("verification_report_denied: report timestamps are out of order")
 	}
-	payload, err := (proto.MarshalOptions{Deterministic: true}).Marshal(report)
+	// observedAt changes on every agent relist/reconnect. It is transport
+	// metadata, not Workflow content, and must not turn an identical
+	// resourceVersion replay into a receipt conflict.
+	checksumReport := proto.Clone(report).(*agentv1.VerificationReport)
+	checksumReport.ObservedAt = nil
+	payload, err := (proto.MarshalOptions{Deterministic: true}).Marshal(checksumReport)
 	if err != nil {
 		return err
 	}
@@ -103,11 +108,20 @@ func (s *Service) ApplyReport(ctx context.Context, orgID, clusterID string, repo
 		}
 	}
 	if run.Status == "passed" || run.Status == "failed" {
-		terminal := terminalReportState(report)
-		if terminal != run.Status {
-			return ErrConflict
-		}
-		return nil // terminal outcomes are immutable and exact replays are no-ops.
+		// Even terminal reports must pass through receipt dedupe: otherwise a
+		// same-resourceVersion content conflict is silently accepted, and a
+		// Workflow whose typed outcome failed validation cannot be replayed
+		// idempotently. Terminal run state itself is never updated here.
+		return s.db.WithTx(ctx, func(tx pgx.Tx) error {
+			inserted, err := s.store.recordReportReceipt(ctx, tx, clusterID, run, report, payloadDigest)
+			if err != nil || !inserted {
+				return err
+			}
+			if terminalReportState(report) != run.Status {
+				return ErrConflict // rolls back the newly claimed receipt
+			}
+			return nil
+		})
 	}
 	mutation := reportMutation{
 		clusterID: clusterID, status: "verification_pending", disposition: "running",

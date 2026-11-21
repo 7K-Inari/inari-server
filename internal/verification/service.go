@@ -2,6 +2,8 @@ package verification
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"time"
@@ -107,6 +109,10 @@ func (s *Service) PreviewSuite(ctx context.Context, input SuiteAdmissionInput) (
 		return nil, err
 	}
 	release.OrgID = input.OrgID
+	// IDs are deterministic for idempotent retries, but must also be scoped by
+	// tenant because verification_suite_releases.id is a global primary key.
+	identity := sha256.Sum256([]byte(input.OrgID + "\x00" + release.SuiteDigest))
+	release.ID = "vsr-" + hex.EncodeToString(identity[:8])
 	release.Descriptor = admitted.Descriptor
 	profile := release.Suite.Profiles[input.Profile]
 	if err := ValidateWorkflowTemplate(release.WorkflowTemplate, &release.Suite, &SuiteGrant{SideEffect: profile.SideEffects}); err != nil {

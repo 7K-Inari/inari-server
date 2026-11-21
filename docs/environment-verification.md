@@ -31,13 +31,13 @@ An `EnvironmentVerificationPolicy` is bound to a deployment `ResourceTarget` and
 - Side effects, timeout, active/pending concurrency, retention, result size, notification/approver policy, fixture namespace, cleanup, and grant expiry.
 - Optional HTTPS Argo Workflows UI base URL for read-time external links.
 
-Production defaults to readOnly. Synthetic/mutating production grants require isolated fixtures, exit cleanup, named per-run approval, and a change window. Mutating automatic/PostSync execution is denied. Production grant creation re-admits the suite and requires fresh signed release evidence within the environment's approval-age limit.
+Production defaults to readOnly. Synthetic/mutating grants in every environment require isolated fixtures, exit cleanup, named per-run approval, and a change window. Synthetic and mutating automatic/PostSync execution is denied while per-run approval is required. Production grant creation re-admits the suite and requires fresh signed release evidence within the environment's approval-age limit.
 
 Static signed Workflow validation rejects external template references, mutable images, ServiceAccount/namespace/podSpecPatch/synchronization overrides, hostPath/host namespaces, privilege escalation, resource/apply templates, suite-created RBAC, suspend steps, and unbounded parallelism/retries/output.
 
 ## Team policy and triggers
 
-`VerificationPolicy` supports onRevisionChange (default on), observed onSync/manual/cron, timeout, active/pending concurrency, Workflow/result retention, existing notification endpoint IDs, addon-absence behavior, and failure action. Preview revalidates org, target, app, suite, grant, SemVer compatibility, RBAC, egress, side effects, and policy revision before returning effective read-only guardrails. Save performs the same preview and optimistic revision check.
+`VerificationPolicy` supports onRevisionChange (default on), observed onSync/manual/cron, timeout, active/pending concurrency, Workflow/result retention, existing notification endpoint IDs, addon-absence behavior, and failure action. Preview revalidates org, target, app, suite, grant, SemVer compatibility, RBAC, egress, side effects, and policy revision before returning effective read-only guardrails. Save performs the same preview and optimistic revision check. An empty `binding.specDigest` requests a fresh digest from the server's exact stored spec JSON; the normalized preview/save binding contains the resulting immutable digest.
 
 The run key is SHA-256 over instance UID + appRevision + suite digest + canonical trigger. The public run ID is stable lowercase base32. App revision binds instance UID, item/version/digest, canonical spec digest, generation, and desired commit. Manual idempotency keys distinguish deliberate repeats; explicit retry uses the same run ID and a new attempt. Cron derives its scheduled instant from Argo's deterministic child name. Health-only updates do not trigger revision runs; onSync requires a new successful operation for the exact current deployed revision.
 

@@ -48,8 +48,8 @@ func TestUngatedPolicyLifecycleStopsBeforeRun(t *testing.T) {
 	if _, err := database.Pool.Exec(ctx, `INSERT INTO organizations (id, slug, display_name, keycloak_org_id) VALUES ('org:1','acme','Acme','kc-1');
 		INSERT INTO clusters (id, org_id, name, state, labels) VALUES ('cluster:1','org:1','kind','active','{"inari.dev/environment":"staging"}');
 		INSERT INTO resource_targets (id, org_id, name, resource_kind, resource_id, capability) VALUES ('rt-1','org:1','kind','cluster','cluster:1','deployment.cluster');
-		INSERT INTO resource_instances (id, org_id, cluster_id, catalog_item_id, version, artifact_digest, spec, commit_sha, generation)
-		VALUES ('inst-1','org:1','cluster:1','hiroba/example','1.4.0','`+digestA+`','{"replicas":2}','0123456789abcdef0123456789abcdef01234567',4)`); err != nil {
+		INSERT INTO resource_instances (id, org_id, cluster_id, catalog_item_id, version, artifact_digest, spec, commit_sha, generation, sync_state, observed_revision, sync_operation_id, sync_operation_phase)
+		VALUES ('inst-1','org:1','cluster:1','hiroba/example','1.4.0','`+digestA+`','{"replicas":2}','0123456789abcdef0123456789abcdef01234567',4,'synced','0123456789abcdef0123456789abcdef01234567','op-7','Succeeded')`); err != nil {
 		t.Fatal(err)
 	}
 	instance := syncedInstance()
@@ -92,6 +92,9 @@ func TestUngatedPolicyLifecycleStopsBeforeRun(t *testing.T) {
 	policy := validRunPolicy(t, instance)
 	policy.OrgID = instance.OrgID
 	policy.Binding.SuiteGrantID = grant.ID
+	// Clients may request a fresh server-derived binding after a spec edit;
+	// browser JSON number normalization must not define the trusted digest.
+	policy.Binding.SpecDigest = ""
 	preview, err := service.PreviewPolicy(ctx, instance.OrgID, "user:team", policy)
 	if err != nil {
 		t.Fatalf("PreviewPolicy: %v", err)

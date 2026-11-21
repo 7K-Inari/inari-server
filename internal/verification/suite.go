@@ -260,8 +260,23 @@ func inspectWorkflowValue(value any, key string) error {
 				return fmt.Errorf("%s overrides are reserved for the platform renderer", k)
 			case "hostPath":
 				return errors.New("hostPath volumes are forbidden")
-			case "hostNetwork", "hostPID", "hostIPC":
+			case "hostNetwork", "hostPID", "hostIPC", "hostPort":
 				return fmt.Errorf("%s is forbidden", k)
+			case "automountServiceAccountToken", "nodeName", "nodeSelector":
+				return fmt.Errorf("%s is reserved for the platform renderer", k)
+			case "secretKeyRef", "secretRef", "secretName", "configMapRef", "configMapKeyRef", "configMap":
+				return fmt.Errorf("%s is forbidden without a platform-approved reference", k)
+			case "runAsNonRoot", "readOnlyRootFilesystem":
+				if allowed, ok := child.(bool); !ok || !allowed {
+					return fmt.Errorf("%s must be true when specified by a suite", k)
+				}
+			case "add":
+				if key == "capabilities" {
+					values, ok := child.([]any)
+					if !ok || len(values) != 0 {
+						return errors.New("capabilities.add is forbidden")
+					}
+				}
 			case "privileged", "allowPrivilegeEscalation":
 				if allowed, _ := child.(bool); allowed {
 					return fmt.Errorf("%s=true is forbidden", k)

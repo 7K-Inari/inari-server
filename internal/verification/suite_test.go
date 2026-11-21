@@ -124,6 +124,12 @@ func TestWorkflowTemplateSafety(t *testing.T) {
 		{name: "external template", old: "    - name: smoke\n      container:", replacement: "    - name: smoke\n      templateRef:\n        name: privileged\n      container:", want: "templateRef"},
 		{name: "host path", old: "  entrypoint: smoke", replacement: "  entrypoint: smoke\n  volumes:\n    - name: host\n      hostPath: {path: /}", want: "hostPath"},
 		{name: "synchronization override", old: "  entrypoint: smoke", replacement: "  entrypoint: smoke\n  synchronization:\n    semaphore: {}", want: "synchronization"},
+		{name: "root execution", old: "        command: [check]", replacement: "        command: [check]\n        securityContext:\n          runAsNonRoot: false", want: "runAsNonRoot"},
+		{name: "writable root", old: "        command: [check]", replacement: "        command: [check]\n        securityContext:\n          readOnlyRootFilesystem: false", want: "readOnlyRootFilesystem"},
+		{name: "unsafe capability", old: "        command: [check]", replacement: "        command: [check]\n        securityContext:\n          capabilities:\n            add: [NET_ADMIN]", want: "capabilities"},
+		{name: "host port", old: "        command: [check]", replacement: "        command: [check]\n        ports: [{containerPort: 8080, hostPort: 8080}]", want: "hostPort"},
+		{name: "token automount override", old: "  entrypoint: smoke", replacement: "  entrypoint: smoke\n  automountServiceAccountToken: true", want: "automountServiceAccountToken"},
+		{name: "suite secret reference", old: "        command: [check]", replacement: "        command: [check]\n        env: [{name: TOKEN, valueFrom: {secretKeyRef: {name: customer, key: token}}}]", want: "secretKeyRef"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -2,10 +2,12 @@ package verification
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
 	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
+	contract "github.com/7K-Inari/inari-api/contract/verification/v1"
 	"github.com/7K-Inari/inari-server/internal/resourcetargets"
 	"github.com/jackc/pgx/v5"
 )
@@ -79,16 +81,62 @@ func (s *Service) RevokeGrant(ctx context.Context, orgID, actor, grantID string)
 }
 
 func (s *Service) DisablePolicy(ctx context.Context, orgID, subject, instanceID string) (*VerificationPolicy, error) {
+	if s.db == nil || s.instances == nil || s.targets == nil {
+		return nil, errors.New("verification disable dependencies are not configured")
+	}
 	current, err := s.store.GetCurrentPolicy(ctx, s.db.Pool, orgID, instanceID)
 	if err != nil {
 		return nil, err
 	}
+	instance, err := s.instances.Get(ctx, s.db.Pool, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	if instance.OrgID != orgID || current.InstanceUID != instance.UID {
+		return nil, ErrNotFound
+	}
+	// Disabling is a safety control, not a new execution admission. Preserve
+	// the exact historical binding and re-check only the caller's current
+	// target authority; registry availability and grant revocation must not
+	// make a policy impossible to disable.
+	resolved, err := s.targets.ResolveResource(ctx, orgID, subject, resourcetargets.CapabilityDeploymentCluster, resourcetargets.ActionUse,
+		resourcetargets.TargetResourceRef{Kind: resourcetargets.ResourceKindCluster, ID: instance.ClusterID}, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resolved == nil || resolved.Target.ID == "" {
+		return nil, errors.New("target_stale: deployment target is unavailable")
+	}
 	next := *current
-	next.ID = ""
+	next.ID, err = newVerificationID("vp")
+	if err != nil {
+		return nil, err
+	}
 	next.Revision = current.Revision + 1
 	next.Enabled = false
-	next.Current = false
-	return s.PutPolicy(ctx, orgID, subject, &next)
+	next.Current = true
+	now := s.now().UTC()
+	next.CreatedAt, next.UpdatedAt = now, now
+	fingerprintInput, _ := json.Marshal(map[string]any{"policy": next, "disabled": true})
+	renderFingerprint, err := contract.DigestJSON(fingerprintInput)
+	if err != nil {
+		return nil, err
+	}
+	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		if err := s.store.PutPolicy(ctx, tx, &next, renderFingerprint); err != nil {
+			return err
+		}
+		return s.record(ctx, tx, orgID, subject, "verification.policy_updated", "verification_policy", next.ID, map[string]any{
+			"orgId": orgID, "instanceId": instanceID, "instanceUid": instance.UID,
+			"policyRevision": next.Revision, "appArtifactDigest": next.Binding.AppArtifactDigest,
+			"suiteDigest": next.Binding.SuiteDigest, "profile": next.Binding.Profile,
+			"renderFingerprint": renderFingerprint, "externalGate": s.GateStatus().Reason, "disabled": true,
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &next, nil
 }
 
 func (s *Service) ListRuns(ctx context.Context, orgID, instanceID string, limit int) ([]Run, error) {

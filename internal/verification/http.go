@@ -370,11 +370,7 @@ func (h *Handler) createRun(ctx context.Context, in *runInput) (*runOutput, erro
 	}
 	out := &runOutput{}
 	if in.Body.DryRun {
-		policy, err := h.svc.store.GetCurrentPolicy(ctx, h.svc.db.Pool, org.ID, in.ID)
-		if err != nil {
-			return nil, verificationHTTPError(err)
-		}
-		preview, err := h.svc.PreviewPolicy(ctx, org.ID, "user:"+id.Subject, policy)
+		preview, err := h.svc.PreviewManualRun(ctx, org.ID, "user:"+id.Subject, in.ID, in.Body.IdempotencyKey)
 		out.Body.Preview = preview
 		return out, verificationHTTPError(err)
 	}

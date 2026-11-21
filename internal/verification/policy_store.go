@@ -161,14 +161,22 @@ func (s *Store) UpsertGrant(ctx context.Context, q db.Querier, grant *SuiteGrant
 	if err != nil {
 		return err
 	}
-	_, err = q.Exec(ctx, `INSERT INTO verification_suite_grants
+	tag, err := q.Exec(ctx, `INSERT INTO verification_suite_grants
 		(id, org_id, environment_policy_id, suite_release_id, suite_digest, profile, grant_revision, grant_spec, expires_at, revoked_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(environment_policy_id,suite_digest,profile) DO UPDATE SET
 		id=EXCLUDED.id, suite_release_id=EXCLUDED.suite_release_id, grant_revision=EXCLUDED.grant_revision,
-		grant_spec=EXCLUDED.grant_spec, expires_at=EXCLUDED.expires_at, revoked_at=EXCLUDED.revoked_at, updated_at=now()`,
+		grant_spec=EXCLUDED.grant_spec, expires_at=EXCLUDED.expires_at, revoked_at=EXCLUDED.revoked_at, updated_at=now()
+		WHERE verification_suite_grants.id=EXCLUDED.id AND
+		  verification_suite_grants.grant_revision=EXCLUDED.grant_revision-1`,
 		grant.ID, grant.OrgID, grant.EnvironmentPolicyID, grant.SuiteReleaseID, grant.SuiteDigest, grant.Profile,
 		grant.Revision, spec, grant.ExpiresAt, grant.RevokedAt)
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrConflict
+	}
+	return nil
 }
 
 const grantCols = `id, org_id, environment_policy_id, suite_release_id, suite_digest, profile, grant_revision, grant_spec, expires_at, revoked_at`

@@ -4,7 +4,7 @@ go 1.26.3
 
 require (
 	connectrpc.com/connect/v2 v2.0.2
-	github.com/7K-Inari/inari-api v0.8.0-5ee597d.0.20261120100719-b154bc4443cb
+	github.com/7K-Inari/inari-api v0.8.0-b5e7e0b.0.20261121015609-4971e59ac41e
 	github.com/aws/aws-sdk-go-v2 v1.47.3
 	github.com/aws/aws-sdk-go-v2/config v1.33.9
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.9
@@ -176,6 +176,7 @@ require (
 	github.com/prometheus/otlptranslator v1.0.0 // indirect
 	github.com/prometheus/procfs v0.22.0 // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20250401214520-65e299d6c5c9 // indirect
+	github.com/robfig/cron/v3 v3.0.1 // indirect
 	github.com/sassoftware/relic v7.2.1+incompatible // indirect
 	github.com/secure-systems-lab/go-securesystemslib v0.11.0 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect

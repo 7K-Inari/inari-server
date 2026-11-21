@@ -66,6 +66,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/tenantzonefactory"
 	"github.com/7K-Inari/inari-server/internal/types"
 	"github.com/7K-Inari/inari-server/internal/usergit"
+	"github.com/7K-Inari/inari-server/internal/verification"
 
 	"connectrpc.com/connect/v2"
 	"connectrpc.com/connect/v2/connecthttp"
@@ -107,6 +108,8 @@ func (r statusSinkRouter) ApplyStatus(ctx context.Context, orgID, clusterID stri
 	}
 	return r.inv.ApplyStatus(ctx, orgID, clusterID, inventory.StatusUpdate{
 		Resource: upd.Resource, Health: upd.Health, Sync: upd.Sync, Message: upd.Message,
+		ObservedRevision: upd.ObservedRevision, SyncOperationID: upd.SyncOperationID,
+		SyncOperationPhase: upd.SyncOperationPhase, OperationFinishedAt: upd.OperationFinishedAt,
 	})
 }
 
@@ -1091,6 +1094,10 @@ func run() error {
 	go dispatcher.Run(ctx)
 
 	flagSvc := featureflags.NewService(database, flagStore, auditStore, cacheBackend, cfg.CacheBackend)
+	verificationSvc := verification.NewService(database, verification.NewStore(), catalogSvc, invStore, resourceTargetsSvc, auditStore)
+	orchestratorSvc.WithPromotionGate(verificationSvc)
+	verificationSvc.WithPromoter(orchestratorSvc)
+	gateway.SetVerificationSink(verificationSvc)
 
 	router, api := httpserver.NewRouter(log, validator, database)
 	// /metrics is a plain chi route (like /healthz): outside huma, so the
@@ -1111,6 +1118,7 @@ func run() error {
 		Inventory:         inventorySvc,
 		PlatformResources: platformResourcesSvc,
 		Orchestrator:      orchestratorSvc,
+		Verification:      verificationSvc,
 		GitRepos:          gitReposSvc,
 		ResourceTargets:   resourceTargetsSvc,
 		GitWebhook:        webhookIngress,

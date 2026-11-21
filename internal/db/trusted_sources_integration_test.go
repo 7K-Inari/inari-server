@@ -40,8 +40,23 @@ func TestTrustedSourcesDownIsExplicitlyIrreversible(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.Down(ctx); err != nil {
-		t.Fatalf("reversible 0042 Down failed before reaching 0041: %v", err)
+	for steps := 0; ; steps++ {
+		if steps > 10 {
+			t.Fatal("reversible Down calls did not reach migration 0041")
+		}
+		var current int64
+		if err := database.Pool.QueryRow(ctx, `SELECT max(version_id) FROM goose_db_version`).Scan(&current); err != nil {
+			t.Fatal(err)
+		}
+		if current == 41 {
+			break
+		}
+		if current < 41 {
+			t.Fatalf("reversible Down passed migration 0041 without rejection: version=%d", current)
+		}
+		if _, err := provider.Down(ctx); err != nil {
+			t.Fatalf("reversible Down failed before migration 0041: version=%d error=%v", current, err)
+		}
 	}
 	if _, err := provider.Down(ctx); err == nil || !strings.Contains(err.Error(), "irreversible") {
 		t.Fatalf("0041 Down error = %v, want explicit irreversible rejection", err)

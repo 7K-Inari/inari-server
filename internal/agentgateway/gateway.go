@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect/v2"
+	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
 
 	"github.com/7K-Inari/inari-server/internal/addons"
 	"github.com/7K-Inari/inari-server/internal/audit"
@@ -104,14 +105,15 @@ type capabilityIngestor interface {
 
 // Gateway bundles the Agent Gateway dependencies.
 type Gateway struct {
-	registry   *clusterregistry.Service
-	clients    clusterregistry.ClientManager
-	caps       capabilityIngestor
-	queue      commandQueue
-	audit      *audit.Store
-	db         *db.DB
-	cfg        Config
-	statusSink StatusSink
+	registry         *clusterregistry.Service
+	clients          clusterregistry.ClientManager
+	caps             capabilityIngestor
+	queue            commandQueue
+	audit            *audit.Store
+	db               *db.DB
+	cfg              Config
+	statusSink       StatusSink
+	verificationSink VerificationSink
 	// addonDiscovery ingests scanner-reported addons (Feature C; nil-safe:
 	// reports are drop-and-log until wired).
 	addonDiscovery AddonDiscoverySink
@@ -250,6 +252,15 @@ type StatusSink interface {
 // SetStatusSink wires the inventory module post-construction (nil-safe:
 // status updates are drop-and-log until wired).
 func (g *Gateway) SetStatusSink(s StatusSink) { g.statusSink = s }
+
+// VerificationSink consumes exact signed-suite reports from the authenticated
+// existing stream. There is no public result-ingest endpoint.
+type VerificationSink interface {
+	ApplyReport(ctx context.Context, orgID, clusterID string, report *agentv1.VerificationReport) error
+}
+
+// SetVerificationSink wires generic verification post-construction.
+func (g *Gateway) SetVerificationSink(s VerificationSink) { g.verificationSink = s }
 
 // AddonDiscoverySink consumes scanner-reported addon batches (the addons
 // module's IngestDiscovery seam, Feature C).

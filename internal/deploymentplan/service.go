@@ -529,8 +529,42 @@ func selectedDatasource(companion *Companion) string {
 	return selection.Datasource
 }
 
+func (s *Service) unplannedInstanceObservability(ctx context.Context, orgID, instanceID string) (*InstanceObservability, error) {
+	if s.instances == nil {
+		return nil, ErrPlanNotFound
+	}
+	instance, err := s.instances.Get(ctx, orgID, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	if instance.CatalogItemID == "" || instance.Version == "" || instance.ArtifactDigest == "" {
+		return &InstanceObservability{Mode: ModeNone, Available: false, Reason: "capability_unavailable: original application pin is incomplete"}, nil
+	}
+	source := Source{Kind: SourceCatalog, ItemID: instance.CatalogItemID, Version: instance.Version, Digest: instance.ArtifactDigest}
+	normalized, err := s.normalizeSource(ctx, PlanRequest{Source: &source}, orgID, nil)
+	if err != nil {
+		return nil, err
+	}
+	if normalized.app.Digest != instance.ArtifactDigest {
+		return &InstanceObservability{Mode: ModeNone, Available: false, Reason: "capability_unavailable: original application digest does not match"}, nil
+	}
+	out := &InstanceObservability{Mode: ModeNone, Available: normalized.capability != nil}
+	if normalized.capability != nil {
+		if err := normalized.capability.ValidateAppVersion(normalized.app.Version); err != nil {
+			return nil, err
+		}
+		out.Mode = ModeSkip
+	} else {
+		out.Reason = "This exact app version has no signed observability metadata."
+	}
+	return out, nil
+}
+
 func (s *Service) InstanceObservability(ctx context.Context, orgID, instanceID, subject string) (*InstanceObservability, error) {
 	plan, err := s.store.LatestPlanForInstance(ctx, orgID, instanceID)
+	if errors.Is(err, ErrPlanNotFound) {
+		return s.unplannedInstanceObservability(ctx, orgID, instanceID)
+	}
 	if err != nil {
 		return nil, err
 	}

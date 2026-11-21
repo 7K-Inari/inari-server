@@ -636,12 +636,34 @@ func TestLegacyCatalogInstanceCanProvisionFromRecordedPin(t *testing.T) {
 		ID: "legacy-1", OrgID: "org-1", ClusterID: "cluster-app", CatalogItemID: "hiroba/payments-api", Version: "1.4.0", ArtifactDigest: testDigest,
 		OwnerTeam: "payments-api-maintainers", Spec: json.RawMessage(`{"replicas":2}`), ResourceRef: types.ResourceRef{Name: "payments", Namespace: "payments"}, RepoID: "repo-1",
 	}}})
+	status, err := svc.InstanceObservability(context.Background(), "org-1", "legacy-1", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Mode != ModeSkip || !status.Available || status.Companion != nil {
+		t.Fatalf("legacy status = %#v", status)
+	}
 	preflight, err := svc.Preflight(context.Background(), PlanRequest{Operation: OperationProvisionExisting, InstanceID: "legacy-1", Observability: ObservabilityInput{Mode: ModeProvision}}, "org-1", "acme-inc", "user-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if preflight.Plan.AppInstanceID != "legacy-1" || preflight.Plan.App.Digest != testDigest || preflight.Plan.Capability == nil || preflight.Plan.Deployment.TargetID != "rt-app" {
 		t.Fatalf("legacy preflight = %#v", preflight.Plan)
+	}
+}
+
+func TestLegacyInstanceStatusFailsClosedWithoutOriginalDigest(t *testing.T) {
+	svc, _, _, _, _ := serviceFixture(t)
+	svc.WithInstances(&fakeInstances{view: &inventory.InstanceView{ResourceInstance: types.ResourceInstance{
+		ID: "legacy-1", OrgID: "org-1", ClusterID: "cluster-app", CatalogItemID: "hiroba/payments-api", Version: "1.4.0",
+		OwnerTeam: "payments-api-maintainers", ResourceRef: types.ResourceRef{Name: "payments", Namespace: "payments"},
+	}}})
+	status, err := svc.InstanceObservability(context.Background(), "org-1", "legacy-1", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Available || status.Companion != nil || status.Mode != ModeNone || !strings.Contains(status.Reason, "capability_unavailable") {
+		t.Fatalf("legacy status without provenance = %#v", status)
 	}
 }
 

@@ -32,6 +32,11 @@ func (s *MemoryStore) CreatePlan(_ context.Context, plan *Plan) error {
 	if _, exists := s.plans[plan.ID]; exists {
 		return ErrPlanConflict
 	}
+	for _, existing := range s.plans {
+		if existing.OrgID == plan.OrgID && existing.Requester == plan.Requester && existing.IdempotencyKey == plan.IdempotencyKey {
+			return ErrIdempotencyConflict
+		}
+	}
 	s.plans[plan.ID] = clonePlan(plan)
 	if plan.Companion != nil {
 		s.companions[plan.Companion.ID] = plan.Companion.DeepCopy()

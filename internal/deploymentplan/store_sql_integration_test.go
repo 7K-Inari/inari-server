@@ -4,6 +4,7 @@ package deploymentplan_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -44,6 +45,12 @@ func TestMigrationAndSQLStoreRoundTrip(t *testing.T) {
 	}
 	if err := store.CreatePlan(ctx, plan); err != nil {
 		t.Fatal(err)
+	}
+	duplicate := plan.DeepCopy()
+	duplicate.ID = "dp-duplicate"
+	duplicate.Companion = nil
+	if err := store.CreatePlan(ctx, duplicate); !errors.Is(err, deploymentplan.ErrIdempotencyConflict) {
+		t.Fatalf("duplicate idempotency key error = %v, want ErrIdempotencyConflict", err)
 	}
 	got, err := store.GetPlan(ctx, "org:1", "dp-1")
 	if err != nil || got.Requester != "user:1" || got.Companion.ID != "oc-1" {

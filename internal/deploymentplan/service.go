@@ -471,6 +471,16 @@ func (s *Service) Submit(ctx context.Context, req PlanRequest, orgID, orgSlug, s
 		plan.Companion = companion
 	}
 	if err := s.store.CreatePlan(ctx, plan); err != nil {
+		if errors.Is(err, ErrIdempotencyConflict) && req.IdempotencyKey != "" {
+			existing, getErr := s.store.GetPlanByIdempotency(ctx, orgID, subject, req.IdempotencyKey)
+			if getErr != nil {
+				return nil, getErr
+			}
+			if existing.PlanFingerprint != plan.PlanFingerprint {
+				return nil, fmt.Errorf("%w: idempotency key reused with different plan", ErrPlanConflict)
+			}
+			return existing, nil
+		}
 		return nil, err
 	}
 	if req.Operation == OperationProvisionExisting {

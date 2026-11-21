@@ -9,6 +9,7 @@ import (
 	observability "github.com/7K-Inari/inari-api/contract/observability/v1"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type SQLStore struct{ db *db.DB }
@@ -26,6 +27,11 @@ func nullable(value string) any {
 	return value
 }
 
+func idempotencyUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "deployment_plans_org_id_requester_idempotency_key_key"
+}
+
 func (s *SQLStore) CreatePlan(ctx context.Context, plan *Plan) error {
 	raw, err := planJSON(plan)
 	if err != nil {
@@ -41,6 +47,9 @@ func (s *SQLStore) CreatePlan(ctx context.Context, plan *Plan) error {
 			plan.App.Version, plan.App.Ref, plan.App.Digest, packField(plan, "item"), packField(plan, "version"), packField(plan, "digest"), packField(plan, "contract"),
 			plan.CapabilityDigest, plan.PlanFingerprint, plan.State, mustJSON(plan.Gate), raw, plan.ErrorCode, plan.ErrorMessage, plan.CreatedAt, plan.UpdatedAt)
 		if err != nil {
+			if idempotencyUniqueViolation(err) {
+				return ErrIdempotencyConflict
+			}
 			return err
 		}
 		return s.insertCompanionForOrg(ctx, tx, plan.Companion, plan.OrgID)

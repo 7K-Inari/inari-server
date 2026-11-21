@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 )
 
 type fakeCatalog struct {
+	mu                  sync.Mutex
 	item                *types.CatalogItem
 	version             *types.CatalogItemVersion
 	packItem            *types.CatalogItem
@@ -71,6 +74,8 @@ func (f *fakeCatalog) ListVisible(_ context.Context, _ string, _ types.CatalogLi
 }
 func (f *fakeCatalog) EnsureVisible(context.Context, string, string, string) error { return nil }
 func (f *fakeCatalog) AdmitVersion(_ context.Context, id, version string, _ trustedsource.Environment) (*catalog.AdmittedVersion, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.admitErr != nil {
 		return nil, f.admitErr
 	}
@@ -138,6 +143,42 @@ func (f *fakeExecutor) Execute(_ context.Context, _, _ string, plan *Plan) (*Exe
 		return &Execution{InstanceID: f.instanceID}, nil
 	}
 	return &Execution{InstanceID: "app-1"}, nil
+}
+
+type qaConcurrentExecutor struct {
+	calls atomic.Int64
+}
+
+func (e *qaConcurrentExecutor) Execute(context.Context, string, string, *Plan) (*Execution, error) {
+	e.calls.Add(1)
+	return &Execution{InstanceID: "app-1"}, nil
+}
+
+type qaIdempotencyBarrierStore struct {
+	*MemoryStore
+	mu      sync.Mutex
+	lookups int
+	ready   chan struct{}
+}
+
+func newQAIdempotencyBarrierStore() *qaIdempotencyBarrierStore {
+	return &qaIdempotencyBarrierStore{MemoryStore: NewMemoryStore(), ready: make(chan struct{})}
+}
+
+func (s *qaIdempotencyBarrierStore) GetPlanByIdempotency(ctx context.Context, orgID, requester, key string) (*Plan, error) {
+	s.mu.Lock()
+	if s.lookups < 2 {
+		s.lookups++
+		if s.lookups == 2 {
+			close(s.ready)
+		}
+		ready := s.ready
+		s.mu.Unlock()
+		<-ready
+		return nil, ErrPlanNotFound
+	}
+	s.mu.Unlock()
+	return s.MemoryStore.GetPlanByIdempotency(ctx, orgID, requester, key)
 }
 
 type fakeInstances struct{ view *inventory.InstanceView }
@@ -310,6 +351,47 @@ func TestSubmitSkipExecutesAppWithoutCompanion(t *testing.T) {
 	}
 	if spec["observability"].(map[string]any)["enabled"] != false {
 		t.Fatalf("chart-native overlay missing: %#v", spec)
+	}
+}
+
+func TestQASubmitConcurrentSameIdempotencyKeyReturnsOnePlan(t *testing.T) {
+	svc, cat, _, _, _ := serviceFixture(t)
+	cat.version.ChartRef, cat.version.ChartDigest = "", ""
+	store := newQAIdempotencyBarrierStore()
+	executor := &qaConcurrentExecutor{}
+	svc.store, svc.executor = store, executor
+	request := deployRequest()
+	request.Observability.Mode = ModeSkip
+	request.Deployment.TargetID = ""
+	review, err := svc.Preflight(context.Background(), request, "org-1", "acme-inc", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Source = &review.Plan.Source
+	request.Deployment = review.Plan.Deployment
+	request.Observability = review.Plan.Observability
+	request.PlanFingerprint = review.Plan.PlanFingerprint
+
+	type outcome struct {
+		plan *Plan
+		err  error
+	}
+	start := make(chan struct{})
+	results := make(chan outcome, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			<-start
+			plan, err := svc.Submit(context.Background(), request, "org-1", "acme-inc", "user-1")
+			results <- outcome{plan: plan, err: err}
+		}()
+	}
+	close(start)
+	first, second := <-results, <-results
+	if first.err != nil || second.err != nil {
+		t.Fatalf("concurrent submits: first=%v second=%v", first.err, second.err)
+	}
+	if first.plan.ID != second.plan.ID || executor.calls.Load() != 1 {
+		t.Fatalf("same key produced plans %s/%s and %d executions", first.plan.ID, second.plan.ID, executor.calls.Load())
 	}
 }
 

@@ -72,6 +72,9 @@ func (qaDeploymentInventory) ListClusterBaselineRepos(context.Context, db.Querie
 func (qaDeploymentInventory) ListClusterAddons(context.Context, db.Querier, string, string) ([]*types.ClusterAddon, error) {
 	return nil, nil
 }
+func (qaDeploymentInventory) ListClusterInstances(context.Context, db.Querier, string, string) ([]types.ResourceInstance, error) {
+	return nil, nil
+}
 
 type qaDeploymentCapabilities struct{}
 

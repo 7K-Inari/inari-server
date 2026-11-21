@@ -7,7 +7,7 @@ The first providers are:
 | Capability | Backing resource | Team action | Purpose |
 | --- | --- | --- | --- |
 | `deployment.cluster` | cluster | `use` | Existing orchestrator deploy and instance-mutation authorization |
-| `monitoring.grafana` | cluster plus concrete addon/Helm-release evidence | `provision` | Select an eligible Grafana target for a later observability DeploymentPlan |
+| `monitoring.grafana` | cluster plus concrete Helm-release or trusted KRO-instance evidence | `provision` | Select an eligible Grafana target for a later observability DeploymentPlan |
 
 Both providers use the same target table, grants, resolver, readiness model, and REST API.
 
@@ -46,7 +46,7 @@ All routes are registered in `internal/restsurface.Register` and therefore appea
 
 There is no public arbitrary-resolve endpoint. Consumers list targets and submit the target ID to the owning service, which performs the authoritative server-side resolve.
 
-A target descriptor includes `resourceRef`, `capabilities`, normalized `config`, computed `binding`, `readiness`, `effectiveActions`, `enabled`, `isDefault`, and `revision`. The binding is derived from the current cluster baseline and tenant Git repository. Clients cannot replace the cluster, repo, renderer, addon evidence, or URL in a target selection.
+A target descriptor includes `resourceRef`, `capabilities`, normalized `config`, computed `binding`, `readiness`, `effectiveActions`, `enabled`, `isDefault`, and `revision`. The binding is derived from the current cluster baseline and tenant Git repository. Clients cannot replace the cluster, repo, renderer, Helm/KRO evidence, or URL in a target selection.
 
 For `action=view`, unavailable targets are hidden unless `includeUnavailable=true`; use/provision lists always omit unavailable targets. Managers can inspect disabled/unavailable targets. Typical errors are 403 for grant denial, 404 for unknown/cross-org targets, 409 for conflicts/stale revisions/unavailable bindings, 422 for provider validation, and 503 for an authorization backend outage.
 
@@ -87,12 +87,13 @@ Rules:
 - `evaluation` is `central` or `local`.
 - Folder prefixes and datasources are explicit non-empty allowlists.
 - Required approval names at least one same-org approver team.
-- The addon must be a concrete (not fleet `*`) `cluster_addons` row on the target cluster. Its discovered release name/namespace must match a live `helm-release` capability whose status is `deployed`.
+- Exactly one evidence form is allowed. With `addonId`, the addon must be a concrete (not fleet `*`) `cluster_addons` row on the target cluster. Its discovered release name/namespace must match a live `helm-release` capability whose status is `deployed`.
+- With `instanceId` and `catalogItem`, the referenced `resource_instances` row must be on the same org/cluster, match that source-qualified trusted item, have a version and immutable SHA-256 artifact digest, and currently be running and synced. This supports the KRO-managed monitoring reference without reopening the generic provider framework.
 - A provision-eligible target needs a current same-org platform baseline binding.
 
 The later plan selection contains only `folder`, `datasource`, and `evaluation`. Evaluation must match target policy, and folder/datasource must be allowed. Unknown fields such as `baseUrl`, `clusterId`, `repoId`, credentials, or renderer settings are rejected.
 
-The hub never calls Grafana. No readiness result fabricates a dashboard link. Target-side folder/dashboard/datasource/access verification and deep-link gating belong to the later observability/verification tasks.
+The hub never calls Grafana. No readiness result fabricates a dashboard link. Target-side folder/dashboard/datasource/rule verification and deep-link gating belong to the observability/verification path; neither target registration nor readiness evidence provisions Grafana identities or folder ACLs.
 
 ## Audit and concurrency
 
@@ -111,7 +112,7 @@ Rollout procedure:
 1. Back up PostgreSQL and roll out the migration/new server together.
 2. The server runs an initial target authz sync before accepting traffic. A sync failure aborts startup rather than silently dropping backfilled grants.
 3. Verify backfilled target/grant counts and one deployment per representative built-in/custom role.
-4. Register Grafana only after its cluster, concrete addon/release evidence, and baseline binding exist. Add explicit team `provision` grants and optionally one provider default.
+4. Register Grafana only after its cluster, concrete Helm or trusted KRO-instance evidence, and baseline binding exist. Add explicit team `provision` grants and optionally one provider default.
 5. Monitor the `resource-target-authz` durable consumer, outbox dead letters, OpenFGA failures, PEP cache invalidation metrics, and target unavailable reasons.
 
 For temporary removal, disable rather than delete. For revocation, delete the team grant; non-manager resolution is fenced immediately while OpenFGA converges. New allows are asynchronous and should be verified before handing the target to a team.

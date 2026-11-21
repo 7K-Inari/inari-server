@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -15,7 +16,9 @@ type grafanaDatasource struct {
 }
 
 type grafanaEvidence struct {
-	AddonID string `json:"addonId"`
+	AddonID     string `json:"addonId,omitempty"`
+	InstanceID  string `json:"instanceId,omitempty"`
+	CatalogItem string `json:"catalogItem,omitempty"`
 }
 
 type grafanaConfig struct {
@@ -35,6 +38,8 @@ type grafanaSelection struct {
 
 type grafanaProvider struct{}
 
+var grafanaArtifactDigest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
 func (grafanaProvider) Describe() ProviderDescriptor {
 	return ProviderDescriptor{
 		Capability: CapabilityMonitoringGrafana, ResourceKinds: []string{ResourceKindCluster},
@@ -48,7 +53,7 @@ func (grafanaProvider) Describe() ProviderDescriptor {
 				"folderPrefixes":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}},
 				"datasources":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["name","type"],"properties":{"name":{"type":"string"},"type":{"type":"string"}}}},
 				"approval":{"type":"object","additionalProperties":false,"properties":{"required":{"type":"boolean"},"approverTeamIds":{"type":"array","items":{"type":"string"}}}},
-				"evidence":{"type":"object","additionalProperties":false,"required":["addonId"],"properties":{"addonId":{"type":"string"}}}
+				"evidence":{"type":"object","additionalProperties":false,"properties":{"addonId":{"type":"string"},"instanceId":{"type":"string"},"catalogItem":{"type":"string"}},"oneOf":[{"required":["addonId"]},{"required":["instanceId","catalogItem"]}]}
 			}
 		}`),
 		SelectionSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["folder","datasource","evaluation"],"properties":{"folder":{"type":"string"},"datasource":{"type":"string"},"evaluation":{"type":"string","enum":["central","local"]}}}`),
@@ -109,8 +114,14 @@ func parseGrafanaConfig(raw json.RawMessage) (grafanaConfig, error) {
 	if cfg.Approval.Required && len(cfg.Approval.ApproverTeamIDs) == 0 {
 		return cfg, invalid("config.approval.approverTeamIds", "required approval needs at least one approver team")
 	}
-	if cfg.Evidence.AddonID == "" {
-		return cfg, invalid("config.evidence.addonId", "addonId is required")
+	if (cfg.Evidence.AddonID == "") == (cfg.Evidence.InstanceID == "") {
+		return cfg, invalid("config.evidence", "exactly one of addonId or instanceId is required")
+	}
+	if cfg.Evidence.AddonID != "" && cfg.Evidence.CatalogItem != "" {
+		return cfg, invalid("config.evidence.catalogItem", "catalogItem is valid only with instanceId evidence")
+	}
+	if cfg.Evidence.InstanceID != "" && cfg.Evidence.CatalogItem == "" {
+		return cfg, invalid("config.evidence.catalogItem", "source-qualified catalogItem is required with instanceId")
 	}
 	return cfg, nil
 }
@@ -138,42 +149,48 @@ func validateGrafanaSnapshot(snapshot ResourceSnapshot, cfg grafanaConfig) error
 	if snapshot.BaselineRepo == nil || snapshot.BaselineRepo.OrgID != cluster.OrgID || snapshot.BaselineRepo.Scope != types.GitRepoScopePlatform {
 		return invalid("binding.baselineRepoId", "a same-org platform baseline is required")
 	}
-	var addon *types.ClusterAddon
-	for _, candidate := range snapshot.Addons {
-		if candidate.ID == cfg.Evidence.AddonID {
-			addon = candidate
-			break
+	if cfg.Evidence.InstanceID != "" {
+		if err := validateGrafanaInstanceEvidence(snapshot, cfg); err != nil {
+			return err
 		}
-	}
-	if addon == nil || addon.OrgID != cluster.OrgID || addon.ClusterID != cluster.ID {
-		return invalid("config.evidence.addonId", "addon must be a concrete row on the target cluster")
-	}
-	var release struct {
-		ReleaseName string `json:"releaseName"`
-		Namespace   string `json:"namespace"`
-	}
-	// Discovery projections contain additional scanner-owned metadata. Only
-	// the release identity is consumed here; unknown projection fields are
-	// additive and must not invalidate otherwise valid evidence.
-	if err := json.Unmarshal(addon.DiscoveredMeta, &release); err != nil || release.ReleaseName == "" || release.Namespace == "" {
-		return invalid("config.evidence.addonId", "addon has no discovered Helm release identity")
-	}
-	capabilityName := release.Namespace + "/" + release.ReleaseName
-	deployed := false
-	for _, capability := range snapshot.Capabilities {
-		if capability.Kind != types.CapabilityKindHelmRelease || capability.Name != capabilityName || capability.Group != "helm.sh" {
-			continue
+	} else {
+		var addon *types.ClusterAddon
+		for _, candidate := range snapshot.Addons {
+			if candidate.ID == cfg.Evidence.AddonID {
+				addon = candidate
+				break
+			}
 		}
-		var hints struct {
-			Status string `json:"status"`
+		if addon == nil || addon.OrgID != cluster.OrgID || addon.ClusterID != cluster.ID {
+			return invalid("config.evidence.addonId", "addon must be a concrete row on the target cluster")
 		}
-		if err := json.Unmarshal(capability.UIHints, &hints); err == nil && hints.Status == "deployed" {
-			deployed = true
-			break
+		var release struct {
+			ReleaseName string `json:"releaseName"`
+			Namespace   string `json:"namespace"`
 		}
-	}
-	if !deployed {
-		return invalid("config.evidence.addonId", "matching Helm release capability is not deployed")
+		// Discovery projections contain additional scanner-owned metadata. Only
+		// the release identity is consumed here; unknown projection fields are
+		// additive and must not invalidate otherwise valid evidence.
+		if err := json.Unmarshal(addon.DiscoveredMeta, &release); err != nil || release.ReleaseName == "" || release.Namespace == "" {
+			return invalid("config.evidence.addonId", "addon has no discovered Helm release identity")
+		}
+		capabilityName := release.Namespace + "/" + release.ReleaseName
+		deployed := false
+		for _, capability := range snapshot.Capabilities {
+			if capability.Kind != types.CapabilityKindHelmRelease || capability.Name != capabilityName || capability.Group != "helm.sh" {
+				continue
+			}
+			var hints struct {
+				Status string `json:"status"`
+			}
+			if err := json.Unmarshal(capability.UIHints, &hints); err == nil && hints.Status == "deployed" {
+				deployed = true
+				break
+			}
+		}
+		if !deployed {
+			return invalid("config.evidence.addonId", "matching Helm release capability is not deployed")
+		}
 	}
 	teams := make(map[string]bool, len(snapshot.TeamIDs))
 	for _, id := range snapshot.TeamIDs {
@@ -185,6 +202,28 @@ func validateGrafanaSnapshot(snapshot ResourceSnapshot, cfg grafanaConfig) error
 		}
 	}
 	return nil
+}
+
+func validateGrafanaInstanceEvidence(snapshot ResourceSnapshot, cfg grafanaConfig) error {
+	for _, instance := range snapshot.Instances {
+		if instance.ID != cfg.Evidence.InstanceID {
+			continue
+		}
+		if instance.OrgID != snapshot.Cluster.OrgID || instance.ClusterID != snapshot.Cluster.ID {
+			return invalid("config.evidence.instanceId", "instance must belong to the target org and cluster")
+		}
+		if instance.CatalogItemID != cfg.Evidence.CatalogItem || instance.Version == "" {
+			return invalid("config.evidence.instanceId", "instance does not match the expected source-qualified catalog item")
+		}
+		if !grafanaArtifactDigest.MatchString(instance.ArtifactDigest) {
+			return invalid("config.evidence.instanceId", "instance must have an immutable artifact digest")
+		}
+		if instance.State != types.InstanceStateRunning || !strings.EqualFold(instance.SyncState, "Synced") {
+			return invalid("config.evidence.instanceId", "instance is not running and synced")
+		}
+		return nil
+	}
+	return invalid("config.evidence.instanceId", "instance evidence was not found on the target cluster")
 }
 
 func (p grafanaProvider) ValidateRegistration(snapshot ResourceSnapshot, raw json.RawMessage) error {

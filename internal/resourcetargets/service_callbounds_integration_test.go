@@ -45,6 +45,7 @@ type countingInventory struct {
 	baselineSelectorCalls  int
 	getRepoCalls           int
 	listAddonsCalls        int
+	listInstancesCalls     int
 	baselineBatchLoadCalls int
 }
 
@@ -60,6 +61,11 @@ func (f *countingInventory) GetGitRepo(context.Context, db.Querier, string, stri
 
 func (f *countingInventory) ListClusterAddons(context.Context, db.Querier, string, string) ([]*types.ClusterAddon, error) {
 	f.listAddonsCalls++
+	return nil, nil
+}
+
+func (f *countingInventory) ListClusterInstances(context.Context, db.Querier, string, string) ([]types.ResourceInstance, error) {
+	f.listInstancesCalls++
 	return nil, nil
 }
 
@@ -150,9 +156,9 @@ func TestServiceListAndResolveHaveBoundedBackendCalls(t *testing.T) {
 	if inventory.baselineSelectorCalls != 0 || inventory.getRepoCalls != 0 || inventory.baselineBatchLoadCalls != 1 {
 		t.Errorf("baseline loads: selector=%d get=%d batch=%d, want one batch load", inventory.baselineSelectorCalls, inventory.getRepoCalls, inventory.baselineBatchLoadCalls)
 	}
-	if inventory.listAddonsCalls != 0 || capabilities.listCalls != 0 || capabilities.listForOrgCalls != 0 || teams.calls != 0 {
-		t.Errorf("deployment-only list loaded discovery/teams: addons=%d capabilities=%d capabilitiesForOrg=%d teams=%d",
-			inventory.listAddonsCalls, capabilities.listCalls, capabilities.listForOrgCalls, teams.calls)
+	if inventory.listAddonsCalls != 0 || inventory.listInstancesCalls != 0 || capabilities.listCalls != 0 || capabilities.listForOrgCalls != 0 || teams.calls != 0 {
+		t.Errorf("deployment-only list loaded discovery/teams: addons=%d instances=%d capabilities=%d capabilitiesForOrg=%d teams=%d",
+			inventory.listAddonsCalls, inventory.listInstancesCalls, capabilities.listCalls, capabilities.listForOrgCalls, teams.calls)
 	}
 
 	monitoring := &Target{
@@ -171,6 +177,7 @@ func TestServiceListAndResolveHaveBoundedBackendCalls(t *testing.T) {
 	clusters.getCalls, clusters.listCalls = 0, 0
 	inventory.baselineSelectorCalls, inventory.getRepoCalls, inventory.baselineBatchLoadCalls = 0, 0, 0
 	inventory.listAddonsCalls = 0
+	inventory.listInstancesCalls = 0
 	capabilities.listCalls, capabilities.listForOrgCalls = 0, 0
 	teams.calls = 0
 	az.checkCalls, az.listObjectsCalls = 0, 0
@@ -181,9 +188,9 @@ func TestServiceListAndResolveHaveBoundedBackendCalls(t *testing.T) {
 	if clusters.getCalls != 0 || clusters.listCalls != 1 || inventory.baselineBatchLoadCalls != 1 {
 		t.Errorf("mixed batch cluster/baseline loads = get %d, clusters %d, baselines %d", clusters.getCalls, clusters.listCalls, inventory.baselineBatchLoadCalls)
 	}
-	if inventory.listAddonsCalls != 1 || capabilities.listCalls != 0 || capabilities.listForOrgCalls != 1 || teams.calls != 1 {
-		t.Errorf("mixed discovery loads = addons %d, capabilities %d, capabilitiesForOrg %d, teams %d; want one batch each",
-			inventory.listAddonsCalls, capabilities.listCalls, capabilities.listForOrgCalls, teams.calls)
+	if inventory.listAddonsCalls != 1 || inventory.listInstancesCalls != 1 || capabilities.listCalls != 0 || capabilities.listForOrgCalls != 1 || teams.calls != 1 {
+		t.Errorf("mixed discovery loads = addons %d, instances %d, capabilities %d, capabilitiesForOrg %d, teams %d; want one batch each",
+			inventory.listAddonsCalls, inventory.listInstancesCalls, capabilities.listCalls, capabilities.listForOrgCalls, teams.calls)
 	}
 	if az.checkCalls != 1 || az.listObjectsCalls != 3 {
 		t.Errorf("mixed authorization calls = Check %d ListObjects %d, want 1 and 3", az.checkCalls, az.listObjectsCalls)

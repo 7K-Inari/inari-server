@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,6 +118,81 @@ func TestGrafanaProviderValidationAndResolution(t *testing.T) {
 	}
 	if !approval.Required || len(approval.ApproverTeamIDs) != 1 || len(selection) == 0 {
 		t.Errorf("selection=%s approval=%+v", selection, approval)
+	}
+}
+
+func validKROGrafanaConfig() json.RawMessage {
+	return json.RawMessage(`{
+		"baseUrl":"https://grafana.example/",
+		"evaluation":"central",
+		"folderPrefixes":["acme"],
+		"datasources":[{"name":"metrics","type":"prometheus"}],
+		"approval":{"required":true,"approverTeamIds":["team-1"]},
+		"evidence":{"instanceId":"instance-1","catalogItem":"hiroba/monitoring-stack"}
+	}`)
+}
+
+func TestGrafanaProviderAcceptsKROInstanceEvidence(t *testing.T) {
+	p := grafanaProvider{}
+	normalized, err := p.NormalizeConfig(validKROGrafanaConfig())
+	if err != nil {
+		t.Fatalf("valid KRO config rejected: %v", err)
+	}
+	snapshot := validGrafanaSnapshot()
+	snapshot.Instances = []types.ResourceInstance{{
+		ID: "instance-1", OrgID: "org:1", ClusterID: "cluster:1", CatalogItemID: "hiroba/monitoring-stack",
+		Version: "1.0.0", ArtifactDigest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		State: types.InstanceStateRunning, SyncState: "Synced",
+	}}
+	if err := p.ValidateRegistration(snapshot, normalized); err != nil {
+		t.Fatalf("valid KRO instance evidence rejected: %v", err)
+	}
+	target := &Target{ResourceRef: TargetResourceRef{Kind: ResourceKindCluster, ID: "cluster:1"}, Config: normalized}
+	binding, readiness, err := p.Resolve(target, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !readiness.State.Selectable() || binding.BaselineRepoID != "repo-1" {
+		t.Fatalf("KRO resolution readiness=%+v binding=%+v", readiness, binding)
+	}
+}
+
+func TestGrafanaProviderRejectsInvalidKROInstanceEvidence(t *testing.T) {
+	p := grafanaProvider{}
+	newSnapshot := func() ResourceSnapshot {
+		snapshot := validGrafanaSnapshot()
+		snapshot.Instances = []types.ResourceInstance{{
+			ID: "instance-1", OrgID: "org:1", ClusterID: "cluster:1", CatalogItemID: "hiroba/monitoring-stack",
+			Version: "1.0.0", ArtifactDigest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			State: types.InstanceStateRunning, SyncState: "Synced",
+		}}
+		return snapshot
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*ResourceSnapshot)
+	}{
+		{name: "missing instance", mutate: func(s *ResourceSnapshot) { s.Instances = nil }},
+		{name: "wrong cluster", mutate: func(s *ResourceSnapshot) { s.Instances[0].ClusterID = "cluster:other" }},
+		{name: "wrong org", mutate: func(s *ResourceSnapshot) { s.Instances[0].OrgID = "org:other" }},
+		{name: "wrong catalog item", mutate: func(s *ResourceSnapshot) { s.Instances[0].CatalogItemID = "hiroba/other" }},
+		{name: "mutable artifact", mutate: func(s *ResourceSnapshot) { s.Instances[0].ArtifactDigest = "latest" }},
+		{name: "not running", mutate: func(s *ResourceSnapshot) { s.Instances[0].State = types.InstanceStateDegraded }},
+		{name: "not synced", mutate: func(s *ResourceSnapshot) { s.Instances[0].SyncState = "OutOfSync" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot := newSnapshot()
+			tc.mutate(&snapshot)
+			if err := p.ValidateRegistration(snapshot, validKROGrafanaConfig()); err == nil {
+				t.Fatal("invalid KRO instance evidence accepted")
+			}
+		})
+	}
+	if _, err := p.NormalizeConfig(json.RawMessage(strings.Replace(string(validKROGrafanaConfig()), `"instanceId":"instance-1"`, `"instanceId":"instance-1","addonId":"addon-1"`, 1))); err == nil {
+		t.Fatal("ambiguous Helm and KRO evidence accepted")
+	}
+	if _, err := p.NormalizeConfig(json.RawMessage(strings.Replace(string(validKROGrafanaConfig()), `"catalogItem":"hiroba/monitoring-stack"`, `"catalogItem":""`, 1))); err == nil {
+		t.Fatal("KRO evidence without an expected catalog item accepted")
 	}
 }
 

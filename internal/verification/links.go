@@ -37,7 +37,7 @@ func BuildRunLinks(baseURL string, attempt *RunAttempt, now time.Time) (*RunLink
 	}
 	base, err := url.Parse(baseURL)
 	if err != nil || base.Scheme != "https" || base.Host == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" {
-		return nil, errors.New("Argo UI base URL must be HTTPS without credentials, query, or fragment")
+		return nil, errors.New("argo UI base URL must be HTTPS without credentials, query, or fragment")
 	}
 	base.Path = strings.TrimRight(base.Path, "/") + "/workflows/" + attempt.WorkflowNamespace + "/" + attempt.WorkflowName
 	workflowURL := *base

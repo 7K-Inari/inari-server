@@ -70,7 +70,7 @@ CREATE TABLE observability_companions (
 CREATE UNIQUE INDEX observability_companions_active_target_idx
     ON observability_companions (org_id, app_instance_id, target_id)
     WHERE app_instance_id IS NOT NULL AND target_id IS NOT NULL
-      AND state NOT IN ('verification_failed', 'cancelled');
+      AND state NOT IN ('verification_failed', 'cancelled', 'blocked_external_gate');
 CREATE INDEX observability_companions_app_idx ON observability_companions (app_instance_id, updated_at DESC);
 CREATE INDEX observability_companions_state_idx ON observability_companions (org_id, state);
 

@@ -86,6 +86,44 @@ func TestMigrationAndSQLStoreRoundTrip(t *testing.T) {
 	}
 }
 
+func TestBlockedCompanionCanBeSupersededByFreshPlan(t *testing.T) {
+	ctx := context.Background()
+	pg, err := testutil.SharedPostgres(ctx)
+	if err != nil {
+		t.Skipf("testcontainers unavailable: %v", err)
+	}
+	database, err := testdb.NewDatabase(t, pg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		INSERT INTO organizations (id, slug, display_name, keycloak_org_id) VALUES ('org:1','acme','Acme','kc-1');
+		INSERT INTO clusters (id, org_id, name, state) VALUES ('cluster-mon','org:1','Monitoring','active');
+		INSERT INTO resource_targets (id, org_id, name, resource_kind, resource_id, capability) VALUES ('rt-mon','org:1','Monitoring','cluster','cluster-mon','monitoring.grafana');
+		INSERT INTO resource_instances (id, org_id, cluster_id, catalog_item_id, version, spec) VALUES ('app-1','org:1','cluster-mon','hiroba/payments-api','1.4.0','{}');
+	`); err != nil {
+		t.Fatal(err)
+	}
+	store := deploymentplan.NewSQLStore(database)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	create := func(id string) error {
+		plan := &deploymentplan.Plan{
+			ID: id, OrgID: "org:1", OrgSlug: "acme", Requester: "user:1", IdempotencyKey: id,
+			Operation: deploymentplan.OperationProvisionExisting, Source: deploymentplan.Source{Kind: deploymentplan.SourceCatalog, ItemID: "hiroba/payments-api", Version: "1.4.0", Digest: integrationDigest},
+			App: deploymentplan.ArtifactPin{ItemID: "hiroba/payments-api", Version: "1.4.0", Digest: integrationDigest}, AppInstanceID: "app-1",
+			Observability: deploymentplan.ObservabilityInput{Mode: deploymentplan.ModeProvision}, PlanFingerprint: integrationDigest, State: "submitted", CreatedAt: now, UpdatedAt: now,
+			Companion: &deploymentplan.Companion{ID: "oc-" + id, PlanID: id, AppInstanceID: "app-1", TargetID: "rt-mon", TargetRevision: 7, TargetClusterID: "cluster-mon", TargetSelection: []byte(`{"folder":"acme/payments-api","datasource":"metrics","evaluation":"central"}`), AppSourceDigest: integrationDigest, AppRevision: "1.4.0@" + integrationDigest, Pack: deploymentplan.PackPin{ArtifactPin: deploymentplan.ArtifactPin{ItemID: "hiroba/observability-pack", Version: "0.2.0", Digest: integrationDigest}, RenderContract: observability.PackRenderContractV2}, CapabilityDigest: integrationDigest, State: "blocked_external_gate", Generation: 1, Links: []deploymentplan.Link{}, CreatedAt: now, UpdatedAt: now},
+		}
+		return store.CreatePlan(ctx, plan)
+	}
+	if err := create("dp-blocked-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := create("dp-blocked-2"); err != nil {
+		t.Fatalf("fresh plan could not supersede blocked intent: %v", err)
+	}
+}
+
 func TestDeploymentObservabilityDownLeavesExistingTables(t *testing.T) {
 	ctx := context.Background()
 	pg, err := testutil.SharedPostgres(ctx)

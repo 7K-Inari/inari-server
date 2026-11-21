@@ -71,18 +71,18 @@ func (p PublisherExpectation) SourceWorkflowURI() string {
 }
 
 type ArtifactDescriptor struct {
-	Ref            string
-	Digest         string
-	MediaType      string
-	SourceSHA      string
-	ReleaseTag     string
-	PackageVersion string
-	App            string
-	Component      string
-	Producer       trustedsource.Producer
-	Lanes          []trustedsource.Lane
-	Compatibility  *trustedsource.Compatibility
-	Runtime        *trustedsource.RuntimeEvidence
+	Ref            string                         `json:"ref"`
+	Digest         string                         `json:"digest"`
+	MediaType      string                         `json:"mediaType"`
+	SourceSHA      string                         `json:"sourceSha"`
+	ReleaseTag     string                         `json:"releaseTag"`
+	PackageVersion string                         `json:"packageVersion"`
+	App            string                         `json:"app,omitempty"`
+	Component      string                         `json:"component"`
+	Producer       trustedsource.Producer         `json:"producer"`
+	Lanes          []trustedsource.Lane           `json:"lanes"`
+	Compatibility  *trustedsource.Compatibility   `json:"compatibility,omitempty"`
+	Runtime        *trustedsource.RuntimeEvidence `json:"runtime,omitempty"`
 }
 
 type Request struct {

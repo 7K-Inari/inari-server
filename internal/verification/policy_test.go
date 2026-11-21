@@ -28,11 +28,15 @@ func validPolicy() *verification.Policy {
 }
 
 func validEnvironment(environment trustedsource.Environment) *verification.EnvironmentPolicy {
+	profiles := []string{"stage"}
+	if environment == trustedsource.EnvironmentProduction {
+		profiles = []string{"prod"}
+	}
 	return &verification.EnvironmentPolicy{
 		ID: "vep-1", OrgID: "org-1", TargetID: "rt-1", TargetRevision: 1,
 		Environment: environment, Revision: 1, MaxTimeout: "15m", MaxActive: 2, MaxPending: 2,
 		MinWorkflowTTLSeconds: 60, MaxWorkflowTTLSeconds: 3600, MaxResultDays: 30,
-		AllowedProfiles:       []string{"stage", "prod"},
+		AllowedProfiles:       profiles,
 		AllowedTriggers:       []string{"onRevisionChange", "onSync", "manual", "cron"},
 		AllowedFailureActions: []string{"notify", "pausePromotion", "blockPromotion"},
 	}

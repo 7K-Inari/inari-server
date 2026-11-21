@@ -139,6 +139,8 @@ type EnvironmentPolicy struct {
 	MinWorkflowTTLSeconds           int64                     `json:"minWorkflowTTLSeconds"`
 	MaxWorkflowTTLSeconds           int64                     `json:"maxWorkflowTTLSeconds"`
 	MaxResultDays                   int                       `json:"maxResultDays"`
+	MaxEvidenceAgeAtApproval        string                    `json:"maxEvidenceAgeAtApproval"`
+	MaxGrantLifetimeDays            int                       `json:"maxGrantLifetimeDays"`
 	AllowedProfiles                 []string                  `json:"allowedProfiles"`
 	AllowedTriggers                 []string                  `json:"allowedTriggers"`
 	AllowedFailureActions           []string                  `json:"allowedFailureActions"`

@@ -4,6 +4,7 @@ import (
 	"time"
 
 	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
+	"github.com/7K-Inari/inari-server/internal/artifactadmission"
 )
 
 // Suite describes the signed inari.smoke.v1 manifest.
@@ -47,18 +48,20 @@ type SuiteProfile struct {
 
 // SuiteRelease is a normalized, cryptographically admitted signed artifact.
 type SuiteRelease struct {
-	ID                string                  `json:"id"`
-	OrgID             string                  `json:"orgId"`
-	SourceID          string                  `json:"sourceId"`
-	SuiteDigest       string                  `json:"suiteDigest"`
-	SourceFingerprint string                  `json:"sourceFingerprint"`
-	ContentDigest     string                  `json:"contentDigest"`
-	Suite             Suite                   `json:"suite"`
-	WorkflowTemplate  []byte                  `json:"-"`
-	TrustTier         trustedsource.TrustTier `json:"trustTier"`
-	Unsigned          bool                    `json:"unsigned"`
-	EvidenceDigest    string                  `json:"evidenceDigest,omitempty"`
-	Eligibility       string                  `json:"eligibility"`
-	LegacyException   bool                    `json:"legacyException,omitempty"`
-	AdmittedAt        time.Time               `json:"admittedAt"`
+	ID                 string                               `json:"id"`
+	OrgID              string                               `json:"orgId"`
+	SourceID           string                               `json:"sourceId"`
+	SuiteDigest        string                               `json:"suiteDigest"`
+	SourceFingerprint  string                               `json:"sourceFingerprint"`
+	ContentDigest      string                               `json:"contentDigest"`
+	Suite              Suite                                `json:"suite"`
+	Descriptor         artifactadmission.ArtifactDescriptor `json:"descriptor"`
+	WorkflowTemplate   []byte                               `json:"-"`
+	TrustTier          trustedsource.TrustTier              `json:"trustTier"`
+	Unsigned           bool                                 `json:"unsigned"`
+	EvidenceDigest     string                               `json:"evidenceDigest,omitempty"`
+	EvidenceFinishedAt time.Time                            `json:"evidenceFinishedAt,omitempty"`
+	Eligibility        string                               `json:"eligibility"`
+	LegacyException    bool                                 `json:"legacyException,omitempty"`
+	AdmittedAt         time.Time                            `json:"admittedAt"`
 }

@@ -98,6 +98,14 @@ func ParseSuiteArtifact(admitted *catalog.AdmittedSmokeSuite, profile string, en
 	if evidence.AppEvidenceEligible == nil && evidence.FixtureOnly == nil {
 		eligibility = "legacy-non-production-non-evidence"
 	}
+	var evidenceFinishedAt time.Time
+	if evidence.FinishedAt != "" {
+		parsed, err := time.Parse(time.RFC3339, evidence.FinishedAt)
+		if err != nil {
+			return nil, fmt.Errorf("signed evidence finishedAt: %w", err)
+		}
+		evidenceFinishedAt = parsed.UTC()
+	}
 	contentDigest, err := suiteContentDigest(admitted.Evidence.Files)
 	if err != nil {
 		return nil, err
@@ -108,7 +116,8 @@ func ParseSuiteArtifact(admitted *catalog.AdmittedSmokeSuite, profile string, en
 		SourceFingerprint: admitted.SourceFingerprint, ContentDigest: contentDigest,
 		Suite: suite, WorkflowTemplate: workflow, TrustTier: admitted.Source.TrustTier,
 		Unsigned: admitted.Evidence.Unsigned, EvidenceDigest: admitted.Evidence.TestEvidenceDigest,
-		Eligibility: eligibility, LegacyException: legacyAllowed, AdmittedAt: now.UTC(),
+		EvidenceFinishedAt: evidenceFinishedAt,
+		Eligibility:        eligibility, LegacyException: legacyAllowed, AdmittedAt: now.UTC(),
 	}, nil
 }
 

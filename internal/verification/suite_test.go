@@ -101,6 +101,12 @@ func TestParseSuiteArtifact(t *testing.T) {
 	if _, err := verification.ParseSuiteArtifact(legacy, verification.ProfileStage, trustedsource.EnvironmentDevelopment, true, time.Now()); err != nil {
 		t.Fatalf("exact artifact-bound development legacy exception rejected: %v", err)
 	}
+	multipleDocuments := admittedSuite(func(a *catalog.AdmittedSmokeSuite) {
+		a.Evidence.Files["suite.yaml"] = []byte(validSuiteYAML + "---\nsuiteSchema: inari.smoke.v1\n")
+	})
+	if _, err := verification.ParseSuiteArtifact(multipleDocuments, verification.ProfileStage, trustedsource.EnvironmentStaging, false, time.Now()); err == nil || !strings.Contains(err.Error(), "multiple YAML documents") {
+		t.Fatalf("multiple suite documents error = %v", err)
+	}
 }
 
 func TestWorkflowTemplateSafety(t *testing.T) {
@@ -126,5 +132,8 @@ func TestWorkflowTemplateSafety(t *testing.T) {
 				t.Fatalf("error = %v, want containing %q", err, tt.want)
 			}
 		})
+	}
+	if err := verification.ValidateWorkflowTemplate([]byte(validWorkflowYAML+"---\napiVersion: argoproj.io/v1alpha1\nkind: Workflow\n"), suite, grant); err == nil || !strings.Contains(err.Error(), "multiple YAML documents") {
+		t.Fatalf("multiple Workflow documents error = %v", err)
 	}
 }

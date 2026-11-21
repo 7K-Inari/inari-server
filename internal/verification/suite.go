@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"sort"
 	"strconv"
@@ -27,10 +28,8 @@ func ParseSuiteArtifact(admitted *catalog.AdmittedSmokeSuite, profile string, en
 	if !ok || len(rawSuite) == 0 {
 		return nil, errors.New("signed suite.yaml is missing")
 	}
-	decoder := yaml.NewDecoder(bytes.NewReader(rawSuite))
-	decoder.KnownFields(true)
 	var suite Suite
-	if err := decoder.Decode(&suite); err != nil {
+	if err := decodeSingleYAML(rawSuite, &suite, true); err != nil {
 		return nil, fmt.Errorf("decode signed suite.yaml: %w", err)
 	}
 	if suite.SuiteSchema != "inari.smoke.v1" {
@@ -154,6 +153,22 @@ func safeSuitePath(value string) bool {
 	return value != "" && !strings.HasPrefix(value, "/") && !strings.Contains(value, "\\") && path.Clean(value) == value && value != "." && value != ".." && !strings.HasPrefix(value, "../")
 }
 
+func decodeSingleYAML(raw []byte, out any, knownFields bool) error {
+	decoder := yaml.NewDecoder(bytes.NewReader(raw))
+	decoder.KnownFields(knownFields)
+	if err := decoder.Decode(out); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return err
+		}
+		return errors.New("multiple YAML documents are forbidden")
+	}
+	return nil
+}
+
 func suiteContentDigest(files map[string][]byte) (string, error) {
 	if len(files) == 0 {
 		return "", errors.New("signed suite contains no files")
@@ -184,7 +199,7 @@ func ValidateWorkflowTemplate(raw []byte, suite *Suite, grant *SuiteGrant) error
 		return errors.New("suite is required")
 	}
 	var document map[string]any
-	if err := yaml.Unmarshal(raw, &document); err != nil {
+	if err := decodeSingleYAML(raw, &document, false); err != nil {
 		return fmt.Errorf("decode WorkflowTemplate: %w", err)
 	}
 	if document["apiVersion"] != "argoproj.io/v1alpha1" || document["kind"] != "WorkflowTemplate" {

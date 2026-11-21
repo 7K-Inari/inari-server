@@ -3,6 +3,7 @@ package verification_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
 	verification "github.com/7K-Inari/inari-server/internal/verification"
@@ -145,5 +146,16 @@ func TestGrantProductionGuardrails(t *testing.T) {
 				t.Fatalf("error = %v, want containing %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestMutatingStagePolicyRejectsAutomaticTriggers(t *testing.T) {
+	policy := validPolicy()
+	environment := validEnvironment(trustedsource.EnvironmentStaging)
+	grant := validGrant()
+	grant.ID = policy.Binding.SuiteGrantID
+	grant.SideEffect = verification.SideEffectMutating
+	if err := policy.ValidateAgainstGrant(environment, grant, time.Now()); err == nil || !strings.Contains(err.Error(), "manual runs only") {
+		t.Fatalf("mutating onRevisionChange policy error = %v", err)
 	}
 }

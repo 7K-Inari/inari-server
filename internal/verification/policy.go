@@ -291,6 +291,9 @@ func (p *VerificationPolicy) ValidateAgainstGrant(environment *EnvironmentPolicy
 	if p.Retention.WorkflowTTLSeconds < environment.MinWorkflowTTLSeconds || p.Retention.WorkflowTTLSeconds > environment.MaxWorkflowTTLSeconds || p.Retention.ResultDays > environment.MaxResultDays {
 		return errors.New("retention exceeds the environment policy")
 	}
+	if grant.SideEffect == SideEffectMutating && (p.Triggers.OnRevisionChange.Enabled || p.Triggers.OnSync.Enabled || p.Triggers.Cron.Enabled) {
+		return errors.New("side_effect_denied: mutating profiles allow approved manual runs only")
+	}
 	if p.Binding.Profile == ProfileProd && grant.SideEffect != SideEffectReadOnly {
 		if p.Triggers.OnRevisionChange.Enabled || p.Triggers.OnSync.Enabled || p.Triggers.Cron.Enabled || !grant.RequirePerRunApproval {
 			return errors.New("side_effect_denied: mutating production profiles allow approved manual runs only")

@@ -10,7 +10,7 @@ import (
 )
 
 // BuildRun derives a durable run without performing admission or rendering.
-func BuildRun(policy *Policy, grantRevision int64, instance *types.ResourceInstance, trigger contract.Trigger, now time.Time) (*Run, error) {
+func BuildRun(policy *VerificationPolicy, grantRevision int64, instance *types.ResourceInstance, trigger contract.Trigger, now time.Time) (*Run, error) {
 	if policy == nil || instance == nil {
 		return nil, errors.New("policy and instance are required")
 	}
@@ -88,7 +88,7 @@ func RevisionChanged(previous, current *types.ResourceInstance) bool {
 
 // ShouldTriggerOnSync accepts only a new successful operation for the exact
 // current desired revision.
-func ShouldTriggerOnSync(policy *Policy, previous, current *types.ResourceInstance) bool {
+func ShouldTriggerOnSync(policy *VerificationPolicy, previous, current *types.ResourceInstance) bool {
 	if policy == nil || !policy.Enabled || !policy.Triggers.OnSync.Enabled || previous == nil || current == nil {
 		return false
 	}

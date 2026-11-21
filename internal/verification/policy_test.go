@@ -14,7 +14,7 @@ const (
 	digestC = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 )
 
-func validPolicy() *verification.Policy {
+func validPolicy() *verification.VerificationPolicy {
 	p := verification.DefaultPolicy("inst-1")
 	p.OrgID = "org-1"
 	p.InstanceUID = "2b6e4424-87a4-4f7c-b6d8-dfe2f6a894f8"
@@ -72,21 +72,21 @@ func TestDefaultPolicyUsesSecureDefaults(t *testing.T) {
 func TestPolicyValidation(t *testing.T) {
 	tests := []struct {
 		name   string
-		mutate func(*verification.Policy)
+		mutate func(*verification.VerificationPolicy)
 		want   string
 	}{
 		{name: "valid"},
-		{name: "app digest", mutate: func(p *verification.Policy) { p.Binding.AppArtifactDigest = "latest" }, want: "appArtifactDigest"},
-		{name: "suite digest", mutate: func(p *verification.Policy) { p.Binding.SuiteDigest = "tag" }, want: "suiteDigest"},
-		{name: "replace concurrency", mutate: func(p *verification.Policy) { p.Concurrency.QueuedRevisionPolicy = "replace" }, want: "queuedRevisionPolicy"},
-		{name: "zero active", mutate: func(p *verification.Policy) { p.Concurrency.MaxActive = 0 }, want: "maxActive"},
-		{name: "rollback failure action", mutate: func(p *verification.Policy) { p.FailureAction = "rollback" }, want: "failureAction"},
-		{name: "cron schedule required", mutate: func(p *verification.Policy) {
+		{name: "app digest", mutate: func(p *verification.VerificationPolicy) { p.Binding.AppArtifactDigest = "latest" }, want: "appArtifactDigest"},
+		{name: "suite digest", mutate: func(p *verification.VerificationPolicy) { p.Binding.SuiteDigest = "tag" }, want: "suiteDigest"},
+		{name: "replace concurrency", mutate: func(p *verification.VerificationPolicy) { p.Concurrency.QueuedRevisionPolicy = "replace" }, want: "queuedRevisionPolicy"},
+		{name: "zero active", mutate: func(p *verification.VerificationPolicy) { p.Concurrency.MaxActive = 0 }, want: "maxActive"},
+		{name: "rollback failure action", mutate: func(p *verification.VerificationPolicy) { p.FailureAction = "rollback" }, want: "failureAction"},
+		{name: "cron schedule required", mutate: func(p *verification.VerificationPolicy) {
 			p.Triggers.Cron.Enabled = true
 			p.Triggers.Cron.ScheduleSetID = "nightly"
 			p.Triggers.Cron.Timezone = "UTC"
 		}, want: "schedules"},
-		{name: "unknown notification event", mutate: func(p *verification.Policy) { p.Notifications.Events = []string{"rolledBack"} }, want: "events"},
+		{name: "unknown notification event", mutate: func(p *verification.VerificationPolicy) { p.Notifications.Events = []string{"rolledBack"} }, want: "events"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

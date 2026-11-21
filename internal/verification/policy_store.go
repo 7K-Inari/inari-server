@@ -207,7 +207,7 @@ func (s *Store) RevokeGrant(ctx context.Context, q db.Querier, orgID, id string,
 	return err
 }
 
-func (s *Store) PutPolicy(ctx context.Context, q db.Querier, policy *Policy, renderFingerprint string) error {
+func (s *Store) PutPolicy(ctx context.Context, q db.Querier, policy *VerificationPolicy, renderFingerprint string) error {
 	spec, err := json.Marshal(policy)
 	if err != nil {
 		return err
@@ -225,8 +225,8 @@ func (s *Store) PutPolicy(ctx context.Context, q db.Querier, policy *Policy, ren
 	return err
 }
 
-func (s *Store) GetCurrentPolicy(ctx context.Context, q db.Querier, orgID, instanceID string) (*Policy, error) {
-	var policy Policy
+func (s *Store) GetCurrentPolicy(ctx context.Context, q db.Querier, orgID, instanceID string) (*VerificationPolicy, error) {
+	var policy VerificationPolicy
 	var spec json.RawMessage
 	var id string
 	var revision int64

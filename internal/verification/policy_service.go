@@ -28,21 +28,21 @@ var (
 
 // PolicyPreview contains normalized policy and read-only effective guardrails.
 type PolicyPreview struct {
-	Policy               *Policy            `json:"policy"`
-	Environment          *EnvironmentPolicy `json:"environment"`
-	Grant                *SuiteGrant        `json:"grant"`
-	Suite                *SuiteRelease      `json:"suite"`
-	Gate                 GateStatus         `json:"gate"`
-	WouldCreate          []string           `json:"wouldCreate,omitempty"`
-	Warnings             []string           `json:"warnings,omitempty"`
-	SideEffectsPerformed int                `json:"sideEffectsPerformed"`
+	VerificationPolicy   *VerificationPolicy `json:"policy"`
+	Environment          *EnvironmentPolicy  `json:"environment"`
+	Grant                *SuiteGrant         `json:"grant"`
+	Suite                *SuiteRelease       `json:"suite"`
+	Gate                 GateStatus          `json:"gate"`
+	WouldCreate          []string            `json:"wouldCreate,omitempty"`
+	Warnings             []string            `json:"warnings,omitempty"`
+	SideEffectsPerformed int                 `json:"sideEffectsPerformed"`
 }
 
 // VerificationView is the current policy/status projection.
 type VerificationView struct {
-	Policy *Policy    `json:"policy,omitempty"`
-	Gate   GateStatus `json:"gate"`
-	Runs   []Run      `json:"runs,omitempty"`
+	VerificationPolicy *VerificationPolicy `json:"policy,omitempty"`
+	Gate               GateStatus          `json:"gate"`
+	Runs               []Run               `json:"runs,omitempty"`
 }
 
 func (s *Service) CreateSuiteRelease(ctx context.Context, actor string, input SuiteAdmissionInput) (*SuiteRelease, error) {
@@ -322,19 +322,24 @@ func validateRBACSubset(required, allowed []RBACRule) error {
 	return nil
 }
 
-func (s *Service) PreviewPolicy(ctx context.Context, orgID, subject string, policy *Policy) (*PolicyPreview, error) {
+func (s *Service) PreviewPolicy(ctx context.Context, orgID, subject string, policy *VerificationPolicy) (*PolicyPreview, error) {
 	if s.db == nil || s.instances == nil || s.targets == nil || s.suites == nil {
 		return nil, errors.New("verification preview dependencies are not configured")
 	}
-	if err := policy.Validate(); err != nil {
-		return nil, err
+	if policy == nil || policy.InstanceID == "" {
+		return nil, errors.New("policy and instanceId are required")
 	}
 	instance, err := s.instances.Get(ctx, s.db.Pool, policy.InstanceID)
 	if err != nil {
 		return nil, err
 	}
-	if instance.OrgID != orgID || policy.OrgID != orgID {
+	if instance.OrgID != orgID {
 		return nil, ErrNotFound
+	}
+	// Instance identity is server-bound; clients cannot claim another UID/org.
+	policy.OrgID, policy.InstanceUID = orgID, instance.UID
+	if err := policy.Validate(); err != nil {
+		return nil, err
 	}
 	grant, err := s.store.GetGrant(ctx, s.db.Pool, orgID, policy.Binding.SuiteGrantID)
 	if err != nil {
@@ -438,7 +443,7 @@ func (s *Service) PreviewPolicy(ctx context.Context, orgID, subject string, poli
 		}
 	}
 	preview := &PolicyPreview{
-		Policy: policy, Environment: environment, Grant: grant, Suite: suitePreview.Release,
+		VerificationPolicy: policy, Environment: environment, Grant: grant, Suite: suitePreview.Release,
 		Gate: s.GateStatus(), WouldCreate: wouldCreate, SideEffectsPerformed: 0,
 	}
 	if grant.LegacyNonProductionException {
@@ -447,7 +452,7 @@ func (s *Service) PreviewPolicy(ctx context.Context, orgID, subject string, poli
 	return preview, nil
 }
 
-func (s *Service) PutPolicy(ctx context.Context, orgID, subject string, policy *Policy) (*Policy, error) {
+func (s *Service) PutPolicy(ctx context.Context, orgID, subject string, policy *VerificationPolicy) (*VerificationPolicy, error) {
 	preview, err := s.PreviewPolicy(ctx, orgID, subject, policy)
 	if err != nil {
 		return nil, err
@@ -505,7 +510,7 @@ func (s *Service) GetVerification(ctx context.Context, orgID, instanceID string)
 	if err != nil {
 		return nil, err
 	}
-	return &VerificationView{Policy: policy, Gate: s.GateStatus(), Runs: runs}, nil
+	return &VerificationView{VerificationPolicy: policy, Gate: s.GateStatus(), Runs: runs}, nil
 }
 
 func (s *Service) CreateManualRun(ctx context.Context, orgID, subject, instanceID, requestKey string) (*Run, error) {

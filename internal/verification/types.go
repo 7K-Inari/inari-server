@@ -90,7 +90,7 @@ type NotificationConfig struct {
 }
 
 // Policy is one revision of a team-owned verification policy.
-type Policy struct {
+type VerificationPolicy struct {
 	ID            string             `json:"id,omitempty"`
 	OrgID         string             `json:"orgId,omitempty"`
 	InstanceID    string             `json:"instanceId,omitempty"`
@@ -111,7 +111,7 @@ type Policy struct {
 }
 
 // Trigger constructs the canonical contract trigger for this policy.
-func (p *Policy) Trigger(kind contract.TriggerKind, sourceID string) contract.Trigger {
+func (p *VerificationPolicy) Trigger(kind contract.TriggerKind, sourceID string) contract.Trigger {
 	t := contract.Trigger{Kind: kind, Profile: p.Binding.Profile}
 	switch kind {
 	case contract.TriggerOnSync:

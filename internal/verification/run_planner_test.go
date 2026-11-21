@@ -20,7 +20,7 @@ func syncedInstance() *types.ResourceInstance {
 	}
 }
 
-func validRunPolicy(t *testing.T, instance *types.ResourceInstance) *verification.Policy {
+func validRunPolicy(t *testing.T, instance *types.ResourceInstance) *verification.VerificationPolicy {
 	t.Helper()
 	specDigest, err := contract.DigestJSON(instance.Spec)
 	if err != nil {

@@ -20,8 +20,8 @@ var (
 )
 
 // DefaultPolicy returns secure team defaults for a new instance policy.
-func DefaultPolicy(instanceID string) *Policy {
-	return &Policy{
+func DefaultPolicy(instanceID string) *VerificationPolicy {
+	return &VerificationPolicy{
 		InstanceID: instanceID,
 		Enabled:    true,
 		Triggers: Triggers{
@@ -40,7 +40,7 @@ func DefaultPolicy(instanceID string) *Policy {
 }
 
 // Validate normalizes and validates a team policy.
-func (p *Policy) Validate() error {
+func (p *VerificationPolicy) Validate() error {
 	if p == nil {
 		return errors.New("policy is required")
 	}
@@ -267,7 +267,7 @@ func (g *SuiteGrant) ValidateGrant(environmentPolicy *EnvironmentPolicy) error {
 }
 
 // ValidateAgainstGrant applies environment and grant limits to a team policy.
-func (p *Policy) ValidateAgainstGrant(environment *EnvironmentPolicy, grant *SuiteGrant, now time.Time) error {
+func (p *VerificationPolicy) ValidateAgainstGrant(environment *EnvironmentPolicy, grant *SuiteGrant, now time.Time) error {
 	if err := p.Validate(); err != nil {
 		return err
 	}
@@ -320,6 +320,6 @@ func contains(values []string, want string) bool {
 }
 
 // TriggerAllowed verifies that the environment permits the requested source.
-func (p *Policy) TriggerAllowed(environment *EnvironmentPolicy, kind contract.TriggerKind) bool {
+func (p *VerificationPolicy) TriggerAllowed(environment *EnvironmentPolicy, kind contract.TriggerKind) bool {
 	return environment != nil && contains(environment.AllowedTriggers, string(kind))
 }

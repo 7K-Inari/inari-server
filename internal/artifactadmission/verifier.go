@@ -68,7 +68,7 @@ func (v *Verifier) admit(ctx context.Context, req Request) (*EvidenceSummary, er
 		return nil, &Error{Code: CodeMediaTypeMismatch, Ref: ref, Err: fmt.Errorf("artifact media layout does not match %q", req.Artifact.MediaType)}
 	}
 	if unsigned {
-		return &EvidenceSummary{Unsigned: true, ArtifactDigest: req.Artifact.Digest}, nil
+		return &EvidenceSummary{Unsigned: true, ArtifactDigest: req.Artifact.Digest, Files: artifact.Files}, nil
 	}
 	expect := PublisherExpectation{Source: req.Source, Role: req.Role, SourceSHA: req.Artifact.SourceSHA, Producer: req.Artifact.Producer}
 	if err := v.backend.VerifySignature(ctx, ref, expect); err != nil {
@@ -77,6 +77,7 @@ func (v *Verifier) admit(ctx context.Context, req Request) (*EvidenceSummary, er
 	summary := &EvidenceSummary{
 		PublisherRepository: req.Source.Publisher.Repository,
 		PublisherWorkflow:   expect.Workflow(), ArtifactDigest: req.Artifact.Digest,
+		Files: artifact.Files,
 	}
 	if req.SyncOnly {
 		return summary, nil
@@ -91,11 +92,12 @@ func (v *Verifier) admit(ctx context.Context, req Request) (*EvidenceSummary, er
 		return nil, err
 	}
 	summary.ProvenanceDigest = req.Artifact.Digest
-	evidenceDigest, err := v.verifyTestEvidence(ctx, ref, req, expect)
+	evidenceDigest, evidence, err := v.verifyTestEvidence(ctx, ref, req, expect)
 	if err != nil {
 		return nil, err
 	}
 	summary.TestEvidenceDigest = evidenceDigest
+	summary.TestEvidence = evidence
 	return summary, nil
 }
 

@@ -102,6 +102,10 @@ type EvidenceSummary struct {
 	ArtifactDigest      string
 	ProvenanceDigest    string
 	TestEvidenceDigest  string
+	// Files and TestEvidence are verified in-process results for consumers
+	// such as signed-suite admission. They are never caller-supplied claims.
+	Files        map[string][]byte
+	TestEvidence *trustedsource.TestEvidence
 }
 
 type Attestation struct {

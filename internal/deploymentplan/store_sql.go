@@ -167,25 +167,50 @@ func (s *SQLStore) LatestCompanionForInstance(ctx context.Context, orgID, instan
 	return companion, err
 }
 
-func (s *SQLStore) SaveVerification(ctx context.Context, companionID string, result *observability.VerificationResult) error {
-	if result == nil {
-		return errors.New("verification result is required")
+func (s *SQLStore) SaveVerification(ctx context.Context, orgID string, companion *Companion, result *observability.VerificationResult, expectedVerification string) (applied bool, err error) {
+	if companion == nil || result == nil {
+		return false, errors.New("companion and verification result are required")
 	}
 	raw, err := json.Marshal(result)
 	if err != nil {
-		return err
+		return false, err
 	}
 	checks, err := json.Marshal(result.Checks)
 	if err != nil {
-		return err
+		return false, err
 	}
-	_, err = s.db.Pool.Exec(ctx, `INSERT INTO observability_verification_results
-		(companion_id, generation, run_id, attempt, suite_digest, suite_profile, target_revision, app_revision, pack_digest,
-		 capability_digest, result, checks, result_document, observed_at, expires_at, received_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-		ON CONFLICT (companion_id, generation, run_id, suite_digest) DO NOTHING`,
-		companionID, result.Companion.Generation, result.Run.ID, result.Run.Attempt, result.Suite.Digest, result.Suite.Profile,
-		result.Target.Revision, result.App.Revision, result.Pack.Digest, result.CapabilityDigest, result.Result, checks, raw,
-		result.Run.FinishedAt, result.ExpiresAt, time.Now())
-	return err
+	companionRaw, err := companionJSON(companion)
+	if err != nil {
+		return false, err
+	}
+	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `INSERT INTO observability_verification_results
+			(companion_id, generation, run_id, attempt, suite_digest, suite_profile, target_revision, app_revision, pack_digest,
+			 capability_digest, result, checks, result_document, observed_at, expires_at, received_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+			ON CONFLICT (companion_id, generation, run_id, suite_digest) DO NOTHING`,
+			companion.ID, result.Companion.Generation, result.Run.ID, result.Run.Attempt, result.Suite.Digest, result.Suite.Profile,
+			result.Target.Revision, result.App.Revision, result.Pack.Digest, result.CapabilityDigest, result.Result, checks, raw,
+			result.Run.FinishedAt, result.ExpiresAt, time.Now())
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return nil
+		}
+		tag, err = tx.Exec(ctx, `UPDATE observability_companions SET state=$2, reason=$3, companion_document=$4,
+			latest_verification_id=$5, updated_at=$6
+			WHERE id=$1 AND org_id=$7 AND generation=$8 AND latest_verification_id=$9`,
+			companion.ID, companion.State, companion.Reason, companionRaw, verificationToken(result), companion.UpdatedAt,
+			orgID, companion.Generation, expectedVerification)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrPlanConflict
+		}
+		applied = true
+		return nil
+	})
+	return applied, err
 }

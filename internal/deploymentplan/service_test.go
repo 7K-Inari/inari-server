@@ -544,6 +544,103 @@ func TestProvisionRejectsUnknownOwnerTeam(t *testing.T) {
 	}
 }
 
+func resultForPlan(t *testing.T, plan *Plan) *observability.VerificationResult {
+	t.Helper()
+	result := verifiedResult(t, plan.Capability)
+	result.Companion.ID = plan.Companion.ID
+	result.Companion.Generation = plan.Companion.Generation
+	result.Target.ID = plan.Companion.TargetID
+	result.Target.Revision = plan.Companion.TargetRevision
+	result.Target.ClusterID = plan.Companion.TargetClusterID
+	result.App.PlanID = plan.ID
+	result.App.InstanceID = plan.AppInstanceID
+	result.App.SourceDigest = plan.App.Digest
+	result.App.Revision = plan.Companion.AppRevision
+	result.Pack.ItemID = plan.Companion.Pack.ItemID
+	result.Pack.Version = plan.Companion.Pack.Version
+	result.Pack.Digest = plan.Companion.Pack.Digest
+	return result
+}
+
+func TestVerificationDuplicateAndOlderResultsCannotChangeReadiness(t *testing.T) {
+	svc, _, _, _, store := serviceFixture(t)
+	plan, err := svc.Submit(context.Background(), deployRequest(), "org-1", "acme-inc", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Companion.CompanionInstanceID = "companion-1"
+	plan.Companion.State = "verification_pending"
+	if err := store.UpdatePlan(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	result := resultForPlan(t, plan)
+	ready, err := svc.ApplyVerification(context.Background(), "org-1", result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready.State != "ready" {
+		t.Fatalf("initial state = %s", ready.State)
+	}
+	duplicate := resultForPlan(t, plan)
+	duplicate.Result = "failed"
+	duplicate.Run.FinishedAt = duplicate.Run.FinishedAt.Add(time.Minute)
+	got, err := svc.ApplyVerification(context.Background(), "org-1", duplicate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != "ready" || !got.UpdatedAt.Equal(ready.UpdatedAt) || got.Verification.Result != "passed" {
+		t.Fatalf("duplicate run changed readiness: %#v", got)
+	}
+	older := resultForPlan(t, plan)
+	older.Run.ID = "vr-older"
+	older.Run.FinishedAt = result.Run.FinishedAt.Add(-time.Minute)
+	older.Result = "failed"
+	if _, err := svc.ApplyVerification(context.Background(), "org-1", older); err == nil {
+		t.Fatal("older evidence replaced current readiness")
+	}
+}
+
+func TestVerificationStoreRejectsStaleCompanionSnapshot(t *testing.T) {
+	svc, _, _, _, store := serviceFixture(t)
+	plan, err := svc.Submit(context.Background(), deployRequest(), "org-1", "acme-inc", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Companion.CompanionInstanceID = "companion-1"
+	plan.Companion.State = "verification_pending"
+	if err := store.UpdatePlan(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.GetCompanion(context.Background(), "org-1", plan.Companion.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstResult := resultForPlan(t, plan)
+	first := current.DeepCopy()
+	first.State = "ready"
+	first.Verification = firstResult
+	applied, err := store.SaveVerification(context.Background(), "org-1", first, firstResult, "")
+	if err != nil || !applied {
+		t.Fatalf("first verification applied=%t, err=%v", applied, err)
+	}
+	staleResult := resultForPlan(t, plan)
+	staleResult.Run.ID = "vr-stale"
+	staleResult.Run.FinishedAt = staleResult.Run.FinishedAt.Add(time.Minute)
+	stale := current.DeepCopy()
+	stale.State = "verification_failed"
+	stale.Verification = staleResult
+	if applied, err := store.SaveVerification(context.Background(), "org-1", stale, staleResult, ""); !errors.Is(err, ErrPlanConflict) || applied {
+		t.Fatalf("stale verification applied=%t, err=%v", applied, err)
+	}
+	got, err := store.GetCompanion(context.Background(), "org-1", plan.Companion.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != "ready" || got.Verification.Run.ID != firstResult.Run.ID {
+		t.Fatalf("stale snapshot overwrote current companion: %#v", got)
+	}
+}
+
 func TestVerificationRejectsWrongGeneration(t *testing.T) {
 	svc, _, _, _, _ := serviceFixture(t)
 	plan, err := svc.Submit(context.Background(), deployRequest(), "org-1", "acme-inc", "user-1")

@@ -3,6 +3,7 @@ package deploymentplan
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	observability "github.com/7K-Inari/inari-api/contract/observability/v1"
 )
@@ -12,6 +13,13 @@ var (
 	ErrCompanionNotFound = errors.New("observability companion not found")
 	ErrPlanConflict      = errors.New("deployment plan conflict")
 )
+
+func verificationToken(result *observability.VerificationResult) string {
+	if result == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d:%s:%s", result.Companion.Generation, result.Run.ID, result.Suite.Digest)
+}
 
 // Store is the persistence seam. SQL implementation lives in store_sql.go;
 // unit tests use the in-memory implementation in store_memory.go.
@@ -23,5 +31,5 @@ type Store interface {
 	LatestPlanForInstance(ctx context.Context, orgID, instanceID string) (*Plan, error)
 	GetCompanion(ctx context.Context, orgID, id string) (*Companion, error)
 	LatestCompanionForInstance(ctx context.Context, orgID, instanceID string) (*Companion, error)
-	SaveVerification(ctx context.Context, companionID string, result *observability.VerificationResult) error
+	SaveVerification(ctx context.Context, orgID string, companion *Companion, result *observability.VerificationResult, expectedVerification string) (bool, error)
 }

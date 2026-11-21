@@ -58,11 +58,31 @@ func TestMigrationAndSQLStoreRoundTrip(t *testing.T) {
 		t.Fatalf("companion = %#v, %v", companion, err)
 	}
 	result := &observability.VerificationResult{Companion: observability.CompanionIdentity{ID: "oc-1", Generation: 1}, Target: observability.TargetIdentity{Revision: 7}, App: observability.AppIdentity{Revision: companion.AppRevision}, Pack: observability.PackIdentity{Digest: integrationDigest}, CapabilityDigest: integrationDigest, Suite: observability.SuiteIdentity{Digest: integrationDigest, Profile: observability.ReadOnlyProfile}, Run: observability.RunIdentity{ID: "vr-1", Attempt: 1, FinishedAt: now}, Result: "failed", Checks: observability.VerificationChecks{}, ExpiresAt: now.Add(time.Hour)}
-	if err := store.SaveVerification(ctx, "oc-1", result); err != nil {
+	companion.State = "verification_failed"
+	companion.Verification = result
+	companion.UpdatedAt = now.Add(time.Second)
+	applied, err := store.SaveVerification(ctx, "org:1", companion, result, "")
+	if err != nil || !applied {
+		t.Fatalf("first verification applied=%t, err=%v", applied, err)
+	}
+	applied, err = store.SaveVerification(ctx, "org:1", companion, result, "")
+	if err != nil || applied {
+		t.Fatalf("duplicate verification applied=%t, err=%v", applied, err)
+	}
+	staleResult := *result
+	staleResult.Run.ID = "vr-stale"
+	staleResult.Run.FinishedAt = now.Add(time.Minute)
+	stale := companion.DeepCopy()
+	stale.Verification = &staleResult
+	if applied, err := store.SaveVerification(ctx, "org:1", stale, &staleResult, ""); applied || err == nil {
+		t.Fatalf("stale verification applied=%t, err=%v", applied, err)
+	}
+	var receipts int
+	if err := database.Pool.QueryRow(ctx, `SELECT count(*) FROM observability_verification_results WHERE companion_id='oc-1'`).Scan(&receipts); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SaveVerification(ctx, "oc-1", result); err != nil {
-		t.Fatalf("duplicate verification was not idempotent: %v", err)
+	if receipts != 1 {
+		t.Fatalf("stale transaction left %d verification receipts, want 1", receipts)
 	}
 }
 

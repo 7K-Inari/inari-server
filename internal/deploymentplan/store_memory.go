@@ -12,11 +12,11 @@ type MemoryStore struct {
 	mu            sync.RWMutex
 	plans         map[string]*Plan
 	companions    map[string]*Companion
-	verifications map[string]*observability.VerificationResult
+	verifications map[string]struct{}
 }
 
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{plans: map[string]*Plan{}, companions: map[string]*Companion{}, verifications: map[string]*observability.VerificationResult{}}
+	return &MemoryStore{plans: map[string]*Plan{}, companions: map[string]*Companion{}, verifications: map[string]struct{}{}}
 }
 
 func clonePlan(plan *Plan) *Plan {
@@ -118,9 +118,21 @@ func (s *MemoryStore) LatestCompanionForInstance(_ context.Context, orgID, insta
 	return found.DeepCopy(), nil
 }
 
-func (s *MemoryStore) SaveVerification(_ context.Context, companionID string, result *observability.VerificationResult) error {
+func (s *MemoryStore) SaveVerification(_ context.Context, _ string, companion *Companion, result *observability.VerificationResult, expectedVerification string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.verifications[companionID] = result
-	return nil
+	if companion == nil || result == nil {
+		return false, ErrPlanConflict
+	}
+	key := companion.ID + "\n" + verificationToken(result)
+	if _, exists := s.verifications[key]; exists {
+		return false, nil
+	}
+	current := s.companions[companion.ID]
+	if current == nil || verificationToken(current.Verification) != expectedVerification {
+		return false, ErrPlanConflict
+	}
+	s.verifications[key] = struct{}{}
+	s.companions[companion.ID] = companion.DeepCopy()
+	return true, nil
 }

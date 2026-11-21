@@ -600,6 +600,15 @@ func (s *Service) ApplyVerification(ctx context.Context, orgID string, result *o
 	if companion.ScaffoldRunID != "" && result.App.ScaffoldRunID != companion.ScaffoldRunID {
 		return nil, errors.New("verification_stale")
 	}
+	expectedVerification := verificationToken(companion.Verification)
+	if companion.Verification != nil {
+		if expectedVerification == verificationToken(result) {
+			return companion, nil
+		}
+		if !result.Run.FinishedAt.After(companion.Verification.Run.FinishedAt) {
+			return nil, errors.New("verification_stale: out-of-order evidence")
+		}
+	}
 	if err := result.ValidateAt(s.now()); err != nil {
 		return nil, err
 	}
@@ -619,13 +628,12 @@ func (s *Service) ApplyVerification(ctx context.Context, orgID string, result *o
 	}
 	companion.Links = []Link{}
 	companion.UpdatedAt = s.now()
-	if err := s.store.SaveVerification(ctx, companion.ID, result); err != nil {
+	applied, err := s.store.SaveVerification(ctx, orgID, companion, result, expectedVerification)
+	if err != nil {
 		return nil, err
 	}
-	plan.Companion = companion
-	plan.UpdatedAt = companion.UpdatedAt
-	if err := s.store.UpdatePlan(ctx, plan); err != nil {
-		return nil, err
+	if !applied {
+		return s.store.GetCompanion(ctx, orgID, companion.ID)
 	}
 	return companion, nil
 }

@@ -512,7 +512,7 @@ func (s *Service) Get(ctx context.Context, orgID, id, subject string) (*Plan, er
 	}
 	if plan.AppInstanceID != "" {
 		status, err := s.InstanceObservability(ctx, orgID, plan.AppInstanceID, subject)
-		if err == nil {
+		if err == nil && status.Companion != nil && status.Companion.PlanID == plan.ID {
 			plan.Companion = status.Companion
 		}
 	}

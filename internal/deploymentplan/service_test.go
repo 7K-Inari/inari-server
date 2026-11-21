@@ -630,6 +630,28 @@ func TestInstanceStatusNeverUsesCompanionFromOlderPlan(t *testing.T) {
 	}
 }
 
+func TestGetPlanDoesNotReplaceCompanionFromNewerPlan(t *testing.T) {
+	svc, _, _, _, _ := serviceFixture(t)
+	original, err := submitReviewed(t, svc, deployRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := svc.now()
+	svc.now = func() time.Time { return now.Add(time.Second) }
+	request := PlanRequest{Operation: OperationProvisionExisting, InstanceID: original.AppInstanceID, Observability: ObservabilityInput{Mode: ModeProvision}, IdempotencyKey: "request-newer"}
+	newer, err := submitReviewed(t, svc, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.Get(context.Background(), "org-1", original.ID, "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Companion == nil || got.Companion.PlanID != original.ID || got.Companion.ID == newer.Companion.ID {
+		t.Fatalf("historical plan inherited a newer companion: got %#v, newer %#v", got.Companion, newer.Companion)
+	}
+}
+
 func TestLegacyCatalogInstanceCanProvisionFromRecordedPin(t *testing.T) {
 	svc, _, _, _, _ := serviceFixture(t)
 	svc.WithInstances(&fakeInstances{view: &inventory.InstanceView{ResourceInstance: types.ResourceInstance{

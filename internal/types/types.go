@@ -676,22 +676,27 @@ type ResourceRef struct {
 
 // ResourceInstance is one deployed catalog item on a cluster (plan §5.9).
 type ResourceInstance struct {
-	ID             string          `json:"id"`
-	OrgID          string          `json:"orgId"`
-	ClusterID      string          `json:"clusterId"`
-	CatalogItemID  string          `json:"catalogItemId"`
-	Version        string          `json:"version"`
-	ArtifactDigest string          `json:"artifactDigest,omitempty"`
-	OwnerTeam      string          `json:"ownerTeam"`
-	Spec           json.RawMessage `json:"spec"`
-	ResourceRef    ResourceRef     `json:"resourceRef"`
-	Health         string          `json:"health"`
-	SyncState      string          `json:"syncState,omitempty"`
-	StatusMessage  string          `json:"statusMessage,omitempty"`
-	State          InstanceState   `json:"state"`
-	ManagementMode ManagementMode  `json:"managementMode"`
-	CommitSHA      string          `json:"commitSha,omitempty"`
-	PRURL          string          `json:"prUrl,omitempty"`
+	ID                  string          `json:"id"`
+	UID                 string          `json:"uid"`
+	OrgID               string          `json:"orgId"`
+	ClusterID           string          `json:"clusterId"`
+	CatalogItemID       string          `json:"catalogItemId"`
+	Version             string          `json:"version"`
+	ArtifactDigest      string          `json:"artifactDigest,omitempty"`
+	OwnerTeam           string          `json:"ownerTeam"`
+	Spec                json.RawMessage `json:"spec"`
+	ResourceRef         ResourceRef     `json:"resourceRef"`
+	Health              string          `json:"health"`
+	SyncState           string          `json:"syncState,omitempty"`
+	StatusMessage       string          `json:"statusMessage,omitempty"`
+	State               InstanceState   `json:"state"`
+	ManagementMode      ManagementMode  `json:"managementMode"`
+	CommitSHA           string          `json:"commitSha,omitempty"`
+	ObservedRevision    string          `json:"observedRevision,omitempty"`
+	SyncOperationID     string          `json:"syncOperationId,omitempty"`
+	SyncOperationPhase  string          `json:"syncOperationPhase,omitempty"`
+	OperationFinishedAt *time.Time      `json:"operationFinishedAt,omitempty"`
+	PRURL               string          `json:"prUrl,omitempty"`
 	// RepoID is the tenant_git_repos row this instance's manifests were
 	// committed to (Feature A). Empty predates the column; readers fall
 	// back to the cluster's baseline binding.

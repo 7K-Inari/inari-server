@@ -52,17 +52,19 @@ type Store struct{}
 
 func NewStore() *Store { return &Store{} }
 
-const instanceCols = `id, org_id, cluster_id, catalog_item_id, version, artifact_digest, owner_team, spec, resource_ref,
-                      health, sync_state, status_message, state, management_mode, commit_sha, pr_url,
+const instanceCols = `id, uid, org_id, cluster_id, catalog_item_id, version, artifact_digest, owner_team, spec, resource_ref,
+                      health, sync_state, status_message, state, management_mode, commit_sha,
+                      observed_revision, sync_operation_id, sync_operation_phase, operation_finished_at, pr_url,
                       repo_id, generation, created_at, updated_at`
 
 func scanInstance(row pgx.Row) (*types.ResourceInstance, error) {
 	var it types.ResourceInstance
 	var ref json.RawMessage
 	var repoID *string
-	err := row.Scan(&it.ID, &it.OrgID, &it.ClusterID, &it.CatalogItemID, &it.Version, &it.ArtifactDigest, &it.OwnerTeam,
+	err := row.Scan(&it.ID, &it.UID, &it.OrgID, &it.ClusterID, &it.CatalogItemID, &it.Version, &it.ArtifactDigest, &it.OwnerTeam,
 		&it.Spec, &ref, &it.Health, &it.SyncState, &it.StatusMessage, &it.State, &it.ManagementMode,
-		&it.CommitSHA, &it.PRURL, &repoID, &it.Generation, &it.CreatedAt, &it.UpdatedAt)
+		&it.CommitSHA, &it.ObservedRevision, &it.SyncOperationID, &it.SyncOperationPhase, &it.OperationFinishedAt,
+		&it.PRURL, &repoID, &it.Generation, &it.CreatedAt, &it.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}

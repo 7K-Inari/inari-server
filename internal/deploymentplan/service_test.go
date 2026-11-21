@@ -18,12 +18,13 @@ import (
 )
 
 type fakeCatalog struct {
-	item        *types.CatalogItem
-	version     *types.CatalogItemVersion
-	packItem    *types.CatalogItem
-	packVersion *types.CatalogItemVersion
-	admitErr    error
-	admitted    []string
+	item                *types.CatalogItem
+	version             *types.CatalogItemVersion
+	packItem            *types.CatalogItem
+	packVersion         *types.CatalogItemVersion
+	admittedPackVersion *types.CatalogItemVersion
+	admitErr            error
+	admitted            []string
 }
 
 func (f *fakeCatalog) GetItemByID(_ context.Context, id string) (*types.CatalogItem, error) {
@@ -77,6 +78,9 @@ func (f *fakeCatalog) AdmitVersion(_ context.Context, id, version string, _ trus
 	versionRow, err := f.GetVersion(context.Background(), id, version)
 	if err != nil {
 		return nil, err
+	}
+	if f.packItem != nil && id == f.packItem.ID && f.admittedPackVersion != nil {
+		versionRow = f.admittedPackVersion
 	}
 	return &catalog.AdmittedVersion{Version: versionRow}, nil
 }
@@ -254,6 +258,58 @@ func TestSubmitProvisionClosedGateRevalidatesAndHasNoLinks(t *testing.T) {
 	}
 	if plan.RenderIntent == nil || plan.RenderIntent.PackSpec["rulesCentral"] != true || plan.RenderIntent.PackSpec["rulesLocal"] != false {
 		t.Fatalf("render intent = %#v", plan.RenderIntent)
+	}
+}
+
+func TestSubmitRequiresExactCompatiblePackPin(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*PackPin)
+	}{
+		{name: "render contract", mutate: func(pin *PackPin) { pin.RenderContract = "inari.observability-pack/v1" }},
+		{name: "source", mutate: func(pin *PackPin) { pin.SourceID = "other" }},
+		{name: "package version", mutate: func(pin *PackPin) { pin.PackageVersion = "9.9.9" }},
+		{name: "artifact ref", mutate: func(pin *PackPin) { pin.Ref = "ghcr.io/other/pack:0.2.0" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, _, _, executor, _ := serviceFixture(t)
+			req := deployRequest()
+			initial, err := svc.Preflight(context.Background(), req, "org-1", "acme-inc", "user-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			pin := initial.CompatiblePacks[0]
+			tc.mutate(&pin)
+			req.Observability.Pack = &pin
+			if _, err := svc.Submit(context.Background(), req, "org-1", "acme-inc", "user-1"); err == nil {
+				t.Fatal("submit accepted a pack pin that was not an exact compatible candidate")
+			}
+			if executor.calls != 0 {
+				t.Fatal("application executed after invalid pack selection")
+			}
+		})
+	}
+}
+
+func TestSubmitRevalidatesAdmittedPackPayload(t *testing.T) {
+	svc, cat, _, executor, _ := serviceFixture(t)
+	req := deployRequest()
+	initial, err := svc.Preflight(context.Background(), req, "org-1", "acme-inc", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin := initial.CompatiblePacks[0]
+	req.Observability.Pack = &pin
+	req.PlanFingerprint = initial.Plan.PlanFingerprint
+	invalid := *cat.packVersion
+	invalid.Payload = json.RawMessage(`{"admission":{"type":"kro-rgd"},"rgd":"kind: ResourceGraphDefinition"}`)
+	cat.admittedPackVersion = &invalid
+	if _, err := svc.Submit(context.Background(), req, "org-1", "acme-inc", "user-1"); err == nil {
+		t.Fatal("submit accepted an admitted pack without the required v2 RGD contract")
+	}
+	if executor.calls != 0 {
+		t.Fatal("application executed after invalid admitted pack payload")
 	}
 }
 

@@ -392,6 +392,17 @@ func (s *Service) Submit(ctx context.Context, req PlanRequest, orgID, orgSlug, s
 		if plan.Observability.Pack == nil || plan.Observability.Target == nil {
 			return nil, errors.New("provision requires an exact compatible pack and monitoring target")
 		}
+		pack := plan.Observability.Pack
+		compatible := false
+		for _, candidate := range preflight.CompatiblePacks {
+			if *pack == candidate {
+				compatible = true
+				break
+			}
+		}
+		if !compatible {
+			return nil, fmt.Errorf("%w: selected pack is not an exact compatible preflight candidate", resourcetargets.ErrInvalidInput)
+		}
 		resolved, err := s.targets.Resolve(ctx, resourcetargets.ResolveInput{OrgID: orgID, Subject: subject, TargetID: plan.Observability.Target.ID, Capability: resourcetargets.CapabilityMonitoringGrafana, Action: resourcetargets.ActionProvision, ExpectedRevision: plan.Observability.Target.Revision, Selection: plan.Observability.Target.Selection})
 		if err != nil {
 			return nil, err
@@ -405,7 +416,6 @@ func (s *Service) Submit(ctx context.Context, req PlanRequest, orgID, orgSlug, s
 		if resolved.Cluster == nil {
 			return nil, errors.New("monitoring target returned no cluster")
 		}
-		pack := plan.Observability.Pack
 		if err := s.catalog.EnsureVisible(ctx, orgID, resolved.Cluster.ID, pack.ItemID); err != nil {
 			return nil, err
 		}
@@ -413,8 +423,26 @@ func (s *Service) Submit(ctx context.Context, req PlanRequest, orgID, orgSlug, s
 		if err != nil {
 			return nil, err
 		}
-		if admitted == nil || admitted.Version == nil || admitted.Version.ArtifactDigest != pack.Digest {
-			return nil, errors.New("observability pack digest mismatch")
+		if admitted == nil || admitted.Version == nil {
+			return nil, errors.New("observability pack admission returned no version")
+		}
+		version := admitted.Version
+		if version.ItemID != pack.ItemID || version.Version != pack.Version || version.PackageVersion != pack.PackageVersion ||
+			version.ArtifactRef != pack.Ref || version.ArtifactDigest != pack.Digest || version.ChartRef != pack.ChartRef || version.ChartDigest != pack.ChartDigest {
+			return nil, fmt.Errorf("%w: admitted observability pack pin differs from the selected candidate", resourcetargets.ErrInvalidInput)
+		}
+		item, err := s.catalog.GetItemByID(ctx, pack.ItemID)
+		if err != nil {
+			return nil, err
+		}
+		if item.SourceID != pack.SourceID || item.Category != "observability" || packType(version) != "kro-rgd" {
+			return nil, fmt.Errorf("%w: admitted pack is not a same-source kro-rgd observability candidate", resourcetargets.ErrInvalidInput)
+		}
+		if err := plan.Capability.ValidatePackVersion(version.Version); err != nil {
+			return nil, err
+		}
+		if err := ValidatePackRGD(packRGD(version), *pack, plan.Capability); err != nil {
+			return nil, err
 		}
 		companionState := "waiting_for_app"
 		if !s.gate.CompanionRendering {

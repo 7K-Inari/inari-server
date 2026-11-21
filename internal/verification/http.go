@@ -12,6 +12,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/inventory"
+	"github.com/7K-Inari/inari-server/internal/orchestrator"
 	"github.com/7K-Inari/inari-server/internal/resourcetargets"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/types"
@@ -57,6 +58,10 @@ func (h *Handler) RegisterRoutes(api huma.API) {
 	registerRoute(api, huma.Operation{OperationID: "listInstanceVerificationRuns", Method: http.MethodGet, Path: "/api/v1/tenants/{org}/instances/{id}/verification/runs", Summary: "List verification run history"}, h.listRuns)
 	registerRoute(api, huma.Operation{OperationID: "getInstanceVerificationRun", Method: http.MethodGet, Path: "/api/v1/tenants/{org}/instances/{id}/verification/runs/{runId}", Summary: "Get verification run details"}, h.getRun)
 	registerRoute(api, huma.Operation{OperationID: "retryInstanceVerificationRun", Method: http.MethodPost, Path: "/api/v1/tenants/{org}/instances/{id}/verification/runs/{runId}/retry", Summary: "Retry a failed verification attempt after revalidation"}, h.retryRun)
+	registerRoute(api, huma.Operation{OperationID: "getInstancePromotionPolicy", Method: http.MethodGet, Path: "/api/v1/tenants/{org}/instances/{id}/promotion-policy", Summary: "Get linked promotion verification policy"}, h.getPromotionPolicy)
+	registerRoute(api, huma.Operation{OperationID: "putInstancePromotionPolicy", Method: http.MethodPut, Path: "/api/v1/tenants/{org}/instances/{id}/promotion-policy", Summary: "Set linked promotion verification policy"}, h.putPromotionPolicy)
+	registerRoute(api, huma.Operation{OperationID: "previewInstancePromotion", Method: http.MethodPost, Path: "/api/v1/tenants/{org}/instances/{id}/promotion/preview", Summary: "Preview exact promotion evidence gates"}, h.previewPromotion)
+	registerRoute(api, huma.Operation{OperationID: "promoteInstance", Method: http.MethodPost, Path: "/api/v1/tenants/{org}/instances/{id}/promote", Summary: "Explicitly promote an exact verified application version"}, h.promote)
 }
 
 func (h *Handler) authorize(ctx context.Context, slug, relation string, manage bool) (*types.Organization, *authn.Identity, error) {
@@ -429,4 +434,89 @@ func (h *Handler) retryRun(ctx context.Context, in *runGetInput) (*runDetailOutp
 		return nil, verificationHTTPError(err)
 	}
 	return &runDetailOutput{Body: *run}, nil
+}
+
+type promotionPolicyInput struct {
+	Org  string `path:"org"`
+	ID   string `path:"id"`
+	Body PromotionPolicy
+}
+type promotionPolicyOutput struct {
+	Body struct {
+		Policy *PromotionPolicy `json:"policy,omitempty"`
+	}
+}
+
+func (h *Handler) getPromotionPolicy(ctx context.Context, in *instanceInput) (*promotionPolicyOutput, error) {
+	org, _, err := h.authorize(ctx, in.Org, authz.RelationTenantRead, false)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := h.svc.GetPromotionPolicy(ctx, org.ID, in.ID)
+	if errors.Is(err, ErrNotFound) {
+		return &promotionPolicyOutput{}, nil
+	}
+	if err != nil {
+		return nil, verificationHTTPError(err)
+	}
+	out := &promotionPolicyOutput{}
+	out.Body.Policy = policy
+	return out, nil
+}
+
+func (h *Handler) putPromotionPolicy(ctx context.Context, in *promotionPolicyInput) (*promotionPolicyOutput, error) {
+	org, id, err := h.authorize(ctx, in.Org, authz.RelationDeploymentsCreate, true)
+	if err != nil {
+		return nil, err
+	}
+	in.Body.OrgID, in.Body.TargetInstanceID = org.ID, in.ID
+	policy, err := h.svc.PutPromotionPolicy(ctx, org.ID, "user:"+id.Subject, &in.Body)
+	if err != nil {
+		return nil, verificationHTTPError(err)
+	}
+	out := &promotionPolicyOutput{}
+	out.Body.Policy = policy
+	return out, nil
+}
+
+type promotionInput struct {
+	Org  string `path:"org"`
+	ID   string `path:"id"`
+	Body struct {
+		ToVersion string `json:"toVersion"`
+		ToDigest  string `json:"toDigest"`
+		RepoID    string `json:"repoId,omitempty"`
+	}
+}
+type promotionPreviewOutput struct{ Body PromotionPreview }
+type promotionOutput struct {
+	Body struct {
+		Deploy orchestrator.DeployResult `json:"deploy"`
+	}
+}
+
+func (h *Handler) previewPromotion(ctx context.Context, in *promotionInput) (*promotionPreviewOutput, error) {
+	org, _, err := h.authorize(ctx, in.Org, authz.RelationDeploymentsCreate, true)
+	if err != nil {
+		return nil, err
+	}
+	preview, err := h.svc.PreviewPromotion(ctx, org.ID, in.ID, in.Body.ToVersion, in.Body.ToDigest)
+	if err != nil {
+		return nil, verificationHTTPError(err)
+	}
+	return &promotionPreviewOutput{Body: *preview}, nil
+}
+
+func (h *Handler) promote(ctx context.Context, in *promotionInput) (*promotionOutput, error) {
+	org, id, err := h.authorize(ctx, in.Org, authz.RelationDeploymentsCreate, true)
+	if err != nil {
+		return nil, err
+	}
+	deploy, err := h.svc.Promote(ctx, org.ID, in.ID, in.Body.ToVersion, in.Body.ToDigest, in.Body.RepoID, "user:"+id.Subject)
+	if err != nil {
+		return nil, verificationHTTPError(err)
+	}
+	out := &promotionOutput{}
+	out.Body.Deploy = *deploy
+	return out, nil
 }

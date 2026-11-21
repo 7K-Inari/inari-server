@@ -12,6 +12,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/inventory"
+	"github.com/7K-Inari/inari-server/internal/orchestrator"
 	"github.com/7K-Inari/inari-server/internal/resourcetargets"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -27,6 +28,11 @@ type SuiteAdmitter interface {
 // InstanceGetter is implemented by inventory.Store.
 type InstanceGetter interface {
 	Get(ctx context.Context, q db.Querier, id string) (*types.ResourceInstance, error)
+}
+
+// Promoter is the existing explicit orchestrator upgrade operation.
+type Promoter interface {
+	Upgrade(ctx context.Context, orgID, instanceID, toVersion, repoID, requester string) (*orchestrator.DeployResult, error)
 }
 
 // TargetResolver is the shared deployment-target policy enforcement point.
@@ -67,6 +73,7 @@ type Service struct {
 	suites        SuiteAdmitter
 	instances     InstanceGetter
 	targets       TargetResolver
+	promoter      Promoter
 	audit         *audit.Store
 	observability ObservabilityReportConsumer
 	now           func() time.Time

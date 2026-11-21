@@ -64,7 +64,7 @@ func TestMigrationAndSQLStoreRoundTrip(t *testing.T) {
 	if err != nil || companion.State != "blocked_external_gate" {
 		t.Fatalf("companion = %#v, %v", companion, err)
 	}
-	result := &observability.VerificationResult{Companion: observability.CompanionIdentity{ID: "oc-1", Generation: 1}, Target: observability.TargetIdentity{Revision: 7}, App: observability.AppIdentity{Revision: companion.AppRevision}, Pack: observability.PackIdentity{Digest: integrationDigest}, CapabilityDigest: integrationDigest, Suite: observability.SuiteIdentity{Digest: integrationDigest, Profile: observability.ReadOnlyProfile}, Run: observability.RunIdentity{ID: "vr-1", Attempt: 1, FinishedAt: now}, Result: "failed", Checks: observability.VerificationChecks{}, ExpiresAt: now.Add(time.Hour)}
+	result := &observability.VerificationResult{Companion: observability.CompanionIdentity{ID: "oc-1", Generation: 1}, Target: observability.TargetIdentity{Revision: 7}, App: observability.AppIdentity{Revision: companion.AppRevision}, Pack: observability.PackIdentity{Digest: integrationDigest}, CapabilityDigest: integrationDigest, Suite: observability.SuiteIdentity{Digest: integrationDigest, Profile: "stage"}, Run: observability.RunIdentity{ID: "vr-1", Attempt: 1, FinishedAt: now}, Result: "failed", Checks: observability.VerificationChecks{}, ExpiresAt: now.Add(time.Hour)}
 	companion.State = "verification_failed"
 	companion.Verification = result
 	companion.UpdatedAt = now.Add(time.Second)

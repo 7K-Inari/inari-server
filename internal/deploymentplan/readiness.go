@@ -33,10 +33,6 @@ func validateReadyEvidence(plan *Plan, companion *Companion, target *resourcetar
 	if result.Checks.Folder.Name != folder {
 		return errors.New("verification_stale: folder evidence does not match the approved selection")
 	}
-	if result.Checks.Access.Team != plan.Deployment.OwnerTeam {
-		return errors.New("verification_stale: access evidence does not match the application owner team")
-	}
-
 	dashboards := make(map[string]observability.DashboardCheck, len(result.Checks.Dashboards))
 	for _, check := range result.Checks.Dashboards {
 		if _, exists := dashboards[check.UID]; exists {

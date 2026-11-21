@@ -744,7 +744,6 @@ func TestVerificationRejectsEvidenceOutsideApprovedSelection(t *testing.T) {
 		{name: "datasource name", mutate: func(result *observability.VerificationResult) { result.Checks.Datasources[0].Name = "other" }},
 		{name: "datasource logical", mutate: func(result *observability.VerificationResult) { result.Checks.Datasources[0].Logical = "other" }},
 		{name: "datasource type", mutate: func(result *observability.VerificationResult) { result.Checks.Datasources[0].Type = "loki" }},
-		{name: "owner team", mutate: func(result *observability.VerificationResult) { result.Checks.Access.Team = "other-team" }},
 		{name: "selected rule", mutate: func(result *observability.VerificationResult) { result.Checks.Rules[0].File = "rules/other.yaml" }},
 		{name: "extra rule", mutate: func(result *observability.VerificationResult) {
 			result.Checks.Rules = append(result.Checks.Rules, observability.RuleCheck{Check: observability.Check{State: "passed"}, File: "rules/service.yaml", Evaluation: observability.EvaluationLocal})

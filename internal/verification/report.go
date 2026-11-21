@@ -151,6 +151,18 @@ func (s *Service) ApplyReport(ctx context.Context, orgID, clusterID string, repo
 				mutation.outcome = []byte(report.OutcomeJson)
 			}
 		}
+		if report.OutcomeJson != "" && report.SubjectKind == "observability.companion" {
+			if s.observability == nil {
+				mutation.status, mutation.disposition, mutation.reason = "failed", "unavailable", "observability_sink_unavailable"
+				terminalEvent = "verification.failed"
+				break
+			}
+			if err := s.observability.ApplyObservabilityReport(ctx, orgID, clusterID, report, run); err != nil {
+				mutation.status, mutation.disposition, mutation.reason = "failed", "failed", "observability_result_invalid"
+				mutation.message = err.Error()
+				terminalEvent = "verification.failed"
+			}
+		}
 	case report.Result == agentv1.VerificationResult_VERIFICATION_RESULT_PASSED:
 		terminalEvent = "verification.passed"
 		mutation.status, mutation.disposition = "passed", "passed"

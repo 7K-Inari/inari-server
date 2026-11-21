@@ -149,9 +149,9 @@ type EnvironmentPolicy struct {
 
 // RBACRule is a finite declaration checked against platform-approved rules.
 type RBACRule struct {
-	APIGroups []string `json:"apiGroups"`
-	Resources []string `json:"resources"`
-	Verbs     []string `json:"verbs"`
+	APIGroups []string `json:"apiGroups" yaml:"apiGroups"`
+	Resources []string `json:"resources" yaml:"resources"`
+	Verbs     []string `json:"verbs" yaml:"verbs"`
 }
 
 // SuiteGrant authorizes exactly one suite digest and profile.

@@ -147,8 +147,8 @@ func TestDeploymentObservabilityDownLeavesExistingTables(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.Down(ctx); err != nil {
-		t.Fatalf("down 0043: %v", err)
+	if _, err := provider.DownTo(ctx, 42); err != nil {
+		t.Fatalf("down through 0043: %v", err)
 	}
 	for _, table := range []string{"deployment_plans", "observability_companions", "observability_verification_results"} {
 		var exists *string

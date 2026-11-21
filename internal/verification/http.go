@@ -265,13 +265,13 @@ type grantRevokeInput struct {
 	Org string `path:"org"`
 	ID  string `path:"id"`
 }
-type statusOutput struct {
+type verificationGrantStatusOutput struct {
 	Body struct {
 		Status string `json:"status"`
 	}
 }
 
-func (h *Handler) revokeGrant(ctx context.Context, in *grantRevokeInput) (*statusOutput, error) {
+func (h *Handler) revokeGrant(ctx context.Context, in *grantRevokeInput) (*verificationGrantStatusOutput, error) {
 	org, id, err := h.authorize(ctx, in.Org, authz.RelationResourceTargetsManage, true)
 	if err != nil {
 		return nil, err
@@ -279,7 +279,7 @@ func (h *Handler) revokeGrant(ctx context.Context, in *grantRevokeInput) (*statu
 	if err := h.svc.RevokeGrant(ctx, org.ID, "user:"+id.Subject, in.ID); err != nil {
 		return nil, verificationHTTPError(err)
 	}
-	out := &statusOutput{}
+	out := &verificationGrantStatusOutput{}
 	out.Body.Status = "revoked"
 	return out, nil
 }

@@ -394,9 +394,13 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 	}); err != nil {
 		return nil, err
 	}
+	reviewedDigest := req.ArtifactDigest
 	digest, err := s.admitVersion(ctx, req, item, version)
 	if err != nil {
 		return nil, err
+	}
+	if reviewedDigest == "" {
+		reviewedDigest = digest
 	}
 	req.ArtifactDigest = digest
 	req.admissionVerified = true
@@ -404,7 +408,7 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 	gate, err := s.gate.Gate(ctx, approvals.GateInput{
 		OrgID: req.OrgID, Item: item, Version: version, ClusterID: req.ClusterID,
 		Spec: req.Spec, Requester: req.Requester, Name: req.Name, Namespace: req.Namespace,
-		OwnerTeam: req.OwnerTeam, Channel: req.Channel, RepoID: req.RepoID, ArtifactDigest: req.ArtifactDigest,
+		OwnerTeam: req.OwnerTeam, Channel: req.Channel, RepoID: req.RepoID, ArtifactDigest: reviewedDigest,
 	})
 	if err != nil {
 		return nil, err
@@ -423,12 +427,14 @@ func (s *Service) apply(ctx context.Context, req DeployRequest, item *types.Cata
 
 func (s *Service) admitVersion(ctx context.Context, req DeployRequest, item *types.CatalogItem, version string) (string, error) {
 	digest := ""
+	chartDigest := ""
 	if item.SourceID == "" {
 		row, err := s.catalog.GetVersion(ctx, req.ItemID, version)
 		if err != nil {
 			return "", err
 		}
 		digest = row.ArtifactDigest
+		chartDigest = row.ChartDigest
 	} else {
 		admitter, ok := s.catalog.(VersionAdmitter)
 		if !ok {
@@ -445,9 +451,10 @@ func (s *Service) admitVersion(ctx context.Context, req DeployRequest, item *typ
 		}
 		if admitted != nil && admitted.Version != nil {
 			digest = admitted.Version.ArtifactDigest
+			chartDigest = admitted.Version.ChartDigest
 		}
 	}
-	if req.ArtifactDigest != "" && digest != req.ArtifactDigest {
+	if req.ArtifactDigest != "" && digest != req.ArtifactDigest && (chartDigest == "" || chartDigest != req.ArtifactDigest) {
 		return "", ErrArtifactDigestMismatch
 	}
 	return digest, nil

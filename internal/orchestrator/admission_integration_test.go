@@ -127,6 +127,25 @@ func TestAdmissionDenialPrecedesEveryApprovalGate(t *testing.T) {
 	}
 }
 
+func TestDirectChartApprovalRetainsReviewedChartDigest(t *testing.T) {
+	const packageDigest = "sha256:52ccaee6d4dd272e54bfccda77738b42e1edf0e4a20c27e23f0b6c15d01aef79"
+	const chartDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	item := &types.CatalogItem{ID: "core/web-service", SourceID: "core", Name: "web-service"}
+	catalog := &denialCatalog{item: item, version: &types.CatalogItemVersion{ItemID: item.ID, Version: "1.0.0", ArtifactDigest: packageDigest, ChartDigest: chartDigest}}
+	gate := &recordingGate{}
+	service, _ := newAdmissionWorkflowFixture(t, catalog, gate)
+	result, err := service.Deploy(context.Background(), DeployRequest{OrgID: "org:1", ClusterID: "c1", ItemID: item.ID, Version: "1.0.0", ArtifactDigest: chartDigest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gate.artifactDigest != chartDigest {
+		t.Fatalf("approval reviewed digest = %q, want chart %q", gate.artifactDigest, chartDigest)
+	}
+	if result.ArtifactDigest != packageDigest {
+		t.Fatalf("execution artifact digest = %q, want package %q", result.ArtifactDigest, packageDigest)
+	}
+}
+
 func TestDeployAdmitsBeforePendingAndReusesImmediateAdmission(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

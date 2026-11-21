@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -19,10 +20,14 @@ import (
 
 // StatusUpdate is the internal form of an agent status-update event.
 type StatusUpdate struct {
-	Resource types.ResourceRef
-	Health   string
-	Sync     string
-	Message  string
+	Resource            types.ResourceRef
+	Health              string
+	Sync                string
+	Message             string
+	ObservedRevision    string
+	SyncOperationID     string
+	SyncOperationPhase  string
+	OperationFinishedAt time.Time
 }
 
 // VersionResolver reports the latest catalog version of an item (catalog
@@ -212,12 +217,25 @@ func (s *Service) applyAppStatus(ctx context.Context, orgID, clusterID, instance
 		return false, nil
 	}
 	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
-		if err := s.store.ApplyAppStatus(ctx, tx, instanceID, upd.Health, upd.Sync, upd.Message, state); err != nil {
+		if err := s.store.ApplyAppStatusWithRevision(ctx, tx, instanceID, upd.Health, upd.Sync, upd.Message, state,
+			upd.ObservedRevision, upd.SyncOperationID, upd.SyncOperationPhase, upd.OperationFinishedAt); err != nil {
 			return err
 		}
-		return s.audit.Record(ctx, tx, &types.AuditEvent{
+		if err := s.audit.Record(ctx, tx, &types.AuditEvent{
 			OrgID: inst.OrgID, Actor: "agent:" + clusterID, Action: "instance.app_status",
 			ObjectType: "resource_instance", ObjectID: inst.ID,
+		}); err != nil {
+			return err
+		}
+		var finishedAt *time.Time
+		if !upd.OperationFinishedAt.IsZero() {
+			finishedAt = &upd.OperationFinishedAt
+		}
+		return audit.AppendOutbox(ctx, tx, inst.OrgID, types.EventInstanceStatus, types.InstancePayload{
+			OrgID: inst.OrgID, InstanceID: inst.ID, InstanceUID: inst.UID, ItemID: inst.CatalogItemID,
+			ClusterID: clusterID, Version: inst.Version, Health: upd.Health, ArtifactDigest: inst.ArtifactDigest,
+			ObservedRevision: upd.ObservedRevision, SyncOperationID: upd.SyncOperationID,
+			SyncOperationPhase: upd.SyncOperationPhase, OperationFinishedAt: finishedAt,
 		})
 	})
 	if err != nil {

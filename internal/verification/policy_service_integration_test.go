@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
+	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/7K-Inari/inari-server/internal/inventory"
@@ -17,6 +19,8 @@ import (
 	"github.com/7K-Inari/inari-server/internal/testutil/testdb"
 	"github.com/7K-Inari/inari-server/internal/types"
 	verification "github.com/7K-Inari/inari-server/internal/verification"
+	"github.com/jackc/pgx/v5"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type fakeTargetResolver struct {
@@ -50,6 +54,7 @@ func TestUngatedPolicyLifecycleStopsBeforeRun(t *testing.T) {
 	}
 	instance := syncedInstance()
 	instance.OrgID = "org:1"
+	instance.ClusterID = "cluster:1"
 	if err := database.Pool.QueryRow(ctx, `SELECT uid FROM resource_instances WHERE id='inst-1'`).Scan(&instance.UID); err != nil {
 		t.Fatal(err)
 	}
@@ -106,5 +111,54 @@ func TestUngatedPolicyLifecycleStopsBeforeRun(t *testing.T) {
 	var runs int
 	if err := database.Pool.QueryRow(ctx, `SELECT count(*) FROM verification_runs`).Scan(&runs); err != nil || runs != 0 {
 		t.Fatalf("runs = %d, %v; closed gate must not queue work", runs, err)
+	}
+
+	// Transport-only fixture: insert a planned run directly, without a
+	// renderer, and verify authenticated report binding and replay behavior.
+	run, err := verification.BuildRun(policy, grant.Revision, instance, policy.Trigger("onRevisionChange", ""), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runStore := verification.NewStore()
+	if err := database.WithTx(ctx, func(tx pgx.Tx) error {
+		inserted, err := runStore.InsertRun(ctx, tx, run)
+		if err == nil && !inserted {
+			return errors.New("run was not inserted")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var renderFingerprint string
+	if err := database.Pool.QueryRow(ctx, `SELECT render_fingerprint FROM verification_policies WHERE id=$1`, policy.ID).Scan(&renderFingerprint); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	expires := now.Add(time.Hour)
+	outcome := `{"schema":"inari.verification.outcome/v1","result":"passed","checks":[{"name":"api","state":"passed"}],"expiresAt":"` + expires.Format(time.RFC3339) + `"}`
+	report := &agentv1.VerificationReport{
+		RunId: run.ID, Attempt: 1, TriggerFingerprint: run.TriggerFingerprint,
+		SuiteDigest: run.SuiteDigest, Profile: run.Profile, RenderFingerprint: renderFingerprint,
+		Workflow:        &agentv1.ResourceRef{Kind: "Workflow", Name: run.ID + "-a1", Namespace: "verification", Uid: "wf-1"},
+		ResourceVersion: "42", Result: agentv1.VerificationResult_VERIFICATION_RESULT_PASSED,
+		SubjectKind: "application", InstanceUid: run.InstanceUID, AppInstanceId: run.InstanceID,
+		AppRevision: run.AppRevision, AppDigest: run.AppArtifactDigest, TargetId: "rt-1", TargetRevision: 1,
+		PolicyRevision: policy.Revision, GrantRevision: grant.Revision,
+		StartedAt: timestamppb.New(now.Add(-time.Minute)), FinishedAt: timestamppb.New(now), ObservedAt: timestamppb.New(now.Add(time.Second)),
+		OutcomeJson: outcome, ExpiresAt: timestamppb.New(expires),
+	}
+	if err := service.ApplyReport(ctx, instance.OrgID, instance.ClusterID, report); err != nil {
+		t.Fatalf("ApplyReport: %v", err)
+	}
+	gotRun, err := runStore.GetRun(ctx, database.Pool, instance.OrgID, instance.ID, run.ID)
+	if err != nil || gotRun.Status != "passed" {
+		t.Fatalf("run after report = %#v, %v", gotRun, err)
+	}
+	if err := service.ApplyReport(ctx, instance.OrgID, instance.ClusterID, report); err != nil {
+		t.Fatalf("identical report replay was not idempotent: %v", err)
+	}
+	report.ResourceVersion = "43"
+	if err := service.ApplyReport(ctx, instance.OrgID, "cluster:wrong", report); err == nil {
+		t.Fatal("wrong-cluster report was accepted")
 	}
 }

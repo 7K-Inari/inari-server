@@ -996,12 +996,18 @@ type DeployRequestedPayload struct {
 
 // InstancePayload is the outbox payload for instance lifecycle events.
 type InstancePayload struct {
-	OrgID      string `json:"orgId"`
-	InstanceID string `json:"instanceId"`
-	ItemID     string `json:"itemId"`
-	ClusterID  string `json:"clusterId"`
-	Version    string `json:"version,omitempty"`
-	Health     string `json:"health,omitempty"`
+	OrgID               string     `json:"orgId"`
+	InstanceID          string     `json:"instanceId"`
+	InstanceUID         string     `json:"instanceUid,omitempty"`
+	ItemID              string     `json:"itemId"`
+	ClusterID           string     `json:"clusterId"`
+	Version             string     `json:"version,omitempty"`
+	Health              string     `json:"health,omitempty"`
+	ArtifactDigest      string     `json:"artifactDigest,omitempty"`
+	ObservedRevision    string     `json:"observedRevision,omitempty"`
+	SyncOperationID     string     `json:"syncOperationId,omitempty"`
+	SyncOperationPhase  string     `json:"syncOperationPhase,omitempty"`
+	OperationFinishedAt *time.Time `json:"operationFinishedAt,omitempty"`
 }
 
 // AddonPayload is the outbox payload for addon lifecycle/status events

@@ -62,13 +62,14 @@ type SuitePreview struct {
 // Service coordinates verification policy and admission. No concrete renderer
 // is registered while the external gate is closed.
 type Service struct {
-	db        *db.DB
-	store     *Store
-	suites    SuiteAdmitter
-	instances InstanceGetter
-	targets   TargetResolver
-	audit     *audit.Store
-	now       func() time.Time
+	db            *db.DB
+	store         *Store
+	suites        SuiteAdmitter
+	instances     InstanceGetter
+	targets       TargetResolver
+	audit         *audit.Store
+	observability ObservabilityReportConsumer
+	now           func() time.Time
 }
 
 func NewService(d *db.DB, store *Store, suites SuiteAdmitter, instances InstanceGetter, targets TargetResolver, auditStore *audit.Store) *Service {

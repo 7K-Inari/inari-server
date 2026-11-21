@@ -108,6 +108,8 @@ func (r statusSinkRouter) ApplyStatus(ctx context.Context, orgID, clusterID stri
 	}
 	return r.inv.ApplyStatus(ctx, orgID, clusterID, inventory.StatusUpdate{
 		Resource: upd.Resource, Health: upd.Health, Sync: upd.Sync, Message: upd.Message,
+		ObservedRevision: upd.ObservedRevision, SyncOperationID: upd.SyncOperationID,
+		SyncOperationPhase: upd.SyncOperationPhase, OperationFinishedAt: upd.OperationFinishedAt,
 	})
 }
 
@@ -1093,6 +1095,7 @@ func run() error {
 
 	flagSvc := featureflags.NewService(database, flagStore, auditStore, cacheBackend, cfg.CacheBackend)
 	verificationSvc := verification.NewService(database, verification.NewStore(), catalogSvc, invStore, resourceTargetsSvc, auditStore)
+	gateway.SetVerificationSink(verificationSvc)
 
 	router, api := httpserver.NewRouter(log, validator, database)
 	// /metrics is a plain chi route (like /healthz): outside huma, so the

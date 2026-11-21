@@ -6,6 +6,7 @@ import (
 	"time"
 
 	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
+	"github.com/7K-Inari/inari-server/internal/resourcetargets"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -94,8 +95,43 @@ func (s *Service) ListRuns(ctx context.Context, orgID, instanceID string, limit 
 	return s.store.ListRuns(ctx, s.db.Pool, orgID, instanceID, limit)
 }
 
-func (s *Service) GetRun(ctx context.Context, orgID, instanceID, runID string) (*Run, error) {
-	return s.store.GetRun(ctx, s.db.Pool, orgID, instanceID, runID)
+func (s *Service) GetRun(ctx context.Context, orgID, instanceID, runID string, subject ...string) (*Run, error) {
+	run, err := s.store.GetRun(ctx, s.db.Pool, orgID, instanceID, runID)
+	if err != nil {
+		return nil, err
+	}
+	policy, _, err := s.store.GetPolicyRevision(ctx, s.db.Pool, orgID, instanceID, run.PolicyRevision)
+	if err != nil {
+		return run, nil
+	}
+	grant, err := s.store.GetGrant(ctx, s.db.Pool, orgID, policy.Binding.SuiteGrantID)
+	if err != nil || grant.RevokedAt != nil || grant.ArgoUIBaseURL == "" {
+		return run, nil
+	}
+	environment, err := s.store.GetEnvironmentPolicy(ctx, s.db.Pool, orgID, grant.EnvironmentPolicyID)
+	if err != nil {
+		return run, nil
+	}
+	if len(subject) > 0 && subject[0] != "" && s.targets != nil {
+		instance, err := s.instances.Get(ctx, s.db.Pool, instanceID)
+		if err != nil {
+			return run, nil
+		}
+		resolved, err := s.targets.ResolveResource(ctx, orgID, subject[0], resourcetargets.CapabilityDeploymentCluster, resourcetargets.ActionView,
+			resourcetargets.TargetResourceRef{Kind: resourcetargets.ResourceKindCluster, ID: instance.ClusterID}, nil)
+		if err != nil || resolved == nil || resolved.Target.ID != environment.TargetID {
+			return run, nil
+		}
+	}
+	attempt, err := s.store.GetLatestAttempt(ctx, s.db.Pool, run.ID, run.LatestAttempt)
+	if err != nil {
+		return run, nil
+	}
+	links, err := BuildRunLinks(grant.ArgoUIBaseURL, attempt, s.now())
+	if err == nil {
+		run.Links = links
+	}
+	return run, nil
 }
 
 func (s *Service) RetryRun(ctx context.Context, orgID, subject, instanceID, runID string) (*Run, error) {

@@ -212,6 +212,7 @@ type Run struct {
 	Outcome            json.RawMessage  `json:"outcome,omitempty"`
 	OutcomeDigest      string           `json:"outcomeDigest,omitempty"`
 	ExpiresAt          *time.Time       `json:"expiresAt,omitempty"`
+	Links              *RunLinks        `json:"links,omitempty"`
 	CreatedAt          time.Time        `json:"createdAt"`
 	UpdatedAt          time.Time        `json:"updatedAt"`
 }

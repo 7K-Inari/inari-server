@@ -413,11 +413,11 @@ type runGetInput struct {
 type runDetailOutput struct{ Body Run }
 
 func (h *Handler) getRun(ctx context.Context, in *runGetInput) (*runDetailOutput, error) {
-	org, _, err := h.authorize(ctx, in.Org, authz.RelationTenantRead, false)
+	org, id, err := h.authorize(ctx, in.Org, authz.RelationTenantRead, false)
 	if err != nil {
 		return nil, err
 	}
-	run, err := h.svc.GetRun(ctx, org.ID, in.ID, in.RunID)
+	run, err := h.svc.GetRun(ctx, org.ID, in.ID, in.RunID, "user:"+id.Subject)
 	if err != nil {
 		return nil, verificationHTTPError(err)
 	}

@@ -114,7 +114,7 @@ func (p *RegistryTemplateSource) pullCatalog(ctx context.Context) ([]catalog.Pac
 			Type: "template", Version: pkg.Manifest.Version, Channel: entry.Channel,
 			OCIRef: ref, Entry: entry, IndexDigest: indexArtifact.Digest,
 			ManifestJSON: manifestRaw, SkeletonDigest: pkg.SkeletonDigest, ApprovalPolicy: approvalPolicyFor(pkg.Manifest.Scaffold),
-			Schema: pkg.Schema, UIHints: pkg.UIHints,
+			Observability: pkg.Observability, Schema: pkg.Schema, UIHints: pkg.UIHints,
 		})
 	}
 	p.mu.Lock()

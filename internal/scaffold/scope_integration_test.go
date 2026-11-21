@@ -58,6 +58,24 @@ func TestCreateRunUserScopeBlockedWithoutConnection(t *testing.T) {
 	}
 }
 
+func TestCreateRunExactRejectsReviewedDigestDrift(t *testing.T) {
+	f := newITFixture(t)
+	defer f.srv.Close()
+	seedUserScopeTemplate(t, f)
+	const reviewed = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	_, _, _, err := f.svc.CreateRunExact(context.Background(), "dev-1", "org:acme", "template:go-service", "2.0.0", "", json.RawMessage(`{"name":"payments-api"}`), reviewed)
+	if !errors.Is(err, ErrTemplateDigestMismatch) {
+		t.Fatalf("CreateRunExact error = %v, want ErrTemplateDigestMismatch", err)
+	}
+	var runs int
+	if err := f.db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM scaffold_runs`).Scan(&runs); err != nil {
+		t.Fatal(err)
+	}
+	if runs != 0 {
+		t.Fatalf("digest drift persisted %d runs", runs)
+	}
+}
+
 func TestUserScopeRunFallsBackWithAudit(t *testing.T) {
 	f := newITFixture(t)
 	defer f.srv.Close()

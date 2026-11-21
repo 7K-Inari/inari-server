@@ -70,6 +70,14 @@ type Gate interface {
 	Gate(ctx context.Context, in approvals.GateInput) (*approvals.GateResult, error)
 }
 
+// DeploymentPlanApprovalHandler is implemented by the deploymentplan module
+// without introducing an orchestrator -> deploymentplan dependency cycle.
+// Resume revalidates before any apply side effect, then links the real result.
+type DeploymentPlanApprovalHandler interface {
+	RevalidateApprovedExecution(ctx context.Context, orgID, planID, requester string) error
+	LinkApprovedExecution(ctx context.Context, orgID, planID string, result *DeployResult) error
+}
+
 // PolicyChecker is the Policy Service seam (plan §5.11): PreFlight runs
 // request-time OPA checks before the approval gate; RenderCheck runs
 // render-time manifest checks before anything reaches tenant Git.
@@ -138,6 +146,10 @@ var ErrClusterMismatch = fmt.Errorf("orchestrator: cluster does not belong to te
 // ErrInstanceExists is returned when a deploy reuses an existing instance name.
 var ErrInstanceExists = fmt.Errorf("orchestrator: instance already exists")
 
+// ErrArtifactDigestMismatch prevents admission drift between a reviewed plan
+// (including an approval resume) and the artifact selected for execution.
+var ErrArtifactDigestMismatch = fmt.Errorf("orchestrator: admitted artifact digest does not match the reviewed pin")
+
 func isUniqueViolation(err error) bool {
 	if err == nil {
 		return false
@@ -165,6 +177,8 @@ type DeployRequest struct {
 	// to (Feature A); empty = the org's default repo.
 	RepoID         string
 	ArtifactDigest string
+	// DeploymentPlanID is internal common-plan approval context.
+	DeploymentPlanID string
 	// admissionVerified is set only by this service after admitVersion succeeds
 	// in the current invocation. Resume builds a fresh request and re-admits.
 	admissionVerified bool
@@ -184,16 +198,17 @@ type DeployResult struct {
 
 // Service is the Orchestrator module.
 type Service struct {
-	db             *db.DB
-	instances      *inventory.Store
-	catalog        CatalogResolver
-	clusters       ClusterResolver
-	targets        ResourceTargetResolver
-	orgPermissions authz.Authorizer
-	gate           Gate
-	policy         PolicyChecker // nil = no policy enforcement
-	queue          Queue
-	git            gitprovider.Resolver
+	db              *db.DB
+	instances       *inventory.Store
+	catalog         CatalogResolver
+	clusters        ClusterResolver
+	targets         ResourceTargetResolver
+	orgPermissions  authz.Authorizer
+	gate            Gate
+	deploymentPlans DeploymentPlanApprovalHandler
+	policy          PolicyChecker // nil = no policy enforcement
+	queue           Queue
+	git             gitprovider.Resolver
 	// gitRepos is the repo-aware resolver (Feature A). nil = legacy
 	// single-repo mode: deploys resolve via git.ForTenant(GitConfig(org)).
 	gitRepos      *gitprovider.RepoResolver
@@ -225,6 +240,11 @@ func (s *Service) WithResourceTargets(targets ResourceTargetResolver) *Service {
 // when an approval resumes without the original HTTP request context.
 func (s *Service) WithOrgPermissions(permissions authz.Authorizer) *Service {
 	s.orgPermissions = permissions
+	return s
+}
+
+func (s *Service) WithDeploymentPlanApprovalHandler(handler DeploymentPlanApprovalHandler) *Service {
+	s.deploymentPlans = handler
 	return s
 }
 
@@ -391,9 +411,13 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 	}); err != nil {
 		return nil, err
 	}
+	reviewedDigest := req.ArtifactDigest
 	digest, err := s.admitVersion(ctx, req, item, version)
 	if err != nil {
 		return nil, err
+	}
+	if reviewedDigest == "" {
+		reviewedDigest = digest
 	}
 	req.ArtifactDigest = digest
 	req.admissionVerified = true
@@ -401,7 +425,7 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 	gate, err := s.gate.Gate(ctx, approvals.GateInput{
 		OrgID: req.OrgID, Item: item, Version: version, ClusterID: req.ClusterID,
 		Spec: req.Spec, Requester: req.Requester, Name: req.Name, Namespace: req.Namespace,
-		OwnerTeam: req.OwnerTeam, Channel: req.Channel, RepoID: req.RepoID,
+		OwnerTeam: req.OwnerTeam, Channel: req.Channel, RepoID: req.RepoID, ArtifactDigest: reviewedDigest, DeploymentPlanID: req.DeploymentPlanID,
 	})
 	if err != nil {
 		return nil, err
@@ -419,26 +443,38 @@ func (s *Service) apply(ctx context.Context, req DeployRequest, item *types.Cata
 }
 
 func (s *Service) admitVersion(ctx context.Context, req DeployRequest, item *types.CatalogItem, version string) (string, error) {
+	digest := ""
+	chartDigest := ""
 	if item.SourceID == "" {
-		return "", nil
+		row, err := s.catalog.GetVersion(ctx, req.ItemID, version)
+		if err != nil {
+			return "", err
+		}
+		digest = row.ArtifactDigest
+		chartDigest = row.ChartDigest
+	} else {
+		admitter, ok := s.catalog.(VersionAdmitter)
+		if !ok {
+			return "", &artifactadmission.Error{Code: artifactadmission.CodeUnavailable, Ref: req.ItemID, Err: errors.New("catalog admission seam is not configured"), Temporary: true}
+		}
+		cluster, err := s.clusters.GetCluster(ctx, req.ClusterID)
+		if err != nil {
+			return "", err
+		}
+		environment := trustedsource.Environment(cluster.Labels["inari.dev/environment"])
+		admitted, err := admitter.AdmitVersion(ctx, req.ItemID, version, environment)
+		if err != nil {
+			return "", err
+		}
+		if admitted != nil && admitted.Version != nil {
+			digest = admitted.Version.ArtifactDigest
+			chartDigest = admitted.Version.ChartDigest
+		}
 	}
-	admitter, ok := s.catalog.(VersionAdmitter)
-	if !ok {
-		return "", &artifactadmission.Error{Code: artifactadmission.CodeUnavailable, Ref: req.ItemID, Err: errors.New("catalog admission seam is not configured"), Temporary: true}
+	if req.ArtifactDigest != "" && digest != req.ArtifactDigest && (chartDigest == "" || chartDigest != req.ArtifactDigest) {
+		return "", ErrArtifactDigestMismatch
 	}
-	cluster, err := s.clusters.GetCluster(ctx, req.ClusterID)
-	if err != nil {
-		return "", err
-	}
-	environment := trustedsource.Environment(cluster.Labels["inari.dev/environment"])
-	admitted, err := admitter.AdmitVersion(ctx, req.ItemID, version, environment)
-	if err != nil {
-		return "", err
-	}
-	if admitted != nil && admitted.Version != nil {
-		return admitted.Version.ArtifactDigest, nil
-	}
-	return "", nil
+	return digest, nil
 }
 
 // gitTarget is the resolved repo a write lands in: the registry row when
@@ -547,14 +583,12 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 		}
 	}
 
-	// Render through the source-agnostic pipeline (kro handler): the
-	// descriptor carries the catalog-backed RGD ref + the user spec; the
-	// handler materializes instance.yaml and the git-path Application —
-	// byte-identical to the pre-migration render.go output (parity-pinned
-	// by render_parity_test.go and the renderer golden tests).
-	desc := types.SourceDescriptor{
-		Kind: types.SourceKindKRO,
-		KRO:  &types.KROSource{RGDRef: rgdRef(req.ItemID, version), Instance: req.Spec},
+	// Resolve the source from the admitted catalog version on every initial
+	// render and approval resume. KRO output remains byte-identical; platform
+	// apps and direct charts use exact-digest Helm multi-source rendering.
+	desc, helmSource, err := s.sourceDescriptor(ctx, req, version)
+	if err != nil {
+		return nil, err
 	}
 	path := RepoPath(req.ClusterID, req.ItemID, instanceID)
 	// NOTE: for team-repo deploys the tenant ArgoCD needs repo-creds for
@@ -567,6 +601,7 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 		Clusters:   []renderer.ClusterTarget{{ID: req.ClusterID, Name: req.ClusterID}},
 		Prune:      true, // instance deploys keep their historical prune-on policy
 		Project:    "default",
+		Values:     req.Spec,
 		RepoURL:    RepoURL(target.repo), BaseBranch: target.branch,
 		Path: path,
 	})
@@ -576,13 +611,16 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 	var manifest []byte
 	files := make([]gitprovider.File, 0, len(rendered))
 	for _, f := range rendered {
-		if strings.HasSuffix(f.Path, "/instance.yaml") {
+		if !helmSource && strings.HasSuffix(f.Path, "/instance.yaml") {
+			manifest = f.Content
+		}
+		if helmSource && strings.HasSuffix(f.Path, "/application.yaml") {
 			manifest = f.Content
 		}
 		files = append(files, gitprovider.File{Path: f.Path, Content: f.Content})
 	}
 	if manifest == nil {
-		return nil, fmt.Errorf("orchestrator: kro render produced no instance manifest")
+		return nil, fmt.Errorf("orchestrator: %s render produced no policy/registration manifest", desc.Kind)
 	}
 	if err := s.renderCheck(ctx, req.OrgID, manifest); err != nil {
 		return nil, err
@@ -602,7 +640,12 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 	// For pull-request policy the app registers after the PR merges (M2:
 	// documented gap; the merge webhook wiring lands with Fleet Manager).
 	if gitResult.PRURL == "" {
-		if err := s.enqueueAppRegistration(ctx, req.ClusterID, instanceID, target, path, namespace); err != nil {
+		if helmSource {
+			err = s.enqueueAppManifestRegistration(ctx, req.ClusterID, instanceID, manifest)
+		} else {
+			err = s.enqueueAppRegistration(ctx, req.ClusterID, instanceID, target, path, namespace)
+		}
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -611,13 +654,18 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 	if existing != nil {
 		state = types.InstanceStateUpgrading
 	}
+	resourceRef := types.ResourceRef{Group: "kro.run", Kind: kindOf(manifest), Name: name, Namespace: namespace}
+	if helmSource {
+		resourceRef.Group = "helm.sh"
+		resourceRef.Kind = "HelmRelease"
+	}
 	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		if existing == nil {
 			inst := &types.ResourceInstance{
 				ID: instanceID, OrgID: req.OrgID, ClusterID: req.ClusterID,
 				CatalogItemID: req.ItemID, Version: version, ArtifactDigest: req.ArtifactDigest, OwnerTeam: req.OwnerTeam,
 				Spec:        req.Spec,
-				ResourceRef: types.ResourceRef{Group: "kro.run", Kind: kindOf(manifest), Name: name, Namespace: namespace},
+				ResourceRef: resourceRef,
 				Health:      "unknown", State: state, ManagementMode: types.ManagementModeAdopt,
 				CommitSHA: gitResult.CommitSHA, PRURL: gitResult.PRURL, RepoID: target.repoID, Generation: 1,
 			}
@@ -728,12 +776,24 @@ func (s *Service) FinalizePRMerge(ctx context.Context, orgID, prURL, mergeSHA st
 	if err != nil {
 		return false, err
 	}
-	// Enqueue before marking: the command ID is deterministic
-	// (register-argocd-app:<instanceID>), so a crash after enqueue but
-	// before the mark redelivers and re-enqueues idempotently — the
-	// reverse order could lose the registration entirely.
-	if err := s.enqueueAppRegistration(ctx, inst.ClusterID, inst.ID, target,
-		RepoPath(inst.ClusterID, inst.CatalogItemID, inst.ID), inst.ResourceRef.Namespace); err != nil {
+	// Enqueue before marking: command IDs are deterministic, so a crash after
+	// enqueue redelivers idempotently. Helm reads the exact merged multi-source
+	// Application rather than reconstructing a legacy single-source app.
+	_, helmSource, err := s.sourceDescriptor(ctx, DeployRequest{ItemID: inst.CatalogItemID, Spec: inst.Spec}, inst.Version)
+	if err != nil {
+		return false, err
+	}
+	if helmSource {
+		manifest, readErr := target.provider.ReadFile(ctx, target.repo, mergeSHA, RepoPath(inst.ClusterID, inst.CatalogItemID, inst.ID)+"/application.yaml")
+		if readErr != nil {
+			return false, readErr
+		}
+		err = s.enqueueAppManifestRegistration(ctx, inst.ClusterID, inst.ID, []byte(manifest))
+	} else {
+		err = s.enqueueAppRegistration(ctx, inst.ClusterID, inst.ID, target,
+			RepoPath(inst.ClusterID, inst.CatalogItemID, inst.ID), inst.ResourceRef.Namespace)
+	}
+	if err != nil {
 		return false, err
 	}
 	if err := s.markInstancePRMerged(ctx, orgID, inst.ID, prURL, mergeSHA); err != nil {
@@ -891,7 +951,7 @@ func (s *Service) revert(ctx context.Context, orgID, instanceID, toVersion, repo
 	gate, err := s.gate.Gate(ctx, approvals.GateInput{
 		OrgID: orgID, Item: item, Version: toVersion, ClusterID: existing.ClusterID,
 		Spec: existing.Spec, Requester: requester, OwnerTeam: existing.OwnerTeam,
-		InstanceID: instanceID, RepoID: existing.RepoID,
+		InstanceID: instanceID, RepoID: existing.RepoID, ArtifactDigest: req.ArtifactDigest,
 	})
 	if err != nil {
 		return nil, err
@@ -948,7 +1008,7 @@ func (s *Service) UpdateSpec(ctx context.Context, orgID, instanceID string, spec
 	gate, err := s.gate.Gate(ctx, approvals.GateInput{
 		OrgID: orgID, Item: item, Version: existing.Version, ClusterID: existing.ClusterID,
 		Spec: spec, Requester: requester, OwnerTeam: existing.OwnerTeam,
-		InstanceID: instanceID, Action: GateActionInstanceUpdate, RepoID: existing.RepoID,
+		InstanceID: instanceID, Action: GateActionInstanceUpdate, RepoID: existing.RepoID, ArtifactDigest: req.ArtifactDigest,
 	})
 	if err != nil {
 		return nil, err
@@ -963,10 +1023,10 @@ func (s *Service) UpdateSpec(ctx context.Context, orgID, instanceID string, spec
 // The authorization subject remains the original requester while requester is
 // the audit actor (system automation on an outbox resume).
 func (s *Service) UpdateSpecResume(ctx context.Context, orgID, instanceID string, spec json.RawMessage, requester string) error {
-	return s.UpdateSpecResumeAs(ctx, orgID, instanceID, spec, requester, requester)
+	return s.UpdateSpecResumeAs(ctx, orgID, instanceID, spec, requester, requester, "")
 }
 
-func (s *Service) UpdateSpecResumeAs(ctx context.Context, orgID, instanceID string, spec json.RawMessage, requester, authorizationSubject string) error {
+func (s *Service) UpdateSpecResumeAs(ctx context.Context, orgID, instanceID string, spec json.RawMessage, requester, authorizationSubject, expectedArtifactDigest string) error {
 	existing, err := s.instances.Get(ctx, s.db.Pool, instanceID)
 	if err != nil {
 		return err
@@ -987,6 +1047,7 @@ func (s *Service) UpdateSpecResumeAs(ctx context.Context, orgID, instanceID stri
 	_, err = s.applyWithEvent(ctx, DeployRequest{
 		OrgID: orgID, ClusterID: existing.ClusterID, ItemID: existing.CatalogItemID,
 		Version: existing.Version, OwnerTeam: existing.OwnerTeam, Spec: spec, Requester: requester,
+		ArtifactDigest: expectedArtifactDigest,
 	}, item, existing.Version, existing, types.EventInstanceUpdated, true)
 	return err
 }

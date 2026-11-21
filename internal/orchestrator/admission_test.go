@@ -42,6 +42,18 @@ func (c admissionCluster) GetCluster(context.Context, string) (*types.Cluster, e
 	return &types.Cluster{ID: "c1", OrgID: c.org, State: types.ClusterStateActive}, nil
 }
 
+func TestAdmissionRejectsUnexpectedArtifactDigest(t *testing.T) {
+	const admittedDigest = "sha256:52ccaee6d4dd272e54bfccda77738b42e1edf0e4a20c27e23f0b6c15d01aef79"
+	const reviewedDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	item := &types.CatalogItem{ID: "core/web-service", SourceID: "core", Name: "web-service"}
+	catalog := &denialCatalog{item: item, version: &types.CatalogItemVersion{ItemID: item.ID, Version: "1.0.0", ArtifactDigest: admittedDigest}}
+	service := NewService(nil, nil, catalog, admissionCluster{org: "org:1"}, nil, nil, nil, nil)
+	_, err := service.admitVersion(context.Background(), DeployRequest{OrgID: "org:1", ClusterID: "c1", ItemID: item.ID, Version: "1.0.0", ArtifactDigest: reviewedDigest}, item, "1.0.0")
+	if err == nil {
+		t.Fatal("admission accepted a digest different from the reviewed application pin")
+	}
+}
+
 func TestExternalAdmissionDenialStopsBeforeGit(t *testing.T) {
 	item := &types.CatalogItem{ID: "core/web-service", SourceID: "core", Name: "web-service"}
 	version := &types.CatalogItemVersion{ItemID: item.ID, Version: "1.0.0"}

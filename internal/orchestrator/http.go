@@ -213,6 +213,12 @@ func (h *Handler) enforceRepoWrite(ctx context.Context, id *authn.Identity, orgI
 	return huma.Error403Forbidden("not a member of the team that owns this repo")
 }
 
+// EnforceRepoWrite exposes the existing team-repo PEP to other deployment
+// entry points without duplicating its policy.
+func (h *Handler) EnforceRepoWrite(ctx context.Context, id *authn.Identity, orgID, repoID string) error {
+	return h.enforceRepoWrite(ctx, id, orgID, repoID)
+}
+
 // enforceRecordedRepoWrite runs the repo-write check against the repo the
 // instance was recorded against (mutations: upgrade/rollback/update/delete).
 // Unknown instances defer to the service's own 404.
@@ -231,6 +237,11 @@ func (h *Handler) enforceRecordedRepoWrite(ctx context.Context, id *authn.Identi
 		return nil
 	}
 	return h.enforceRepoWrite(ctx, id, orgID, inst.RepoID)
+}
+
+// EnforceRecordedRepoWrite applies the existing recorded-repo mutation PEP.
+func (h *Handler) EnforceRecordedRepoWrite(ctx context.Context, id *authn.Identity, orgID, instanceID string) error {
+	return h.enforceRecordedRepoWrite(ctx, id, orgID, instanceID)
 }
 
 type deployInput struct {

@@ -404,11 +404,19 @@ func (s *Service) admitTemplate(ctx context.Context, item *catalog.ItemView, ver
 	return admitter.AdmitVersion(ctx, item.ID, version, s.cfg.Environment)
 }
 
+var ErrTemplateDigestMismatch = errors.New("scaffold: template digest does not match reviewed plan")
+
 // CreateRun validates the wizard values against the template version's
 // schema and persists the run plus its initial (pending) step rows with
 // audit + outbox in one transaction. Retries with identical inputs return
 // the existing run (existed=true) instead of creating a duplicate.
 func (s *Service) CreateRun(ctx context.Context, actor, orgID, name, version, displayName string, values json.RawMessage) (*types.ScaffoldRun, []types.ScaffoldRunStep, bool, error) {
+	return s.CreateRunExact(ctx, actor, orgID, name, version, displayName, values, "")
+}
+
+// CreateRunExact additionally requires the admitted template digest to match
+// the digest reviewed in a DeploymentPlan before any run is persisted.
+func (s *Service) CreateRunExact(ctx context.Context, actor, orgID, name, version, displayName string, values json.RawMessage, expectedDigest string) (*types.ScaffoldRun, []types.ScaffoldRunStep, bool, error) {
 	it, err := s.resolveTemplate(ctx, orgID, name)
 	if err != nil {
 		return nil, nil, false, err
@@ -428,6 +436,9 @@ func (s *Service) CreateRun(ctx context.Context, actor, orgID, name, version, di
 	}
 	if admitted != nil && admitted.Version != nil {
 		ver = admitted.Version
+	}
+	if expectedDigest != "" && ver.ArtifactDigest != expectedDigest {
+		return nil, nil, false, ErrTemplateDigestMismatch
 	}
 	if err := validateValues(ver.Schema, values); err != nil {
 		return nil, nil, false, err

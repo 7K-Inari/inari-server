@@ -239,6 +239,12 @@ func (s *Service) EffectiveVersion(ctx context.Context, orgID, itemID, channel s
 	return resolveChannelVersion(pin, versions, itemID, channel)
 }
 
+// VersionPin exposes the tenant's exact version pin to deployment planners.
+// Empty means normal stable-channel candidate selection.
+func (s *Service) VersionPin(ctx context.Context, orgID, itemID string) (string, error) {
+	return s.store.GetPin(ctx, s.db.Pool, orgID, itemID)
+}
+
 // resolveChannelVersion applies pin-then-channel resolution to a version
 // list. Kept DB-free so the deploy-path error is unit-testable.
 func resolveChannelVersion(pin string, versions []types.CatalogItemVersion, itemID, channel string) (string, error) {

@@ -434,6 +434,92 @@ func TestVerificationGatesReadyLinksAndRejectsBlockedIntent(t *testing.T) {
 	}
 }
 
+func TestVerificationRejectsEvidenceOutsideApprovedSelection(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*observability.VerificationResult)
+	}{
+		{name: "folder", mutate: func(result *observability.VerificationResult) { result.Checks.Folder.Name = "acme-inc/other" }},
+		{name: "datasource name", mutate: func(result *observability.VerificationResult) { result.Checks.Datasources[0].Name = "other" }},
+		{name: "datasource logical", mutate: func(result *observability.VerificationResult) { result.Checks.Datasources[0].Logical = "other" }},
+		{name: "datasource type", mutate: func(result *observability.VerificationResult) { result.Checks.Datasources[0].Type = "loki" }},
+		{name: "owner team", mutate: func(result *observability.VerificationResult) { result.Checks.Access.Team = "other-team" }},
+		{name: "selected rule", mutate: func(result *observability.VerificationResult) { result.Checks.Rules[0].File = "rules/other.yaml" }},
+		{name: "extra rule", mutate: func(result *observability.VerificationResult) {
+			result.Checks.Rules = append(result.Checks.Rules, observability.RuleCheck{Check: observability.Check{State: "passed"}, File: "rules/service.yaml", Evaluation: observability.EvaluationLocal})
+		}},
+		{name: "extra dashboard", mutate: func(result *observability.VerificationResult) {
+			result.Checks.Dashboards = append(result.Checks.Dashboards, observability.DashboardCheck{Check: observability.Check{State: "passed"}, UID: "payments-api-extra", Title: "Extra", Slug: "extra"})
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, _, _, _, store := serviceFixture(t)
+			plan, err := svc.Submit(context.Background(), deployRequest(), "org-1", "acme-inc", "user-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan.Companion.CompanionInstanceID = "companion-1"
+			plan.Companion.State = "verification_pending"
+			if err := store.UpdatePlan(context.Background(), plan); err != nil {
+				t.Fatal(err)
+			}
+			result := verifiedResult(t, plan.Capability)
+			result.Companion.ID = plan.Companion.ID
+			result.Companion.Generation = plan.Companion.Generation
+			result.Target.ID = plan.Companion.TargetID
+			result.Target.Revision = plan.Companion.TargetRevision
+			result.Target.ClusterID = plan.Companion.TargetClusterID
+			result.App.PlanID = plan.ID
+			result.App.InstanceID = plan.AppInstanceID
+			result.App.SourceDigest = plan.App.Digest
+			result.App.Revision = plan.Companion.AppRevision
+			result.Pack.ItemID = plan.Companion.Pack.ItemID
+			result.Pack.Version = plan.Companion.Pack.Version
+			result.Pack.Digest = plan.Companion.Pack.Digest
+			tc.mutate(result)
+			if _, err := svc.ApplyVerification(context.Background(), "org-1", result); err == nil {
+				t.Fatal("mismatched evidence changed readiness")
+			}
+		})
+	}
+}
+
+func TestInstanceLinksRejectPersistedEvidenceThatDoesNotMatchSelection(t *testing.T) {
+	svc, _, _, _, store := serviceFixture(t)
+	plan, err := svc.Submit(context.Background(), deployRequest(), "org-1", "acme-inc", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Companion.CompanionInstanceID = "companion-1"
+	plan.Companion.State = "ready"
+	result := verifiedResult(t, plan.Capability)
+	result.Companion.ID = plan.Companion.ID
+	result.Companion.Generation = plan.Companion.Generation
+	result.Target.ID = plan.Companion.TargetID
+	result.Target.Revision = plan.Companion.TargetRevision
+	result.Target.ClusterID = plan.Companion.TargetClusterID
+	result.App.PlanID = plan.ID
+	result.App.InstanceID = plan.AppInstanceID
+	result.App.SourceDigest = plan.App.Digest
+	result.App.Revision = plan.Companion.AppRevision
+	result.Pack.ItemID = plan.Companion.Pack.ItemID
+	result.Pack.Version = plan.Companion.Pack.Version
+	result.Pack.Digest = plan.Companion.Pack.Digest
+	result.Checks.Datasources[0].Name = "other"
+	plan.Companion.Verification = result
+	if err := store.UpdatePlan(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	status, err := svc.InstanceObservability(context.Background(), "org-1", plan.AppInstanceID, "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Companion.Links) != 0 {
+		t.Fatal("links survived mismatched persisted datasource evidence")
+	}
+}
+
 func TestLegacyCatalogInstanceCanProvisionFromRecordedPin(t *testing.T) {
 	svc, _, _, _, _ := serviceFixture(t)
 	svc.WithInstances(&fakeInstances{view: &inventory.InstanceView{ResourceInstance: types.ResourceInstance{

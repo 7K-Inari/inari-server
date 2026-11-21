@@ -555,6 +555,10 @@ func (s *Service) InstanceObservability(ctx context.Context, orgID, instanceID, 
 		companion.Reason = "target_unavailable"
 		return out, nil
 	}
+	if err := validateReadyEvidence(plan, companion, target, companion.Verification); err != nil {
+		companion.Reason = "verification_stale"
+		return out, nil
+	}
 	values := map[string]string{
 		"namespace": plan.Deployment.Namespace, "instance": plan.Deployment.Name, "app": plan.Capability.App,
 		"org": plan.OrgSlug, "cluster": plan.AppClusterID, "datasource": selectedDatasource(companion),
@@ -598,6 +602,15 @@ func (s *Service) ApplyVerification(ctx context.Context, orgID string, result *o
 	}
 	if err := result.ValidateAt(s.now()); err != nil {
 		return nil, err
+	}
+	if result.Result == "passed" {
+		target, err := s.targets.Get(ctx, orgID, plan.Requester, companion.TargetID)
+		if err != nil {
+			return nil, fmt.Errorf("verification target unavailable: %w", err)
+		}
+		if err := validateReadyEvidence(plan, companion, target, result); err != nil {
+			return nil, err
+		}
 	}
 	companion.Verification = result
 	companion.State = "verification_failed"

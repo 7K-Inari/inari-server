@@ -99,6 +99,45 @@ func (s *Service) AdmitVersion(ctx context.Context, itemID, version string, envi
 	return out, nil
 }
 
+// AdmittedSmokeSuite is an exact suite artifact verified under a configured
+// source policy. The descriptor remains untrusted input until Evidence returns.
+type AdmittedSmokeSuite struct {
+	Source            trustedsource.Source
+	SourceFingerprint string
+	Descriptor        artifactadmission.ArtifactDescriptor
+	Evidence          *artifactadmission.EvidenceSummary
+}
+
+// AdmitSmokeSuite verifies one exact signed suite through the shared admission
+// verifier. It does not follow tags, channels, or caller publisher claims.
+func (s *Service) AdmitSmokeSuite(ctx context.Context, sourceID string, descriptor artifactadmission.ArtifactDescriptor, environment trustedsource.Environment) (*AdmittedSmokeSuite, error) {
+	if s.admission == nil {
+		return nil, &artifactadmission.Error{Code: artifactadmission.CodeUnavailable, Err: errors.New("suite admission is not configured"), Temporary: true}
+	}
+	source, found := s.policies[sourceID]
+	if !found {
+		return nil, &artifactadmission.Error{Code: artifactadmission.CodeInvalidRequest, Ref: descriptor.Ref, Err: errors.New("source is not configured")}
+	}
+	if descriptor.MediaType != trustedsource.SmokeSuiteMediaType {
+		return nil, &artifactadmission.Error{Code: artifactadmission.CodeInvalidRequest, Ref: descriptor.Ref, Err: errors.New("artifact must use the signed smoke-suite media type")}
+	}
+	fingerprint, err := (&trustedsource.File{}).Fingerprint(source)
+	if err != nil {
+		return nil, err
+	}
+	// App identity is derived from the configured source repository, never
+	// accepted from the descriptor import caller.
+	descriptor.App = evidenceApplication(source)
+	evidence, err := s.admission.AdmitArtifact(ctx, artifactadmission.Request{
+		Source: source, Role: trustedsource.ArtifactSmokeSuite, Artifact: descriptor,
+		TargetEnvironment: environment, Now: s.now(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &AdmittedSmokeSuite{Source: source, SourceFingerprint: fingerprint, Descriptor: descriptor, Evidence: evidence}, nil
+}
+
 // fixtureBackend is used only by NewService's local FixturePuller path. It
 // keeps existing internal integration fixtures independent of a live registry;
 // production sources are constructed through NewServiceWithSources.

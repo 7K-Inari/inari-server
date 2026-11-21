@@ -77,13 +77,13 @@ type Service struct {
 	executor  AppExecutor
 	instances InstanceResolver
 	teams     TeamLister
-	gate      GateStatus
+	gate      DeploymentGateStatus
 	now       func() time.Time
 	newID     func() string
 }
 
 func NewService(d *db.DB, store Store) *Service {
-	return &Service{db: d, store: store, now: time.Now, newID: func() string { return uuid.NewString() }, gate: GateStatus{Reason: "sibling_8f8c472a_phase_3_unconfirmed"}}
+	return &Service{db: d, store: store, now: time.Now, newID: func() string { return uuid.NewString() }, gate: DeploymentGateStatus{Reason: "sibling_8f8c472a_phase_3_unconfirmed"}}
 }
 
 func (s *Service) WithDependencies(cat Catalog, targets Targets, charts ChartFetcher, executor AppExecutor) *Service {
@@ -122,7 +122,7 @@ func (s *Service) validateOwnerTeam(ctx context.Context, orgID, ownerTeam string
 
 // WithGate is intended for contract tests and for the independently confirmed
 // renderer handoff. No configuration flag enables the production gate.
-func (s *Service) WithGate(gate GateStatus) *Service {
+func (s *Service) WithGate(gate DeploymentGateStatus) *Service {
 	s.gate = gate
 	return s
 }

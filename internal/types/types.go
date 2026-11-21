@@ -120,21 +120,26 @@ const (
 	EventClusterKubectlProxyOpen  = "cluster.kubectl_proxy_open"
 	EventClusterKubectlProxyClose = "cluster.kubectl_proxy_close"
 
-	EventCatalogItemUpserted      = "catalog.item_upserted"
-	EventCatalogVisibilityChanged = "catalog.visibility.changed"
-	EventApprovalRequested        = "approval.requested"
-	EventApprovalDecided          = "approval.decided"
-	EventApprovalCancelled        = "approval.cancelled"
-	EventApprovalExpired          = "approval.expired"
-	EventApprovalConfigUpdated    = "approvals.config.updated"
-	EventDeployRequested          = "deploy.requested"
-	EventDeployTargetDenied       = "deploy.target_denied"
-	EventInstanceCreated          = "instance.created"
-	EventInstanceStatus           = "instance.status"
-	EventInstanceUpgraded         = "instance.upgraded"
-	EventInstanceUpdated          = "instance.updated"
-	EventInstanceDeleted          = "instance.deleted"
-	EventInstanceRolledBack       = "instance.rolled_back"
+	EventCatalogItemUpserted          = "catalog.item_upserted"
+	EventCatalogVisibilityChanged     = "catalog.visibility.changed"
+	EventApprovalRequested            = "approval.requested"
+	EventApprovalDecided              = "approval.decided"
+	EventApprovalCancelled            = "approval.cancelled"
+	EventApprovalExpired              = "approval.expired"
+	EventApprovalConfigUpdated        = "approvals.config.updated"
+	EventDeployRequested              = "deploy.requested"
+	EventDeployTargetDenied           = "deploy.target_denied"
+	EventInstanceCreated              = "instance.created"
+	EventInstanceStatus               = "instance.status"
+	EventInstanceUpgraded             = "instance.upgraded"
+	EventInstanceUpdated              = "instance.updated"
+	EventInstanceDeleted              = "instance.deleted"
+	EventInstanceRolledBack           = "instance.rolled_back"
+	EventVerificationRunStarted       = "verification.run_started"
+	EventVerificationPassed           = "verification.passed"
+	EventVerificationFailed           = "verification.failed"
+	EventVerificationBlocked          = "verification.blocked"
+	EventVerificationPromotionBlocked = "verification.promotion_blocked"
 
 	// First-class addons (Feature C): lifecycle events from the addons
 	// service plus health/sync folded from the status stream.
@@ -680,22 +685,27 @@ type ResourceRef struct {
 
 // ResourceInstance is one deployed catalog item on a cluster (plan §5.9).
 type ResourceInstance struct {
-	ID             string          `json:"id"`
-	OrgID          string          `json:"orgId"`
-	ClusterID      string          `json:"clusterId"`
-	CatalogItemID  string          `json:"catalogItemId"`
-	Version        string          `json:"version"`
-	ArtifactDigest string          `json:"artifactDigest,omitempty"`
-	OwnerTeam      string          `json:"ownerTeam"`
-	Spec           json.RawMessage `json:"spec"`
-	ResourceRef    ResourceRef     `json:"resourceRef"`
-	Health         string          `json:"health"`
-	SyncState      string          `json:"syncState,omitempty"`
-	StatusMessage  string          `json:"statusMessage,omitempty"`
-	State          InstanceState   `json:"state"`
-	ManagementMode ManagementMode  `json:"managementMode"`
-	CommitSHA      string          `json:"commitSha,omitempty"`
-	PRURL          string          `json:"prUrl,omitempty"`
+	ID                  string          `json:"id"`
+	UID                 string          `json:"uid"`
+	OrgID               string          `json:"orgId"`
+	ClusterID           string          `json:"clusterId"`
+	CatalogItemID       string          `json:"catalogItemId"`
+	Version             string          `json:"version"`
+	ArtifactDigest      string          `json:"artifactDigest,omitempty"`
+	OwnerTeam           string          `json:"ownerTeam"`
+	Spec                json.RawMessage `json:"spec"`
+	ResourceRef         ResourceRef     `json:"resourceRef"`
+	Health              string          `json:"health"`
+	SyncState           string          `json:"syncState,omitempty"`
+	StatusMessage       string          `json:"statusMessage,omitempty"`
+	State               InstanceState   `json:"state"`
+	ManagementMode      ManagementMode  `json:"managementMode"`
+	CommitSHA           string          `json:"commitSha,omitempty"`
+	ObservedRevision    string          `json:"observedRevision,omitempty"`
+	SyncOperationID     string          `json:"syncOperationId,omitempty"`
+	SyncOperationPhase  string          `json:"syncOperationPhase,omitempty"`
+	OperationFinishedAt *time.Time      `json:"operationFinishedAt,omitempty"`
+	PRURL               string          `json:"prUrl,omitempty"`
 	// RepoID is the tenant_git_repos row this instance's manifests were
 	// committed to (Feature A). Empty predates the column; readers fall
 	// back to the cluster's baseline binding.
@@ -995,12 +1005,18 @@ type DeployRequestedPayload struct {
 
 // InstancePayload is the outbox payload for instance lifecycle events.
 type InstancePayload struct {
-	OrgID      string `json:"orgId"`
-	InstanceID string `json:"instanceId"`
-	ItemID     string `json:"itemId"`
-	ClusterID  string `json:"clusterId"`
-	Version    string `json:"version,omitempty"`
-	Health     string `json:"health,omitempty"`
+	OrgID               string     `json:"orgId"`
+	InstanceID          string     `json:"instanceId"`
+	InstanceUID         string     `json:"instanceUid,omitempty"`
+	ItemID              string     `json:"itemId"`
+	ClusterID           string     `json:"clusterId"`
+	Version             string     `json:"version,omitempty"`
+	Health              string     `json:"health,omitempty"`
+	ArtifactDigest      string     `json:"artifactDigest,omitempty"`
+	ObservedRevision    string     `json:"observedRevision,omitempty"`
+	SyncOperationID     string     `json:"syncOperationId,omitempty"`
+	SyncOperationPhase  string     `json:"syncOperationPhase,omitempty"`
+	OperationFinishedAt *time.Time `json:"operationFinishedAt,omitempty"`
 }
 
 // AddonPayload is the outbox payload for addon lifecycle/status events
@@ -1759,15 +1775,16 @@ const (
 
 // NotificationDelivery records one attempted delivery for retry/audit.
 type NotificationDelivery struct {
-	ID          string          `json:"id"`
-	EndpointID  string          `json:"endpointId"`
-	EventType   string          `json:"eventType"`
-	Payload     json.RawMessage `json:"payload"`
-	Status      string          `json:"status"`
-	Attempts    int             `json:"attempts"`
-	LastError   string          `json:"lastError,omitempty"`
-	CreatedAt   time.Time       `json:"createdAt"`
-	DeliveredAt *time.Time      `json:"deliveredAt,omitempty"`
+	ID            string          `json:"id"`
+	EndpointID    string          `json:"endpointId"`
+	EventType     string          `json:"eventType"`
+	Payload       json.RawMessage `json:"payload"`
+	Status        string          `json:"status"`
+	Attempts      int             `json:"attempts"`
+	LastError     string          `json:"lastError,omitempty"`
+	CreatedAt     time.Time       `json:"createdAt"`
+	DeliveredAt   *time.Time      `json:"deliveredAt,omitempty"`
+	OutboxEventID *int64          `json:"-"`
 }
 
 // Tenant Zone lifecycle (plan §5.12): the resumable, idempotent vending

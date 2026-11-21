@@ -211,8 +211,9 @@ type Service struct {
 	git             gitprovider.Resolver
 	// gitRepos is the repo-aware resolver (Feature A). nil = legacy
 	// single-repo mode: deploys resolve via git.ForTenant(GitConfig(org)).
-	gitRepos *gitprovider.RepoResolver
-	audit    *audit.Store
+	gitRepos      *gitprovider.RepoResolver
+	audit         *audit.Store
+	promotionGate PromotionGate
 	// renders is the source-agnostic render pipeline (Feature C, parent
 	// plan §6): deploy/update/rollback build a kro SourceDescriptor and
 	// render through the registry instead of calling render.go directly.
@@ -540,6 +541,9 @@ func (s *Service) applyWithEvent(ctx context.Context, req DeployRequest, item *t
 			return nil, err
 		}
 		req.ArtifactDigest = digest
+	}
+	if err := s.checkPromotion(ctx, req, existing, eventType, version); err != nil {
+		return nil, err
 	}
 	selector := req.RepoID
 	if existing != nil {

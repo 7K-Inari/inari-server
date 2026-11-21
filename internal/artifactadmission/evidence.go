@@ -86,41 +86,43 @@ func validateProvenanceBinding(statement *trustedsource.Statement, req Request, 
 	return nil
 }
 
-func (v *Verifier) verifyTestEvidence(ctx context.Context, ref string, req Request, expected PublisherExpectation) (string, error) {
+func (v *Verifier) verifyTestEvidence(ctx context.Context, ref string, req Request, expected PublisherExpectation) (string, *trustedsource.TestEvidence, error) {
 	attestations, err := v.backend.VerifyAttestations(ctx, ref, expected, trustedsource.TestEvidencePredicateType)
 	if err != nil {
-		return "", admissionBackendError(CodeUnavailable, ref, err)
+		return "", nil, admissionBackendError(CodeUnavailable, ref, err)
 	}
 	if len(attestations) == 0 {
-		return "", &Error{Code: CodeTestEvidenceInvalid, Ref: ref, Err: errors.New("missing signed test evidence")}
+		return "", nil, &Error{Code: CodeTestEvidenceInvalid, Ref: ref, Err: errors.New("missing signed test evidence")}
 	}
 	evidenceDigest := ""
+	var matchedEvidence *trustedsource.TestEvidence
 	for _, attestation := range attestations {
 		if attestation.PredicateType != trustedsource.TestEvidencePredicateType {
 			continue
 		}
 		evidence, err := trustedsource.DecodeTestEvidence(attestation.Payload)
 		if err != nil {
-			return "", &Error{Code: CodeTestEvidenceInvalid, Ref: ref, Err: err}
+			return "", nil, &Error{Code: CodeTestEvidenceInvalid, Ref: ref, Err: err}
 		}
 		maxAge, err := req.Source.PluginCompatibilityAge()
 		if err != nil {
-			return "", &Error{Code: CodeInvalidRequest, Ref: ref, Err: err}
+			return "", nil, &Error{Code: CodeInvalidRequest, Ref: ref, Err: err}
 		}
 		if err := evidence.ValidateAt(req.Now, maxAge, req.RequireUICompatibility); err != nil {
-			return "", &Error{Code: CodeTestEvidenceInvalid, Ref: ref, Err: err}
+			return "", nil, &Error{Code: CodeTestEvidenceInvalid, Ref: ref, Err: err}
 		}
 		if err := validateEvidenceBinding(evidence, req, expected); err != nil {
-			return "", &Error{Code: CodeTestEvidenceInvalid, Ref: ref, Err: err}
+			return "", nil, &Error{Code: CodeTestEvidenceInvalid, Ref: ref, Err: err}
 		}
 		if evidenceDigest == "" {
 			evidenceDigest = evidence.EvidenceDigest
+			matchedEvidence = evidence
 		}
 	}
 	if evidenceDigest != "" {
-		return evidenceDigest, nil
+		return evidenceDigest, matchedEvidence, nil
 	}
-	return "", &Error{Code: CodeTestEvidenceInvalid, Ref: ref, Err: errors.New("no test-evidence statement matched the required predicate")}
+	return "", nil, &Error{Code: CodeTestEvidenceInvalid, Ref: ref, Err: errors.New("no test-evidence statement matched the required predicate")}
 }
 
 func validateEvidenceBinding(evidence *trustedsource.TestEvidence, req Request, expected PublisherExpectation) error {

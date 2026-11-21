@@ -42,6 +42,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/tenantzonefactory"
 	"github.com/7K-Inari/inari-server/internal/usergit"
+	"github.com/7K-Inari/inari-server/internal/verification"
 )
 
 // Deps carries every dependency the REST handlers need. The live binary
@@ -58,6 +59,7 @@ type Deps struct {
 	Inventory          *inventory.Service
 	PlatformResources  *platformresources.Service
 	Orchestrator       *orchestrator.Service
+	Verification       *verification.Service
 	GitRepos           *gitrepos.Service
 	ResourceTargets    *resourcetargets.Service
 	DeploymentPlans    *deploymentplan.Service
@@ -137,6 +139,7 @@ func Register(api huma.API, d Deps) {
 		WithAllowedAPIBases(d.AllowedAPIBases).
 		WithRepoWriteEnforcement(d.OrchestratorTeams, d.OrchestratorRepos, d.OrchestratorInstances)
 	orchestratorHandler.RegisterRoutes(api)
+	verification.NewHandler(d.Verification, d.Tenancy, d.Authz).RegisterRoutes(api)
 	gitrepos.NewHandler(d.GitRepos, d.Tenancy, d.Authz).RegisterRoutes(api)
 	resourcetargets.NewHandler(d.ResourceTargets, d.Tenancy, d.Authz).RegisterRoutes(api)
 	deploymentplan.NewHandler(d.DeploymentPlans, d.Tenancy, d.Authz).WithRepoWriteEnforcement(orchestratorHandler).RegisterRoutes(api)

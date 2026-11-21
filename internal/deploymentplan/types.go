@@ -95,7 +95,7 @@ type PlanRequest struct {
 	IdempotencyKey  string             `json:"idempotencyKey"`
 }
 
-type GateStatus struct {
+type DeploymentGateStatus struct {
 	CompanionRendering   bool   `json:"companionRendering"`
 	DeployedVerification bool   `json:"deployedVerification"`
 	Reason               string `json:"reason,omitempty"`
@@ -152,7 +152,7 @@ type Plan struct {
 	RenderIntent     *RenderIntent             `json:"renderIntent,omitempty"`
 	PlanFingerprint  string                    `json:"planFingerprint"`
 	State            string                    `json:"state"`
-	Gate             GateStatus                `json:"gate"`
+	Gate             DeploymentGateStatus                `json:"gate"`
 	AppInstanceID    string                    `json:"appInstanceId,omitempty"`
 	AppClusterID     string                    `json:"appClusterId,omitempty"`
 	ScaffoldRunID    string                    `json:"scaffoldRunId,omitempty"`

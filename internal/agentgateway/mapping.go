@@ -64,10 +64,14 @@ func structJSON(s *structpb.Struct) []byte {
 // StatusUpdate is the internal form of an agent status-update event
 // (inventory seam — defined here to keep the gateway decoupled).
 type StatusUpdate struct {
-	Resource types.ResourceRef
-	Health   string
-	Sync     string
-	Message  string
+	Resource            types.ResourceRef
+	Health              string
+	Sync                string
+	Message             string
+	ObservedRevision    string
+	SyncOperationID     string
+	SyncOperationPhase  string
+	OperationFinishedAt time.Time
 	// ObservedAt is the agent-side observation time (zero when the agent did
 	// not report one).
 	ObservedAt time.Time
@@ -106,9 +110,12 @@ func mapSync(s agentv1.SyncState) string {
 // mapStatusUpdate converts the contract message to the internal form.
 func mapStatusUpdate(upd *agentv1.StatusUpdate) StatusUpdate {
 	out := StatusUpdate{
-		Health:  mapHealth(upd.Health),
-		Sync:    mapSync(upd.Sync),
-		Message: upd.Message,
+		Health:             mapHealth(upd.Health),
+		Sync:               mapSync(upd.Sync),
+		Message:            upd.Message,
+		ObservedRevision:   upd.ObservedRevision,
+		SyncOperationID:    upd.SyncOperationId,
+		SyncOperationPhase: upd.SyncOperationPhase,
 	}
 	if upd.Resource != nil {
 		out.Resource = types.ResourceRef{
@@ -119,6 +126,9 @@ func mapStatusUpdate(upd *agentv1.StatusUpdate) StatusUpdate {
 	}
 	if upd.ObservedAt != nil {
 		out.ObservedAt = upd.ObservedAt.AsTime()
+	}
+	if upd.OperationFinishedAt != nil {
+		out.OperationFinishedAt = upd.OperationFinishedAt.AsTime()
 	}
 	return out
 }

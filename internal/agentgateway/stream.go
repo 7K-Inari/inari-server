@@ -239,6 +239,21 @@ func (s *session) handleEvent(ctx context.Context, ev *agentv1.Event) ([]*agentv
 			}
 		}
 
+	case agentv1.EventType_EVENT_TYPE_VERIFICATION_REPORT:
+		var report agentv1.VerificationReport
+		if err := ev.Payload.UnmarshalTo(&report); err != nil {
+			slog.Warn("agentgateway: bad verification-report payload", "cluster", s.cluster.ID, "error", err)
+			return out, nil
+		}
+		if s.gw.verificationSink != nil {
+			if err := s.gw.verificationSink.ApplyReport(ctx, s.cluster.OrgID, s.cluster.ID, &report); err != nil {
+				// Permanent binding failures and transient store failures both remain
+				// drop-and-log on the stream. Reconnect resync supplies current state;
+				// an authenticated workload cannot force a reconnect loop.
+				slog.Warn("agentgateway: verification report rejected", "cluster", s.cluster.ID, "run", report.RunId, "error", err)
+			}
+		}
+
 	case agentv1.EventType_EVENT_TYPE_COMMAND_ACK, agentv1.EventType_EVENT_TYPE_COMMAND_NACK:
 		var ack agentv1.CommandAck
 		if err := ev.Payload.UnmarshalTo(&ack); err != nil {

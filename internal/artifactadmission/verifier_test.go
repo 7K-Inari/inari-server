@@ -140,7 +140,7 @@ func validEvidence(expected PublisherExpectation, artifact ArtifactDescriptor) *
 }
 
 func newTestBackend(req Request) *fakeBackend {
-	return &fakeBackend{request: req, artifact: &oci.Artifact{Digest: req.Artifact.Digest, MediaType: req.Artifact.MediaType}, omit: map[string]bool{}}
+	return &fakeBackend{request: req, artifact: &oci.Artifact{Digest: req.Artifact.Digest, MediaType: req.Artifact.MediaType, Files: map[string][]byte{"suite.yaml": []byte("suiteSchema: inari.smoke.v1\n")}}, omit: map[string]bool{}}
 }
 
 func TestAdmitOfficialArtifact(t *testing.T) {
@@ -152,6 +152,9 @@ func TestAdmitOfficialArtifact(t *testing.T) {
 	}
 	if summary.Unsigned || summary.ArtifactDigest != testDigest || summary.ProvenanceDigest != testDigest || summary.TestEvidenceDigest != testDigest {
 		t.Fatalf("summary = %+v", summary)
+	}
+	if summary.Files == nil || summary.TestEvidence == nil || summary.TestEvidence.App != req.Artifact.App {
+		t.Fatalf("verified artifact and evidence were not returned: %+v", summary)
 	}
 	if backend.attestCalls != 2 {
 		t.Fatalf("attestation calls = %d, want provenance and test evidence", backend.attestCalls)

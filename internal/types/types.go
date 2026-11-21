@@ -648,11 +648,12 @@ type ApprovalRequest struct {
 	RepoID string `json:"repoId,omitempty"`
 	// ArtifactDigest is the admitted application pin carried through approval
 	// resume. It is internal execution context, not a mutable API field.
-	ArtifactDigest string     `json:"-"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	DecidedAt      *time.Time `json:"decidedAt,omitempty"`
-	ExpiresAt      *time.Time `json:"expiresAt,omitempty"`
-	CancelledBy    string     `json:"cancelledBy,omitempty"`
+	ArtifactDigest   string     `json:"-"`
+	DeploymentPlanID string     `json:"-"`
+	CreatedAt        time.Time  `json:"createdAt"`
+	DecidedAt        *time.Time `json:"decidedAt,omitempty"`
+	ExpiresAt        *time.Time `json:"expiresAt,omitempty"`
+	CancelledBy      string     `json:"cancelledBy,omitempty"`
 }
 
 // InstanceState is the resource instance lifecycle (plan §5.11).

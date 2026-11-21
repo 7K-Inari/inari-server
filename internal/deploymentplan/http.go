@@ -13,6 +13,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/7K-Inari/inari-server/internal/httpserver"
 	"github.com/7K-Inari/inari-server/internal/resourcetargets"
+	"github.com/7K-Inari/inari-server/internal/scaffold"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -96,9 +97,9 @@ func httpError(err error) error {
 		return huma.Error403Forbidden("resource target grant required")
 	case errors.Is(err, resourcetargets.ErrTargetNotFound), errors.Is(err, catalog.ErrItemNotFound), errors.Is(err, catalog.ErrVersionNotFound), errors.Is(err, ErrPlanNotFound), errors.Is(err, ErrCompanionNotFound):
 		return huma.Error404NotFound(err.Error())
-	case errors.Is(err, resourcetargets.ErrStaleRevision), errors.Is(err, resourcetargets.ErrUnavailable), errors.Is(err, resourcetargets.ErrConflict), errors.Is(err, ErrPlanConflict):
+	case errors.Is(err, resourcetargets.ErrStaleRevision), errors.Is(err, resourcetargets.ErrUnavailable), errors.Is(err, resourcetargets.ErrConflict), errors.Is(err, ErrPlanConflict), errors.Is(err, scaffold.ErrTemplateDigestMismatch):
 		return huma.Error409Conflict(err.Error())
-	case errors.Is(err, resourcetargets.ErrInvalidInput), errors.As(err, &targetValidation), errors.Is(err, ErrCapabilityMetadataMissing), errors.Is(err, ErrCapabilityConflict), errors.Is(err, ErrPackRenderContract), errors.Is(err, ErrManagedChartNativeConflict):
+	case errors.Is(err, resourcetargets.ErrInvalidInput), errors.Is(err, ErrInvalidPlanInput), errors.As(err, &targetValidation), errors.Is(err, ErrCapabilityMetadataMissing), errors.Is(err, ErrCapabilityConflict), errors.Is(err, ErrPackRenderContract), errors.Is(err, ErrManagedChartNativeConflict):
 		return huma.Error422UnprocessableEntity(err.Error())
 	case errors.As(err, &targetAuthorization), artifactadmission.IsTemporary(err):
 		return huma.Error503ServiceUnavailable(err.Error())

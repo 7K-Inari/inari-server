@@ -944,6 +944,7 @@ func run() error {
 		WithDependencies(catalogSvc, resourceTargetsSvc, &oci.Fetcher{}, deploymentplan.NewExecutor(orchestratorSvc, scaffoldSvc)).
 		WithInstances(inventorySvc).
 		WithTeams(svc)
+	orchestratorSvc.WithDeploymentPlanApprovalHandler(deploymentPlanSvc)
 
 	// Fleet Manager (plan §5.11): owns ClusterSets (policy service consumes
 	// them via the SetResolver seam), staged rollouts, agent channels,

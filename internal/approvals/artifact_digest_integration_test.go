@@ -31,7 +31,7 @@ func TestApprovalArtifactDigestRoundTrip(t *testing.T) {
 	}
 	const digest = "sha256:52ccaee6d4dd272e54bfccda77738b42e1edf0e4a20c27e23f0b6c15d01aef79"
 	store := NewStore(database)
-	request := &types.ApprovalRequest{OrgID: "org:1", ItemID: "core/web-service", Version: "1.0.0", ClusterID: "c1", Spec: json.RawMessage(`{}`), Requester: "user:test", ArtifactDigest: digest}
+	request := &types.ApprovalRequest{OrgID: "org:1", ItemID: "core/web-service", Version: "1.0.0", ClusterID: "c1", Spec: json.RawMessage(`{}`), Requester: "user:test", ArtifactDigest: digest, DeploymentPlanID: "dp-1"}
 	if err := store.create(ctx, database.Pool, request); err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestApprovalArtifactDigestRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ArtifactDigest != digest {
-		t.Fatalf("approval artifact digest = %q, want %q", got.ArtifactDigest, digest)
+	if got.ArtifactDigest != digest || got.DeploymentPlanID != "dp-1" {
+		t.Fatalf("approval execution pins = %q / %q", got.ArtifactDigest, got.DeploymentPlanID)
 	}
 }

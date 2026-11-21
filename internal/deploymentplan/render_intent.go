@@ -24,11 +24,11 @@ func ApplyManagedChartOverlay(raw json.RawMessage) (json.RawMessage, error) {
 	dec.UseNumber()
 	var spec map[string]any
 	if err := dec.Decode(&spec); err != nil {
-		return nil, fmt.Errorf("deployment spec must be a JSON object: %w", err)
+		return nil, invalidPlanInput("deployment spec must be a JSON object: %v", err)
 	}
 	var extra any
 	if err := dec.Decode(&extra); err != io.EOF {
-		return nil, errors.New("deployment spec must contain one JSON object")
+		return nil, invalidPlanInput("deployment spec must contain one JSON object")
 	}
 	if spec == nil {
 		spec = map[string]any{}
@@ -36,7 +36,7 @@ func ApplyManagedChartOverlay(raw json.RawMessage) (json.RawMessage, error) {
 	obs, ok := spec["observability"].(map[string]any)
 	if !ok {
 		if _, exists := spec["observability"]; exists {
-			return nil, errors.New("observability must be an object")
+			return nil, invalidPlanInput("observability must be an object")
 		}
 		obs = map[string]any{}
 		spec["observability"] = obs
@@ -48,7 +48,7 @@ func ApplyManagedChartOverlay(raw json.RawMessage) (json.RawMessage, error) {
 	rules, ok := obs["rules"].(map[string]any)
 	if !ok {
 		if _, exists := obs["rules"]; exists {
-			return nil, errors.New("observability.rules must be an object")
+			return nil, invalidPlanInput("observability.rules must be an object")
 		}
 		rules = map[string]any{}
 		obs["rules"] = rules
@@ -62,7 +62,7 @@ func ApplyManagedChartOverlay(raw json.RawMessage) (json.RawMessage, error) {
 
 func BuildPackRenderIntent(capability *observability.Capability, selection json.RawMessage, orgSlug, ownerTeam string) (*RenderIntent, error) {
 	if capability == nil {
-		return nil, errors.New("observability capability is required")
+		return nil, invalidPlanInput("observability capability is required")
 	}
 	dec := json.NewDecoder(bytes.NewReader(selection))
 	dec.DisallowUnknownFields()
@@ -72,13 +72,13 @@ func BuildPackRenderIntent(capability *observability.Capability, selection json.
 		Evaluation observability.Evaluation `json:"evaluation"`
 	}
 	if err := dec.Decode(&selected); err != nil {
-		return nil, fmt.Errorf("invalid provider-normalized selection: %w", err)
+		return nil, invalidPlanInput("invalid provider-normalized selection: %v", err)
 	}
 	if selected.Folder == "" || selected.Datasource == "" || orgSlug == "" || ownerTeam == "" {
-		return nil, errors.New("folder, datasource, org, and owner team are required")
+		return nil, invalidPlanInput("folder, datasource, org, and owner team are required")
 	}
 	if selected.Evaluation != observability.EvaluationCentral && selected.Evaluation != observability.EvaluationLocal {
-		return nil, errors.New("evaluation must be central or local")
+		return nil, invalidPlanInput("evaluation must be central or local")
 	}
 	supported := false
 	ruleFound := false
@@ -89,7 +89,7 @@ func BuildPackRenderIntent(capability *observability.Capability, selection json.
 		ruleFound = ruleFound || rule.Evaluation == selected.Evaluation
 	}
 	if !supported || !ruleFound {
-		return nil, fmt.Errorf("capability does not support %s dashboard/rule rendering", selected.Evaluation)
+		return nil, invalidPlanInput("capability does not support %s dashboard/rule rendering", selected.Evaluation)
 	}
 	packSpec := map[string]any{
 		"org": orgSlug, "namespace": "monitoring", "app": capability.App, "team": ownerTeam,

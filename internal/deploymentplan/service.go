@@ -1,6 +1,7 @@
 package deploymentplan
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 
 	observability "github.com/7K-Inari/inari-api/contract/observability/v1"
 	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
+	"github.com/7K-Inari/inari-server/internal/artifactadmission"
 	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/inventory"
@@ -20,10 +22,16 @@ import (
 )
 
 var ErrNotImplemented = errors.New("deployment plan not implemented")
+var ErrInvalidPlanInput = errors.New("invalid deployment plan input")
+
+func invalidPlanInput(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", ErrInvalidPlanInput, fmt.Sprintf(format, args...))
+}
 
 type Catalog interface {
 	GetItemByID(ctx context.Context, itemID string) (*types.CatalogItem, error)
 	EffectiveVersion(ctx context.Context, orgID, itemID, channel string) (string, error)
+	VersionPin(ctx context.Context, orgID, itemID string) (string, error)
 	GetVersion(ctx context.Context, itemID, version string) (*types.CatalogItemVersion, error)
 	ListVersions(ctx context.Context, itemID string) ([]types.CatalogItemVersion, error)
 	ListVisible(ctx context.Context, orgID string, opts types.CatalogListOptions) ([]catalog.ItemView, int, error)
@@ -95,7 +103,7 @@ func (s *Service) WithTeams(teams TeamLister) *Service {
 
 func (s *Service) validateOwnerTeam(ctx context.Context, orgID, ownerTeam string) error {
 	if ownerTeam == "" {
-		return errors.New("ownerTeam is required for observability provisioning")
+		return invalidPlanInput("ownerTeam is required for observability provisioning")
 	}
 	if s.teams == nil {
 		return errors.New("team resolver is not configured")
@@ -109,7 +117,7 @@ func (s *Service) validateOwnerTeam(ctx context.Context, orgID, ownerTeam string
 			return nil
 		}
 	}
-	return errors.New("ownerTeam must be a team in the current org")
+	return invalidPlanInput("ownerTeam must be a team in the current org")
 }
 
 // WithGate is intended for contract tests and for the independently confirmed
@@ -181,15 +189,217 @@ func defaultTargetIntent(target resourcetargets.Target, capability *observabilit
 	return &TargetIntent{ID: target.ID, Revision: target.Revision, Selection: selection}, true
 }
 
+func packVersionMatchesPin(pin PackPin, version *types.CatalogItemVersion) bool {
+	return version != nil && version.ItemID == pin.ItemID && version.Version == pin.Version && version.PackageVersion == pin.PackageVersion &&
+		version.ArtifactRef == pin.Ref && version.ArtifactDigest == pin.Digest && version.ChartRef == pin.ChartRef && version.ChartDigest == pin.ChartDigest
+}
+
+func targetSelectionRejected(err error) bool {
+	var validation *resourcetargets.ValidationError
+	return errors.Is(err, resourcetargets.ErrTargetDenied) || errors.Is(err, resourcetargets.ErrTargetNotFound) ||
+		errors.Is(err, resourcetargets.ErrStaleRevision) || errors.Is(err, resourcetargets.ErrUnavailable) ||
+		errors.Is(err, resourcetargets.ErrInvalidInput) || errors.As(err, &validation)
+}
+
+func (s *Service) eligibleMonitoringTargets(ctx context.Context, orgID, subject, orgSlug string, capability *observability.Capability, candidates []resourcetargets.Target, packs []PackPin) ([]resourcetargets.Target, error) {
+	out := []resourcetargets.Target{}
+	visibilityCache := map[string]bool{}
+	admissionCache := map[string]bool{}
+	for _, target := range candidates {
+		config, err := targetConfig(target)
+		if err != nil || !supportsEvaluation(capability, config.Evaluation) {
+			continue
+		}
+		selection, ok := defaultTargetIntent(target, capability, orgSlug)
+		if !ok {
+			continue
+		}
+		resolved, err := s.targets.Resolve(ctx, resourcetargets.ResolveInput{OrgID: orgID, Subject: subject, TargetID: target.ID,
+			Capability: resourcetargets.CapabilityMonitoringGrafana, Action: resourcetargets.ActionProvision,
+			ExpectedRevision: target.Revision, Selection: selection.Selection})
+		if err != nil {
+			if targetSelectionRejected(err) {
+				continue
+			}
+			return nil, err
+		}
+		if resolved.Cluster == nil {
+			continue
+		}
+		eligible := false
+		for _, pack := range packs {
+			visibilityKey := resolved.Cluster.ID + "\n" + pack.ItemID
+			visible, cached := visibilityCache[visibilityKey]
+			if !cached {
+				err := s.catalog.EnsureVisible(ctx, orgID, resolved.Cluster.ID, pack.ItemID)
+				if err != nil && !errors.Is(err, catalog.ErrItemNotFound) {
+					return nil, err
+				}
+				visible = err == nil
+				visibilityCache[visibilityKey] = visible
+			}
+			if !visible {
+				continue
+			}
+			environment := environmentFor(resolved)
+			admissionKey := pack.ItemID + "\n" + pack.Version + "\n" + pack.Digest + "\n" + string(environment)
+			admittedValid, cached := admissionCache[admissionKey]
+			if !cached {
+				admitted, err := s.catalog.AdmitVersion(ctx, pack.ItemID, pack.Version, environment)
+				if err != nil {
+					if artifactadmission.IsTemporary(err) {
+						return nil, err
+					}
+					var admissionErr *artifactadmission.Error
+					if errors.Is(err, catalog.ErrItemNotFound) || errors.Is(err, catalog.ErrVersionNotFound) || errors.As(err, &admissionErr) {
+						admissionCache[admissionKey] = false
+						continue
+					}
+					return nil, err
+				}
+				admittedValid = admitted != nil && packVersionMatchesPin(pack, admitted.Version) && packType(admitted.Version) == "kro-rgd" && ValidatePackRGD(packRGD(admitted.Version), pack, capability) == nil
+				admissionCache[admissionKey] = admittedValid
+			}
+			if admittedValid {
+				eligible = true
+				break
+			}
+		}
+		if eligible {
+			out = append(out, target)
+		}
+	}
+	return out, nil
+}
+
+func equalSpecs(left, right json.RawMessage) bool {
+	canonical := func(raw json.RawMessage) ([]byte, error) {
+		if len(bytes.TrimSpace(raw)) == 0 {
+			raw = json.RawMessage(`{}`)
+		}
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		var value any
+		if err := dec.Decode(&value); err != nil {
+			return nil, err
+		}
+		return json.Marshal(value)
+	}
+	leftRaw, leftErr := canonical(left)
+	rightRaw, rightErr := canonical(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftRaw, rightRaw)
+}
+
+func effectiveNamespace(value string) string {
+	if value == "" {
+		return "default"
+	}
+	return value
+}
+
+// applicationMatchesPlan binds readiness to the current inventory projection,
+// not only to the historical plan. Direct-chart instances record the admitted
+// package digest while the plan reviews the chart digest, so reload that signed
+// row and require both halves of the identity to match.
+func (s *Service) applicationMatchesPlan(ctx context.Context, plan *Plan, instance *inventory.InstanceView) bool {
+	if plan == nil || instance == nil || instance.CatalogItemID != plan.App.ItemID || instance.Version != plan.App.Version || instance.ClusterID != plan.AppClusterID {
+		return false
+	}
+	if plan.Source.Kind == SourceChart {
+		row, err := s.catalog.GetVersion(ctx, plan.App.ItemID, plan.App.Version)
+		if err != nil || row.ChartDigest != plan.App.Digest || instance.ArtifactDigest != row.ArtifactDigest {
+			return false
+		}
+	} else if instance.ArtifactDigest != plan.App.Digest {
+		return false
+	}
+	if instance.OwnerTeam != plan.Deployment.OwnerTeam || effectiveNamespace(instance.ResourceRef.Namespace) != effectiveNamespace(plan.Deployment.Namespace) {
+		return false
+	}
+	if plan.Deployment.Name != "" && instance.ResourceRef.Name != plan.Deployment.Name {
+		return false
+	}
+	if plan.Deployment.RepoID != "" && instance.RepoID != plan.Deployment.RepoID {
+		return false
+	}
+	expectedSpec := plan.Deployment.Spec
+	if plan.RenderIntent != nil && len(plan.RenderIntent.AppSpec) > 0 {
+		expectedSpec = plan.RenderIntent.AppSpec
+	}
+	return equalSpecs(instance.Spec, expectedSpec)
+}
+
+// currentInstancePlan rebuilds later-provisioning provenance from the exact
+// live application after an upgrade/spec edit. A direct-chart hint retains the
+// original trusted source/admission identity instead of treating it as latest.
+func (s *Service) currentInstancePlan(ctx context.Context, orgID, subject, instanceID string, hint *Plan) (*Plan, error) {
+	if s.instances == nil {
+		return nil, invalidPlanInput("capability_unavailable: instance inventory is not configured")
+	}
+	instance, err := s.instances.Get(ctx, orgID, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	if instance.CatalogItemID == "" || instance.Version == "" || instance.ArtifactDigest == "" {
+		return nil, invalidPlanInput("capability_unavailable: legacy instance has no recorded artifact digest")
+	}
+	targets, err := s.targets.List(ctx, orgID, subject, resourcetargets.ListFilter{Capability: resourcetargets.CapabilityDeploymentCluster, Action: resourcetargets.ActionUse, ResourceRef: &resourcetargets.TargetResourceRef{Kind: resourcetargets.ResourceKindCluster, ID: instance.ClusterID}})
+	if err != nil || len(targets) == 0 {
+		return nil, invalidPlanInput("capability_unavailable: legacy instance has no entitled deployment target")
+	}
+	target := targets[0]
+	if hint != nil {
+		for _, candidate := range targets {
+			if candidate.ID == hint.Deployment.TargetID {
+				target = candidate
+				break
+			}
+		}
+	}
+	source := Source{Kind: SourceCatalog, ItemID: instance.CatalogItemID, Version: instance.Version, Digest: instance.ArtifactDigest}
+	if hint != nil && hint.Source.Kind == SourceChart {
+		row, err := s.catalog.GetVersion(ctx, instance.CatalogItemID, instance.Version)
+		if err != nil || row.ArtifactDigest != instance.ArtifactDigest || row.ChartDigest == "" {
+			return nil, invalidPlanInput("capability_unavailable: current direct chart identity is unavailable")
+		}
+		source = hint.Source
+		source.ItemID, source.AdmissionItemID = instance.CatalogItemID, instance.CatalogItemID
+		source.Version, source.AdmissionVersion = instance.Version, instance.Version
+		source.Ref, source.Digest = row.ChartRef, row.ChartDigest
+	}
+	name := instance.ResourceRef.Name
+	if name == "" {
+		name = instance.ID
+	}
+	return &Plan{
+		OrgID: orgID, Operation: OperationDeploy, Source: source,
+		App: ArtifactPin{ItemID: instance.CatalogItemID, Version: instance.Version, Digest: source.Digest}, AppInstanceID: instance.ID, AppClusterID: instance.ClusterID,
+		Deployment:    DeploymentInput{TargetID: target.ID, TargetRevision: target.Revision, RepoID: instance.RepoID, Name: name, Namespace: instance.ResourceRef.Namespace, OwnerTeam: instance.OwnerTeam, Spec: instance.Spec, DisplayName: name},
+		Observability: ObservabilityInput{Mode: ModeSkip}, CreatedAt: instance.CreatedAt, UpdatedAt: instance.UpdatedAt,
+	}, nil
+}
+
 func (s *Service) existingRequest(ctx context.Context, req PlanRequest, orgID, subject string) (PlanRequest, *Plan, error) {
 	if req.Operation != OperationProvisionExisting {
 		return req, nil, nil
 	}
 	if req.InstanceID == "" {
-		return req, nil, errors.New("instanceId is required for existing-instance provisioning")
+		return req, nil, invalidPlanInput("instanceId is required for existing-instance provisioning")
 	}
 	original, err := s.store.LatestPlanForInstance(ctx, orgID, req.InstanceID)
 	if err == nil {
+		if s.instances != nil {
+			instance, getErr := s.instances.Get(ctx, orgID, req.InstanceID)
+			if getErr != nil {
+				return req, nil, getErr
+			}
+			if !s.applicationMatchesPlan(ctx, original, instance) {
+				original, err = s.currentInstancePlan(ctx, orgID, subject, req.InstanceID, original)
+				if err != nil {
+					return req, nil, err
+				}
+			}
+		}
 		req.Source = &original.Source
 		req.Deployment = original.Deployment
 		return req, original, nil
@@ -197,27 +407,9 @@ func (s *Service) existingRequest(ctx context.Context, req PlanRequest, orgID, s
 	if !errors.Is(err, ErrPlanNotFound) || s.instances == nil {
 		return req, nil, err
 	}
-	instance, err := s.instances.Get(ctx, orgID, req.InstanceID)
+	original, err = s.currentInstancePlan(ctx, orgID, subject, req.InstanceID, nil)
 	if err != nil {
 		return req, nil, err
-	}
-	if instance.ArtifactDigest == "" {
-		return req, nil, errors.New("capability_unavailable: legacy instance has no recorded artifact digest")
-	}
-	targets, err := s.targets.List(ctx, orgID, subject, resourcetargets.ListFilter{Capability: resourcetargets.CapabilityDeploymentCluster, Action: resourcetargets.ActionUse, ResourceRef: &resourcetargets.TargetResourceRef{Kind: resourcetargets.ResourceKindCluster, ID: instance.ClusterID}})
-	if err != nil || len(targets) == 0 {
-		return req, nil, errors.New("capability_unavailable: legacy instance has no entitled deployment target")
-	}
-	target := targets[0]
-	name := instance.ResourceRef.Name
-	if name == "" {
-		name = instance.ID
-	}
-	original = &Plan{
-		OrgID: orgID, Operation: OperationDeploy, Source: Source{Kind: SourceCatalog, ItemID: instance.CatalogItemID, Version: instance.Version},
-		App: ArtifactPin{ItemID: instance.CatalogItemID, Version: instance.Version, Digest: instance.ArtifactDigest}, AppInstanceID: instance.ID,
-		Deployment:    DeploymentInput{TargetID: target.ID, TargetRevision: target.Revision, RepoID: instance.RepoID, Name: name, Namespace: instance.ResourceRef.Namespace, OwnerTeam: instance.OwnerTeam, Spec: instance.Spec, DisplayName: name},
-		Observability: ObservabilityInput{Mode: ModeSkip}, CreatedAt: instance.CreatedAt, UpdatedAt: instance.UpdatedAt,
 	}
 	req.Source = &original.Source
 	req.Deployment = original.Deployment
@@ -248,12 +440,12 @@ func (s *Service) Preflight(ctx context.Context, req PlanRequest, orgID, orgSlug
 	}
 	if normalized.capability != nil {
 		if err := normalized.capability.ValidateAppVersion(normalized.app.Version); err != nil {
-			return nil, err
+			return nil, invalidPlanInput("app_version_incompatible: %v", err)
 		}
 	}
 	if original != nil {
 		if original.App.Version != normalized.app.Version || original.App.Digest != normalized.app.Digest || (original.CapabilityDigest != "" && original.CapabilityDigest != normalized.capabilityDigest) {
-			return nil, errors.New("original application pin or capability changed; review a fresh deployment plan")
+			return nil, fmt.Errorf("%w: original application pin or capability changed; review a fresh deployment plan", ErrPlanConflict)
 		}
 	}
 	deployment := req.Deployment
@@ -286,7 +478,7 @@ func (s *Service) Preflight(ctx context.Context, req PlanRequest, orgID, orgSlug
 		plan.Observability.Mode = ModeSkip
 	}
 	if plan.Observability.Mode != ModeNone && plan.Observability.Mode != ModeSkip && plan.Observability.Mode != ModeProvision {
-		return nil, errors.New("observability mode must be none, skip, or provision")
+		return nil, invalidPlanInput("observability mode must be none, skip, or provision")
 	}
 	if plan.Observability.Mode == ModeProvision && plan.Deployment.OwnerTeam != "" {
 		if err := s.validateOwnerTeam(ctx, orgID, plan.Deployment.OwnerTeam); err != nil {
@@ -304,22 +496,20 @@ func (s *Service) Preflight(ctx context.Context, req PlanRequest, orgID, orgSlug
 	if err != nil {
 		return nil, err
 	}
+	packs, err := s.compatiblePacks(ctx, orgID, normalized)
+	if err != nil {
+		return nil, err
+	}
 	monitoringTargets := []resourcetargets.Target{}
 	if plan.Capability != nil {
 		candidates, err := s.targets.List(ctx, orgID, subject, resourcetargets.ListFilter{Capability: resourcetargets.CapabilityMonitoringGrafana, Action: resourcetargets.ActionProvision})
 		if err != nil {
 			return nil, err
 		}
-		for _, target := range candidates {
-			config, err := targetConfig(target)
-			if err == nil && supportsEvaluation(plan.Capability, config.Evaluation) {
-				monitoringTargets = append(monitoringTargets, target)
-			}
+		monitoringTargets, err = s.eligibleMonitoringTargets(ctx, orgID, subject, orgSlug, plan.Capability, candidates, packs)
+		if err != nil {
+			return nil, err
 		}
-	}
-	packs, err := s.compatiblePacks(ctx, normalized)
-	if err != nil {
-		return nil, err
 	}
 	if plan.Observability.Mode == ModeProvision {
 		if plan.Observability.Pack == nil && len(packs) > 0 {
@@ -380,25 +570,13 @@ func (s *Service) Submit(ctx context.Context, req PlanRequest, orgID, orgSlug, s
 	if req.PlanFingerprint != plan.PlanFingerprint {
 		return nil, fmt.Errorf("%w: plan_stale", ErrPlanConflict)
 	}
-	if req.IdempotencyKey != "" {
-		existing, err := s.store.GetPlanByIdempotency(ctx, orgID, subject, req.IdempotencyKey)
-		if err == nil {
-			if existing.PlanFingerprint != plan.PlanFingerprint {
-				return nil, fmt.Errorf("%w: idempotency key reused with different plan", ErrPlanConflict)
-			}
-			return existing, nil
-		}
-		if !errors.Is(err, ErrPlanNotFound) {
-			return nil, err
-		}
-	}
 	plan.State = "submitted"
 	if plan.Observability.Mode == ModeProvision {
 		if err := s.validateOwnerTeam(ctx, orgID, plan.Deployment.OwnerTeam); err != nil {
 			return nil, err
 		}
 		if plan.Observability.Pack == nil || plan.Observability.Target == nil {
-			return nil, errors.New("provision requires an exact compatible pack and monitoring target")
+			return nil, invalidPlanInput("provision requires an exact compatible pack and monitoring target")
 		}
 		pack := plan.Observability.Pack
 		compatible := false
@@ -435,8 +613,7 @@ func (s *Service) Submit(ctx context.Context, req PlanRequest, orgID, orgSlug, s
 			return nil, errors.New("observability pack admission returned no version")
 		}
 		version := admitted.Version
-		if version.ItemID != pack.ItemID || version.Version != pack.Version || version.PackageVersion != pack.PackageVersion ||
-			version.ArtifactRef != pack.Ref || version.ArtifactDigest != pack.Digest || version.ChartRef != pack.ChartRef || version.ChartDigest != pack.ChartDigest {
+		if !packVersionMatchesPin(*pack, version) {
 			return nil, fmt.Errorf("%w: admitted observability pack pin differs from the selected candidate", resourcetargets.ErrInvalidInput)
 		}
 		item, err := s.catalog.GetItemByID(ctx, pack.ItemID)
@@ -447,7 +624,7 @@ func (s *Service) Submit(ctx context.Context, req PlanRequest, orgID, orgSlug, s
 			return nil, fmt.Errorf("%w: admitted pack is not a same-source kro-rgd observability candidate", resourcetargets.ErrInvalidInput)
 		}
 		if err := plan.Capability.ValidatePackVersion(version.Version); err != nil {
-			return nil, err
+			return nil, invalidPlanInput("pack_version_incompatible: %v", err)
 		}
 		if err := ValidatePackRGD(packRGD(version), *pack, plan.Capability); err != nil {
 			return nil, err
@@ -470,6 +647,18 @@ func (s *Service) Submit(ctx context.Context, req PlanRequest, orgID, orgSlug, s
 		}
 		plan.Companion = companion
 	}
+	if req.IdempotencyKey != "" {
+		existing, err := s.store.GetPlanByIdempotency(ctx, orgID, subject, req.IdempotencyKey)
+		if err == nil {
+			if existing.PlanFingerprint != plan.PlanFingerprint {
+				return nil, fmt.Errorf("%w: idempotency key reused with different plan", ErrPlanConflict)
+			}
+			return existing, nil
+		}
+		if !errors.Is(err, ErrPlanNotFound) {
+			return nil, err
+		}
+	}
 	if err := s.store.CreatePlan(ctx, plan); err != nil {
 		if errors.Is(err, ErrIdempotencyConflict) && req.IdempotencyKey != "" {
 			existing, getErr := s.store.GetPlanByIdempotency(ctx, orgID, subject, req.IdempotencyKey)
@@ -489,10 +678,12 @@ func (s *Service) Submit(ctx context.Context, req PlanRequest, orgID, orgSlug, s
 	if s.executor == nil {
 		return nil, errors.New("application executor is not configured")
 	}
+	executionPlan := plan
 	if plan.RenderIntent != nil && len(plan.RenderIntent.AppSpec) > 0 {
-		plan.Deployment.Spec = plan.RenderIntent.AppSpec
+		executionPlan = plan.DeepCopy()
+		executionPlan.Deployment.Spec = plan.RenderIntent.AppSpec
 	}
-	execution, err := s.executor.Execute(ctx, orgID, subject, plan)
+	execution, err := s.executor.Execute(ctx, orgID, subject, executionPlan)
 	if err != nil {
 		plan.State = "failed"
 		plan.ErrorCode = "application_execution_failed"
@@ -503,6 +694,9 @@ func (s *Service) Submit(ctx context.Context, req PlanRequest, orgID, orgSlug, s
 	}
 	plan.AppInstanceID, plan.ScaffoldRunID = execution.InstanceID, execution.ScaffoldRunID
 	plan.CommitSHA, plan.PRURL, plan.ApprovalID = execution.CommitSHA, execution.PRURL, execution.ApprovalID
+	if execution.ApprovalID != "" && execution.InstanceID == "" && execution.ScaffoldRunID == "" {
+		plan.State = "pending_approval"
+	}
 	plan.UpdatedAt = s.now()
 	if plan.Companion != nil {
 		plan.Companion.AppInstanceID = execution.InstanceID
@@ -561,7 +755,7 @@ func (s *Service) unplannedInstanceObservability(ctx context.Context, orgID, ins
 	out := &InstanceObservability{Mode: ModeNone, Available: normalized.capability != nil}
 	if normalized.capability != nil {
 		if err := normalized.capability.ValidateAppVersion(normalized.app.Version); err != nil {
-			return nil, err
+			return nil, invalidPlanInput("app_version_incompatible: %v", err)
 		}
 		out.Mode = ModeSkip
 	} else {
@@ -579,26 +773,57 @@ func (s *Service) InstanceObservability(ctx context.Context, orgID, instanceID, 
 		return nil, err
 	}
 	out := &InstanceObservability{Mode: plan.Observability.Mode, Available: plan.Capability != nil}
+	applicationStale := false
+	if s.instances != nil {
+		instance, getErr := s.instances.Get(ctx, orgID, instanceID)
+		if getErr != nil {
+			return nil, getErr
+		}
+		applicationStale = !s.applicationMatchesPlan(ctx, plan, instance)
+	}
 	if !out.Available {
 		out.Reason = "This exact app version has no signed observability metadata."
 	}
 	companion, err := s.store.LatestCompanionForInstance(ctx, orgID, instanceID)
 	if errors.Is(err, ErrCompanionNotFound) {
+		if applicationStale {
+			return s.unplannedInstanceObservability(ctx, orgID, instanceID)
+		}
 		return out, nil
 	}
 	if err != nil {
 		return nil, err
 	}
 	if companion.PlanID != plan.ID {
+		if applicationStale {
+			return s.unplannedInstanceObservability(ctx, orgID, instanceID)
+		}
 		return out, nil
 	}
 	out.Companion = companion
 	companion.Links = []Link{}
+	if applicationStale {
+		companion.State = "stale"
+		companion.Reason = "application_stale"
+		return out, nil
+	}
 	if companion.State != "ready" || companion.Verification == nil || plan.Capability == nil {
+		return out, nil
+	}
+	companion.Reason = ""
+	if !s.now().Before(companion.Verification.ExpiresAt) {
+		companion.State = "expired"
+		companion.Reason = "verification_expired"
+		return out, nil
+	}
+	if err := companion.Verification.ValidateAt(s.now()); err != nil {
+		companion.State = "stale"
+		companion.Reason = "verification_stale"
 		return out, nil
 	}
 	target, err := s.targets.Get(ctx, orgID, subject, companion.TargetID)
 	if err != nil {
+		companion.State = "unavailable"
 		companion.Reason = "target_unavailable"
 		return out, nil
 	}
@@ -607,10 +832,12 @@ func (s *Service) InstanceObservability(ctx context.Context, orgID, instanceID, 
 		view = view || action == resourcetargets.ActionView
 	}
 	if !view {
-		companion.Reason = "target_unavailable"
+		companion.State = "revoked"
+		companion.Reason = "target_view_revoked"
 		return out, nil
 	}
 	if err := validateReadyEvidence(plan, companion, target, companion.Verification); err != nil {
+		companion.State = "stale"
 		companion.Reason = "verification_stale"
 		return out, nil
 	}
@@ -623,7 +850,14 @@ func (s *Service) InstanceObservability(ctx context.Context, orgID, instanceID, 
 	}
 	links, err := VerifiedLinks(*target, plan.Capability, companion.Verification, values, s.now())
 	if err != nil {
-		return nil, err
+		companion.State = "stale"
+		companion.Reason = "link_binding_unavailable"
+		return out, nil
+	}
+	if len(links) == 0 {
+		companion.State = "stale"
+		companion.Reason = "verification_stale"
+		return out, nil
 	}
 	companion.Links = links
 	return out, nil
@@ -677,6 +911,7 @@ func (s *Service) ApplyVerification(ctx context.Context, orgID string, result *o
 		}
 	}
 	companion.Verification = result
+	companion.Reason = ""
 	companion.State = "verification_failed"
 	if result.Result == "passed" {
 		companion.State = "ready"

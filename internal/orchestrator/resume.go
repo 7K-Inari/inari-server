@@ -14,6 +14,7 @@ import (
 
 	"github.com/7K-Inari/inari-server/internal/artifactadmission"
 	"github.com/7K-Inari/inari-server/internal/impersonation"
+	"github.com/7K-Inari/inari-server/internal/resourcetargets"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -144,7 +145,7 @@ func (h *ResumeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) error
 		Version: req.Version, Channel: req.Channel, Name: req.Name,
 		Namespace: req.Namespace, OwnerTeam: req.OwnerTeam,
 		Spec: req.Spec, Requester: impersonation.SystemActor("approvals"),
-		RepoID: req.RepoID, ArtifactDigest: req.ArtifactDigest,
+		RepoID: req.RepoID, ArtifactDigest: req.ArtifactDigest, DeploymentPlanID: req.DeploymentPlanID,
 	}
 	item, err := h.svc.catalog.GetItemByID(ctx, req.ItemID)
 	if err != nil {
@@ -173,6 +174,18 @@ func (h *ResumeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) error
 		}
 		return fmt.Errorf("orchestrator: resume: preflight: %w", err)
 	}
+	if req.DeploymentPlanID != "" {
+		if h.svc.deploymentPlans == nil {
+			return fmt.Errorf("orchestrator: deployment plan approval handler is not configured")
+		}
+		if err := h.svc.deploymentPlans.RevalidateApprovedExecution(ctx, req.OrgID, req.DeploymentPlanID, req.Requester); err != nil {
+			var targetAuthorization *resourcetargets.AuthorizationError
+			if artifactadmission.IsTemporary(err) || errors.As(err, &targetAuthorization) {
+				return fmt.Errorf("orchestrator: temporary deployment plan revalidation failure: %w", err)
+			}
+			return h.denyTarget(ctx, req)
+		}
+	}
 	var res *DeployResult
 	var applyErr error
 	if req.InstanceID != "" {
@@ -186,7 +199,13 @@ func (h *ResumeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) error
 	}
 	if applyErr != nil {
 		if errors.Is(applyErr, ErrInstanceExists) {
-			// Deployed meanwhile (e.g. duplicate delivery) — idempotent no-op.
+			// Deployed meanwhile (e.g. duplicate delivery) — reconcile the plan
+			// when the deterministic instance ID is known, then acknowledge.
+			if req.DeploymentPlanID != "" && req.Name != "" && h.svc.deploymentPlans != nil {
+				if err := h.svc.deploymentPlans.LinkApprovedExecution(ctx, req.OrgID, req.DeploymentPlanID, &DeployResult{InstanceID: req.Name, Version: req.Version, Status: string(types.InstanceStateDeploying)}); err != nil {
+					return fmt.Errorf("orchestrator: link existing approved deployment plan %s: %w", req.DeploymentPlanID, err)
+				}
+			}
 			h.log.Info("orchestrator: resume skipped, instance exists", "approval", p.ApprovalID)
 			return nil
 		}
@@ -198,6 +217,11 @@ func (h *ResumeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) error
 			return nil
 		}
 		return fmt.Errorf("orchestrator: resume approval %s: %w", p.ApprovalID, applyErr)
+	}
+	if req.DeploymentPlanID != "" {
+		if err := h.svc.deploymentPlans.LinkApprovedExecution(ctx, req.OrgID, req.DeploymentPlanID, res); err != nil {
+			return fmt.Errorf("orchestrator: link approved deployment plan %s: %w", req.DeploymentPlanID, err)
+		}
 	}
 	h.log.Info("orchestrator: approval-gated deploy resumed",
 		"approval", p.ApprovalID, "instance", res.InstanceID, "status", res.Status)

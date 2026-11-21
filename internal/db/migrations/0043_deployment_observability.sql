@@ -5,6 +5,7 @@
 -- it as mutable approval API input. Existing pending rows retain an empty pin
 -- and follow their legacy admission behavior.
 ALTER TABLE approval_requests ADD COLUMN artifact_digest TEXT NOT NULL DEFAULT '';
+ALTER TABLE approval_requests ADD COLUMN deployment_plan_id TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE deployment_plans (
     id TEXT PRIMARY KEY,
@@ -100,4 +101,5 @@ CREATE INDEX observability_verification_current_idx ON observability_verificatio
 DROP TABLE IF EXISTS observability_verification_results;
 DROP TABLE IF EXISTS observability_companions;
 DROP TABLE IF EXISTS deployment_plans;
+ALTER TABLE approval_requests DROP COLUMN IF EXISTS deployment_plan_id;
 ALTER TABLE approval_requests DROP COLUMN IF EXISTS artifact_digest;

@@ -19,6 +19,22 @@ func (l staticApprovalLoader) Get(context.Context, string, string) (*types.Appro
 	return l.request, nil
 }
 
+type recordingDeploymentPlanApprovalHandler struct {
+	revalidated []string
+	linked      []string
+	err         error
+}
+
+func (h *recordingDeploymentPlanApprovalHandler) RevalidateApprovedExecution(_ context.Context, _, planID, _ string) error {
+	h.revalidated = append(h.revalidated, planID)
+	return h.err
+}
+
+func (h *recordingDeploymentPlanApprovalHandler) LinkApprovedExecution(_ context.Context, _, planID string, _ *DeployResult) error {
+	h.linked = append(h.linked, planID)
+	return nil
+}
+
 func approvedEvent(t *testing.T, request *types.ApprovalRequest) *types.OutboxEvent {
 	t.Helper()
 	raw, err := json.Marshal(types.ApprovalPayload{OrgID: request.OrgID, ApprovalID: request.ID, ItemID: request.ItemID, State: types.ApprovalStateApproved})
@@ -96,7 +112,9 @@ func TestResumeRejectsApplicationDigestDrift(t *testing.T) {
 	item := &types.CatalogItem{ID: "core/web-service", SourceID: "core", Name: "web-service"}
 	catalog := &denialCatalog{item: item, version: &types.CatalogItemVersion{ItemID: item.ID, Version: "1.0.0", ArtifactDigest: admittedDigest}}
 	service, database := newAdmissionWorkflowFixture(t, catalog, &recordingGate{})
-	request := &types.ApprovalRequest{ID: "approval-digest-drift", OrgID: "org:1", ItemID: item.ID, Version: "1.0.0", ClusterID: "c1", ArtifactDigest: reviewedDigest}
+	planHandler := &recordingDeploymentPlanApprovalHandler{}
+	service.WithDeploymentPlanApprovalHandler(planHandler)
+	request := &types.ApprovalRequest{ID: "approval-digest-drift", OrgID: "org:1", ItemID: item.ID, Version: "1.0.0", ClusterID: "c1", ArtifactDigest: reviewedDigest, DeploymentPlanID: "dp-1"}
 	handler := NewResumeHandler(service, staticApprovalLoader{request: request}, nil)
 	if err := handler.Handle(context.Background(), approvedEvent(t, request)); !errors.Is(err, ErrArtifactDigestMismatch) {
 		t.Fatalf("resume error = %v, want ErrArtifactDigestMismatch", err)
@@ -104,12 +122,31 @@ func TestResumeRejectsApplicationDigestDrift(t *testing.T) {
 	if catalog.admitCalls != 1 {
 		t.Fatalf("admission calls = %d, want 1", catalog.admitCalls)
 	}
+	if len(planHandler.revalidated) != 1 || planHandler.revalidated[0] != "dp-1" || len(planHandler.linked) != 0 {
+		t.Fatalf("plan resume calls = revalidate %v link %v", planHandler.revalidated, planHandler.linked)
+	}
 	var outbox int
 	if err := database.Pool.QueryRow(context.Background(), `SELECT count(*) FROM outbox`).Scan(&outbox); err != nil {
 		t.Fatal(err)
 	}
 	if outbox != 0 {
 		t.Fatalf("digest drift caused %d outbox side effects", outbox)
+	}
+}
+
+func TestResumePlanRevalidationDenialPrecedesAdmission(t *testing.T) {
+	item := &types.CatalogItem{ID: "core/web-service", SourceID: "core", Name: "web-service"}
+	catalog := &denialCatalog{item: item, version: &types.CatalogItemVersion{ItemID: item.ID, Version: "1.0.0", ArtifactDigest: "sha256:52ccaee6d4dd272e54bfccda77738b42e1edf0e4a20c27e23f0b6c15d01aef79"}}
+	service, _ := newAdmissionWorkflowFixture(t, catalog, &recordingGate{})
+	planHandler := &recordingDeploymentPlanApprovalHandler{err: errors.New("plan_stale")}
+	service.WithDeploymentPlanApprovalHandler(planHandler)
+	request := &types.ApprovalRequest{ID: "approval-plan-stale", OrgID: "org:1", ItemID: item.ID, Version: "1.0.0", ClusterID: "c1", DeploymentPlanID: "dp-stale"}
+	handler := NewResumeHandler(service, staticApprovalLoader{request: request}, nil)
+	if err := handler.Handle(context.Background(), approvedEvent(t, request)); err != nil {
+		t.Fatalf("permanent plan revalidation denial must be terminal: %v", err)
+	}
+	if len(planHandler.revalidated) != 1 || catalog.admitCalls != 0 || len(planHandler.linked) != 0 {
+		t.Fatalf("denial reached apply: revalidate %v admissions %d links %v", planHandler.revalidated, catalog.admitCalls, planHandler.linked)
 	}
 }
 

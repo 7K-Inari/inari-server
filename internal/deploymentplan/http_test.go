@@ -271,6 +271,41 @@ func TestQAHTTPReadStatusDoesNotRequireDeploymentsCreate(t *testing.T) {
 	}
 }
 
+func TestQAHTTPRejectsMalformedPlanInputs(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*PlanRequest)
+		want   string
+	}{
+		{name: "empty body", mutate: func(r *PlanRequest) { *r = PlanRequest{} }, want: "deployment source is required"},
+		{name: "invalid mode", mutate: func(r *PlanRequest) { r.Observability.Mode = "bogus" }, want: "observability mode"},
+		{name: "non-object spec", mutate: func(r *PlanRequest) { r.Deployment.Spec = json.RawMessage(`[]`) }, want: "deployment spec"},
+		{name: "native observability conflict", mutate: func(r *PlanRequest) { r.Deployment.Spec = json.RawMessage(`{"observability":{"enabled":true}}`) }, want: "managed_chart_native_observability_conflict"},
+		{name: "unknown owner team", mutate: func(r *PlanRequest) { r.Deployment.OwnerTeam = "unknown" }, want: "ownerTeam"},
+		{name: "chart latest", mutate: func(r *PlanRequest) {
+			r.Source = &Source{Kind: SourceChart, SourceID: "hiroba", Ref: "oci://ghcr.io/7k-hiroba/payments-api/charts/payments-api", Version: "latest", Digest: testDigest}
+		}, want: "chart_version_invalid"},
+		{name: "chart mutable digest", mutate: func(r *PlanRequest) {
+			r.Source = &Source{Kind: SourceChart, SourceID: "hiroba", Ref: "oci://ghcr.io/7k-hiroba/payments-api/charts/payments-api", Version: "1.4.0", Digest: "latest"}
+		}, want: "chart_digest_invalid"},
+		{name: "chart tagged repository", mutate: func(r *PlanRequest) {
+			r.Source = &Source{Kind: SourceChart, SourceID: "hiroba", Ref: "oci://ghcr.io/7k-hiroba/payments-api/charts/payments-api:1.4.0", Version: "1.4.0", Digest: testDigest}
+		}, want: "chart_ref_invalid"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, _, _, _, _ := serviceFixture(t)
+			srv := newQAHTTPServer(t, svc, &qaHTTPAuthorizer{defaultAllow: true}, &qaHTTPRepoWrite{})
+			request := deployRequest()
+			tc.mutate(&request)
+			code, raw := qaHTTPJSON(t, srv, http.MethodPost, "/api/v1/tenants/acme/deployment-plans/preflight", "good", request)
+			if code != http.StatusUnprocessableEntity || !strings.Contains(string(raw), tc.want) {
+				t.Fatalf("preflight = %d %s, want 422 containing %q", code, raw, tc.want)
+			}
+		})
+	}
+}
+
 func TestQAHTTPExistingInstanceProvisionAfterSkip(t *testing.T) {
 	svc, _, _, _, _ := serviceFixture(t)
 	repoWrite := &qaHTTPRepoWrite{}

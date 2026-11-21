@@ -15,6 +15,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/7K-Inari/inari-server/internal/inventory"
 	"github.com/7K-Inari/inari-server/internal/oci"
+	"github.com/7K-Inari/inari-server/internal/orchestrator"
 	"github.com/7K-Inari/inari-server/internal/resourcetargets"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -25,8 +26,10 @@ type fakeCatalog struct {
 	version             *types.CatalogItemVersion
 	packItem            *types.CatalogItem
 	packVersion         *types.CatalogItemVersion
+	packVersions        []types.CatalogItemVersion
 	admittedPackVersion *types.CatalogItemVersion
 	admitErr            error
+	pin                 string
 	admitted            []string
 }
 
@@ -44,21 +47,44 @@ func (f *fakeCatalog) EffectiveVersion(_ context.Context, _, id, _ string) (stri
 		return f.version.Version, nil
 	}
 	if f.packItem != nil && id == f.packItem.ID {
+		if f.pin != "" {
+			return f.pin, nil
+		}
+		best := ""
+		for _, version := range f.packVersions {
+			if version.Channel == "stable" && version.Version > best {
+				best = version.Version
+			}
+		}
+		if best != "" {
+			return best, nil
+		}
 		return f.packVersion.Version, nil
 	}
 	return "", catalog.ErrVersionNotFound
 }
+func (f *fakeCatalog) VersionPin(context.Context, string, string) (string, error) { return f.pin, nil }
 func (f *fakeCatalog) GetVersion(_ context.Context, id, version string) (*types.CatalogItemVersion, error) {
 	if f.item != nil && id == f.item.ID && version == f.version.Version {
 		return f.version, nil
 	}
-	if f.packItem != nil && id == f.packItem.ID && version == f.packVersion.Version {
-		return f.packVersion, nil
+	if f.packItem != nil && id == f.packItem.ID {
+		for i := range f.packVersions {
+			if f.packVersions[i].Version == version {
+				return &f.packVersions[i], nil
+			}
+		}
+		if version == f.packVersion.Version {
+			return f.packVersion, nil
+		}
 	}
 	return nil, catalog.ErrVersionNotFound
 }
 func (f *fakeCatalog) ListVersions(_ context.Context, id string) ([]types.CatalogItemVersion, error) {
 	if f.packItem != nil && id == f.packItem.ID {
+		if f.packVersions != nil {
+			return f.packVersions, nil
+		}
 		return []types.CatalogItemVersion{*f.packVersion}, nil
 	}
 	if f.item != nil && id == f.item.ID {
@@ -91,10 +117,12 @@ func (f *fakeCatalog) AdmitVersion(_ context.Context, id, version string, _ trus
 }
 
 type fakeTargets struct {
+	mu           sync.Mutex
 	appTarget    *resourcetargets.Target
 	monTarget    *resourcetargets.Target
 	provisionErr error
 	resolveCalls []string
+	viewActions  []resourcetargets.Action
 }
 
 func (f *fakeTargets) List(_ context.Context, _, _ string, filter resourcetargets.ListFilter) ([]resourcetargets.Target, error) {
@@ -109,12 +137,17 @@ func (f *fakeTargets) List(_ context.Context, _, _ string, filter resourcetarget
 func (f *fakeTargets) Get(_ context.Context, _, _, id string) (*resourcetargets.Target, error) {
 	if f.monTarget != nil && id == f.monTarget.ID {
 		copy := *f.monTarget
-		copy.EffectiveActions = []resourcetargets.Action{resourcetargets.ActionView}
+		copy.EffectiveActions = f.viewActions
+		if copy.EffectiveActions == nil {
+			copy.EffectiveActions = []resourcetargets.Action{resourcetargets.ActionView}
+		}
 		return &copy, nil
 	}
 	return nil, resourcetargets.ErrTargetNotFound
 }
 func (f *fakeTargets) Resolve(_ context.Context, in resourcetargets.ResolveInput) (*resourcetargets.ResolvedTarget, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.resolveCalls = append(f.resolveCalls, in.TargetID+":"+string(in.Action))
 	if in.TargetID == f.appTarget.ID {
 		return &resourcetargets.ResolvedTarget{Target: *f.appTarget, Cluster: &types.Cluster{ID: "cluster-app", OrgID: "org-1", State: types.ClusterStateActive, Labels: map[string]string{"inari.dev/environment": "production"}}}, nil
@@ -132,6 +165,7 @@ func (f *fakeTargets) Providers() []resourcetargets.ProviderDescriptor { return 
 type fakeExecutor struct {
 	calls      int
 	instanceID string
+	approvalID string
 }
 
 func (f *fakeExecutor) Execute(_ context.Context, _, _ string, plan *Plan) (*Execution, error) {
@@ -141,6 +175,9 @@ func (f *fakeExecutor) Execute(_ context.Context, _, _ string, plan *Plan) (*Exe
 	}
 	if f.instanceID != "" {
 		return &Execution{InstanceID: f.instanceID}, nil
+	}
+	if f.approvalID != "" {
+		return &Execution{ApprovalID: f.approvalID}, nil
 	}
 	return &Execution{InstanceID: "app-1"}, nil
 }
@@ -221,7 +258,7 @@ spec:
 		item:        &types.CatalogItem{ID: "hiroba/payments-api", SourceID: "hiroba", Name: "payments-api"},
 		version:     &types.CatalogItemVersion{ItemID: "hiroba/payments-api", Version: "1.4.0", ArtifactRef: "ghcr.io/7k-hiroba/payments-api/catalog/payments-api:1.4.0", ArtifactDigest: testDigest, ChartRef: "oci://ghcr.io/7k-hiroba/payments-api/charts/payments-api:1.4.0", ChartDigest: testDigest, Payload: payload},
 		packItem:    &types.CatalogItem{ID: "hiroba/observability-pack", SourceID: "hiroba", Name: "observability-pack", Category: "observability"},
-		packVersion: &types.CatalogItemVersion{ItemID: "hiroba/observability-pack", Version: "0.2.0", ArtifactRef: "ghcr.io/7k-hiroba/payments-api/catalog/observability-pack:0.2.0", ArtifactDigest: testDigest, Payload: packPayload},
+		packVersion: &types.CatalogItemVersion{ItemID: "hiroba/observability-pack", Version: "0.2.0", Channel: "stable", ArtifactRef: "ghcr.io/7k-hiroba/payments-api/catalog/observability-pack:0.2.0", ArtifactDigest: testDigest, Payload: packPayload},
 	}
 	appTarget := &resourcetargets.Target{ID: "rt-app", Revision: 4, ResourceRef: resourcetargets.TargetResourceRef{Kind: "cluster", ID: "cluster-app"}, Capabilities: []string{resourcetargets.CapabilityDeploymentCluster}, Enabled: true, Readiness: resourcetargets.Readiness{State: resourcetargets.ReadinessReady}}
 	monTarget := &resourcetargets.Target{ID: "rt-mon", Revision: 7, IsDefault: true, ResourceRef: resourcetargets.TargetResourceRef{Kind: "cluster", ID: "cluster-mon"}, Capabilities: []string{resourcetargets.CapabilityMonitoringGrafana}, Enabled: true, Readiness: resourcetargets.Readiness{State: resourcetargets.ReadinessReady}, Config: json.RawMessage(`{"baseUrl":"https://grafana.team.example","evaluation":"central","folderPrefixes":["acme-inc"],"datasources":[{"name":"metrics-central","type":"prometheus"}]}`)}
@@ -262,6 +299,50 @@ func TestPreflightNormalizesAssetsPinsAndPolicyDefault(t *testing.T) {
 	}
 	if plan.Observability.Pack == nil || plan.PlanFingerprint == "" || plan.Gate.CompanionRendering {
 		t.Fatalf("plan pins/gate = %#v", plan)
+	}
+}
+
+func TestPreflightPackCandidatesHonorStableChannelAndTenantPin(t *testing.T) {
+	svc, cat, _, _, _ := serviceFixture(t)
+	stable20 := *cat.packVersion
+	stable21 := stable20
+	stable21.Version = "0.2.1"
+	incubating := stable20
+	incubating.Version, incubating.Channel = "0.2.2", "incubating"
+	cat.packVersions = []types.CatalogItemVersion{incubating, stable20, stable21}
+	preflight, err := svc.Preflight(context.Background(), deployRequest(), "org-1", "acme-inc", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preflight.CompatiblePacks) != 2 || preflight.CompatiblePacks[0].Version != "0.2.1" || preflight.Plan.Observability.Pack.Version != "0.2.1" {
+		t.Fatalf("stable/effective pack candidates = %#v", preflight.CompatiblePacks)
+	}
+	for _, pack := range preflight.CompatiblePacks {
+		if pack.Version == "0.2.2" {
+			t.Fatal("incubating pack returned without a tenant pin")
+		}
+	}
+	cat.pin = "0.2.0"
+	pinned, err := svc.Preflight(context.Background(), deployRequest(), "org-1", "acme-inc", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pinned.CompatiblePacks) != 1 || pinned.CompatiblePacks[0].Version != "0.2.0" || pinned.Plan.Observability.Pack.Version != "0.2.0" {
+		t.Fatalf("tenant pack pin was not authoritative: %#v", pinned.CompatiblePacks)
+	}
+}
+
+func TestPreflightOmitsTargetWhenExactPackAdmissionFails(t *testing.T) {
+	svc, cat, _, _, _ := serviceFixture(t)
+	invalid := *cat.packVersion
+	invalid.Payload = json.RawMessage(`{"admission":{"type":"kro-rgd"},"rgd":"kind: ResourceGraphDefinition"}`)
+	cat.admittedPackVersion = &invalid
+	preflight, err := svc.Preflight(context.Background(), deployRequest(), "org-1", "acme-inc", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preflight.MonitoringTargets) != 0 || preflight.Plan.Observability.Target != nil {
+		t.Fatalf("target remained eligible after exact pack admission failure: %#v", preflight.MonitoringTargets)
 	}
 }
 
@@ -407,11 +488,50 @@ func TestSubmitProvisionClosedGateRevalidatesAndHasNoLinks(t *testing.T) {
 	if executor.calls != 1 || plan.Companion == nil || plan.Companion.State != "blocked_external_gate" || len(plan.Companion.Links) != 0 {
 		t.Fatalf("plan = %#v", plan)
 	}
-	if len(cat.admitted) != 2 || len(targets.resolveCalls) != 2 {
-		t.Fatalf("admission/target revalidation = %v / %v", cat.admitted, targets.resolveCalls)
+	if len(cat.admitted) != 3 || len(targets.resolveCalls) != 3 {
+		t.Fatalf("preflight/submit admission and target revalidation = %v / %v", cat.admitted, targets.resolveCalls)
 	}
 	if plan.RenderIntent == nil || plan.RenderIntent.PackSpec["rulesCentral"] != true || plan.RenderIntent.PackSpec["rulesLocal"] != false {
 		t.Fatalf("render intent = %#v", plan.RenderIntent)
+	}
+}
+
+func TestApprovedExecutionRevalidatesAndLinksPlan(t *testing.T) {
+	svc, _, targets, executor, store := serviceFixture(t)
+	executor.approvalID = "approval-1"
+	plan, err := submitReviewed(t, svc, deployRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.State != "pending_approval" || plan.AppInstanceID != "" || executor.calls != 1 {
+		t.Fatalf("pending approval plan = %#v, calls %d", plan, executor.calls)
+	}
+	if err := svc.RevalidateApprovedExecution(context.Background(), "org-1", plan.ID, "user:someone-else"); !errors.Is(err, ErrPlanConflict) {
+		t.Fatalf("wrong requester revalidation = %v", err)
+	}
+	if err := svc.RevalidateApprovedExecution(context.Background(), "org-1", plan.ID, "user:user-1"); err != nil {
+		t.Fatal(err)
+	}
+	if executor.calls != 1 {
+		t.Fatalf("read-only resume revalidation executed app %d times", executor.calls)
+	}
+	targets.provisionErr = resourcetargets.ErrTargetDenied
+	if err := svc.RevalidateApprovedExecution(context.Background(), "org-1", plan.ID, "user:user-1"); !errors.Is(err, resourcetargets.ErrTargetDenied) {
+		t.Fatalf("revoked monitoring grant revalidation = %v", err)
+	}
+	if executor.calls != 1 {
+		t.Fatal("denied resume revalidation executed app")
+	}
+	targets.provisionErr = nil
+	if err := svc.LinkApprovedExecution(context.Background(), "org-1", plan.ID, &orchestrator.DeployResult{InstanceID: "app-approved", Version: plan.App.Version, Status: "deploying", CommitSHA: "commit-1"}); err != nil {
+		t.Fatal(err)
+	}
+	linked, err := store.GetPlan(context.Background(), "org-1", plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linked.AppInstanceID != "app-approved" || linked.State != "deploying" || linked.CommitSHA != "commit-1" || linked.Companion.AppInstanceID != "app-approved" || linked.Companion.State != "blocked_external_gate" {
+		t.Fatalf("approved execution link = %#v", linked)
 	}
 }
 
@@ -473,8 +593,9 @@ func TestSubmitRevalidatesAdmittedPackPayload(t *testing.T) {
 
 func TestSubmitRevokedProvisionGrantStopsBeforeExecution(t *testing.T) {
 	svc, _, targets, executor, _ := serviceFixture(t)
+	request := reviewedRequest(t, svc, deployRequest())
 	targets.provisionErr = resourcetargets.ErrTargetDenied
-	if _, err := submitReviewed(t, svc, deployRequest()); !errors.Is(err, resourcetargets.ErrTargetDenied) {
+	if _, err := svc.Submit(context.Background(), request, "org-1", "acme-inc", "user-1"); !errors.Is(err, resourcetargets.ErrTargetDenied) {
 		t.Fatalf("error = %v", err)
 	}
 	if executor.calls != 0 {
@@ -550,7 +671,7 @@ func TestExistingInstanceCanProvisionFromOriginalPins(t *testing.T) {
 }
 
 func TestVerificationGatesReadyLinksAndRejectsBlockedIntent(t *testing.T) {
-	svc, _, _, _, store := serviceFixture(t)
+	svc, _, targets, _, store := serviceFixture(t)
 	plan, err := submitReviewed(t, svc, deployRequest())
 	if err != nil {
 		t.Fatal(err)
@@ -580,15 +701,37 @@ func TestVerificationGatesReadyLinksAndRejectsBlockedIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if companion.State != "ready" {
-		t.Fatalf("companion state = %s", companion.State)
+	if companion.State != "ready" || companion.Reason != "" {
+		t.Fatalf("companion state = %s reason = %q", companion.State, companion.Reason)
 	}
 	status, err := svc.InstanceObservability(context.Background(), "org-1", plan.AppInstanceID, "user-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(status.Companion.Links) != 1 || !strings.Contains(status.Companion.Links[0].URL, "var-namespace=payments") {
-		t.Fatalf("ready links = %#v", status.Companion.Links)
+	if len(status.Companion.Links) != 1 || !strings.Contains(status.Companion.Links[0].URL, "var-namespace=payments") || status.Companion.Reason != "" {
+		t.Fatalf("ready status = %#v", status.Companion)
+	}
+	targets.viewActions = []resourcetargets.Action{}
+	revoked, err := svc.InstanceObservability(context.Background(), "org-1", plan.AppInstanceID, "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revoked.Companion.State != "revoked" || revoked.Companion.Reason != "target_view_revoked" || len(revoked.Companion.Links) != 0 {
+		t.Fatalf("revoked status = %#v", revoked.Companion)
+	}
+	targets.viewActions = nil
+	restored, err := svc.InstanceObservability(context.Background(), "org-1", plan.AppInstanceID, "user-1")
+	if err != nil || restored.Companion.State != "ready" || restored.Companion.Reason != "" || len(restored.Companion.Links) != 1 {
+		t.Fatalf("restored status = %#v, %v", restored.Companion, err)
+	}
+	now := svc.now()
+	svc.now = func() time.Time { return now.Add(48 * time.Hour) }
+	expired, err := svc.InstanceObservability(context.Background(), "org-1", plan.AppInstanceID, "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expired.Companion.State != "expired" || expired.Companion.Reason != "verification_expired" || len(expired.Companion.Links) != 0 {
+		t.Fatalf("expired status = %#v", expired.Companion)
 	}
 }
 
@@ -673,8 +816,82 @@ func TestInstanceLinksRejectPersistedEvidenceThatDoesNotMatchSelection(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(status.Companion.Links) != 0 {
-		t.Fatal("links survived mismatched persisted datasource evidence")
+	if status.Companion.State != "stale" || status.Companion.Reason != "verification_stale" || len(status.Companion.Links) != 0 {
+		t.Fatalf("mismatched persisted evidence did not become stale: %#v", status.Companion)
+	}
+}
+
+func TestInstanceObservabilityStalesReadyCompanionAfterApplicationChange(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*inventory.InstanceView)
+	}{
+		{name: "version", mutate: func(view *inventory.InstanceView) { view.Version = "1.5.0" }},
+		{name: "digest", mutate: func(view *inventory.InstanceView) {
+			view.ArtifactDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		}},
+		{name: "spec", mutate: func(view *inventory.InstanceView) { view.Spec = json.RawMessage(`{"replicas":3}`) }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, cat, _, _, store := serviceFixture(t)
+			plan, err := submitReviewed(t, svc, deployRequest())
+			if err != nil {
+				t.Fatal(err)
+			}
+			view := &inventory.InstanceView{ResourceInstance: types.ResourceInstance{
+				ID: plan.AppInstanceID, OrgID: "org-1", ClusterID: plan.AppClusterID, CatalogItemID: cat.item.ID,
+				Version: plan.App.Version, ArtifactDigest: plan.App.Digest, OwnerTeam: plan.Deployment.OwnerTeam,
+				Spec: plan.RenderIntent.AppSpec, ResourceRef: types.ResourceRef{Name: plan.Deployment.Name, Namespace: plan.Deployment.Namespace},
+			}}
+			svc.WithInstances(&fakeInstances{view: view})
+			plan.Companion.CompanionInstanceID = "companion-1"
+			plan.Companion.State = "verification_pending"
+			if err := store.UpdatePlan(context.Background(), plan); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := svc.ApplyVerification(context.Background(), "org-1", resultForPlan(t, plan)); err != nil {
+				t.Fatal(err)
+			}
+			before, err := svc.InstanceObservability(context.Background(), "org-1", plan.AppInstanceID, "user-1")
+			if err != nil || len(before.Companion.Links) != 1 {
+				t.Fatalf("ready baseline = %#v, %v", before, err)
+			}
+			tc.mutate(view)
+			after, err := svc.InstanceObservability(context.Background(), "org-1", plan.AppInstanceID, "user-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Companion == nil || after.Companion.State != "stale" || after.Companion.Reason != "application_stale" || len(after.Companion.Links) != 0 {
+				t.Fatalf("application change did not invalidate readiness: %#v", after.Companion)
+			}
+		})
+	}
+}
+
+func TestExistingInstanceProvisionUsesCurrentPinAfterUpgrade(t *testing.T) {
+	svc, cat, _, _, _ := serviceFixture(t)
+	request := deployRequest()
+	request.Observability.Mode = ModeSkip
+	original, err := submitReviewed(t, svc, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const upgradedDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	cat.version.Version, cat.version.ArtifactDigest = "1.5.0", upgradedDigest
+	cat.version.ChartRef, cat.version.ChartDigest = "", ""
+	view := &inventory.InstanceView{ResourceInstance: types.ResourceInstance{
+		ID: original.AppInstanceID, OrgID: "org-1", ClusterID: original.AppClusterID, CatalogItemID: cat.item.ID,
+		Version: "1.5.0", ArtifactDigest: upgradedDigest, OwnerTeam: original.Deployment.OwnerTeam,
+		Spec: original.RenderIntent.AppSpec, ResourceRef: types.ResourceRef{Name: original.Deployment.Name, Namespace: original.Deployment.Namespace},
+	}}
+	svc.WithInstances(&fakeInstances{view: view})
+	preflight, err := svc.Preflight(context.Background(), PlanRequest{Operation: OperationProvisionExisting, InstanceID: original.AppInstanceID, Observability: ObservabilityInput{Mode: ModeProvision}}, "org-1", "acme-inc", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preflight.Plan.App.Version != "1.5.0" || preflight.Plan.App.Digest != upgradedDigest || preflight.Plan.Source.Version != "1.5.0" {
+		t.Fatalf("later provision reused stale application pin: %#v", preflight.Plan)
 	}
 }
 

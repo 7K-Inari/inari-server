@@ -19,11 +19,11 @@ var (
 func NormalizeCapability(raw []byte) (*observability.Capability, string, error) {
 	capability, err := observability.DecodeCapability(raw)
 	if err != nil {
-		return nil, "", err
+		return nil, "", invalidPlanInput("capability_metadata_invalid: %v", err)
 	}
 	digest, err := capability.Digest()
 	if err != nil {
-		return nil, "", err
+		return nil, "", invalidPlanInput("capability_metadata_invalid: %v", err)
 	}
 	return capability, digest, nil
 }
@@ -76,7 +76,7 @@ func CapabilityFromTemplatePayload(payload json.RawMessage) (*observability.Capa
 	declared := len(body.Manifest.Observability) > 0 && string(body.Manifest.Observability) != "null"
 	if body.Manifest.Kind == "gitops-repo" {
 		if declared || body.ObservabilityYAML != "" {
-			return nil, "", errors.New("pure gitops-repo templates cannot provision observability")
+			return nil, "", invalidPlanInput("pure gitops-repo templates cannot provision observability")
 		}
 		return nil, "", nil
 	}
@@ -97,7 +97,7 @@ func ValidatePackRGD(raw []byte, pin PackPin, capability *observability.Capabili
 		return ErrPackRenderContract
 	}
 	if err := capability.ValidatePackVersion(pin.Version); err != nil {
-		return err
+		return invalidPlanInput("pack_version_incompatible: %v", err)
 	}
 	var document struct {
 		Kind     string `yaml:"kind"`

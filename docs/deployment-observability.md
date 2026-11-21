@@ -6,8 +6,8 @@ DeploymentPlans normalize catalog packages, exact-digest direct OCI Helm charts,
 
 Under `/api/v1/tenants/{org}`:
 
-- `POST /deployment-plans/preflight` performs read-only normalization/admission and returns exact app/pack pins, assets, compatible packs, entitlement-filtered application/monitoring targets, and renderer-gate state.
-- `POST /deployment-plans` requires an idempotency key and revalidates the application target, catalog visibility, monitoring provision grant, target revision, provider folder/datasource/evaluation selection, approval policy, app/pack compatibility, and exact digests.
+- `POST /deployment-plans/preflight` performs read-only normalization/admission and returns exact app/pack pins, assets, compatible packs, entitlement-filtered application/monitoring targets, and renderer-gate state. Tenant pack pins are authoritative; otherwise only stable candidates are offered, with the effective version first. A monitoring target appears only after provider selection resolves and an exact pack is visible/admitted in that target environment.
+- `POST /deployment-plans` requires an idempotency key and revalidates the application target, catalog visibility, monitoring provision grant, target revision, provider folder/datasource/evaluation selection, approval policy, app/pack compatibility, and exact digests. Malformed plan/source/spec/team/chart input returns a typed 4xx response; reviewed digest or approval drift conflicts rather than executing different bytes.
 - `GET /deployment-plans/{id}` returns plan and companion state.
 - `GET /instances/{id}/observability` supports later provisioning state and readiness-gated links.
 
@@ -19,13 +19,13 @@ Inari-managed charts receive final server-owned values `observability.enabled=fa
 
 Central companion intent selects dashboards plus central rules. Local intent selects dashboards plus local rules. Only packs annotated with `inari.observability-pack/v2` are compatible because that contract makes both evaluation booleans effective. The server rejects older ambiguous packs rather than emitting duplicate or cross-environment rules.
 
-The application starts through the existing catalog/template execution path. A provision request while the sibling renderer gate is closed records `blocked_external_gate` without creating an approval, Git write, ArgoCD registration, companion instance, verification run, or automatic later resume. No legacy single-repo adapter exists.
+The application starts through the existing catalog/template execution path. Application approval resume reruns the common plan's grant, target, compatibility, and exact-pin validation without executing a duplicate app, then links only the real orchestrator result back to the plan. Template execution requires the reviewed artifact digest both before run persistence and when the run is linked. A provision request while the sibling renderer gate is closed records `blocked_external_gate` without creating a companion approval, Git write, ArgoCD registration, companion instance, verification run, or automatic later resume. No legacy single-repo adapter exists.
 
 ## Readiness and links
 
 KRO, ArgoCD, and application health do not prove Grafana readiness. A real companion must reach verification and receive a current read-only target-side result for folder, dashboards, datasource, team access, and selected rules. The result must match companion generation, target revision/cluster, app source revision/digest, pack digest, capability digest, and approved suite/run identity.
 
-The hub never calls Grafana. Links are derived only for a `ready` companion with unexpired matching evidence and a caller who retains the target view grant. URLs use the resolved HTTPS target base URL, verified dashboard UID/slug, and declared link variables. Pending, skipped, failed, stale, expired, revoked, or cancelled states return no links. The UI and CLI must not construct their own Grafana URLs.
+The hub never calls Grafana. Links are derived only for a `ready` companion with unexpired matching evidence and a caller who retains the target view grant. Every status read also compares the live inventory application version, digest, cluster, ownership, namespace, repo, and semantic spec with the reviewed plan (including the server-owned chart overlay). Upgrade or edit drift produces `stale` and removes links immediately; expiry, evidence drift, view revocation, and target failure produce `expired`, `stale`, `revoked`, or `unavailable`, never a READY/no-links ambiguity. URLs use the resolved HTTPS target base URL, verified dashboard UID/slug, and declared link variables. Pending, skipped, failed, stale, expired, revoked, or cancelled states return no links. The UI and CLI must not construct their own Grafana URLs.
 
 ## Migration and rollback
 

@@ -70,6 +70,14 @@ type Gate interface {
 	Gate(ctx context.Context, in approvals.GateInput) (*approvals.GateResult, error)
 }
 
+// DeploymentPlanApprovalHandler is implemented by the deploymentplan module
+// without introducing an orchestrator -> deploymentplan dependency cycle.
+// Resume revalidates before any apply side effect, then links the real result.
+type DeploymentPlanApprovalHandler interface {
+	RevalidateApprovedExecution(ctx context.Context, orgID, planID, requester string) error
+	LinkApprovedExecution(ctx context.Context, orgID, planID string, result *DeployResult) error
+}
+
 // PolicyChecker is the Policy Service seam (plan §5.11): PreFlight runs
 // request-time OPA checks before the approval gate; RenderCheck runs
 // render-time manifest checks before anything reaches tenant Git.
@@ -169,6 +177,8 @@ type DeployRequest struct {
 	// to (Feature A); empty = the org's default repo.
 	RepoID         string
 	ArtifactDigest string
+	// DeploymentPlanID is internal common-plan approval context.
+	DeploymentPlanID string
 	// admissionVerified is set only by this service after admitVersion succeeds
 	// in the current invocation. Resume builds a fresh request and re-admits.
 	admissionVerified bool
@@ -188,16 +198,17 @@ type DeployResult struct {
 
 // Service is the Orchestrator module.
 type Service struct {
-	db             *db.DB
-	instances      *inventory.Store
-	catalog        CatalogResolver
-	clusters       ClusterResolver
-	targets        ResourceTargetResolver
-	orgPermissions authz.Authorizer
-	gate           Gate
-	policy         PolicyChecker // nil = no policy enforcement
-	queue          Queue
-	git            gitprovider.Resolver
+	db              *db.DB
+	instances       *inventory.Store
+	catalog         CatalogResolver
+	clusters        ClusterResolver
+	targets         ResourceTargetResolver
+	orgPermissions  authz.Authorizer
+	gate            Gate
+	deploymentPlans DeploymentPlanApprovalHandler
+	policy          PolicyChecker // nil = no policy enforcement
+	queue           Queue
+	git             gitprovider.Resolver
 	// gitRepos is the repo-aware resolver (Feature A). nil = legacy
 	// single-repo mode: deploys resolve via git.ForTenant(GitConfig(org)).
 	gitRepos *gitprovider.RepoResolver
@@ -228,6 +239,11 @@ func (s *Service) WithResourceTargets(targets ResourceTargetResolver) *Service {
 // when an approval resumes without the original HTTP request context.
 func (s *Service) WithOrgPermissions(permissions authz.Authorizer) *Service {
 	s.orgPermissions = permissions
+	return s
+}
+
+func (s *Service) WithDeploymentPlanApprovalHandler(handler DeploymentPlanApprovalHandler) *Service {
+	s.deploymentPlans = handler
 	return s
 }
 
@@ -408,7 +424,7 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 	gate, err := s.gate.Gate(ctx, approvals.GateInput{
 		OrgID: req.OrgID, Item: item, Version: version, ClusterID: req.ClusterID,
 		Spec: req.Spec, Requester: req.Requester, Name: req.Name, Namespace: req.Namespace,
-		OwnerTeam: req.OwnerTeam, Channel: req.Channel, RepoID: req.RepoID, ArtifactDigest: reviewedDigest,
+		OwnerTeam: req.OwnerTeam, Channel: req.Channel, RepoID: req.RepoID, ArtifactDigest: reviewedDigest, DeploymentPlanID: req.DeploymentPlanID,
 	})
 	if err != nil {
 		return nil, err

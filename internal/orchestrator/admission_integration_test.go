@@ -19,12 +19,14 @@ import (
 )
 
 type recordingGate struct {
-	calls    int
-	approved bool
+	calls          int
+	approved       bool
+	artifactDigest string
 }
 
-func (g *recordingGate) Gate(context.Context, approvals.GateInput) (*approvals.GateResult, error) {
+func (g *recordingGate) Gate(_ context.Context, in approvals.GateInput) (*approvals.GateResult, error) {
 	g.calls++
+	g.artifactDigest = in.ArtifactDigest
 	return &approvals.GateResult{Approved: g.approved, ApprovalID: "approval-1"}, nil
 }
 
@@ -157,6 +159,9 @@ func TestDeployAdmitsBeforePendingAndReusesImmediateAdmission(t *testing.T) {
 				}
 				if body["artifactDigest"] != "sha256:52ccaee6d4dd272e54bfccda77738b42e1edf0e4a20c27e23f0b6c15d01aef79" {
 					t.Fatalf("pending deploy JSON = %s, want admitted artifactDigest", raw)
+				}
+				if gate.artifactDigest != body["artifactDigest"] {
+					t.Fatalf("approval artifact digest = %q, want %q", gate.artifactDigest, body["artifactDigest"])
 				}
 			}
 			if gate.calls != 1 || catalog.admitCalls != 1 {

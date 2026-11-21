@@ -138,6 +138,10 @@ var ErrClusterMismatch = fmt.Errorf("orchestrator: cluster does not belong to te
 // ErrInstanceExists is returned when a deploy reuses an existing instance name.
 var ErrInstanceExists = fmt.Errorf("orchestrator: instance already exists")
 
+// ErrArtifactDigestMismatch prevents admission drift between a reviewed plan
+// (including an approval resume) and the artifact selected for execution.
+var ErrArtifactDigestMismatch = fmt.Errorf("orchestrator: admitted artifact digest does not match the reviewed pin")
+
 func isUniqueViolation(err error) bool {
 	if err == nil {
 		return false
@@ -400,7 +404,7 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 	gate, err := s.gate.Gate(ctx, approvals.GateInput{
 		OrgID: req.OrgID, Item: item, Version: version, ClusterID: req.ClusterID,
 		Spec: req.Spec, Requester: req.Requester, Name: req.Name, Namespace: req.Namespace,
-		OwnerTeam: req.OwnerTeam, Channel: req.Channel, RepoID: req.RepoID,
+		OwnerTeam: req.OwnerTeam, Channel: req.Channel, RepoID: req.RepoID, ArtifactDigest: req.ArtifactDigest,
 	})
 	if err != nil {
 		return nil, err
@@ -418,26 +422,35 @@ func (s *Service) apply(ctx context.Context, req DeployRequest, item *types.Cata
 }
 
 func (s *Service) admitVersion(ctx context.Context, req DeployRequest, item *types.CatalogItem, version string) (string, error) {
+	digest := ""
 	if item.SourceID == "" {
-		return "", nil
+		row, err := s.catalog.GetVersion(ctx, req.ItemID, version)
+		if err != nil {
+			return "", err
+		}
+		digest = row.ArtifactDigest
+	} else {
+		admitter, ok := s.catalog.(VersionAdmitter)
+		if !ok {
+			return "", &artifactadmission.Error{Code: artifactadmission.CodeUnavailable, Ref: req.ItemID, Err: errors.New("catalog admission seam is not configured"), Temporary: true}
+		}
+		cluster, err := s.clusters.GetCluster(ctx, req.ClusterID)
+		if err != nil {
+			return "", err
+		}
+		environment := trustedsource.Environment(cluster.Labels["inari.dev/environment"])
+		admitted, err := admitter.AdmitVersion(ctx, req.ItemID, version, environment)
+		if err != nil {
+			return "", err
+		}
+		if admitted != nil && admitted.Version != nil {
+			digest = admitted.Version.ArtifactDigest
+		}
 	}
-	admitter, ok := s.catalog.(VersionAdmitter)
-	if !ok {
-		return "", &artifactadmission.Error{Code: artifactadmission.CodeUnavailable, Ref: req.ItemID, Err: errors.New("catalog admission seam is not configured"), Temporary: true}
+	if req.ArtifactDigest != "" && digest != req.ArtifactDigest {
+		return "", ErrArtifactDigestMismatch
 	}
-	cluster, err := s.clusters.GetCluster(ctx, req.ClusterID)
-	if err != nil {
-		return "", err
-	}
-	environment := trustedsource.Environment(cluster.Labels["inari.dev/environment"])
-	admitted, err := admitter.AdmitVersion(ctx, req.ItemID, version, environment)
-	if err != nil {
-		return "", err
-	}
-	if admitted != nil && admitted.Version != nil {
-		return admitted.Version.ArtifactDigest, nil
-	}
-	return "", nil
+	return digest, nil
 }
 
 // gitTarget is the resolved repo a write lands in: the registry row when
@@ -911,7 +924,7 @@ func (s *Service) revert(ctx context.Context, orgID, instanceID, toVersion, repo
 	gate, err := s.gate.Gate(ctx, approvals.GateInput{
 		OrgID: orgID, Item: item, Version: toVersion, ClusterID: existing.ClusterID,
 		Spec: existing.Spec, Requester: requester, OwnerTeam: existing.OwnerTeam,
-		InstanceID: instanceID, RepoID: existing.RepoID,
+		InstanceID: instanceID, RepoID: existing.RepoID, ArtifactDigest: req.ArtifactDigest,
 	})
 	if err != nil {
 		return nil, err
@@ -968,7 +981,7 @@ func (s *Service) UpdateSpec(ctx context.Context, orgID, instanceID string, spec
 	gate, err := s.gate.Gate(ctx, approvals.GateInput{
 		OrgID: orgID, Item: item, Version: existing.Version, ClusterID: existing.ClusterID,
 		Spec: spec, Requester: requester, OwnerTeam: existing.OwnerTeam,
-		InstanceID: instanceID, Action: GateActionInstanceUpdate, RepoID: existing.RepoID,
+		InstanceID: instanceID, Action: GateActionInstanceUpdate, RepoID: existing.RepoID, ArtifactDigest: req.ArtifactDigest,
 	})
 	if err != nil {
 		return nil, err
@@ -983,10 +996,10 @@ func (s *Service) UpdateSpec(ctx context.Context, orgID, instanceID string, spec
 // The authorization subject remains the original requester while requester is
 // the audit actor (system automation on an outbox resume).
 func (s *Service) UpdateSpecResume(ctx context.Context, orgID, instanceID string, spec json.RawMessage, requester string) error {
-	return s.UpdateSpecResumeAs(ctx, orgID, instanceID, spec, requester, requester)
+	return s.UpdateSpecResumeAs(ctx, orgID, instanceID, spec, requester, requester, "")
 }
 
-func (s *Service) UpdateSpecResumeAs(ctx context.Context, orgID, instanceID string, spec json.RawMessage, requester, authorizationSubject string) error {
+func (s *Service) UpdateSpecResumeAs(ctx context.Context, orgID, instanceID string, spec json.RawMessage, requester, authorizationSubject, expectedArtifactDigest string) error {
 	existing, err := s.instances.Get(ctx, s.db.Pool, instanceID)
 	if err != nil {
 		return err
@@ -1007,6 +1020,7 @@ func (s *Service) UpdateSpecResumeAs(ctx context.Context, orgID, instanceID stri
 	_, err = s.applyWithEvent(ctx, DeployRequest{
 		OrgID: orgID, ClusterID: existing.ClusterID, ItemID: existing.CatalogItemID,
 		Version: existing.Version, OwnerTeam: existing.OwnerTeam, Spec: spec, Requester: requester,
+		ArtifactDigest: expectedArtifactDigest,
 	}, item, existing.Version, existing, types.EventInstanceUpdated, true)
 	return err
 }

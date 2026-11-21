@@ -224,11 +224,80 @@ func TestPreflightNormalizesAssetsPinsAndPolicyDefault(t *testing.T) {
 	}
 }
 
+func reviewedRequest(t *testing.T, svc *Service, req PlanRequest) PlanRequest {
+	t.Helper()
+	review, err := svc.Preflight(context.Background(), req, "org-1", "acme-inc", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Source = &review.Plan.Source
+	req.Deployment = review.Plan.Deployment
+	req.Observability = review.Plan.Observability
+	req.PlanFingerprint = review.Plan.PlanFingerprint
+	return req
+}
+
+func submitReviewed(t *testing.T, svc *Service, req PlanRequest) (*Plan, error) {
+	t.Helper()
+	return svc.Submit(context.Background(), reviewedRequest(t, svc, req), "org-1", "acme-inc", "user-1")
+}
+
+func TestSubmitRequiresReviewedExactSourcePins(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Source)
+	}{
+		{name: "version", mutate: func(source *Source) { source.Version = "" }},
+		{name: "digest", mutate: func(source *Source) { source.Digest = "" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, _, _, executor, _ := serviceFixture(t)
+			req := deployRequest()
+			tc.mutate(req.Source)
+			initial, err := svc.Preflight(context.Background(), req, "org-1", "acme-inc", "user-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.PlanFingerprint = initial.Plan.PlanFingerprint
+			if _, err := svc.Submit(context.Background(), req, "org-1", "acme-inc", "user-1"); err == nil {
+				t.Fatal("submit accepted a mutable source pin")
+			}
+			if executor.calls != 0 {
+				t.Fatal("application executed with a mutable source pin")
+			}
+		})
+	}
+}
+
+func TestSubmitRequiresPlanFingerprint(t *testing.T) {
+	svc, _, _, executor, _ := serviceFixture(t)
+	req := deployRequest()
+	req.Source.Digest = testDigest
+	if _, err := svc.Submit(context.Background(), req, "org-1", "acme-inc", "user-1"); err == nil {
+		t.Fatal("submit accepted a plan without a review fingerprint")
+	}
+	if executor.calls != 0 {
+		t.Fatal("application executed without plan freshness validation")
+	}
+}
+
+func TestPreflightReturnsExactNormalizedSourcePin(t *testing.T) {
+	svc, _, _, _, _ := serviceFixture(t)
+	initial, err := svc.Preflight(context.Background(), deployRequest(), "org-1", "acme-inc", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if initial.Plan.Source.Version != "1.4.0" || initial.Plan.Source.Digest != testDigest {
+		t.Fatalf("normalized source pin = %#v", initial.Plan.Source)
+	}
+}
+
 func TestSubmitSkipExecutesAppWithoutCompanion(t *testing.T) {
 	svc, _, _, executor, _ := serviceFixture(t)
 	req := deployRequest()
 	req.Observability.Mode = ModeSkip
-	plan, err := svc.Submit(context.Background(), req, "org-1", "acme-inc", "user-1")
+	plan, err := submitReviewed(t, svc, req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +315,10 @@ func TestSubmitSkipExecutesAppWithoutCompanion(t *testing.T) {
 
 func TestSubmitProvisionClosedGateRevalidatesAndHasNoLinks(t *testing.T) {
 	svc, cat, targets, executor, _ := serviceFixture(t)
-	plan, err := svc.Submit(context.Background(), deployRequest(), "org-1", "acme-inc", "user-1")
+	req := reviewedRequest(t, svc, deployRequest())
+	cat.admitted = nil
+	targets.resolveCalls = nil
+	plan, err := svc.Submit(context.Background(), req, "org-1", "acme-inc", "user-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,6 +354,7 @@ func TestSubmitRequiresExactCompatiblePackPin(t *testing.T) {
 			pin := initial.CompatiblePacks[0]
 			tc.mutate(&pin)
 			req.Observability.Pack = &pin
+			req = reviewedRequest(t, svc, req)
 			if _, err := svc.Submit(context.Background(), req, "org-1", "acme-inc", "user-1"); err == nil {
 				t.Fatal("submit accepted a pack pin that was not an exact compatible candidate")
 			}
@@ -300,6 +373,9 @@ func TestSubmitRevalidatesAdmittedPackPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	pin := initial.CompatiblePacks[0]
+	req.Source = &initial.Plan.Source
+	req.Deployment = initial.Plan.Deployment
+	req.Observability = initial.Plan.Observability
 	req.Observability.Pack = &pin
 	req.PlanFingerprint = initial.Plan.PlanFingerprint
 	invalid := *cat.packVersion
@@ -316,7 +392,7 @@ func TestSubmitRevalidatesAdmittedPackPayload(t *testing.T) {
 func TestSubmitRevokedProvisionGrantStopsBeforeExecution(t *testing.T) {
 	svc, _, targets, executor, _ := serviceFixture(t)
 	targets.provisionErr = resourcetargets.ErrTargetDenied
-	if _, err := svc.Submit(context.Background(), deployRequest(), "org-1", "acme-inc", "user-1"); !errors.Is(err, resourcetargets.ErrTargetDenied) {
+	if _, err := submitReviewed(t, svc, deployRequest()); !errors.Is(err, resourcetargets.ErrTargetDenied) {
 		t.Fatalf("error = %v", err)
 	}
 	if executor.calls != 0 {
@@ -371,7 +447,7 @@ func TestExistingInstanceCanProvisionFromOriginalPins(t *testing.T) {
 	svc, _, _, _, _ := serviceFixture(t)
 	req := deployRequest()
 	req.Observability.Mode = ModeSkip
-	original, err := svc.Submit(context.Background(), req, "org-1", "acme-inc", "user-1")
+	original, err := submitReviewed(t, svc, req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +469,7 @@ func TestExistingInstanceCanProvisionFromOriginalPins(t *testing.T) {
 
 func TestVerificationGatesReadyLinksAndRejectsBlockedIntent(t *testing.T) {
 	svc, _, _, _, store := serviceFixture(t)
-	plan, err := svc.Submit(context.Background(), deployRequest(), "org-1", "acme-inc", "user-1")
+	plan, err := submitReviewed(t, svc, deployRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +531,7 @@ func TestVerificationRejectsEvidenceOutsideApprovedSelection(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			svc, _, _, _, store := serviceFixture(t)
-			plan, err := svc.Submit(context.Background(), deployRequest(), "org-1", "acme-inc", "user-1")
+			plan, err := submitReviewed(t, svc, deployRequest())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -487,7 +563,7 @@ func TestVerificationRejectsEvidenceOutsideApprovedSelection(t *testing.T) {
 
 func TestInstanceLinksRejectPersistedEvidenceThatDoesNotMatchSelection(t *testing.T) {
 	svc, _, _, _, store := serviceFixture(t)
-	plan, err := svc.Submit(context.Background(), deployRequest(), "org-1", "acme-inc", "user-1")
+	plan, err := submitReviewed(t, svc, deployRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -522,7 +598,7 @@ func TestInstanceLinksRejectPersistedEvidenceThatDoesNotMatchSelection(t *testin
 
 func TestInstanceStatusNeverUsesCompanionFromOlderPlan(t *testing.T) {
 	svc, _, _, _, store := serviceFixture(t)
-	original, err := svc.Submit(context.Background(), deployRequest(), "org-1", "acme-inc", "user-1")
+	original, err := submitReviewed(t, svc, deployRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -598,7 +674,7 @@ func resultForPlan(t *testing.T, plan *Plan) *observability.VerificationResult {
 
 func TestVerificationDuplicateAndOlderResultsCannotChangeReadiness(t *testing.T) {
 	svc, _, _, _, store := serviceFixture(t)
-	plan, err := svc.Submit(context.Background(), deployRequest(), "org-1", "acme-inc", "user-1")
+	plan, err := submitReviewed(t, svc, deployRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -636,7 +712,7 @@ func TestVerificationDuplicateAndOlderResultsCannotChangeReadiness(t *testing.T)
 
 func TestVerificationStoreRejectsStaleCompanionSnapshot(t *testing.T) {
 	svc, _, _, _, store := serviceFixture(t)
-	plan, err := svc.Submit(context.Background(), deployRequest(), "org-1", "acme-inc", "user-1")
+	plan, err := submitReviewed(t, svc, deployRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -677,7 +753,7 @@ func TestVerificationStoreRejectsStaleCompanionSnapshot(t *testing.T) {
 
 func TestVerificationRejectsWrongGeneration(t *testing.T) {
 	svc, _, _, _, _ := serviceFixture(t)
-	plan, err := svc.Submit(context.Background(), deployRequest(), "org-1", "acme-inc", "user-1")
+	plan, err := submitReviewed(t, svc, deployRequest())
 	if err != nil {
 		t.Fatal(err)
 	}

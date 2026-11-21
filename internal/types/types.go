@@ -645,11 +645,14 @@ type ApprovalRequest struct {
 	Action     string          `json:"action,omitempty"`
 	// RepoID carries the deploy-time repo selector through the approval
 	// gate so the resumed deploy commits to the same repo (Feature A).
-	RepoID      string     `json:"repoId,omitempty"`
-	CreatedAt   time.Time  `json:"createdAt"`
-	DecidedAt   *time.Time `json:"decidedAt,omitempty"`
-	ExpiresAt   *time.Time `json:"expiresAt,omitempty"`
-	CancelledBy string     `json:"cancelledBy,omitempty"`
+	RepoID string `json:"repoId,omitempty"`
+	// ArtifactDigest is the admitted application pin carried through approval
+	// resume. It is internal execution context, not a mutable API field.
+	ArtifactDigest string     `json:"-"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	DecidedAt      *time.Time `json:"decidedAt,omitempty"`
+	ExpiresAt      *time.Time `json:"expiresAt,omitempty"`
+	CancelledBy    string     `json:"cancelledBy,omitempty"`
 }
 
 // InstanceState is the resource instance lifecycle (plan §5.11).

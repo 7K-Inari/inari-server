@@ -1,6 +1,11 @@
 -- +goose Up
 -- Deployment observability is additive and deliberately follows the plugin
 -- compatibility migration 0042 when that coordinated change lands.
+-- Approval resume carries the exact admitted application pin without exposing
+-- it as mutable approval API input. Existing pending rows retain an empty pin
+-- and follow their legacy admission behavior.
+ALTER TABLE approval_requests ADD COLUMN artifact_digest TEXT NOT NULL DEFAULT '';
+
 CREATE TABLE deployment_plans (
     id TEXT PRIMARY KEY,
     org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
@@ -95,3 +100,4 @@ CREATE INDEX observability_verification_current_idx ON observability_verificatio
 DROP TABLE IF EXISTS observability_verification_results;
 DROP TABLE IF EXISTS observability_companions;
 DROP TABLE IF EXISTS deployment_plans;
+ALTER TABLE approval_requests DROP COLUMN IF EXISTS artifact_digest;

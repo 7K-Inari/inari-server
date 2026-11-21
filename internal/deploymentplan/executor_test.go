@@ -29,7 +29,7 @@ func TestExecutorDelegatesExactCatalogAndTemplatePins(t *testing.T) {
 	executor := NewExecutor(deployer, scaffolder)
 	plan := &Plan{
 		Source: Source{Kind: SourceCatalog, ItemID: "hiroba/payments-api", Version: "1.4.0"},
-		App:    ArtifactPin{ItemID: "hiroba/payments-api", Version: "1.4.0"}, AppClusterID: "cluster-1",
+		App:    ArtifactPin{ItemID: "hiroba/payments-api", Version: "1.4.0", Digest: testDigest}, AppClusterID: "cluster-1",
 		Deployment: DeploymentInput{Name: "payments", Namespace: "payments", OwnerTeam: "team-1", Spec: json.RawMessage(`{"replicas":2}`)},
 	}
 	execution, err := executor.Execute(context.Background(), "org-1", "user-1", plan)
@@ -38,6 +38,9 @@ func TestExecutorDelegatesExactCatalogAndTemplatePins(t *testing.T) {
 	}
 	if deployer.request.ItemID != plan.App.ItemID || deployer.request.Version != "1.4.0" || deployer.request.ClusterID != "cluster-1" || deployer.request.Requester != "user:user-1" {
 		t.Fatalf("deploy request = %#v", deployer.request)
+	}
+	if deployer.request.ArtifactDigest != testDigest {
+		t.Fatalf("expected application digest was not carried to execution: %#v", deployer.request)
 	}
 	plan.Source = Source{Kind: SourceTemplate, ItemID: "hiroba/service", Version: "1.4.0", DisplayName: "Payments"}
 	execution, err = executor.Execute(context.Background(), "org-1", "user-1", plan)

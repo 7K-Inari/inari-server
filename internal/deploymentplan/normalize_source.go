@@ -191,6 +191,8 @@ func (s *Service) normalizeSource(ctx context.Context, req PlanRequest, orgID st
 	if source.Digest != "" && source.Digest != row.ArtifactDigest {
 		return nil, errors.New("application digest mismatch")
 	}
+	source.Version = row.Version
+	source.Digest = row.ArtifactDigest
 	app := ArtifactPin{ItemID: item.ID, Version: row.Version, PackageVersion: row.PackageVersion, Ref: row.ArtifactRef, Digest: row.ArtifactDigest, SourceID: item.SourceID, ChartRef: row.ChartRef, ChartDigest: row.ChartDigest}
 	var chartMetadata []byte
 	if row.ChartRef != "" {

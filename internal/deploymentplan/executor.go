@@ -45,6 +45,7 @@ func (e *Executor) Execute(ctx context.Context, orgID, subject string, plan *Pla
 			OrgID: orgID, ClusterID: plan.AppClusterID, ItemID: plan.App.ItemID, Version: plan.App.Version,
 			Name: plan.Deployment.Name, Namespace: plan.Deployment.Namespace, OwnerTeam: plan.Deployment.OwnerTeam,
 			Spec: plan.Deployment.Spec, Requester: "user:" + strings.TrimPrefix(subject, "user:"), RepoID: plan.Deployment.RepoID,
+			ArtifactDigest: plan.App.Digest,
 		})
 		if err != nil {
 			return nil, err

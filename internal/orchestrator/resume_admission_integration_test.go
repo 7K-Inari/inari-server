@@ -90,6 +90,29 @@ func TestPermanentResumeAdmissionDenialIsTerminalAndAudited(t *testing.T) {
 	}
 }
 
+func TestResumeRejectsApplicationDigestDrift(t *testing.T) {
+	const admittedDigest = "sha256:52ccaee6d4dd272e54bfccda77738b42e1edf0e4a20c27e23f0b6c15d01aef79"
+	const reviewedDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	item := &types.CatalogItem{ID: "core/web-service", SourceID: "core", Name: "web-service"}
+	catalog := &denialCatalog{item: item, version: &types.CatalogItemVersion{ItemID: item.ID, Version: "1.0.0", ArtifactDigest: admittedDigest}}
+	service, database := newAdmissionWorkflowFixture(t, catalog, &recordingGate{})
+	request := &types.ApprovalRequest{ID: "approval-digest-drift", OrgID: "org:1", ItemID: item.ID, Version: "1.0.0", ClusterID: "c1", ArtifactDigest: reviewedDigest}
+	handler := NewResumeHandler(service, staticApprovalLoader{request: request}, nil)
+	if err := handler.Handle(context.Background(), approvedEvent(t, request)); !errors.Is(err, ErrArtifactDigestMismatch) {
+		t.Fatalf("resume error = %v, want ErrArtifactDigestMismatch", err)
+	}
+	if catalog.admitCalls != 1 {
+		t.Fatalf("admission calls = %d, want 1", catalog.admitCalls)
+	}
+	var outbox int
+	if err := database.Pool.QueryRow(context.Background(), `SELECT count(*) FROM outbox`).Scan(&outbox); err != nil {
+		t.Fatal(err)
+	}
+	if outbox != 0 {
+		t.Fatalf("digest drift caused %d outbox side effects", outbox)
+	}
+}
+
 func TestTemporaryResumeAdmissionFailureRemainsRetryable(t *testing.T) {
 	item := &types.CatalogItem{ID: "core/web-service", SourceID: "core", Name: "web-service"}
 	catalog := &denialCatalog{

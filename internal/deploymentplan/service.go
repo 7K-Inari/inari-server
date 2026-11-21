@@ -364,12 +364,20 @@ func (s *Service) Preflight(ctx context.Context, req PlanRequest, orgID, orgSlug
 }
 
 func (s *Service) Submit(ctx context.Context, req PlanRequest, orgID, orgSlug, subject string) (*Plan, error) {
+	if req.PlanFingerprint == "" {
+		return nil, fmt.Errorf("%w: plan_stale: planFingerprint is required", ErrPlanConflict)
+	}
+	if req.Operation != OperationProvisionExisting {
+		if req.Source == nil || req.Source.Version == "" || req.Source.Digest == "" {
+			return nil, fmt.Errorf("%w: plan_stale: exact normalized source version and digest are required", ErrPlanConflict)
+		}
+	}
 	preflight, err := s.Preflight(ctx, req, orgID, orgSlug, subject)
 	if err != nil {
 		return nil, err
 	}
 	plan := preflight.Plan.DeepCopy()
-	if req.PlanFingerprint != "" && req.PlanFingerprint != plan.PlanFingerprint {
+	if req.PlanFingerprint != plan.PlanFingerprint {
 		return nil, fmt.Errorf("%w: plan_stale", ErrPlanConflict)
 	}
 	if req.IdempotencyKey != "" {

@@ -97,7 +97,7 @@ func (h *ResumeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) error
 	// own paths — never as deploys.
 	switch req.Action {
 	case GateActionInstanceUpdate:
-		err := h.svc.UpdateSpecResumeAs(ctx, req.OrgID, req.InstanceID, req.Spec, impersonation.SystemActor("approvals"), req.Requester)
+		err := h.svc.UpdateSpecResumeAs(ctx, req.OrgID, req.InstanceID, req.Spec, impersonation.SystemActor("approvals"), req.Requester, req.ArtifactDigest)
 		if terminalTargetError(err) {
 			return h.denyTarget(ctx, req)
 		}
@@ -144,7 +144,7 @@ func (h *ResumeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) error
 		Version: req.Version, Channel: req.Channel, Name: req.Name,
 		Namespace: req.Namespace, OwnerTeam: req.OwnerTeam,
 		Spec: req.Spec, Requester: impersonation.SystemActor("approvals"),
-		RepoID: req.RepoID,
+		RepoID: req.RepoID, ArtifactDigest: req.ArtifactDigest,
 	}
 	item, err := h.svc.catalog.GetItemByID(ctx, req.ItemID)
 	if err != nil {

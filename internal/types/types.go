@@ -120,21 +120,26 @@ const (
 	EventClusterKubectlProxyOpen  = "cluster.kubectl_proxy_open"
 	EventClusterKubectlProxyClose = "cluster.kubectl_proxy_close"
 
-	EventCatalogItemUpserted      = "catalog.item_upserted"
-	EventCatalogVisibilityChanged = "catalog.visibility.changed"
-	EventApprovalRequested        = "approval.requested"
-	EventApprovalDecided          = "approval.decided"
-	EventApprovalCancelled        = "approval.cancelled"
-	EventApprovalExpired          = "approval.expired"
-	EventApprovalConfigUpdated    = "approvals.config.updated"
-	EventDeployRequested          = "deploy.requested"
-	EventDeployTargetDenied       = "deploy.target_denied"
-	EventInstanceCreated          = "instance.created"
-	EventInstanceStatus           = "instance.status"
-	EventInstanceUpgraded         = "instance.upgraded"
-	EventInstanceUpdated          = "instance.updated"
-	EventInstanceDeleted          = "instance.deleted"
-	EventInstanceRolledBack       = "instance.rolled_back"
+	EventCatalogItemUpserted          = "catalog.item_upserted"
+	EventCatalogVisibilityChanged     = "catalog.visibility.changed"
+	EventApprovalRequested            = "approval.requested"
+	EventApprovalDecided              = "approval.decided"
+	EventApprovalCancelled            = "approval.cancelled"
+	EventApprovalExpired              = "approval.expired"
+	EventApprovalConfigUpdated        = "approvals.config.updated"
+	EventDeployRequested              = "deploy.requested"
+	EventDeployTargetDenied           = "deploy.target_denied"
+	EventInstanceCreated              = "instance.created"
+	EventInstanceStatus               = "instance.status"
+	EventInstanceUpgraded             = "instance.upgraded"
+	EventInstanceUpdated              = "instance.updated"
+	EventInstanceDeleted              = "instance.deleted"
+	EventInstanceRolledBack           = "instance.rolled_back"
+	EventVerificationRunStarted       = "verification.run_started"
+	EventVerificationPassed           = "verification.passed"
+	EventVerificationFailed           = "verification.failed"
+	EventVerificationBlocked          = "verification.blocked"
+	EventVerificationPromotionBlocked = "verification.promotion_blocked"
 
 	// First-class addons (Feature C): lifecycle events from the addons
 	// service plus health/sync folded from the status stream.
@@ -1766,15 +1771,16 @@ const (
 
 // NotificationDelivery records one attempted delivery for retry/audit.
 type NotificationDelivery struct {
-	ID          string          `json:"id"`
-	EndpointID  string          `json:"endpointId"`
-	EventType   string          `json:"eventType"`
-	Payload     json.RawMessage `json:"payload"`
-	Status      string          `json:"status"`
-	Attempts    int             `json:"attempts"`
-	LastError   string          `json:"lastError,omitempty"`
-	CreatedAt   time.Time       `json:"createdAt"`
-	DeliveredAt *time.Time      `json:"deliveredAt,omitempty"`
+	ID            string          `json:"id"`
+	EndpointID    string          `json:"endpointId"`
+	EventType     string          `json:"eventType"`
+	Payload       json.RawMessage `json:"payload"`
+	Status        string          `json:"status"`
+	Attempts      int             `json:"attempts"`
+	LastError     string          `json:"lastError,omitempty"`
+	CreatedAt     time.Time       `json:"createdAt"`
+	DeliveredAt   *time.Time      `json:"deliveredAt,omitempty"`
+	OutboxEventID *int64          `json:"-"`
 }
 
 // Tenant Zone lifecycle (plan §5.12): the resumable, idempotent vending

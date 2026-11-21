@@ -184,6 +184,7 @@ func (s *Service) ApplyReport(ctx context.Context, orgID, clusterID string, repo
 		return errors.New("verification_report_denied: unknown verification result")
 	}
 	var applied bool
+	notificationEndpointIDs := uniqueNotificationEndpoints(policy.Notifications.EndpointIDs, environment.RequiredNotificationEndpointIDs)
 	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		var err error
 		applied, err = s.store.applyReport(ctx, tx, run, report, payloadDigest, mutation)
@@ -199,7 +200,8 @@ func (s *Service) ApplyReport(ctx context.Context, orgID, clusterID string, repo
 			"runId": run.ID, "attempt": run.LatestAttempt, "appRevision": run.AppRevision,
 			"appArtifactDigest": run.AppArtifactDigest, "suiteDigest": run.SuiteDigest, "profile": run.Profile,
 			"status": mutation.status, "reasonCode": mutation.reason, "outcomeDigest": mutation.outcomeDigest,
-			"automaticRollback": false,
+			"notificationEndpointIds": notificationEndpointIDs,
+			"automaticRollback":       false,
 		})
 	})
 	return err
@@ -228,6 +230,20 @@ func validOptionalReportTime(value *timestamppb.Timestamp) (*time.Time, error) {
 		return nil, err
 	}
 	return &parsed, nil
+}
+
+func uniqueNotificationEndpoints(groups ...[]string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, group := range groups {
+		for _, id := range group {
+			if id != "" && !seen[id] {
+				seen[id] = true
+				out = append(out, id)
+			}
+		}
+	}
+	return out
 }
 
 func terminalReportState(report *agentv1.VerificationReport) string {

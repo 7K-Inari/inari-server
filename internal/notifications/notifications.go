@@ -52,6 +52,11 @@ var subscribedEvents = []string{
 	types.EventExtensionStateChanged,
 	types.EventScaffoldRunCompleted,
 	types.EventScaffoldRunFailed,
+	types.EventVerificationRunStarted,
+	types.EventVerificationPassed,
+	types.EventVerificationFailed,
+	types.EventVerificationBlocked,
+	types.EventVerificationPromotionBlocked,
 }
 
 func knownEvent(t string) bool {
@@ -71,6 +76,25 @@ func matchesEvents(ep *types.NotificationEndpoint, eventType string) bool {
 	}
 	for _, e := range ep.Events {
 		if e == eventType {
+			return true
+		}
+	}
+	return false
+}
+
+func isVerificationEvent(eventType string) bool {
+	return strings.HasPrefix(eventType, "verification.")
+}
+
+func verificationEndpointSelected(payload json.RawMessage, endpointID string) bool {
+	var body struct {
+		EndpointIDs []string `json:"notificationEndpointIds"`
+	}
+	if json.Unmarshal(payload, &body) != nil {
+		return false
+	}
+	for _, id := range body.EndpointIDs {
+		if id == endpointID {
 			return true
 		}
 	}
@@ -160,11 +184,11 @@ func (s *Store) DeleteEndpoint(ctx context.Context, q db.Querier, id string) err
 	return nil
 }
 
-const deliveryCols = `id, endpoint_id, event_type, payload, status, attempts, last_error, created_at, delivered_at`
+const deliveryCols = `id, endpoint_id, event_type, payload, status, attempts, last_error, created_at, delivered_at, outbox_event_id`
 
 func scanDelivery(row interface{ Scan(...any) error }) (*types.NotificationDelivery, error) {
 	var d types.NotificationDelivery
-	err := row.Scan(&d.ID, &d.EndpointID, &d.EventType, &d.Payload, &d.Status, &d.Attempts, &d.LastError, &d.CreatedAt, &d.DeliveredAt)
+	err := row.Scan(&d.ID, &d.EndpointID, &d.EventType, &d.Payload, &d.Status, &d.Attempts, &d.LastError, &d.CreatedAt, &d.DeliveredAt, &d.OutboxEventID)
 	if err != nil {
 		return nil, err
 	}
@@ -173,9 +197,12 @@ func scanDelivery(row interface{ Scan(...any) error }) (*types.NotificationDeliv
 
 // InsertDelivery records a delivery attempt (attempts is incremented).
 func (s *Store) InsertDelivery(ctx context.Context, q db.Querier, d *types.NotificationDelivery) error {
-	const sql = `INSERT INTO notification_deliveries (endpoint_id, event_type, payload, status, attempts, last_error, delivered_at)
-	             VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING ` + deliveryCols
-	out, err := scanDelivery(q.QueryRow(ctx, sql, d.EndpointID, d.EventType, d.Payload, d.Status, d.Attempts, d.LastError, d.DeliveredAt))
+	const sql = `INSERT INTO notification_deliveries (endpoint_id, event_type, payload, status, attempts, last_error, delivered_at, outbox_event_id)
+	             VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING RETURNING ` + deliveryCols
+	out, err := scanDelivery(q.QueryRow(ctx, sql, d.EndpointID, d.EventType, d.Payload, d.Status, d.Attempts, d.LastError, d.DeliveredAt, d.OutboxEventID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil // exact outbox replay already has this endpoint delivery.
+	}
 	if err != nil {
 		return err
 	}
@@ -259,18 +286,22 @@ func (s *Service) Handle(ctx context.Context, ev *types.OutboxEvent) error {
 		if !ep.Enabled || !matchesEvents(ep, ev.EventType) {
 			continue
 		}
-		s.deliver(ctx, ep, msg)
+		if isVerificationEvent(ev.EventType) && !verificationEndpointSelected(ev.Payload, ep.ID) {
+			continue
+		}
+		s.deliver(ctx, ep, msg, &ev.ID)
 	}
 	return nil
 }
 
 // deliver sends one message and records the delivery row.
-func (s *Service) deliver(ctx context.Context, ep *types.NotificationEndpoint, msg Message) {
+func (s *Service) deliver(ctx context.Context, ep *types.NotificationEndpoint, msg Message, outboxEventID *int64) {
 	d := &types.NotificationDelivery{
-		EndpointID: ep.ID,
-		EventType:  msg.EventType,
-		Payload:    msg.Payload,
-		Attempts:   1,
+		EndpointID:    ep.ID,
+		EventType:     msg.EventType,
+		Payload:       msg.Payload,
+		Attempts:      1,
+		OutboxEventID: outboxEventID,
 	}
 	snd, err := s.senderFor(ep.Kind)
 	if err == nil {
@@ -596,6 +627,15 @@ func formatMessage(ev *types.OutboxEvent) string {
 		var pl types.ScaffoldRunPayload
 		if unmarshalPayload(p, &pl) {
 			return fmt.Sprintf("Scaffold run %s failed in phase %s (template version %s)", pl.RunID, pl.Phase, pl.Version)
+		}
+	case types.EventVerificationRunStarted, types.EventVerificationPassed, types.EventVerificationFailed, types.EventVerificationBlocked, types.EventVerificationPromotionBlocked:
+		var pl struct {
+			RunID  string `json:"runId"`
+			Status string `json:"status"`
+			Reason string `json:"reasonCode"`
+		}
+		if unmarshalPayload(p, &pl) {
+			return fmt.Sprintf("Verification run %s is %s (%s). No automatic rollback was performed.", pl.RunID, pl.Status, pl.Reason)
 		}
 	}
 	return fmt.Sprintf("Inari event %s", ev.EventType)

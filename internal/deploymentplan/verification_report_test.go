@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	observability "github.com/7K-Inari/inari-api/contract/observability/v1"
 	agentv1 "github.com/7K-Inari/inari-api/gen/go/inari/agent/v1"
@@ -19,11 +20,12 @@ func verificationReportForResult(t *testing.T, result *observability.Verificatio
 	if err != nil {
 		t.Fatal(err)
 	}
+	runRevision := "run-revision-" + result.App.Revision
 	report := &agentv1.VerificationReport{
 		RunId: result.Run.ID, Attempt: uint32(result.Run.Attempt), SuiteDigest: result.Suite.Digest, Profile: result.Suite.Profile,
-		SubjectKind: "observability.companion", InstanceUid: "companion-uid", AppInstanceId: result.App.InstanceID,
-		DeploymentPlanId: result.App.PlanID, AppRevision: result.App.Revision, AppDigest: result.App.SourceDigest,
-		TargetId: result.Target.ID, TargetRevision: result.Target.Revision,
+		SubjectKind: "observability.companion", InstanceUid: "app-uid", AppInstanceId: result.App.InstanceID,
+		DeploymentPlanId: result.App.PlanID, AppRevision: runRevision, AppDigest: result.App.SourceDigest,
+		TargetId: "rt-deployment", TargetRevision: 99,
 		CompanionId: result.Companion.ID, CompanionGeneration: result.Companion.Generation,
 		PackDigest: result.Pack.Digest, CapabilityDigest: result.CapabilityDigest,
 		FinishedAt: timestamppb.New(result.Run.FinishedAt), ExpiresAt: timestamppb.New(result.ExpiresAt),
@@ -32,7 +34,7 @@ func verificationReportForResult(t *testing.T, result *observability.Verificatio
 	}
 	run := &verification.Run{
 		ID: result.Run.ID, LatestAttempt: result.Run.Attempt, SuiteDigest: result.Suite.Digest, Profile: result.Suite.Profile,
-		InstanceID: "companion-1", InstanceUID: "companion-uid", AppRevision: result.App.Revision, AppArtifactDigest: result.App.SourceDigest,
+		InstanceID: result.App.InstanceID, InstanceUID: "app-uid", AppRevision: runRevision, AppArtifactDigest: result.App.SourceDigest,
 	}
 	return report, run
 }
@@ -56,7 +58,7 @@ func TestApplyObservabilityReportUsesAuthenticatedExistingStreamBinding(t *testi
 	svc, plan, store := pendingCompanionForReport(t)
 	result := resultForPlan(t, plan)
 	report, run := verificationReportForResult(t, result)
-	if err := svc.ApplyObservabilityReport(context.Background(), "org-1", result.Target.ClusterID, report, run); err != nil {
+	if err := svc.ApplyObservabilityReport(context.Background(), "org-1", "cluster-app", report, run, nil); err != nil {
 		t.Fatalf("valid existing-stream observability report rejected: %v", err)
 	}
 	companion, err := store.GetCompanion(context.Background(), "org-1", plan.Companion.ID)
@@ -85,7 +87,7 @@ func TestApplyObservabilityReportRejectsMismatchedEvidence(t *testing.T) {
 			r.AppDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 		}},
 		{name: "companion generation", mutateReport: func(r *agentv1.VerificationReport, _ *verification.Run) { r.CompanionGeneration++ }},
-		{name: "target", mutateReport: func(r *agentv1.VerificationReport, _ *verification.Run) { r.TargetId = "rt-other" }},
+		{name: "monitoring target", mutateOutcome: func(r *observability.VerificationResult) { r.Target.ID = "rt-other" }},
 		{name: "pack", mutateReport: func(r *agentv1.VerificationReport, _ *verification.Run) {
 			r.PackDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 		}},
@@ -100,7 +102,6 @@ func TestApplyObservabilityReportRejectsMismatchedEvidence(t *testing.T) {
 		{name: "terminal result", mutateReport: func(r *agentv1.VerificationReport, _ *verification.Run) {
 			r.Result = agentv1.VerificationResult_VERIFICATION_RESULT_FAILED
 		}},
-		{name: "wrong cluster", clusterID: "cluster-other"},
 		{name: "malformed outcome", mutateOutcome: func(r *observability.VerificationResult) { r.APIVersion = "other" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -117,8 +118,67 @@ func TestApplyObservabilityReportRejectsMismatchedEvidence(t *testing.T) {
 			if tc.clusterID != "" {
 				clusterID = tc.clusterID
 			}
-			if err := svc.ApplyObservabilityReport(context.Background(), "org-1", clusterID, report, run); err == nil {
+			if err := svc.ApplyObservabilityReport(context.Background(), "org-1", clusterID, report, run, nil); err == nil {
 				t.Fatal("mismatched observability evidence accepted")
+			}
+		})
+	}
+}
+
+func TestApplyObservabilityReportCanonicalizesWorkflowCompletion(t *testing.T) {
+	svc, plan, store := pendingCompanionForReport(t)
+	result := resultForPlan(t, plan)
+	report, run := verificationReportForResult(t, result)
+	workflowFinished := result.Run.FinishedAt.Add(time.Second)
+	report.FinishedAt = timestamppb.New(workflowFinished)
+	if err := svc.ApplyObservabilityReport(context.Background(), "org-1", "cluster-app", report, run, nil); err != nil {
+		t.Fatalf("container completion before Workflow completion rejected: %v", err)
+	}
+	companion, err := store.GetCompanion(context.Background(), "org-1", plan.Companion.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if companion.Verification == nil || !companion.Verification.Run.FinishedAt.Equal(workflowFinished) {
+		t.Fatalf("stored completion = %#v, want Workflow timestamp", companion.Verification)
+	}
+}
+
+func TestApplyObservabilityReportRecordsTransportFailureWithoutOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		result  agentv1.VerificationResult
+		deleted bool
+		typed   bool
+	}{
+		{name: "failed", result: agentv1.VerificationResult_VERIFICATION_RESULT_FAILED},
+		{name: "cancelled", result: agentv1.VerificationResult_VERIFICATION_RESULT_CANCELLED},
+		{name: "deleted", result: agentv1.VerificationResult_VERIFICATION_RESULT_PENDING, deleted: true},
+		{name: "deleted retaining pass", result: agentv1.VerificationResult_VERIFICATION_RESULT_PASSED, deleted: true},
+		{name: "deleted with typed failure", result: agentv1.VerificationResult_VERIFICATION_RESULT_PASSED, deleted: true, typed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, plan, store := pendingCompanionForReport(t)
+			result := resultForPlan(t, plan)
+			if tc.typed {
+				result.Result = "failed"
+				result.Checks = observability.VerificationChecks{}
+			}
+			report, run := verificationReportForResult(t, result)
+			report.Result = tc.result
+			report.Deleted = tc.deleted
+			if !tc.typed {
+				report.OutcomeJson = ""
+				report.OutcomeDigest = ""
+			}
+			if err := svc.ApplyObservabilityReport(context.Background(), "org-1", "cluster-app", report, run, nil); err != nil {
+				t.Fatalf("transport-only terminal report rejected: %v", err)
+			}
+			companion, err := store.GetCompanion(context.Background(), "org-1", plan.Companion.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if companion.State != "verification_failed" || companion.Verification == nil || companion.Verification.Result != "failed" {
+				t.Fatalf("companion transport failure state = %#v", companion)
 			}
 		})
 	}
@@ -131,7 +191,7 @@ func TestApplyObservabilityReportRecordsTypedFailure(t *testing.T) {
 	result.Checks = observability.VerificationChecks{}
 	report, run := verificationReportForResult(t, result)
 	report.Result = agentv1.VerificationResult_VERIFICATION_RESULT_FAILED
-	if err := svc.ApplyObservabilityReport(context.Background(), "org-1", result.Target.ClusterID, report, run); err != nil {
+	if err := svc.ApplyObservabilityReport(context.Background(), "org-1", "cluster-app", report, run, nil); err != nil {
 		t.Fatalf("typed failure rejected: %v", err)
 	}
 	companion, err := store.GetCompanion(context.Background(), "org-1", plan.Companion.ID)

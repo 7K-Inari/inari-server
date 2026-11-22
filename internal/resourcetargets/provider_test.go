@@ -1,6 +1,7 @@
 package resourcetargets
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/7K-Inari/inari-server/internal/types"
+	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 func TestProviderDescriptorsContainValidJSON(t *testing.T) {
@@ -193,6 +195,30 @@ func TestGrafanaProviderRejectsInvalidKROInstanceEvidence(t *testing.T) {
 	}
 	if _, err := p.NormalizeConfig(json.RawMessage(strings.Replace(string(validKROGrafanaConfig()), `"catalogItem":"hiroba/monitoring-stack"`, `"catalogItem":""`, 1))); err == nil {
 		t.Fatal("KRO evidence without an expected catalog item accepted")
+	}
+}
+
+func TestGrafanaEvidenceSchemaMatchesExclusiveValidation(t *testing.T) {
+	descriptor := (grafanaProvider{}).Describe()
+	document, err := jsonschema.UnmarshalJSON(bytes.NewReader(descriptor.ConfigSchema))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource("grafana-config.schema.json", document); err != nil {
+		t.Fatal(err)
+	}
+	schema, err := compiler.Compile("grafana-config.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := strings.Replace(string(validGrafanaConfig()), `"addonId":"addon-1"`, `"addonId":"addon-1","catalogItem":"hiroba/monitoring-stack"`, 1)
+	var value any
+	if err := json.Unmarshal([]byte(raw), &value); err != nil {
+		t.Fatal(err)
+	}
+	if err := schema.Validate(value); err == nil {
+		t.Fatal("schema accepted addonId with a KRO-only catalogItem")
 	}
 }
 

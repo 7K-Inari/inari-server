@@ -29,7 +29,7 @@ type fakeTargetResolver struct {
 
 type capturingObservabilityConsumer struct{ calls int }
 
-func (c *capturingObservabilityConsumer) ApplyObservabilityReport(context.Context, string, string, *agentv1.VerificationReport, *verification.Run) error {
+func (c *capturingObservabilityConsumer) ApplyObservabilityReport(context.Context, string, string, *agentv1.VerificationReport, *verification.Run, pgx.Tx) error {
 	c.calls++
 	return nil
 }
@@ -170,33 +170,5 @@ func TestUngatedPolicyLifecycleStopsBeforeRun(t *testing.T) {
 	report.ResourceVersion = "43"
 	if err := service.ApplyReport(ctx, instance.OrgID, "cluster:wrong", report); err == nil {
 		t.Fatal("wrong-cluster report was accepted")
-	}
-
-	consumer := &capturingObservabilityConsumer{}
-	service.WithObservabilityConsumer(consumer)
-	failedRun, err := verification.BuildRun(policy, grant.Revision, instance, policy.Trigger("manual", "req-observability-failure"), time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := database.WithTx(ctx, func(tx pgx.Tx) error {
-		_, err := runStore.InsertRun(ctx, tx, failedRun)
-		return err
-	}); err != nil {
-		t.Fatal(err)
-	}
-	failedReport := *report
-	failedReport.RunId = failedRun.ID
-	failedReport.TriggerFingerprint = failedRun.TriggerFingerprint
-	failedReport.Workflow = &agentv1.ResourceRef{Kind: "Workflow", Name: failedRun.ID + "-a1", Namespace: "verification", Uid: "wf-observability-failure"}
-	failedReport.ResourceVersion = "44"
-	failedReport.Result = agentv1.VerificationResult_VERIFICATION_RESULT_FAILED
-	failedReport.SubjectKind = "observability.companion"
-	failedReport.OutcomeJson = `{"result":"failed"}`
-	failedReport.OutcomeDigest = ""
-	if err := service.ApplyReport(ctx, instance.OrgID, instance.ClusterID, &failedReport); err != nil {
-		t.Fatalf("observability failure report: %v", err)
-	}
-	if consumer.calls != 1 {
-		t.Fatalf("observability consumer calls = %d, want one terminal failure", consumer.calls)
 	}
 }

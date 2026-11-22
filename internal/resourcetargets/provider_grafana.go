@@ -53,7 +53,7 @@ func (grafanaProvider) Describe() ProviderDescriptor {
 				"folderPrefixes":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}},
 				"datasources":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["name","type"],"properties":{"name":{"type":"string"},"type":{"type":"string"}}}},
 				"approval":{"type":"object","additionalProperties":false,"properties":{"required":{"type":"boolean"},"approverTeamIds":{"type":"array","items":{"type":"string"}}}},
-				"evidence":{"type":"object","additionalProperties":false,"properties":{"addonId":{"type":"string"},"instanceId":{"type":"string"},"catalogItem":{"type":"string"}},"oneOf":[{"required":["addonId"]},{"required":["instanceId","catalogItem"]}]}
+				"evidence":{"type":"object","additionalProperties":false,"properties":{"addonId":{"type":"string"},"instanceId":{"type":"string"},"catalogItem":{"type":"string"}},"oneOf":[{"required":["addonId"],"not":{"anyOf":[{"required":["instanceId"]},{"required":["catalogItem"]}]}},{"required":["instanceId","catalogItem"],"not":{"required":["addonId"]}}]}
 			}
 		}`),
 		SelectionSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["folder","datasource","evaluation"],"properties":{"folder":{"type":"string"},"datasource":{"type":"string"},"evaluation":{"type":"string","enum":["central","local"]}}}`),

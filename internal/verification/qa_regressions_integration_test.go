@@ -38,8 +38,12 @@ type reportTestFixture struct {
 	renderFingerprint string
 }
 
-func newReportTestFixture(t *testing.T) *reportTestFixture {
+func newReportTestFixture(t *testing.T, parameterContracts ...string) *reportTestFixture {
 	t.Helper()
+	parameterContract := "inari.smoke.params.v1"
+	if len(parameterContracts) == 1 {
+		parameterContract = parameterContracts[0]
+	}
 	ctx := context.Background()
 	pg, err := testutil.SharedPostgres(ctx)
 	if err != nil {
@@ -66,10 +70,14 @@ func newReportTestFixture(t *testing.T) *reportTestFixture {
 		ItemID: instance.CatalogItemID, Version: instance.Version, ArtifactDigest: instance.ArtifactDigest,
 		Payload: json.RawMessage(`{"admission":{"runtime":{"target":"web","suiteDigest":"` + digestC + `","profile":"ci","result":"passed"}}}`),
 	}}
-	admitter := &fakeSuiteAdmitter{admitted: admittedSuite(), app: app}
+	suite := admittedSuite()
+	if parameterContract != "inari.smoke.params.v1" {
+		suite.Evidence.Files["suite.yaml"] = []byte(strings.Replace(string(suite.Evidence.Files["suite.yaml"]), "inari.smoke.params.v1", parameterContract, 1))
+	}
+	admitter := &fakeSuiteAdmitter{admitted: suite, app: app}
 	service := verification.NewService(database, verification.NewStore(), admitter, inventory.NewStore(), &fakeTargetResolver{}, audit.NewStore())
 	release, err := service.CreateSuiteRelease(ctx, "user:platform", verification.SuiteAdmissionInput{
-		OrgID: instance.OrgID, SourceID: "hiroba", Descriptor: admittedSuite().Descriptor,
+		OrgID: instance.OrgID, SourceID: "hiroba", Descriptor: suite.Descriptor,
 		Environment: trustedsource.EnvironmentStaging, Profile: verification.ProfileStage,
 	})
 	if err != nil {
@@ -85,6 +93,7 @@ func newReportTestFixture(t *testing.T) *reportTestFixture {
 	grant.OrgID = instance.OrgID
 	grant.EnvironmentPolicyID = environment.ID
 	grant.SuiteReleaseID = release.ID
+	grant.ParameterContract = parameterContract
 	grant, err = service.PutGrant(ctx, "user:platform", grant)
 	if err != nil {
 		t.Fatal(err)
@@ -92,6 +101,7 @@ func newReportTestFixture(t *testing.T) *reportTestFixture {
 	policy := validRunPolicy(t, instance)
 	policy.OrgID = instance.OrgID
 	policy.Binding.SuiteGrantID = grant.ID
+	policy.Binding.ParameterContract = parameterContract
 	if _, err := service.PutPolicy(ctx, instance.OrgID, "user:team", policy); err != nil {
 		t.Fatal(err)
 	}

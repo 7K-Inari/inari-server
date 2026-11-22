@@ -1052,6 +1052,35 @@ func TestVerificationDuplicateAndOlderResultsCannotChangeReadiness(t *testing.T)
 	}
 }
 
+func TestVerificationRetryAttemptCanReplaceTerminalResult(t *testing.T) {
+	svc, _, _, _, store := serviceFixture(t)
+	plan, err := submitReviewed(t, svc, deployRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Companion.CompanionInstanceID = "companion-1"
+	plan.Companion.State = "verification_pending"
+	if err := store.UpdatePlan(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	first := resultForPlan(t, plan)
+	if _, err := svc.ApplyVerification(context.Background(), "org-1", first); err != nil {
+		t.Fatal(err)
+	}
+	retry := resultForPlan(t, plan)
+	retry.Run.Attempt = 2
+	retry.Run.FinishedAt = first.Run.FinishedAt.Add(time.Minute)
+	retry.Result = "failed"
+	retry.Checks = observability.VerificationChecks{}
+	companion, err := svc.ApplyVerification(context.Background(), "org-1", retry)
+	if err != nil {
+		t.Fatalf("retry attempt was discarded: %v", err)
+	}
+	if companion.State != "verification_failed" || companion.Verification.Run.Attempt != 2 {
+		t.Fatalf("retry result = %#v", companion)
+	}
+}
+
 func TestVerificationStoreRejectsStaleCompanionSnapshot(t *testing.T) {
 	svc, _, _, _, store := serviceFixture(t)
 	plan, err := submitReviewed(t, svc, deployRequest())

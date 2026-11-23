@@ -19,7 +19,7 @@ func verificationToken(result *observability.VerificationResult) string {
 	if result == nil {
 		return ""
 	}
-	return fmt.Sprintf("%d:%s:%s", result.Companion.Generation, result.Run.ID, result.Suite.Digest)
+	return fmt.Sprintf("%d:%s:%d:%s", result.Companion.Generation, result.Run.ID, result.Run.Attempt, result.Suite.Digest)
 }
 
 // Store is the persistence seam. SQL implementation lives in store_sql.go;

@@ -863,18 +863,56 @@ func (s *Service) InstanceObservability(ctx context.Context, orgID, instanceID, 
 	return out, nil
 }
 
+type verificationTxStore interface {
+	getCompanionTx(context.Context, db.Querier, string, string) (*Companion, error)
+	getPlanTx(context.Context, db.Querier, string, ...any) (*Plan, error)
+	saveVerificationTx(context.Context, db.Querier, string, *Companion, *observability.VerificationResult, string) (bool, error)
+}
+
+func (s *Service) txVerificationStore(q db.Querier) (verificationTxStore, error) {
+	store, ok := s.store.(verificationTxStore)
+	if !ok {
+		return nil, errors.New("verification store does not support the report transaction")
+	}
+	return store, nil
+}
+
+func (s *Service) companionForVerification(ctx context.Context, q db.Querier, orgID, id string) (*Companion, error) {
+	if q == nil {
+		return s.store.GetCompanion(ctx, orgID, id)
+	}
+	store, err := s.txVerificationStore(q)
+	if err != nil {
+		return nil, err
+	}
+	return store.getCompanionTx(ctx, q, orgID, id)
+}
+
 func (s *Service) ApplyVerification(ctx context.Context, orgID string, result *observability.VerificationResult) (*Companion, error) {
+	return s.applyVerification(ctx, orgID, result, nil)
+}
+
+func (s *Service) applyVerification(ctx context.Context, orgID string, result *observability.VerificationResult, q db.Querier) (*Companion, error) {
 	if result == nil {
 		return nil, errors.New("verification result is required")
 	}
-	companion, err := s.store.GetCompanion(ctx, orgID, result.Companion.ID)
+	companion, err := s.companionForVerification(ctx, q, orgID, result.Companion.ID)
 	if err != nil {
 		return nil, err
 	}
 	if companion.CompanionInstanceID == "" || (companion.State != "verification_pending" && companion.State != "deploying" && companion.State != "verification_failed" && companion.State != "ready") {
 		return nil, errors.New("verification_unavailable")
 	}
-	plan, err := s.store.GetPlan(ctx, orgID, companion.PlanID)
+	var plan *Plan
+	if q == nil {
+		plan, err = s.store.GetPlan(ctx, orgID, companion.PlanID)
+	} else {
+		store, storeErr := s.txVerificationStore(q)
+		if storeErr != nil {
+			return nil, storeErr
+		}
+		plan, err = store.getPlanTx(ctx, q, `SELECT plan_document, requester, idempotency_key FROM deployment_plans WHERE org_id=$1 AND id=$2`, orgID, companion.PlanID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -918,7 +956,16 @@ func (s *Service) ApplyVerification(ctx context.Context, orgID string, result *o
 	}
 	companion.Links = []Link{}
 	companion.UpdatedAt = s.now()
-	applied, err := s.store.SaveVerification(ctx, orgID, companion, result, expectedVerification)
+	var applied bool
+	if q == nil {
+		applied, err = s.store.SaveVerification(ctx, orgID, companion, result, expectedVerification)
+	} else {
+		store, storeErr := s.txVerificationStore(q)
+		if storeErr != nil {
+			return nil, storeErr
+		}
+		applied, err = store.saveVerificationTx(ctx, q, orgID, companion, result, expectedVerification)
+	}
 	if err != nil {
 		return nil, err
 	}

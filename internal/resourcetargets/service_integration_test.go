@@ -32,6 +32,7 @@ func (f fakeClusters) ListClusters(_ context.Context, orgID string) ([]types.Clu
 type fakeInventory struct {
 	repo      *types.TenantGitRepo
 	addons    []*types.ClusterAddon
+	instances []types.ResourceInstance
 	clusterID string
 }
 
@@ -53,6 +54,9 @@ func (f fakeInventory) ListClusterBaselineRepos(_ context.Context, _ db.Querier,
 }
 func (f fakeInventory) ListClusterAddons(context.Context, db.Querier, string, string) ([]*types.ClusterAddon, error) {
 	return f.addons, nil
+}
+func (f fakeInventory) ListClusterInstances(context.Context, db.Querier, string, string) ([]types.ResourceInstance, error) {
+	return f.instances, nil
 }
 
 type fakeCapabilities struct{ capabilities []types.Capability }
@@ -238,6 +242,35 @@ func TestServiceMonitoringAndDeploymentShareResolver(t *testing.T) {
 	}
 	if strings.Contains(payload, "grafana.example") || strings.Contains(payload, "addon-1") {
 		t.Errorf("audit leaked raw target config: %s", payload)
+	}
+}
+
+func TestServiceMonitoringAcceptsKROInstanceEvidence(t *testing.T) {
+	svc, _, az, teamID, snapshot := serviceFixture(t)
+	snapshot.Instances = []types.ResourceInstance{{
+		ID: "instance-1", OrgID: "org:store", ClusterID: "cluster:store", CatalogItemID: "hiroba/monitoring-stack",
+		Version: "1.0.0", ArtifactDigest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		State: types.InstanceStateRunning, SyncState: "Synced",
+	}}
+	svc.sources.Inventory = fakeInventory{repo: snapshot.BaselineRepo, instances: snapshot.Instances, clusterID: snapshot.Cluster.ID}
+	svc.sources.Capabilities = fakeCapabilities{}
+	ctx := context.Background()
+	target, err := svc.Create(ctx, "org:store", "user:admin", CreateInput{
+		Name: "KRO Grafana", ResourceRef: TargetResourceRef{Kind: ResourceKindCluster, ID: "cluster:store"},
+		Capability: CapabilityMonitoringGrafana,
+		Config:     json.RawMessage(strings.Replace(string(validKROGrafanaConfig()), "team-1", teamID, 1)),
+	})
+	if err != nil {
+		t.Fatalf("create KRO-backed Grafana target: %v", err)
+	}
+	if _, err := svc.SetGrant(ctx, target.OrgID, target.ID, teamID, ActionProvision, "user:admin"); err != nil {
+		t.Fatal(err)
+	}
+	az.allow("alice", target.ID, authz.RelationProvision)
+	if _, err := svc.Resolve(ctx, ResolveInput{OrgID: target.OrgID, Subject: "alice", TargetID: target.ID,
+		Capability: CapabilityMonitoringGrafana, Action: ActionProvision,
+		Selection: json.RawMessage(`{"folder":"acme/apps","datasource":"metrics","evaluation":"central"}`)}); err != nil {
+		t.Fatalf("resolve KRO-backed Grafana target: %v", err)
 	}
 }
 

@@ -139,6 +139,13 @@ func (s *Store) List(ctx context.Context, q db.Querier, orgID string, f ListFilt
 	return out, rows.Err()
 }
 
+// ListClusterInstances returns the current org/cluster instance projection used
+// by resource-capability evidence. An empty clusterID performs one org-wide
+// batch read for resolver list decoration.
+func (s *Store) ListClusterInstances(ctx context.Context, q db.Querier, orgID, clusterID string) ([]types.ResourceInstance, error) {
+	return s.List(ctx, q, orgID, ListFilters{ClusterID: clusterID})
+}
+
 // Delete removes an instance row (undeploy).
 func (s *Store) Delete(ctx context.Context, q db.Querier, id string) error {
 	tag, err := q.Exec(ctx, `DELETE FROM resource_instances WHERE id = $1`, id)

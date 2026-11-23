@@ -27,6 +27,13 @@ type fakeTargetResolver struct {
 	calls int
 }
 
+type capturingObservabilityConsumer struct{ calls int }
+
+func (c *capturingObservabilityConsumer) ApplyObservabilityReport(context.Context, string, string, *agentv1.VerificationReport, *verification.Run, pgx.Tx) error {
+	c.calls++
+	return nil
+}
+
 func (f *fakeTargetResolver) ResolveResource(_ context.Context, orgID, subject, capability string, action resourcetargets.Action, ref resourcetargets.TargetResourceRef, _ json.RawMessage) (*resourcetargets.ResolvedTarget, error) {
 	f.calls++
 	return &resourcetargets.ResolvedTarget{

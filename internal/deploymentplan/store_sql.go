@@ -132,12 +132,16 @@ func scanPlan(row pgx.Row) (*Plan, error) {
 	return &plan, nil
 }
 
-func (s *SQLStore) getPlan(ctx context.Context, query string, args ...any) (*Plan, error) {
-	plan, err := scanPlan(s.db.Pool.QueryRow(ctx, query, args...))
+func (s *SQLStore) getPlanTx(ctx context.Context, q db.Querier, query string, args ...any) (*Plan, error) {
+	plan, err := scanPlan(q.QueryRow(ctx, query, args...))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrPlanNotFound
 	}
 	return plan, err
+}
+
+func (s *SQLStore) getPlan(ctx context.Context, query string, args ...any) (*Plan, error) {
+	return s.getPlanTx(ctx, s.db.Pool, query, args...)
 }
 
 func (s *SQLStore) GetPlan(ctx context.Context, orgID, id string) (*Plan, error) {
@@ -161,12 +165,16 @@ func scanCompanion(row pgx.Row) (*Companion, error) {
 	}
 	return &companion, nil
 }
-func (s *SQLStore) GetCompanion(ctx context.Context, orgID, id string) (*Companion, error) {
-	companion, err := scanCompanion(s.db.Pool.QueryRow(ctx, `SELECT companion_document FROM observability_companions WHERE org_id=$1 AND id=$2`, orgID, id))
+func (s *SQLStore) getCompanionTx(ctx context.Context, q db.Querier, orgID, id string) (*Companion, error) {
+	companion, err := scanCompanion(q.QueryRow(ctx, `SELECT companion_document FROM observability_companions WHERE org_id=$1 AND id=$2`, orgID, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrCompanionNotFound
 	}
 	return companion, err
+}
+
+func (s *SQLStore) GetCompanion(ctx context.Context, orgID, id string) (*Companion, error) {
+	return s.getCompanionTx(ctx, s.db.Pool, orgID, id)
 }
 func (s *SQLStore) LatestCompanionForInstance(ctx context.Context, orgID, instanceID string) (*Companion, error) {
 	companion, err := scanCompanion(s.db.Pool.QueryRow(ctx, `SELECT companion_document FROM observability_companions WHERE org_id=$1 AND app_instance_id=$2 ORDER BY updated_at DESC LIMIT 1`, orgID, instanceID))
@@ -176,7 +184,7 @@ func (s *SQLStore) LatestCompanionForInstance(ctx context.Context, orgID, instan
 	return companion, err
 }
 
-func (s *SQLStore) SaveVerification(ctx context.Context, orgID string, companion *Companion, result *observability.VerificationResult, expectedVerification string) (applied bool, err error) {
+func (s *SQLStore) saveVerificationTx(ctx context.Context, q db.Querier, orgID string, companion *Companion, result *observability.VerificationResult, expectedVerification string) (bool, error) {
 	if companion == nil || result == nil {
 		return false, errors.New("companion and verification result are required")
 	}
@@ -192,34 +200,39 @@ func (s *SQLStore) SaveVerification(ctx context.Context, orgID string, companion
 	if err != nil {
 		return false, err
 	}
+	tag, err := q.Exec(ctx, `INSERT INTO observability_verification_results
+		(companion_id, generation, run_id, attempt, suite_digest, suite_profile, target_revision, app_revision, pack_digest,
+		 capability_digest, result, checks, result_document, observed_at, expires_at, received_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+		ON CONFLICT (companion_id, generation, run_id, attempt, suite_digest) DO NOTHING`,
+		companion.ID, result.Companion.Generation, result.Run.ID, result.Run.Attempt, result.Suite.Digest, result.Suite.Profile,
+		result.Target.Revision, result.App.Revision, result.Pack.Digest, result.CapabilityDigest, result.Result, checks, raw,
+		result.Run.FinishedAt, result.ExpiresAt, time.Now())
+	if err != nil {
+		return false, err
+	}
+	if tag.RowsAffected() == 0 {
+		return false, nil
+	}
+	tag, err = q.Exec(ctx, `UPDATE observability_companions SET state=$2, reason=$3, companion_document=$4,
+		latest_verification_id=$5, updated_at=$6
+		WHERE id=$1 AND org_id=$7 AND generation=$8 AND latest_verification_id=$9`,
+		companion.ID, companion.State, companion.Reason, companionRaw, verificationToken(result), companion.UpdatedAt,
+		orgID, companion.Generation, expectedVerification)
+	if err != nil {
+		return false, err
+	}
+	if tag.RowsAffected() == 0 {
+		return false, ErrPlanConflict
+	}
+	return true, nil
+}
+
+func (s *SQLStore) SaveVerification(ctx context.Context, orgID string, companion *Companion, result *observability.VerificationResult, expectedVerification string) (applied bool, err error) {
 	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `INSERT INTO observability_verification_results
-			(companion_id, generation, run_id, attempt, suite_digest, suite_profile, target_revision, app_revision, pack_digest,
-			 capability_digest, result, checks, result_document, observed_at, expires_at, received_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-			ON CONFLICT (companion_id, generation, run_id, suite_digest) DO NOTHING`,
-			companion.ID, result.Companion.Generation, result.Run.ID, result.Run.Attempt, result.Suite.Digest, result.Suite.Profile,
-			result.Target.Revision, result.App.Revision, result.Pack.Digest, result.CapabilityDigest, result.Result, checks, raw,
-			result.Run.FinishedAt, result.ExpiresAt, time.Now())
-		if err != nil {
-			return err
-		}
-		if tag.RowsAffected() == 0 {
-			return nil
-		}
-		tag, err = tx.Exec(ctx, `UPDATE observability_companions SET state=$2, reason=$3, companion_document=$4,
-			latest_verification_id=$5, updated_at=$6
-			WHERE id=$1 AND org_id=$7 AND generation=$8 AND latest_verification_id=$9`,
-			companion.ID, companion.State, companion.Reason, companionRaw, verificationToken(result), companion.UpdatedAt,
-			orgID, companion.Generation, expectedVerification)
-		if err != nil {
-			return err
-		}
-		if tag.RowsAffected() == 0 {
-			return ErrPlanConflict
-		}
-		applied = true
-		return nil
+		var applyErr error
+		applied, applyErr = s.saveVerificationTx(ctx, tx, orgID, companion, result, expectedVerification)
+		return applyErr
 	})
 	return applied, err
 }

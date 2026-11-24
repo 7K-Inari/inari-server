@@ -16,7 +16,7 @@ import (
 	trustedsource "github.com/7K-Inari/inari-api/contract/trustedsource/v1"
 	"github.com/7K-Inari/inari-server/internal/catalog"
 	"github.com/Masterminds/semver/v3"
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 )
 
 // ParseSuiteArtifact validates the admitted bytes and requested real profile.

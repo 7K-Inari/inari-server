@@ -42,7 +42,6 @@ require (
 	go.opentelemetry.io/otel/exporters/prometheus v0.69.0
 	go.opentelemetry.io/otel/metric v1.47.0
 	go.opentelemetry.io/otel/sdk/metric v1.47.0
-	go.yaml.in/yaml/v3 v3.0.6
 	go.yaml.in/yaml/v4 v4.0.0
 	golang.org/x/net v0.62.0
 	golang.org/x/sync v0.25.0
@@ -223,6 +222,7 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.28.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
+	go.yaml.in/yaml/v3 v3.0.6 // indirect
 	golang.org/x/crypto v0.59.0 // indirect
 	golang.org/x/crypto/openpgp v0.1.0-deprecated // indirect
 	golang.org/x/mod v0.42.0 // indirect

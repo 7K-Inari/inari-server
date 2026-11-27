@@ -32,7 +32,7 @@ type Identity struct {
 	AuthorizedParty string
 }
 
-// MemberOf reports whether the identity belongs to the given org (slug/alias).
+// ParseScopes parses an OAuth scope claim into a deduplicated set.
 func ParseScopes(raw string) []string {
 	fields := strings.Fields(raw)
 	out := make([]string, 0, len(fields))
@@ -59,6 +59,7 @@ func (i *Identity) HasScope(scope string) bool {
 	return false
 }
 
+// MemberOf reports whether the identity belongs to the given org (slug/alias).
 func (i *Identity) MemberOf(org string) bool {
 	for _, o := range i.Organizations {
 		if o == org {

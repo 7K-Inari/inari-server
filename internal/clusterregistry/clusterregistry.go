@@ -408,8 +408,7 @@ func NewService(d *db.DB, clients ClientManager, store *Store, auditStore *audit
 	}
 }
 
-// WithInstanceLister attaches the inventory seam used by DecommissionCluster
-// for the §10 ownership check. Decommission without it drains nothing.
+// WithPlanLimitsProvider attaches the generic tenant plan-limit lookup seam.
 func (s *Service) WithPlanLimitsProvider(provider planlimits.PlanLimitsProvider) *Service {
 	if provider != nil {
 		s.planLimits = provider
@@ -424,6 +423,8 @@ func (s *Service) WithMeteringEventEmitter(emitter planlimits.MeteringEventEmitt
 	return s
 }
 
+// WithInstanceLister attaches the inventory seam used by DecommissionCluster
+// for the §10 ownership check. Decommission without it drains nothing.
 func (s *Service) WithInstanceLister(l InstanceLister) *Service {
 	s.instances = l
 	return s

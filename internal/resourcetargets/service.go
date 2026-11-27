@@ -27,6 +27,7 @@ type InventorySource interface {
 	GetGitRepo(ctx context.Context, q db.Querier, orgID, id string) (*types.TenantGitRepo, error)
 	ListClusterBaselineRepos(ctx context.Context, q db.Querier, orgID string) (map[string]*types.TenantGitRepo, error)
 	ListClusterAddons(ctx context.Context, q db.Querier, orgID, clusterID string) ([]*types.ClusterAddon, error)
+	ListClusterInstances(ctx context.Context, q db.Querier, orgID, clusterID string) ([]types.ResourceInstance, error)
 }
 
 type CapabilitySource interface {
@@ -686,6 +687,12 @@ func (s *Service) loadSnapshot(ctx context.Context, target *Target) (ResourceSna
 		if err != nil {
 			return snapshot, err
 		}
+		if target.Capability() == CapabilityMonitoringGrafana {
+			snapshot.Instances, err = s.sources.Inventory.ListClusterInstances(ctx, s.db.Pool, target.OrgID, cluster.ID)
+			if err != nil {
+				return snapshot, err
+			}
+		}
 	}
 	if s.sources.Capabilities != nil {
 		snapshot.Capabilities, err = s.sources.Capabilities.List(ctx, s.db.Pool, cluster.ID)
@@ -741,10 +748,15 @@ func (s *Service) loadSnapshots(ctx context.Context, orgID string, targets []*Ta
 	}
 	var addons []*types.ClusterAddon
 	var capabilities []types.Capability
+	var instances []types.ResourceInstance
 	var teamIDs []string
 	if needsDiscovery {
 		if s.sources.Inventory != nil {
 			addons, err = s.sources.Inventory.ListClusterAddons(ctx, s.db.Pool, orgID, "")
+			if err != nil {
+				return nil, err
+			}
+			instances, err = s.sources.Inventory.ListClusterInstances(ctx, s.db.Pool, orgID, "")
 			if err != nil {
 				return nil, err
 			}
@@ -778,6 +790,10 @@ func (s *Service) loadSnapshots(ctx context.Context, orgID string, targets []*Ta
 	for _, capability := range capabilities {
 		capabilitiesByCluster[capability.ClusterID] = append(capabilitiesByCluster[capability.ClusterID], capability)
 	}
+	instancesByCluster := map[string][]types.ResourceInstance{}
+	for _, instance := range instances {
+		instancesByCluster[instance.ClusterID] = append(instancesByCluster[instance.ClusterID], instance)
+	}
 	for _, target := range targets {
 		cluster := clusterByID[target.ResourceRef.ID]
 		if cluster == nil || cluster.OrgID != orgID {
@@ -787,6 +803,7 @@ func (s *Service) loadSnapshots(ctx context.Context, orgID string, targets []*Ta
 		if target.Capability() == CapabilityMonitoringGrafana {
 			snapshot.Addons = append(addonsByCluster[cluster.ID], fleetAddons...)
 			snapshot.Capabilities = capabilitiesByCluster[cluster.ID]
+			snapshot.Instances = instancesByCluster[cluster.ID]
 			snapshot.TeamIDs = append([]string(nil), teamIDs...)
 		}
 		out[target.ID] = snapshot

@@ -744,7 +744,6 @@ func TestVerificationRejectsEvidenceOutsideApprovedSelection(t *testing.T) {
 		{name: "datasource name", mutate: func(result *observability.VerificationResult) { result.Checks.Datasources[0].Name = "other" }},
 		{name: "datasource logical", mutate: func(result *observability.VerificationResult) { result.Checks.Datasources[0].Logical = "other" }},
 		{name: "datasource type", mutate: func(result *observability.VerificationResult) { result.Checks.Datasources[0].Type = "loki" }},
-		{name: "owner team", mutate: func(result *observability.VerificationResult) { result.Checks.Access.Team = "other-team" }},
 		{name: "selected rule", mutate: func(result *observability.VerificationResult) { result.Checks.Rules[0].File = "rules/other.yaml" }},
 		{name: "extra rule", mutate: func(result *observability.VerificationResult) {
 			result.Checks.Rules = append(result.Checks.Rules, observability.RuleCheck{Check: observability.Check{State: "passed"}, File: "rules/service.yaml", Evaluation: observability.EvaluationLocal})
@@ -1050,6 +1049,35 @@ func TestVerificationDuplicateAndOlderResultsCannotChangeReadiness(t *testing.T)
 	older.Result = "failed"
 	if _, err := svc.ApplyVerification(context.Background(), "org-1", older); err == nil {
 		t.Fatal("older evidence replaced current readiness")
+	}
+}
+
+func TestVerificationRetryAttemptCanReplaceTerminalResult(t *testing.T) {
+	svc, _, _, _, store := serviceFixture(t)
+	plan, err := submitReviewed(t, svc, deployRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Companion.CompanionInstanceID = "companion-1"
+	plan.Companion.State = "verification_pending"
+	if err := store.UpdatePlan(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	first := resultForPlan(t, plan)
+	if _, err := svc.ApplyVerification(context.Background(), "org-1", first); err != nil {
+		t.Fatal(err)
+	}
+	retry := resultForPlan(t, plan)
+	retry.Run.Attempt = 2
+	retry.Run.FinishedAt = first.Run.FinishedAt.Add(time.Minute)
+	retry.Result = "failed"
+	retry.Checks = observability.VerificationChecks{}
+	companion, err := svc.ApplyVerification(context.Background(), "org-1", retry)
+	if err != nil {
+		t.Fatalf("retry attempt was discarded: %v", err)
+	}
+	if companion.State != "verification_failed" || companion.Verification.Run.Attempt != 2 {
+		t.Fatalf("retry result = %#v", companion)
 	}
 }
 

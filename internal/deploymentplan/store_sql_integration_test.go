@@ -5,6 +5,7 @@ package deploymentplan_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -64,7 +65,7 @@ func TestMigrationAndSQLStoreRoundTrip(t *testing.T) {
 	if err != nil || companion.State != "blocked_external_gate" {
 		t.Fatalf("companion = %#v, %v", companion, err)
 	}
-	result := &observability.VerificationResult{Companion: observability.CompanionIdentity{ID: "oc-1", Generation: 1}, Target: observability.TargetIdentity{Revision: 7}, App: observability.AppIdentity{Revision: companion.AppRevision}, Pack: observability.PackIdentity{Digest: integrationDigest}, CapabilityDigest: integrationDigest, Suite: observability.SuiteIdentity{Digest: integrationDigest, Profile: observability.ReadOnlyProfile}, Run: observability.RunIdentity{ID: "vr-1", Attempt: 1, FinishedAt: now}, Result: "failed", Checks: observability.VerificationChecks{}, ExpiresAt: now.Add(time.Hour)}
+	result := &observability.VerificationResult{Companion: observability.CompanionIdentity{ID: "oc-1", Generation: 1}, Target: observability.TargetIdentity{Revision: 7}, App: observability.AppIdentity{Revision: companion.AppRevision}, Pack: observability.PackIdentity{Digest: integrationDigest}, CapabilityDigest: integrationDigest, Suite: observability.SuiteIdentity{Digest: integrationDigest, Profile: "stage"}, Run: observability.RunIdentity{ID: "vr-1", Attempt: 1, FinishedAt: now}, Result: "failed", Checks: observability.VerificationChecks{}, ExpiresAt: now.Add(time.Hour)}
 	companion.State = "verification_failed"
 	companion.Verification = result
 	companion.UpdatedAt = now.Add(time.Second)
@@ -84,12 +85,40 @@ func TestMigrationAndSQLStoreRoundTrip(t *testing.T) {
 	if applied, err := store.SaveVerification(ctx, "org:1", stale, &staleResult, ""); applied || err == nil {
 		t.Fatalf("stale verification applied=%t, err=%v", applied, err)
 	}
+	retryResult := *result
+	retryResult.Run.Attempt = 2
+	retryResult.Run.FinishedAt = now.Add(2 * time.Minute)
+	retryCompanion := companion.DeepCopy()
+	retryCompanion.Verification = &retryResult
+	expectedFirst := fmt.Sprintf("%d:%s:%d:%s", result.Companion.Generation, result.Run.ID, result.Run.Attempt, result.Suite.Digest)
+	applied, err = store.SaveVerification(ctx, "org:1", retryCompanion, &retryResult, expectedFirst)
+	if err != nil || !applied {
+		t.Fatalf("retry verification applied=%t, err=%v", applied, err)
+	}
 	var receipts int
 	if err := database.Pool.QueryRow(ctx, `SELECT count(*) FROM observability_verification_results WHERE companion_id='oc-1'`).Scan(&receipts); err != nil {
 		t.Fatal(err)
 	}
+	if receipts != 2 {
+		t.Fatalf("attempt-aware transactions left %d verification receipts, want 2", receipts)
+	}
+	sqlDB := stdlib.OpenDBFromPool(database.Pool)
+	defer sqlDB.Close()
+	provider, err := goose.NewProvider(goose.DialectPostgres, sqlDB, os.DirFS("../db/migrations"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.DownTo(ctx, 44); err != nil {
+		t.Fatalf("down with retry evidence: %v", err)
+	}
+	if _, err := provider.UpTo(ctx, 45); err != nil {
+		t.Fatalf("reapply attempt migration: %v", err)
+	}
+	if err := database.Pool.QueryRow(ctx, `SELECT count(*) FROM observability_verification_results WHERE companion_id='oc-1'`).Scan(&receipts); err != nil {
+		t.Fatal(err)
+	}
 	if receipts != 1 {
-		t.Fatalf("stale transaction left %d verification receipts, want 1", receipts)
+		t.Fatalf("rollback retained %d rows for the legacy key, want 1", receipts)
 	}
 }
 

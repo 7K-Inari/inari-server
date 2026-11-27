@@ -1118,6 +1118,7 @@ func run() error {
 
 	flagSvc := featureflags.NewService(database, flagStore, auditStore, cacheBackend, cfg.CacheBackend)
 	verificationSvc := verification.NewService(database, verification.NewStore(), catalogSvc, invStore, resourceTargetsSvc, auditStore)
+	verificationSvc.WithObservabilityConsumer(deploymentPlanSvc)
 	orchestratorSvc.WithPromotionGate(verificationSvc)
 	verificationSvc.WithPromoter(orchestratorSvc)
 	gateway.SetVerificationSink(verificationSvc)

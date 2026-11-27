@@ -145,6 +145,7 @@ type ResourceSnapshot struct {
 	BaselineRepo *types.TenantGitRepo
 	Addons       []*types.ClusterAddon
 	Capabilities []types.Capability
+	Instances    []types.ResourceInstance
 	TeamIDs      []string
 }
 

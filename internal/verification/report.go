@@ -17,7 +17,7 @@ import (
 // ObservabilityReportConsumer is the sibling's in-process sink. Raw
 // observability payloads are not persisted by generic verification.
 type ObservabilityReportConsumer interface {
-	ApplyObservabilityReport(ctx context.Context, orgID, clusterID string, report *agentv1.VerificationReport, run *Run) error
+	ApplyObservabilityReport(ctx context.Context, orgID, clusterID string, report *agentv1.VerificationReport, run *Run, tx pgx.Tx) error
 }
 
 func (s *Service) WithObservabilityConsumer(consumer ObservabilityReportConsumer) *Service {
@@ -70,6 +70,14 @@ func (s *Service) ApplyReport(ctx context.Context, orgID, clusterID string, repo
 	if report.SubjectKind != "application" && report.SubjectKind != "observability.companion" {
 		return errors.New("verification_report_denied: unsupported subject kind")
 	}
+	if report.SubjectKind == "observability.companion" &&
+		(policy.Binding.ParameterContract != "inari.observability.params.v1" || grant.ParameterContract != "inari.observability.params.v1") {
+		return errors.New("verification_report_denied: observability subject requires its exact parameter contract")
+	}
+	if report.SubjectKind == "observability.companion" && !report.Deleted && report.Result == agentv1.VerificationResult_VERIFICATION_RESULT_PASSED && grant.ExpiresAt != nil &&
+		(report.ExpiresAt == nil || report.ExpiresAt.AsTime().After(*grant.ExpiresAt)) {
+		return errors.New("verification_report_denied: observability evidence exceeds the suite grant expiry")
+	}
 	if len(report.OutcomeJson) > grant.MaxResultBytes || len([]rune(report.Message)) > 1024 {
 		return errors.New("verification_report_denied: outcome or message exceeds the grant limit")
 	}
@@ -108,10 +116,13 @@ func (s *Service) ApplyReport(ctx context.Context, orgID, clusterID string, repo
 		}
 	}
 	if run.Status == "passed" || run.Status == "failed" {
-		// Even terminal reports must pass through receipt dedupe: otherwise a
-		// same-resourceVersion content conflict is silently accepted, and a
-		// Workflow whose typed outcome failed validation cannot be replayed
-		// idempotently. Terminal run state itself is never updated here.
+		if report.SubjectKind == "observability.companion" && !report.Deleted && report.Result == agentv1.VerificationResult_VERIFICATION_RESULT_PASSED &&
+			(grant.RevokedAt != nil || grant.ExpiresAt != nil && !s.now().Before(*grant.ExpiresAt)) {
+			return errors.New("verification_report_denied: passing observability evidence requires a current grant")
+		}
+		// Terminal replays still check receipt content. A later typed
+		// observability outcome for the same terminal attempt may enrich a
+		// transport-only failure, but can never change the run's terminal state.
 		return s.db.WithTx(ctx, func(tx pgx.Tx) error {
 			inserted, err := s.store.recordReportReceipt(ctx, tx, clusterID, run, report, payloadDigest)
 			if err != nil || !inserted {
@@ -119,6 +130,12 @@ func (s *Service) ApplyReport(ctx context.Context, orgID, clusterID string, repo
 			}
 			if terminalReportState(report) != run.Status {
 				return ErrConflict // rolls back the newly claimed receipt
+			}
+			if report.SubjectKind == "observability.companion" {
+				if s.observability == nil {
+					return errors.New("observability sink unavailable")
+				}
+				return s.observability.ApplyObservabilityReport(ctx, orgID, clusterID, report, run, tx)
 			}
 			return nil
 		})
@@ -163,17 +180,7 @@ func (s *Service) ApplyReport(ctx context.Context, orgID, clusterID string, repo
 			break
 		}
 		if report.SubjectKind == "observability.companion" {
-			if s.observability == nil {
-				mutation.status, mutation.disposition, mutation.reason = "failed", "unavailable", "observability_sink_unavailable"
-				terminalEvent = "verification.failed"
-				break
-			}
-			if err := s.observability.ApplyObservabilityReport(ctx, orgID, clusterID, report, run); err != nil {
-				mutation.status, mutation.disposition, mutation.reason = "failed", "failed", "observability_result_invalid"
-				mutation.message = err.Error()
-				terminalEvent = "verification.failed"
-			}
-			// outcome remains nil: the sibling owns the raw observability result.
+			// The raw result stays with the deployment-plan consumer.
 			break
 		}
 		parsed, expiresAt, err := ParseGenericOutcome([]byte(report.OutcomeJson), grant.MaxResultBytes, s.now())
@@ -197,6 +204,11 @@ func (s *Service) ApplyReport(ctx context.Context, orgID, clusterID string, repo
 	default:
 		return errors.New("verification_report_denied: unknown verification result")
 	}
+	consumeObservability := report.SubjectKind == "observability.companion" && terminalReportState(report) != "verification_pending"
+	if consumeObservability && s.observability == nil {
+		mutation.status, mutation.disposition, mutation.reason = "failed", "unavailable", "observability_sink_unavailable"
+		terminalEvent = "verification.failed"
+	}
 	var applied bool
 	notificationEndpointIDs := uniqueNotificationEndpoints(policy.Notifications.EndpointIDs, environment.RequiredNotificationEndpointIDs)
 	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
@@ -204,6 +216,18 @@ func (s *Service) ApplyReport(ctx context.Context, orgID, clusterID string, repo
 		applied, err = s.store.applyReport(ctx, tx, run, report, payloadDigest, mutation)
 		if err != nil || !applied {
 			return err
+		}
+		if consumeObservability && s.observability != nil {
+			consumerReport := report
+			if mutation.status == "failed" && report.Result == agentv1.VerificationResult_VERIFICATION_RESULT_PASSED {
+				consumerReport = proto.Clone(report).(*agentv1.VerificationReport)
+				consumerReport.Result = agentv1.VerificationResult_VERIFICATION_RESULT_FAILED
+				consumerReport.OutcomeJson = ""
+				consumerReport.OutcomeDigest = ""
+			}
+			if err := s.observability.ApplyObservabilityReport(ctx, orgID, clusterID, consumerReport, run, tx); err != nil {
+				return err
+			}
 		}
 		eventType := terminalEvent
 		if eventType == "" {

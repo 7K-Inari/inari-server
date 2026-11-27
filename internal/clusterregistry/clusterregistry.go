@@ -20,6 +20,7 @@ import (
 
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/planlimits"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -374,6 +375,8 @@ type Service struct {
 	tokenTTL         time.Duration
 	approvalRequired bool
 	now              func() time.Time
+	planLimits       planlimits.PlanLimitsProvider
+	metering         planlimits.MeteringEventEmitter
 }
 
 // InventoryStore is the inventory module seam for baseline repo operations
@@ -403,6 +406,21 @@ func NewService(d *db.DB, clients ClientManager, store *Store, auditStore *audit
 		approvalRequired: approvalRequired,
 		now:              time.Now,
 	}
+}
+
+// WithPlanLimitsProvider attaches the generic tenant plan-limit lookup seam.
+func (s *Service) WithPlanLimitsProvider(provider planlimits.PlanLimitsProvider) *Service {
+	if provider != nil {
+		s.planLimits = provider
+	}
+	return s
+}
+
+func (s *Service) WithMeteringEventEmitter(emitter planlimits.MeteringEventEmitter) *Service {
+	if emitter != nil {
+		s.metering = emitter
+	}
+	return s
 }
 
 // WithInstanceLister attaches the inventory seam used by DecommissionCluster

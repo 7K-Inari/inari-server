@@ -45,8 +45,13 @@ type Config struct {
 	KeycloakRealm        string
 	KeycloakClientID     string
 	KeycloakClientSecret string
-	OpenFGAAPIURL        string
-	OpenFGAStoreName     string
+	PlanLimitsProvider   string
+	MeteringEmitter      string
+	// TenantProvisioningIdentities maps allowed OAuth client IDs to exact
+	// Keycloak service-account subjects. Empty disables actor-free creation.
+	TenantProvisioningIdentities map[string]string
+	OpenFGAAPIURL                string
+	OpenFGAStoreName             string
 	// PlatformAdminGroup is the Keycloak realm group whose members receive
 	// platform:inari org_creator tuples (M1; path relative to realm root).
 	PlatformAdminGroup string
@@ -425,6 +430,8 @@ func Load() (*Config, error) {
 		KeycloakRealm:             env("INARI_KEYCLOAK_REALM", "inari"),
 		KeycloakClientID:          env("INARI_KEYCLOAK_CLIENT_ID", "inari-platform-admin"),
 		KeycloakClientSecret:      env("INARI_KEYCLOAK_CLIENT_SECRET", ""),
+		PlanLimitsProvider:        env("INARI_PLAN_LIMITS_PROVIDER", "unlimited"),
+		MeteringEmitter:           env("INARI_METERING_EMITTER", "noop"),
 		OpenFGAAPIURL:             env("INARI_OPENFGA_API_URL", "http://localhost:8082"),
 		OpenFGAStoreName:          env("INARI_OPENFGA_STORE_NAME", "inari"),
 		PlatformAdminGroup:        env("INARI_PLATFORM_ADMIN_GROUP", "platform-admins"),
@@ -585,6 +592,16 @@ func Load() (*Config, error) {
 		}
 	}
 	var err error
+	c.TenantProvisioningIdentities, err = serviceIdentitiesEnv("INARI_TENANT_PROVISIONING_IDENTITIES")
+	if err != nil {
+		return nil, err
+	}
+	if c.PlanLimitsProvider != "unlimited" && c.PlanLimitsProvider != "keycloak" {
+		return nil, fmt.Errorf("config: INARI_PLAN_LIMITS_PROVIDER must be %q or %q, got %q", "unlimited", "keycloak", c.PlanLimitsProvider)
+	}
+	if c.MeteringEmitter != "noop" && c.MeteringEmitter != "outbox" {
+		return nil, fmt.Errorf("config: INARI_METERING_EMITTER must be %q or %q, got %q", "noop", "outbox", c.MeteringEmitter)
+	}
 	c.SupportedPluginContracts, err = extensionv1.NormalizeSupportSet(c.SupportedPluginContracts)
 	if err != nil {
 		return nil, fmt.Errorf("config: INARI_SUPPORTED_PLUGIN_CONTRACTS: %w", err)
@@ -656,6 +673,26 @@ func Load() (*Config, error) {
 		}
 	}
 	return c, nil
+}
+
+func serviceIdentitiesEnv(key string) (map[string]string, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return nil, nil
+	}
+	out := map[string]string{}
+	for _, entry := range strings.Split(raw, ",") {
+		parts := strings.Split(strings.TrimSpace(entry), ":")
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+			return nil, fmt.Errorf("config: %s entries must be client-id:service-account-subject", key)
+		}
+		clientID := strings.TrimSpace(parts[0])
+		if _, exists := out[clientID]; exists {
+			return nil, fmt.Errorf("config: %s contains duplicate client %q", key, clientID)
+		}
+		out[clientID] = strings.TrimSpace(parts[1])
+	}
+	return out, nil
 }
 
 func env(key, def string) string {

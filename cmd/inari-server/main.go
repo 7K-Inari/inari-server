@@ -54,6 +54,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/orchestrator"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
 	gitgithub "github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider/github"
+	"github.com/7K-Inari/inari-server/internal/planlimits"
 	"github.com/7K-Inari/inari-server/internal/platformresources"
 	"github.com/7K-Inari/inari-server/internal/policyservice"
 	"github.com/7K-Inari/inari-server/internal/rbacmaterialize"
@@ -537,8 +538,18 @@ func run() error {
 	auditStore := audit.NewStore()
 
 	idp := tenancy.NewKeycloakAdmin(cfg.KeycloakBaseURL, cfg.KeycloakRealm, cfg.KeycloakClientID, cfg.KeycloakClientSecret)
+	var limitsProvider planlimits.PlanLimitsProvider = planlimits.UnlimitedProvider{}
+	if cfg.PlanLimitsProvider == "keycloak" {
+		limitsProvider = planlimits.NewKeycloakProvider(idp)
+	}
+	var meteringEmitter planlimits.MeteringEventEmitter = planlimits.NoopMeteringEmitter{}
+	if cfg.MeteringEmitter == "outbox" {
+		meteringEmitter = planlimits.NewOutboxEmitter(database)
+	}
 	platformResourcesSvc := platformresources.NewService(database, platformresources.NewStore(), auditStore)
 	svc := tenancy.NewService(database, idp, tenancy.NewStore(), auditStore).
+		WithPlanLimitsProvider(limitsProvider).
+		WithMeteringEventEmitter(meteringEmitter).
 		WithClientManager(idp).
 		WithIdentityProviderManager(idp).
 		WithPlatformResources(platformResourcesSvc).
@@ -638,7 +649,9 @@ func run() error {
 	}, log)
 
 	registry := clusterregistry.NewService(database, idp, clusterregistry.NewStore(), auditStore,
-		cfg.RegistrationTokenTTL, cfg.EnrollmentApprovalRequired)
+		cfg.RegistrationTokenTTL, cfg.EnrollmentApprovalRequired).
+		WithPlanLimitsProvider(limitsProvider).
+		WithMeteringEventEmitter(meteringEmitter)
 	invStore := inventory.NewStore()
 	registry.WithInstanceLister(clusterregistry.InstanceListerFunc(func(ctx context.Context, orgID, clusterID string) ([]types.ResourceInstance, error) {
 		return invStore.List(ctx, database.Pool, orgID, inventory.ListFilters{ClusterID: clusterID})
@@ -1157,7 +1170,8 @@ func run() error {
 		ExtensionContractsRequired: cfg.ExtensionContractsRequired,
 		ServerVersion:              cfg.ServerVersion,
 
-		PlatformAdminGroup: cfg.PlatformAdminGroup,
+		PlatformAdminGroup:           cfg.PlatformAdminGroup,
+		TenantProvisioningIdentities: cfg.TenantProvisioningIdentities,
 
 		// Feature A repo-write enforcement (decision 5b): team-scope repos
 		// are writable by owning-team members; platform repos by settings-write.

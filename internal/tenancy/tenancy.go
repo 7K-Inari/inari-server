@@ -16,6 +16,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/planlimits"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -42,6 +43,12 @@ type IdentityProvider interface {
 	// GetUserByEmail resolves a realm user by exact email match (member
 	// management accepts an email in place of a Keycloak UUID).
 	GetUserByEmail(ctx context.Context, email string) (*types.User, error)
+}
+
+// OrganizationEnsurer recovers an exact-alias create conflict. Only the
+// privileged actor-free lifecycle uses it; interactive creation stays strict.
+type OrganizationEnsurer interface {
+	EnsureOrganization(ctx context.Context, alias, displayName string) (kcOrgID string, err error)
 }
 
 // DefaultTeams are created with every tenant, each bound to a built-in
@@ -537,10 +544,26 @@ type Service struct {
 	store         *Store
 	audit         *audit.Store
 	orgCache      *OrgCache
+	planLimits    planlimits.PlanLimitsProvider
+	metering      planlimits.MeteringEventEmitter
 }
 
 func NewService(d *db.DB, idp IdentityProvider, store *Store, auditStore *audit.Store) *Service {
 	return &Service{db: d, idp: idp, store: store, audit: auditStore}
+}
+
+func (s *Service) WithPlanLimitsProvider(provider planlimits.PlanLimitsProvider) *Service {
+	if provider != nil {
+		s.planLimits = provider
+	}
+	return s
+}
+
+func (s *Service) WithMeteringEventEmitter(emitter planlimits.MeteringEventEmitter) *Service {
+	if emitter != nil {
+		s.metering = emitter
+	}
+	return s
 }
 
 // WithPlatformResources wires the platform-resources module so new tenants
@@ -580,10 +603,70 @@ func (s *Service) invalidateOrgCache(ctx context.Context, slug string) {
 	}
 }
 
-// CreateTenant creates the Keycloak org + default groups, the DB projection,
-// and the outbox event that seeds OpenFGA base tuples.
+// ProvisionTenant is the actor-free, replayable service-account lifecycle.
+// The authenticated subject is used only for audit attribution; it never
+// becomes a creator/member of the new tenant.
+func (s *Service) ProvisionTenant(ctx context.Context, actor, slug, displayName string) (*types.Organization, []types.Team, error) {
+	if org, teams, found, err := s.existingProvisionedTenant(ctx, actor, slug); found || err != nil {
+		return org, teams, err
+	}
+	return s.createTenant(ctx, actor, "", slug, displayName, true)
+}
+
+// existingProvisionedTenant repairs post-commit resources without repeating
+// the tenant/role/team bootstrap transaction or its outbox events.
+func (s *Service) existingProvisionedTenant(ctx context.Context, actor, slug string) (*types.Organization, []types.Team, bool, error) {
+	org, err := s.store.GetOrganizationBySlug(ctx, s.db.Pool, slug)
+	if errors.Is(err, ErrOrgNotFound) {
+		return nil, nil, false, nil
+	}
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if org.Status != types.OrgStatusActive {
+		return nil, nil, true, fmt.Errorf("tenancy: organization %q is %s", slug, org.Status)
+	}
+	teams, err := s.store.ListTeams(ctx, s.db.Pool, org.ID)
+	if err != nil {
+		return nil, nil, true, err
+	}
+	for _, team := range teams {
+		if _, err := s.idp.CreateGroup(ctx, team.KeycloakGroupPath); err != nil {
+			return nil, nil, true, fmt.Errorf("tenancy: ensure group %s: %w", team.KeycloakGroupPath, err)
+		}
+	}
+	if s.platform != nil {
+		if err := s.platform.EnsureBaseResources(ctx, org); err != nil {
+			return nil, nil, true, fmt.Errorf("tenancy: ensure base platform resources: %w", err)
+		}
+	}
+	if s.clients != nil {
+		if err := s.EnsureKubectlClient(ctx, actor, slug); err != nil {
+			return nil, nil, true, fmt.Errorf("tenancy: ensure kubectl client: %w", err)
+		}
+	}
+	return org, teams, true, nil
+}
+
+// CreateTenant preserves the interactive creator-membership behavior.
 func (s *Service) CreateTenant(ctx context.Context, actor, slug, displayName string) (*types.Organization, []types.Team, error) {
-	kcOrgID, err := s.idp.CreateOrganization(ctx, slug, displayName)
+	return s.createTenant(ctx, actor, actor, slug, displayName, false)
+}
+
+// createTenant creates the Keycloak org + default groups, the DB projection,
+// and the outbox event that seeds OpenFGA base tuples.
+func (s *Service) createTenant(ctx context.Context, actor, creatorUserID, slug, displayName string, ensure bool) (*types.Organization, []types.Team, error) {
+	var kcOrgID string
+	var err error
+	if ensure {
+		ensurer, ok := s.idp.(OrganizationEnsurer)
+		if !ok {
+			return nil, nil, fmt.Errorf("tenancy: identity provider does not support organization ensure")
+		}
+		kcOrgID, err = ensurer.EnsureOrganization(ctx, slug, displayName)
+	} else {
+		kcOrgID, err = s.idp.CreateOrganization(ctx, slug, displayName)
+	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("tenancy: create keycloak organization: %w", err)
 	}
@@ -635,9 +718,21 @@ func (s *Service) CreateTenant(ctx context.Context, actor, slug, displayName str
 		})
 	})
 	if err != nil {
-		// Best-effort compensation for the external Keycloak write.
-		if rbErr := s.idp.DeleteOrganization(ctx, kcOrgID); rbErr != nil {
-			return nil, nil, fmt.Errorf("tenancy: %w (rollback keycloak org: %v)", err, rbErr)
+		if ensure && errors.Is(err, ErrSlugTaken) {
+			org, teams, found, ensureErr := s.existingProvisionedTenant(ctx, actor, slug)
+			if found {
+				return org, teams, ensureErr
+			}
+			if ensureErr != nil {
+				return nil, nil, ensureErr
+			}
+		}
+		// Interactive creation compensates its external write. The ensure path
+		// retains partial state so a keyed retry can recover it safely.
+		if !ensure {
+			if rbErr := s.idp.DeleteOrganization(ctx, kcOrgID); rbErr != nil {
+				return nil, nil, fmt.Errorf("tenancy: %w (rollback keycloak org: %v)", err, rbErr)
+			}
 		}
 		return nil, nil, err
 	}
@@ -662,13 +757,11 @@ func (s *Service) CreateTenant(ctx context.Context, actor, slug, displayName str
 			return nil, nil, fmt.Errorf("tenancy: ensure kubectl client: %w", err)
 		}
 	}
-	// Creator auto-membership: the creating user joins the Keycloak
-	// Organization (drives the org token claim), the org-admins group
-	// (tenant's first administrator — the only non-circular path to the
-	// org-admin role) and the platform-team group; the DB rows + outbox
-	// events seed OpenFGA via the tuple writer.
-	if actor != "" {
-		if err := s.idp.AddOrganizationMember(ctx, kcOrgID, actor); err != nil {
+	// A human creator joins the organization and its two anchor teams. The
+	// actor-free service path leaves creatorUserID empty and skips all of these
+	// membership writes while retaining actor-based audit attribution above.
+	if creatorUserID != "" {
+		if err := s.idp.AddOrganizationMember(ctx, kcOrgID, creatorUserID); err != nil {
 			return nil, nil, fmt.Errorf("tenancy: add creator to org: %w", err)
 		}
 		findTeam := func(name string) *types.Team {
@@ -689,27 +782,27 @@ func (s *Service) CreateTenant(ctx context.Context, actor, slug, displayName str
 			if j.team == nil {
 				return nil, nil, fmt.Errorf("tenancy: default anchor team not found")
 			}
-			if err := s.idp.AddGroupMember(ctx, j.team.KeycloakGroupPath, actor); err != nil {
+			if err := s.idp.AddGroupMember(ctx, j.team.KeycloakGroupPath, creatorUserID); err != nil {
 				return nil, nil, fmt.Errorf("tenancy: add creator to %s: %w", j.team.Name, err)
 			}
 		}
 		err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
-			if err := s.store.UpsertUser(ctx, tx, &types.User{ID: actor}); err != nil {
+			if err := s.store.UpsertUser(ctx, tx, &types.User{ID: creatorUserID}); err != nil {
 				return err
 			}
 			for _, j := range joins {
 				if _, err := s.store.AddMembership(ctx, tx, &types.Membership{
-					UserID: actor, OrgID: org.ID, TeamID: j.team.ID, RoleID: j.team.RoleID,
+					UserID: creatorUserID, OrgID: org.ID, TeamID: j.team.ID, RoleID: j.team.RoleID,
 				}); err != nil {
 					return err
 				}
 				if err := s.audit.Record(ctx, tx, &types.AuditEvent{
-					OrgID: org.ID, Actor: actor, Action: "membership.added", ObjectType: "user", ObjectID: actor,
+					OrgID: org.ID, Actor: actor, Action: "membership.added", ObjectType: "user", ObjectID: creatorUserID,
 				}); err != nil {
 					return err
 				}
 				if err := audit.AppendOutbox(ctx, tx, org.ID, types.EventMembershipAdded, types.MembershipPayload{
-					OrgID: org.ID, TeamID: j.team.ID, UserID: actor, RoleID: j.team.RoleID,
+					OrgID: org.ID, TeamID: j.team.ID, UserID: creatorUserID, RoleID: j.team.RoleID,
 				}); err != nil {
 					return err
 				}

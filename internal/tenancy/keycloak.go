@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,10 @@ import (
 
 	"github.com/7K-Inari/inari-server/internal/types"
 )
+
+// ErrOrganizationAlreadyExists classifies a Keycloak alias conflict so the
+// privileged ensure path can recover an earlier partially completed create.
+var ErrOrganizationAlreadyExists = errors.New("keycloak: organization already exists")
 
 // KeycloakAdmin implements IdentityProvider against the Keycloak Admin REST
 // API (KC 26.x), incl. the Organizations endpoints.
@@ -114,6 +119,9 @@ func (k *KeycloakAdmin) CreateOrganization(ctx context.Context, alias, displayNa
 		return "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusConflict {
+		return "", ErrOrganizationAlreadyExists
+	}
 	if resp.StatusCode != http.StatusCreated {
 		b, _ := io.ReadAll(resp.Body)
 		return "", fmt.Errorf("keycloak: create organization: status %d: %s", resp.StatusCode, b)
@@ -125,6 +133,60 @@ func (k *KeycloakAdmin) CreateOrganization(ctx context.Context, alias, displayNa
 		return "", fmt.Errorf("keycloak: create organization: no id in Location header")
 	}
 	return id, nil
+}
+
+func (k *KeycloakAdmin) EnsureOrganization(ctx context.Context, alias, displayName string) (string, error) {
+	id, err := k.CreateOrganization(ctx, alias, displayName)
+	if err == nil {
+		return id, nil
+	}
+	if !errors.Is(err, ErrOrganizationAlreadyExists) {
+		return "", err
+	}
+	resp, err := k.do(ctx, http.MethodGet, "/organizations?exact=true&search="+url.QueryEscape(alias), nil)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("keycloak: resolve organization conflict: status %d", resp.StatusCode)
+	}
+	var orgs []struct {
+		ID    string `json:"id"`
+		Alias string `json:"alias"`
+		Name  string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&orgs); err != nil {
+		return "", err
+	}
+	for _, org := range orgs {
+		if org.Alias == alias || (org.Alias == "" && org.Name == alias) {
+			if org.ID == "" {
+				return "", fmt.Errorf("keycloak: organization %q has no id", alias)
+			}
+			return org.ID, nil
+		}
+	}
+	return "", fmt.Errorf("%w: keycloak alias %q", ErrOrgNotFound, alias)
+}
+
+// OrganizationAttributes reads one organization's generic attribute map.
+func (k *KeycloakAdmin) OrganizationAttributes(ctx context.Context, keycloakOrgID string) (map[string][]string, error) {
+	resp, err := k.do(ctx, http.MethodGet, "/organizations/"+keycloakOrgID, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("keycloak: get organization attributes: status %d", resp.StatusCode)
+	}
+	var representation struct {
+		Attributes map[string][]string `json:"attributes"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&representation); err != nil {
+		return nil, err
+	}
+	return representation.Attributes, nil
 }
 
 func (k *KeycloakAdmin) DeleteOrganization(ctx context.Context, kcOrgID string) error {

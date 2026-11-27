@@ -15,15 +15,27 @@ import (
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
+// TenantProvisioningScope is required together with an explicitly configured
+// service-account identity; it never replaces the org_creator check.
+const TenantProvisioningScope = "provisioning"
+
 // Handler exposes the tenancy REST surface.
 type Handler struct {
 	svc    *Service
 	authz  authz.Authorizer
 	scopes []config.ServiceScopes
+	// tenantProvisioningIdentities maps an allowed OAuth client ID (azp) to
+	// its exact Keycloak service-account subject.
+	tenantProvisioningIdentities map[string]string
 }
 
 func NewHandler(svc *Service, az authz.Authorizer) *Handler {
 	return &Handler{svc: svc, authz: az}
+}
+
+func (h *Handler) WithTenantProvisioningIdentities(identities map[string]string) *Handler {
+	h.tenantProvisioningIdentities = identities
+	return h
 }
 
 // RegisterRoutes mounts the tenancy API on the huma API instance.
@@ -191,9 +203,15 @@ func (h *Handler) createTenant(ctx context.Context, in *createTenantInput) (*ten
 	if id == nil {
 		return nil, huma.Error401Unauthorized("unauthenticated")
 	}
-	// Platform-level fine PEP: only org_creator on platform:inari may create
-	// tenants (M1.W2). Tuples are synced from the Keycloak platform-admins
-	// group by the PlatformGroupSync reconciler.
+	provisioner := false
+	if expectedSubject, configured := h.tenantProvisioningIdentities[id.AuthorizedParty]; configured {
+		if expectedSubject == "" || id.Subject != expectedSubject || !id.HasScope(TenantProvisioningScope) {
+			return nil, huma.Error403Forbidden("invalid tenant provisioning service identity or scope")
+		}
+		provisioner = true
+	}
+	// Both interactive and service callers require the platform org_creator
+	// relationship. The provisioning scope only selects actor-free behavior.
 	ok, err := h.authz.Check(ctx, authz.UserObject(id.Subject), authz.RelationOrgCreator, authz.ObjectPlatform)
 	if err != nil {
 		return nil, err
@@ -201,7 +219,13 @@ func (h *Handler) createTenant(ctx context.Context, in *createTenantInput) (*ten
 	if !ok {
 		return nil, huma.Error403Forbidden("organization creation requires the platform org_creator permission")
 	}
-	org, teams, err := h.svc.CreateTenant(ctx, id.Subject, in.Body.Slug, in.Body.DisplayName)
+	var org *types.Organization
+	var teams []types.Team
+	if provisioner {
+		org, teams, err = h.svc.ProvisionTenant(ctx, id.Subject, in.Body.Slug, in.Body.DisplayName)
+	} else {
+		org, teams, err = h.svc.CreateTenant(ctx, id.Subject, in.Body.Slug, in.Body.DisplayName)
+	}
 	if errors.Is(err, ErrSlugTaken) {
 		return nil, huma.Error409Conflict("tenant slug already exists")
 	}

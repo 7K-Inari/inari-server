@@ -91,6 +91,9 @@ type Deps struct {
 	// PlatformAdminGroup is the Keycloak realm group backing the platform
 	// admins API (config INARI_PLATFORM_ADMIN_GROUP).
 	PlatformAdminGroup string
+	// TenantProvisioningIdentities enables actor-free service-account creation
+	// only for exact client/subject pairs; the route set is unchanged.
+	TenantProvisioningIdentities map[string]string
 
 	// Platform-declared agent compatibility policy (config.Agent* fields);
 	// all empty omits the agentCompat block from cluster responses.
@@ -124,7 +127,8 @@ type Deps struct {
 // mirrors the historical wiring in cmd/inari-server; huma registration is
 // order-independent (routes key on method+path).
 func Register(api huma.API, d Deps) {
-	tenancy.NewHandler(d.Tenancy, d.Authz).WithScopesCatalog(d.IdentityScopes).RegisterRoutes(api)
+	tenancy.NewHandler(d.Tenancy, d.Authz).WithScopesCatalog(d.IdentityScopes).
+		WithTenantProvisioningIdentities(d.TenantProvisioningIdentities).RegisterRoutes(api)
 	tenancy.NewMeHandler(d.Authz, d.Tenancy, d.Tenancy).RegisterRoutes(api)
 	tenancy.NewPlatformHandler(d.Tenancy, d.Authz, d.PlatformAdminGroup).RegisterRoutes(api)
 	clusterregistry.NewHandler(d.Clusters, d.Tenancy, d.Authz, d.CapabilitiesLister).

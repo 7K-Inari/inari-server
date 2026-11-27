@@ -21,6 +21,8 @@ type Identity struct {
 	Email         string
 	Organizations []string
 	Groups        []string
+	// Scopes contains the OAuth scope claim as a normalized set.
+	Scopes []string
 	// ClusterID is the hardcoded `cluster_id` claim on per-cluster agent
 	// client-credentials tokens (plan §5.3). Empty for user tokens.
 	ClusterID string
@@ -31,6 +33,32 @@ type Identity struct {
 }
 
 // MemberOf reports whether the identity belongs to the given org (slug/alias).
+func ParseScopes(raw string) []string {
+	fields := strings.Fields(raw)
+	out := make([]string, 0, len(fields))
+	seen := make(map[string]struct{}, len(fields))
+	for _, field := range fields {
+		if _, ok := seen[field]; ok {
+			continue
+		}
+		seen[field] = struct{}{}
+		out = append(out, field)
+	}
+	return out
+}
+
+func (i *Identity) HasScope(scope string) bool {
+	if i == nil || scope == "" {
+		return false
+	}
+	for _, candidate := range i.Scopes {
+		if candidate == scope {
+			return true
+		}
+	}
+	return false
+}
+
 func (i *Identity) MemberOf(org string) bool {
 	for _, o := range i.Organizations {
 		if o == org {
@@ -69,6 +97,7 @@ type Claims struct {
 	Groups       []string        `json:"groups"`
 	ClusterID    string          `json:"cluster_id"`
 	Azp          string          `json:"azp"`
+	Scope        string          `json:"scope"`
 }
 
 // ParseOrganizations accepts the Keycloak organization claim as a JSON array
@@ -116,6 +145,7 @@ func (v *OIDCValidator) Validate(ctx context.Context, rawToken string) (*Identit
 		Groups:          claims.Groups,
 		ClusterID:       claims.ClusterID,
 		AuthorizedParty: claims.Azp,
+		Scopes:          ParseScopes(claims.Scope),
 	}, nil
 }
 

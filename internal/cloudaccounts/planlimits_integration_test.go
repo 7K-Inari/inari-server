@@ -32,9 +32,9 @@ func TestCloudAccountPlatformContextRequiresZoneVending(t *testing.T) {
 		t.Fatalf("BYO account must remain available: %v", err)
 	}
 
-	enterprise := itService(itDB(t), fakeValidator{}).WithPlanLimitsProvider(staticCloudLimits{allFeatures: true})
+	allFeaturesService := itService(itDB(t), fakeValidator{}).WithPlanLimitsProvider(staticCloudLimits{allFeatures: true})
 	input.RunContext = types.CloudAccountRunContextPlatform
-	if _, err := enterprise.Register(context.Background(), "user-1", "org:1", input); err != nil {
+	if _, err := allFeaturesService.Register(context.Background(), "user-1", "org:1", input); err != nil {
 		t.Fatalf("all-features account registration denied: %v", err)
 	}
 }

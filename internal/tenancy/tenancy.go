@@ -536,16 +536,17 @@ type Service struct {
 	clients ClientManager
 	// tunnelClients manages the per-cluster kubectl-tunnel Keycloak clients
 	// (plan §7.2); nil disables tunnel-client provisioning/kill switches.
-	tunnelClients TunnelClientManager
-	brokers       IdentityProviderManager
-	platform      PlatformResourceEnsurer
-	gate          DeletionApprovalGate
-	deleter       *Deleter
-	store         *Store
-	audit         *audit.Store
-	orgCache      *OrgCache
-	planLimits    planlimits.PlanLimitsProvider
-	metering      planlimits.MeteringEventEmitter
+	tunnelClients  TunnelClientManager
+	brokers        IdentityProviderManager
+	platform       PlatformResourceEnsurer
+	gate           DeletionApprovalGate
+	deleter        *Deleter
+	store          *Store
+	audit          *audit.Store
+	orgCache       *OrgCache
+	planLimits     planlimits.PlanLimitsProvider
+	limitEvaluator planlimits.Evaluator
+	metering       planlimits.MeteringEventEmitter
 }
 
 func NewService(d *db.DB, idp IdentityProvider, store *Store, auditStore *audit.Store) *Service {
@@ -555,8 +556,24 @@ func NewService(d *db.DB, idp IdentityProvider, store *Store, auditStore *audit.
 func (s *Service) WithPlanLimitsProvider(provider planlimits.PlanLimitsProvider) *Service {
 	if provider != nil {
 		s.planLimits = provider
+		s.limitEvaluator = planlimits.NewEvaluator(provider, "")
 	}
 	return s
+}
+
+// WithLimitEvaluator attaches the shared generic enforcement evaluator.
+func (s *Service) WithLimitEvaluator(evaluator planlimits.Evaluator) *Service {
+	if evaluator != nil {
+		s.limitEvaluator = evaluator
+	}
+	return s
+}
+
+func (s *Service) evaluateLimits(ctx context.Context, orgID string) (planlimits.Evaluation, error) {
+	if s.limitEvaluator != nil {
+		return s.limitEvaluator.Evaluate(ctx, orgID)
+	}
+	return planlimits.NewEvaluator(s.planLimits, "").Evaluate(ctx, orgID)
 }
 
 func (s *Service) WithMeteringEventEmitter(emitter planlimits.MeteringEventEmitter) *Service {

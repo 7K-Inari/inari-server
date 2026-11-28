@@ -14,6 +14,7 @@ import (
 
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/planlimits"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -117,8 +118,15 @@ func (s *Service) UpdateConfig(ctx context.Context, actor, orgID string, cfg typ
 	if err := validateConfig(&cfg); err != nil {
 		return nil, err
 	}
+	evaluation, err := s.evaluateLimits(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	if err := evaluation.CheckFeature(planlimits.GateApprovals); err != nil {
+		return nil, err
+	}
 	var rec *types.ApprovalConfigRecord
-	err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
+	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		before, found, err := s.store.getConfig(ctx, tx, orgID)
 		if err != nil {
 			return err

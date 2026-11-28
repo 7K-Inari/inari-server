@@ -19,6 +19,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/planlimits"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -204,7 +205,8 @@ type Service struct {
 	// tenant freeze sweeps the org's FGA tuples before the decision, so the
 	// org-role check alone makes lifecycle approvals undecidable (live
 	// finding, 2026-09-12).
-	platform PlatformChecker
+	platform       PlatformChecker
+	limitEvaluator planlimits.Evaluator
 }
 
 // PlatformChecker checks a platform-level permission (authz.Authorizer seam).
@@ -214,6 +216,20 @@ type PlatformChecker interface {
 
 func NewService(d *db.DB, store *Store, auditStore *audit.Store, roles PermissionResolver, items ItemResolver) *Service {
 	return &Service{db: d, store: store, audit: auditStore, roles: roles, items: items, ttl: DefaultTTL, now: time.Now}
+}
+
+func (s *Service) WithLimitEvaluator(evaluator planlimits.Evaluator) *Service {
+	if evaluator != nil {
+		s.limitEvaluator = evaluator
+	}
+	return s
+}
+
+func (s *Service) evaluateLimits(ctx context.Context, orgID string) (planlimits.Evaluation, error) {
+	if s.limitEvaluator != nil {
+		return s.limitEvaluator.Evaluate(ctx, orgID)
+	}
+	return planlimits.NewEvaluator(nil, "").Evaluate(ctx, orgID)
 }
 
 // WithPlatformChecker wires the platform-permission seam for lifecycle approvals.
@@ -270,6 +286,13 @@ func (s *Service) Gate(ctx context.Context, in GateInput) (*GateResult, error) {
 	if policyFor(in.Item) == types.ApprovalPolicyAuto {
 		return &GateResult{Approved: true}, nil
 	}
+	evaluation, err := s.evaluateLimits(ctx, in.OrgID)
+	if err != nil {
+		return nil, err
+	}
+	if err := evaluation.CheckFeature(planlimits.GateApprovals); err != nil {
+		return nil, err
+	}
 	expires := s.now().Add(s.ttl)
 	req := &types.ApprovalRequest{
 		OrgID: in.OrgID, ItemID: in.Item.ID, Version: in.Version, ClusterID: in.ClusterID,
@@ -277,7 +300,7 @@ func (s *Service) Gate(ctx context.Context, in GateInput) (*GateResult, error) {
 		OwnerTeam: in.OwnerTeam, Channel: in.Channel, InstanceID: in.InstanceID,
 		Action: in.Action, RepoID: in.RepoID, ArtifactDigest: in.ArtifactDigest, DeploymentPlanID: in.DeploymentPlanID, ExpiresAt: &expires,
 	}
-	err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
+	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		if err := s.store.create(ctx, tx, req); err != nil {
 			return err
 		}

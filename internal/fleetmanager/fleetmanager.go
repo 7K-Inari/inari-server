@@ -15,6 +15,7 @@ import (
 
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/planlimits"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -40,20 +41,35 @@ type Queue interface {
 
 // Service is the fleet manager facade.
 type Service struct {
-	db       *db.DB
-	store    *Store
-	audit    *audit.Store
-	clusters ClusterLister
-	queue    Queue
-	gates    GateRequester
-	decider  ApprovalDecider
-	assigner PolicyAssigner
-	pinner   CatalogPinner
-	now      func() time.Time
+	db             *db.DB
+	store          *Store
+	audit          *audit.Store
+	clusters       ClusterLister
+	queue          Queue
+	gates          GateRequester
+	decider        ApprovalDecider
+	assigner       PolicyAssigner
+	pinner         CatalogPinner
+	now            func() time.Time
+	limitEvaluator planlimits.Evaluator
 }
 
 func NewService(d *db.DB, store *Store, auditStore *audit.Store, clusters ClusterLister, queue Queue) *Service {
 	return &Service{db: d, store: store, audit: auditStore, clusters: clusters, queue: queue, now: time.Now}
+}
+
+func (s *Service) WithLimitEvaluator(evaluator planlimits.Evaluator) *Service {
+	if evaluator != nil {
+		s.limitEvaluator = evaluator
+	}
+	return s
+}
+
+func (s *Service) evaluateLimits(ctx context.Context, orgID string) (planlimits.Evaluation, error) {
+	if s.limitEvaluator != nil {
+		return s.limitEvaluator.Evaluate(ctx, orgID)
+	}
+	return planlimits.NewEvaluator(nil, "").Evaluate(ctx, orgID)
 }
 
 // WithGateRequester wires the Approvals module seam for stage gates.

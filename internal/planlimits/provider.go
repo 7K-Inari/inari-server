@@ -15,6 +15,13 @@ type PlanLimitsProvider interface {
 	PlanLimits(ctx context.Context, tenantID string) (Limits, error)
 }
 
+// ProviderFunc adapts a function to PlanLimitsProvider.
+type ProviderFunc func(context.Context, string) (Limits, error)
+
+func (f ProviderFunc) PlanLimits(ctx context.Context, tenantID string) (Limits, error) {
+	return f(ctx, tenantID)
+}
+
 var (
 	ErrLimitsNotFound  = errors.New("planlimits: limits not found")
 	ErrInvalidTenantID = errors.New("planlimits: invalid tenant id")

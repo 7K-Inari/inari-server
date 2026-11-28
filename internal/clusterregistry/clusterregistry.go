@@ -153,6 +153,15 @@ func (s *Store) CreateCluster(ctx context.Context, q db.Querier, c *types.Cluste
 	return nil
 }
 
+// CountActiveClusters counts clusters that still consume a tenant slot.
+// Terminal decommissioned/revoked records do not consume capacity.
+func (s *Store) CountActiveClusters(ctx context.Context, q db.Querier, orgID string) (int64, error) {
+	var count int64
+	err := q.QueryRow(ctx, `SELECT count(*) FROM clusters WHERE org_id=$1 AND state NOT IN ($2,$3)`,
+		orgID, types.ClusterStateDecommissioned, types.ClusterStateRevoked).Scan(&count)
+	return count, err
+}
+
 func (s *Store) GetCluster(ctx context.Context, q db.Querier, id string) (*types.Cluster, error) {
 	const sql = `SELECT ` + clusterCols + ` FROM clusters WHERE id = $1`
 	c, err := scanCluster(q.QueryRow(ctx, sql, id))
@@ -376,6 +385,7 @@ type Service struct {
 	approvalRequired bool
 	now              func() time.Time
 	planLimits       planlimits.PlanLimitsProvider
+	limitEvaluator   planlimits.Evaluator
 	metering         planlimits.MeteringEventEmitter
 }
 
@@ -412,8 +422,24 @@ func NewService(d *db.DB, clients ClientManager, store *Store, auditStore *audit
 func (s *Service) WithPlanLimitsProvider(provider planlimits.PlanLimitsProvider) *Service {
 	if provider != nil {
 		s.planLimits = provider
+		s.limitEvaluator = planlimits.NewEvaluator(provider, "")
 	}
 	return s
+}
+
+// WithLimitEvaluator attaches the shared generic enforcement evaluator.
+func (s *Service) WithLimitEvaluator(evaluator planlimits.Evaluator) *Service {
+	if evaluator != nil {
+		s.limitEvaluator = evaluator
+	}
+	return s
+}
+
+func (s *Service) evaluateLimits(ctx context.Context, orgID string) (planlimits.Evaluation, error) {
+	if s.limitEvaluator != nil {
+		return s.limitEvaluator.Evaluate(ctx, orgID)
+	}
+	return planlimits.NewEvaluator(s.planLimits, "").Evaluate(ctx, orgID)
 }
 
 func (s *Service) WithMeteringEventEmitter(emitter planlimits.MeteringEventEmitter) *Service {
@@ -496,6 +522,10 @@ func (s *Service) RebindBaseline(ctx context.Context, actor, clusterID, repoID s
 // enabled the record starts pending_approval (double opt-in, plan §10) and
 // tokens can only be consumed after ApproveCluster.
 func (s *Service) CreateCluster(ctx context.Context, actor, orgID, name string, labels map[string]string) (*types.Cluster, error) {
+	evaluation, err := s.evaluateLimits(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
 	state := types.ClusterStatePendingRegistration
 	if s.approvalRequired {
 		state = types.ClusterStatePendingApproval
@@ -507,7 +537,19 @@ func (s *Service) CreateCluster(ctx context.Context, actor, orgID, name string, 
 		Labels: labels,
 		State:  state,
 	}
-	err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
+	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		if evaluation.MaxClusters() != nil {
+			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "planlimits/clusters/"+orgID); err != nil {
+				return err
+			}
+			current, err := s.store.CountActiveClusters(ctx, tx, orgID)
+			if err != nil {
+				return err
+			}
+			if err := evaluation.CheckQuota(planlimits.LimitClusters, current); err != nil {
+				return err
+			}
+		}
 		if err := s.store.CreateCluster(ctx, tx, c); err != nil {
 			return err
 		}

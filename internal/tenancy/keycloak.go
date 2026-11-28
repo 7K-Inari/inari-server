@@ -189,6 +189,35 @@ func (k *KeycloakAdmin) OrganizationAttributes(ctx context.Context, keycloakOrgI
 	return representation.Attributes, nil
 }
 
+// UpdateOrganizationAttributes replaces an organization's attribute map while
+// preserving the rest of the full organization representation.
+func (k *KeycloakAdmin) UpdateOrganizationAttributes(ctx context.Context, kcOrgID string, attributes map[string][]string) error {
+	resp, err := k.do(ctx, http.MethodGet, "/organizations/"+kcOrgID, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		return fmt.Errorf("keycloak: get organization for attribute update: status %d", resp.StatusCode)
+	}
+	var representation map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&representation); err != nil {
+		_ = resp.Body.Close()
+		return err
+	}
+	_ = resp.Body.Close()
+	representation["attributes"] = attributes
+	put, err := k.do(ctx, http.MethodPut, "/organizations/"+kcOrgID, representation)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = put.Body.Close() }()
+	if put.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("keycloak: update organization attributes: status %d", put.StatusCode)
+	}
+	return nil
+}
+
 func (k *KeycloakAdmin) DeleteOrganization(ctx context.Context, kcOrgID string) error {
 	resp, err := k.do(ctx, http.MethodDelete, "/organizations/"+kcOrgID, nil)
 	if err != nil {

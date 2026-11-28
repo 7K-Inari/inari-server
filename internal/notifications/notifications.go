@@ -20,6 +20,7 @@ import (
 
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/planlimits"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -242,11 +243,12 @@ func (s *Store) MarkRetry(ctx context.Context, q db.Querier, d *types.Notificati
 
 // Service implements audit.Handler and endpoint CRUD.
 type Service struct {
-	db      *db.DB
-	store   *Store
-	audit   *audit.Store
-	slack   *SlackSender
-	webhook *WebhookSender
+	db             *db.DB
+	store          *Store
+	audit          *audit.Store
+	slack          *SlackSender
+	webhook        *WebhookSender
+	limitEvaluator planlimits.Evaluator
 }
 
 func NewService(d *db.DB, store *Store, auditStore *audit.Store, slack *SlackSender, webhook *WebhookSender) *Service {
@@ -265,6 +267,20 @@ func NewService(d *db.DB, store *Store, auditStore *audit.Store, slack *SlackSen
 	return &Service{db: d, store: store, audit: auditStore, slack: slack, webhook: webhook}
 }
 
+func (s *Service) WithLimitEvaluator(evaluator planlimits.Evaluator) *Service {
+	if evaluator != nil {
+		s.limitEvaluator = evaluator
+	}
+	return s
+}
+
+func (s *Service) evaluateLimits(ctx context.Context, orgID string) (planlimits.Evaluation, error) {
+	if s.limitEvaluator != nil {
+		return s.limitEvaluator.Evaluate(ctx, orgID)
+	}
+	return planlimits.NewEvaluator(nil, "").Evaluate(ctx, orgID)
+}
+
 // EventTypes implements audit.Handler.
 func (s *Service) EventTypes() []string { return subscribedEvents }
 
@@ -276,6 +292,13 @@ func (s *Service) senderFor(kind string) (Sender, error) {
 // and record one delivery row per attempt. Delivery failures are recorded
 // and logged but never fail the event — other outbox handlers still run.
 func (s *Service) Handle(ctx context.Context, ev *types.OutboxEvent) error {
+	evaluation, err := s.evaluateLimits(ctx, ev.OrgID)
+	if err != nil {
+		return fmt.Errorf("notifications: limits: %w", err)
+	}
+	if !evaluation.FeatureEnabled(planlimits.GateNotifications) {
+		return nil
+	}
 	endpoints, err := s.store.ListEndpoints(ctx, s.db.Pool, ev.OrgID)
 	if err != nil {
 		return fmt.Errorf("notifications: list endpoints: %w", err)
@@ -334,6 +357,13 @@ func (s *Service) RetryFailed(ctx context.Context, limit int) (retried int, err 
 		ep, err := s.store.GetEndpoint(ctx, s.db.Pool, d.EndpointID)
 		if err != nil {
 			slog.Warn("notifications: retry: endpoint lookup", "endpoint", d.EndpointID, "error", err)
+			continue
+		}
+		evaluation, err := s.evaluateLimits(ctx, ep.OrgID)
+		if err != nil {
+			return retried, fmt.Errorf("notifications: retry limits: %w", err)
+		}
+		if !evaluation.FeatureEnabled(planlimits.GateNotifications) {
 			continue
 		}
 		d.Attempts++
@@ -436,6 +466,13 @@ func (s *Service) CreateEndpoint(ctx context.Context, actor, orgID string, in En
 	if err := validateEndpoint(&in, ""); err != nil {
 		return nil, err
 	}
+	evaluation, err := s.evaluateLimits(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	if err := evaluation.CheckFeature(planlimits.GateNotifications); err != nil {
+		return nil, err
+	}
 	enabled := true
 	if in.Enabled != nil {
 		enabled = *in.Enabled
@@ -454,7 +491,7 @@ func (s *Service) CreateEndpoint(ctx context.Context, actor, orgID string, in En
 		Events:  events,
 		Enabled: enabled,
 	}
-	err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
+	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		if err := s.store.CreateEndpoint(ctx, tx, ep); err != nil {
 			return err
 		}
@@ -486,6 +523,13 @@ func (s *Service) GetEndpoint(ctx context.Context, orgID, id string) (*types.Not
 
 // UpdateEndpoint edits name/url/events/enabled (and secret when provided).
 func (s *Service) UpdateEndpoint(ctx context.Context, actor, orgID, id string, in EndpointInput) (*types.NotificationEndpoint, error) {
+	evaluation, err := s.evaluateLimits(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	if err := evaluation.CheckFeature(planlimits.GateNotifications); err != nil {
+		return nil, err
+	}
 	ep, err := s.GetEndpoint(ctx, orgID, id)
 	if err != nil {
 		return nil, err
@@ -538,6 +582,13 @@ func (s *Service) DeleteEndpoint(ctx context.Context, actor, orgID, id string) e
 
 // TestEndpoint sends a test message and records the delivery (row + audit).
 func (s *Service) TestEndpoint(ctx context.Context, actor, orgID, id string) (*types.NotificationDelivery, error) {
+	evaluation, err := s.evaluateLimits(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	if err := evaluation.CheckFeature(planlimits.GateNotifications); err != nil {
+		return nil, err
+	}
 	ep, err := s.GetEndpoint(ctx, orgID, id)
 	if err != nil {
 		return nil, err

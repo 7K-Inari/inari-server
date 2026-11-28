@@ -19,6 +19,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/approvals"
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/planlimits"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -146,6 +147,13 @@ func (s *Service) CreateRollout(ctx context.Context, actor, orgID string, in Cre
 			}
 		}
 	}
+	evaluation, err := s.evaluateLimits(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	if err := evaluation.CheckFeature(planlimits.GateFleetRollouts); err != nil {
+		return nil, err
+	}
 	for _, st := range in.Stages {
 		for _, setID := range st.ClusterSetIDs {
 			if _, err := s.GetClusterSet(ctx, orgID, setID); err != nil {
@@ -158,7 +166,7 @@ func (s *Service) CreateRollout(ctx context.Context, actor, orgID string, in Cre
 		TargetRef: in.TargetRef, DesiredVersion: in.DesiredVersion, Stages: in.Stages,
 		CreatedBy: actor,
 	}
-	err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
+	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		if err := s.store.createRollout(ctx, tx, r); err != nil {
 			return err
 		}
@@ -242,6 +250,13 @@ func (s *Service) transition(ctx context.Context, q db.Querier, r *types.Rollout
 // StartRollout moves a pending rollout to running and takes the first
 // advance step (before-gate of stage 0, or immediate fan-out).
 func (s *Service) StartRollout(ctx context.Context, actor, orgID, id string) (*types.Rollout, error) {
+	evaluation, err := s.evaluateLimits(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	if err := evaluation.CheckFeature(planlimits.GateFleetRollouts); err != nil {
+		return nil, err
+	}
 	r, err := s.GetRollout(ctx, orgID, id)
 	if err != nil {
 		return nil, err
@@ -275,6 +290,13 @@ func (s *Service) StopRollout(ctx context.Context, actor, orgID, id string) (*ty
 
 // ResumeRollout re-enters a paused rollout (§5.11 resume).
 func (s *Service) ResumeRollout(ctx context.Context, actor, orgID, id string) (*types.Rollout, error) {
+	evaluation, err := s.evaluateLimits(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	if err := evaluation.CheckFeature(planlimits.GateFleetRollouts); err != nil {
+		return nil, err
+	}
 	r, err := s.GetRollout(ctx, orgID, id)
 	if err != nil {
 		return nil, err
@@ -463,6 +485,13 @@ func (s *Service) advanceOnce(ctx context.Context, rolloutID string) (done bool,
 	r, err := s.store.getRollout(ctx, s.db.Pool, rolloutID)
 	if err != nil {
 		return true, err
+	}
+	evaluation, err := s.evaluateLimits(ctx, r.OrgID)
+	if err != nil {
+		return true, err
+	}
+	if !evaluation.FeatureEnabled(planlimits.GateFleetRollouts) {
+		return true, nil
 	}
 	switch r.State {
 	case types.RolloutStateRunning:
@@ -658,6 +687,13 @@ func (s *Service) fail(ctx context.Context, r *types.Rollout, reason string) err
 // reverse stage order, then marks the rollout rolled_back (§5.11
 // rollback-to-previous-version). Desired state only — agents apply it.
 func (s *Service) Rollback(ctx context.Context, actor, orgID, id, toVersion string) (*types.Rollout, error) {
+	evaluation, err := s.evaluateLimits(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	if err := evaluation.CheckFeature(planlimits.GateFleetRollouts); err != nil {
+		return nil, err
+	}
 	if toVersion == "" {
 		return nil, fmt.Errorf("%w: toVersion is required", ErrInvalidInput)
 	}

@@ -4,6 +4,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -46,6 +47,8 @@ type Config struct {
 	KeycloakClientID     string
 	KeycloakClientSecret string
 	PlanLimitsProvider   string
+	PlanLimitsCacheTTL   time.Duration
+	PlanLimitsUpgradeURL string
 	MeteringEmitter      string
 	// TenantProvisioningIdentities maps allowed OAuth client IDs to exact
 	// Keycloak service-account subjects. Empty disables actor-free creation.
@@ -431,6 +434,8 @@ func Load() (*Config, error) {
 		KeycloakClientID:          env("INARI_KEYCLOAK_CLIENT_ID", "inari-platform-admin"),
 		KeycloakClientSecret:      env("INARI_KEYCLOAK_CLIENT_SECRET", ""),
 		PlanLimitsProvider:        env("INARI_PLAN_LIMITS_PROVIDER", "unlimited"),
+		PlanLimitsCacheTTL:        durEnv("INARI_PLAN_LIMITS_CACHE_TTL", 30*time.Second),
+		PlanLimitsUpgradeURL:      env("INARI_PLAN_LIMITS_UPGRADE_URL", ""),
 		MeteringEmitter:           env("INARI_METERING_EMITTER", "noop"),
 		OpenFGAAPIURL:             env("INARI_OPENFGA_API_URL", "http://localhost:8082"),
 		OpenFGAStoreName:          env("INARI_OPENFGA_STORE_NAME", "inari"),
@@ -601,6 +606,15 @@ func Load() (*Config, error) {
 	}
 	if c.MeteringEmitter != "noop" && c.MeteringEmitter != "outbox" {
 		return nil, fmt.Errorf("config: INARI_METERING_EMITTER must be %q or %q, got %q", "noop", "outbox", c.MeteringEmitter)
+	}
+	if c.PlanLimitsCacheTTL < 0 {
+		return nil, fmt.Errorf("config: INARI_PLAN_LIMITS_CACHE_TTL must not be negative")
+	}
+	if c.PlanLimitsUpgradeURL != "" {
+		upgradeURL, err := url.ParseRequestURI(c.PlanLimitsUpgradeURL)
+		if err != nil || upgradeURL.Scheme != "https" || upgradeURL.Host == "" {
+			return nil, fmt.Errorf("config: INARI_PLAN_LIMITS_UPGRADE_URL must be an absolute HTTPS URL")
+		}
 	}
 	c.SupportedPluginContracts, err = extensionv1.NormalizeSupportSet(c.SupportedPluginContracts)
 	if err != nil {

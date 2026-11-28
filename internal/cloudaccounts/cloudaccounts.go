@@ -22,6 +22,7 @@ import (
 
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/planlimits"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -173,10 +174,11 @@ func (s *Store) DeleteAccount(ctx context.Context, q db.Querier, id string) erro
 // Service orchestrates cloud account lifecycle: DB projection + audit +
 // outbox in one TX; trust validation via the STSValidator seam.
 type Service struct {
-	db        *db.DB
-	store     *Store
-	audit     *audit.Store
-	validator STSValidator
+	db             *db.DB
+	store          *Store
+	audit          *audit.Store
+	validator      STSValidator
+	limitEvaluator planlimits.Evaluator
 }
 
 // NewService wires the module. validator may be a DisabledValidator when the
@@ -188,12 +190,42 @@ func NewService(d *db.DB, store *Store, auditStore *audit.Store, validator STSVa
 	return &Service{db: d, store: store, audit: auditStore, validator: validator}
 }
 
+func (s *Service) WithPlanLimitsProvider(provider planlimits.PlanLimitsProvider) *Service {
+	if provider != nil {
+		s.limitEvaluator = planlimits.NewEvaluator(provider, "")
+	}
+	return s
+}
+
+func (s *Service) WithLimitEvaluator(evaluator planlimits.Evaluator) *Service {
+	if evaluator != nil {
+		s.limitEvaluator = evaluator
+	}
+	return s
+}
+
+func (s *Service) evaluateLimits(ctx context.Context, orgID string) (planlimits.Evaluation, error) {
+	if s.limitEvaluator != nil {
+		return s.limitEvaluator.Evaluate(ctx, orgID)
+	}
+	return planlimits.NewEvaluator(nil, "").Evaluate(ctx, orgID)
+}
+
 // Register validates the input and inserts the account in pending_validation
 // state, with audit + outbox in one TX. A duplicate (org, provider,
 // account_id) returns ErrAlreadyRegistered.
 func (s *Service) Register(ctx context.Context, actor, orgID string, in RegisterInput) (*types.CloudAccount, error) {
 	if err := validateRegisterInput(&in); err != nil {
 		return nil, err
+	}
+	if in.RunContext == types.CloudAccountRunContextPlatform {
+		evaluation, err := s.evaluateLimits(ctx, orgID)
+		if err != nil {
+			return nil, err
+		}
+		if err := evaluation.CheckFeature(planlimits.GateZoneVending); err != nil {
+			return nil, err
+		}
 	}
 	a := &types.CloudAccount{
 		ID:         "cloudaccount:" + newUUID(),

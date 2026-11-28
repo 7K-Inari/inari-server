@@ -18,6 +18,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/authz"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/planlimits"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -97,6 +98,13 @@ func (s *Service) CreateBrokeredIdP(ctx context.Context, actor, slug string, in 
 	}
 	org, err := s.store.GetOrganizationBySlug(ctx, s.db.Pool, slug)
 	if err != nil {
+		return nil, err
+	}
+	evaluation, err := s.evaluateLimits(ctx, org.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := evaluation.CheckFeature(planlimits.GateIdPBrokering); err != nil {
 		return nil, err
 	}
 	// Fast-path one-IdP-per-org check against the projection so a duplicate
@@ -201,6 +209,13 @@ func (s *Service) UpdateBrokeredIdP(ctx context.Context, actor, slug string, bro
 	}
 	org, err := s.store.GetOrganizationBySlug(ctx, s.db.Pool, slug)
 	if err != nil {
+		return err
+	}
+	evaluation, err := s.evaluateLimits(ctx, org.ID)
+	if err != nil {
+		return err
+	}
+	if err := evaluation.CheckFeature(planlimits.GateIdPBrokering); err != nil {
 		return err
 	}
 	kcAlias := brokeredIdPAlias(slug, broker.Alias)

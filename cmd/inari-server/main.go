@@ -542,13 +542,15 @@ func run() error {
 	if cfg.PlanLimitsProvider == "keycloak" {
 		limitsProvider = planlimits.NewKeycloakProvider(idp)
 	}
+	limitsProvider = planlimits.NewCachedProvider(limitsProvider, cfg.PlanLimitsCacheTTL)
+	limitEvaluator := planlimits.NewEvaluator(limitsProvider, cfg.PlanLimitsUpgradeURL)
 	var meteringEmitter planlimits.MeteringEventEmitter = planlimits.NoopMeteringEmitter{}
 	if cfg.MeteringEmitter == "outbox" {
 		meteringEmitter = planlimits.NewOutboxEmitter(database)
 	}
 	platformResourcesSvc := platformresources.NewService(database, platformresources.NewStore(), auditStore)
 	svc := tenancy.NewService(database, idp, tenancy.NewStore(), auditStore).
-		WithPlanLimitsProvider(limitsProvider).
+		WithLimitEvaluator(limitEvaluator).
 		WithMeteringEventEmitter(meteringEmitter).
 		WithClientManager(idp).
 		WithIdentityProviderManager(idp).
@@ -650,7 +652,7 @@ func run() error {
 
 	registry := clusterregistry.NewService(database, idp, clusterregistry.NewStore(), auditStore,
 		cfg.RegistrationTokenTTL, cfg.EnrollmentApprovalRequired).
-		WithPlanLimitsProvider(limitsProvider).
+		WithLimitEvaluator(limitEvaluator).
 		WithMeteringEventEmitter(meteringEmitter)
 	invStore := inventory.NewStore()
 	registry.WithInstanceLister(clusterregistry.InstanceListerFunc(func(ctx context.Context, orgID, clusterID string) ([]types.ResourceInstance, error) {

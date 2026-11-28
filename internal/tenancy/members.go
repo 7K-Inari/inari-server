@@ -47,6 +47,11 @@ func (s *Service) AddMember(ctx context.Context, actor, slug, teamName, userID s
 	if err != nil {
 		return err
 	}
+	releaseSeat, err := s.admitNewSeat(ctx, org, userID)
+	if err != nil {
+		return err
+	}
+	defer releaseSeat()
 	if err := s.idp.AddOrganizationMember(ctx, org.KeycloakOrgID, userID); err != nil {
 		return fmt.Errorf("tenancy: add org member: %w", err)
 	}
@@ -202,6 +207,11 @@ func (s *Service) SetMemberRole(ctx context.Context, actor, slug, userID, roleID
 	if err != nil {
 		return err
 	}
+	releaseSeat, err := s.admitNewSeat(ctx, org, userID)
+	if err != nil {
+		return err
+	}
+	defer releaseSeat()
 	// Keycloak mutations first (idempotent): join org + anchor group, leave
 	// every other team — PUT defines the caller's single org role.
 	if err := s.idp.AddOrganizationMember(ctx, org.KeycloakOrgID, userID); err != nil {

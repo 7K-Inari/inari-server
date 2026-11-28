@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/7K-Inari/inari-server/internal/audit"
+	"github.com/7K-Inari/inari-server/internal/planlimits"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -23,6 +24,13 @@ import (
 func (s *Service) ReportDrift(ctx context.Context, d *types.DriftEvent) (bool, error) {
 	if d.OrgID == "" || d.ClusterID == "" || d.Kind == "" {
 		return false, fmt.Errorf("%w: orgID, clusterID and kind are required", ErrInvalidInput)
+	}
+	evaluation, err := s.evaluateLimits(ctx, d.OrgID)
+	if err != nil {
+		return false, err
+	}
+	if !evaluation.FeatureEnabled(planlimits.GateDriftDetection) {
+		return false, nil
 	}
 	open, err := s.store.hasOpenDrift(ctx, s.db.Pool, d.ClusterID, d.Kind, d.ResourceRef, d.ReportedHash)
 	if err != nil {

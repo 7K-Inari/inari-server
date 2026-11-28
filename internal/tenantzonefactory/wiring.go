@@ -12,6 +12,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/cloudaccounts"
 	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/orchestrator/gitprovider"
+	"github.com/7K-Inari/inari-server/internal/planlimits"
 	"github.com/7K-Inari/inari-server/internal/tenancy"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
@@ -95,6 +96,10 @@ type ModuleWiring struct {
 	// empty skips the manifest commit.
 	PlatformGitOpsRepo string
 	Agent              AgentInstallParams
+	// LimitEvaluator and LimitsProjection propagate the owner's generic
+	// entitlements to the zone child before its own resources are registered.
+	LimitEvaluator   planlimits.Evaluator
+	LimitsProjection planlimits.LimitsProjection
 }
 
 // WireZone implements Wiring: Keycloak Organization → CloudAccount record
@@ -110,6 +115,19 @@ func (w *ModuleWiring) WireZone(ctx context.Context, zone *types.TenantZone, rol
 	}
 	if err != nil {
 		return nil, fmt.Errorf("tzf: wiring keycloak org: %w", err)
+	}
+	if w.LimitsProjection != nil {
+		evaluator := w.LimitEvaluator
+		if evaluator == nil {
+			evaluator = planlimits.NewEvaluator(nil, "")
+		}
+		evaluation, err := evaluator.Evaluate(ctx, zone.OwnerOrgID)
+		if err != nil {
+			return nil, fmt.Errorf("tzf: evaluate owner limits: %w", err)
+		}
+		if err := w.LimitsProjection.PutPlanLimits(ctx, org.ID, evaluation.Limits()); err != nil {
+			return nil, fmt.Errorf("tzf: project owner limits to zone: %w", err)
+		}
 	}
 	// Base platform resources (desired-state rows + GitOps CR manifests).
 	// Idempotent, so zone retries re-run them safely.

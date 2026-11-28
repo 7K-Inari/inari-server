@@ -100,8 +100,12 @@ func (e Evaluation) CheckQuota(limit string, currentUsage int64) error {
 	}
 }
 
+func (e Evaluation) FeatureEnabled(gate string) bool {
+	return e.limits.AllFeatures || e.limits.FeatureGates[gate]
+}
+
 func (e Evaluation) CheckFeature(gate string) error {
-	if e.limits.AllFeatures || e.limits.FeatureGates[gate] {
+	if e.FeatureEnabled(gate) {
 		return nil
 	}
 	return &LimitExceededError{

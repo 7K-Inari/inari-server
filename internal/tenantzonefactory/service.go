@@ -22,6 +22,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/approvals"
 	"github.com/7K-Inari/inari-server/internal/audit"
 	"github.com/7K-Inari/inari-server/internal/db"
+	"github.com/7K-Inari/inari-server/internal/planlimits"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -36,13 +37,14 @@ type LifecycleGate interface {
 // Service orchestrates zone vending and decommission: DB projection +
 // audit + outbox in TXs around the DB-free step runner.
 type Service struct {
-	db    *db.DB
-	store *Store
-	audit *audit.Store
-	env   *Env
-	gate  LifecycleGate
-	log   *slog.Logger
-	newID func() string
+	db             *db.DB
+	store          *Store
+	audit          *audit.Store
+	env            *Env
+	gate           LifecycleGate
+	log            *slog.Logger
+	newID          func() string
+	limitEvaluator planlimits.Evaluator
 
 	locksMu sync.Mutex
 	locks   map[string]*sync.Mutex // per-zone runner serialization
@@ -58,6 +60,35 @@ func NewService(d *db.DB, store *Store, auditStore *audit.Store, env *Env, gate 
 		env.Config.MaxAttempts = 5
 	}
 	return &Service{db: d, store: store, audit: auditStore, env: env, gate: gate, log: log, newID: newUUID, locks: map[string]*sync.Mutex{}}
+}
+
+func (s *Service) WithPlanLimitsProvider(provider planlimits.PlanLimitsProvider) *Service {
+	if provider != nil {
+		s.limitEvaluator = planlimits.NewEvaluator(provider, "")
+	}
+	return s
+}
+
+func (s *Service) WithLimitEvaluator(evaluator planlimits.Evaluator) *Service {
+	if evaluator != nil {
+		s.limitEvaluator = evaluator
+	}
+	return s
+}
+
+func (s *Service) evaluateLimits(ctx context.Context, orgID string) (planlimits.Evaluation, error) {
+	if s.limitEvaluator != nil {
+		return s.limitEvaluator.Evaluate(ctx, orgID)
+	}
+	return planlimits.NewEvaluator(nil, "").Evaluate(ctx, orgID)
+}
+
+func (s *Service) checkZoneVending(ctx context.Context, orgID string) error {
+	evaluation, err := s.evaluateLimits(ctx, orgID)
+	if err != nil {
+		return err
+	}
+	return evaluation.CheckFeature(planlimits.GateZoneVending)
 }
 
 // zoneLock serializes runners for one zone (reconcile loop, approval
@@ -96,6 +127,9 @@ type RequestResult struct {
 func (s *Service) RequestZone(ctx context.Context, actor string, in RequestInput) (*RequestResult, error) {
 	if in.ManagementAccountID == "" || in.OwnerOrgID == "" {
 		return nil, fmt.Errorf("tzf: management cloud account and owner org are required (§5.12 prerequisite)")
+	}
+	if err := s.checkZoneVending(ctx, in.OwnerOrgID); err != nil {
+		return nil, err
 	}
 	if s.env.MgmtAccounts != nil {
 		mgmt, err := s.env.MgmtAccounts.Get(ctx, in.OwnerOrgID, in.ManagementAccountID)
@@ -167,6 +201,9 @@ func (s *Service) StartProvisioning(ctx context.Context, zoneID, actor string) e
 	if err != nil {
 		return err
 	}
+	if err := s.checkZoneVending(ctx, zone.OwnerOrgID); err != nil {
+		return err
+	}
 	switch zone.State {
 	case types.ZoneStateRequested, types.ZoneStatePendingApproval, types.ZoneStateProvisioning,
 		types.ZoneStateManualIntervention:
@@ -191,6 +228,11 @@ func (s *Service) ResumeZone(ctx context.Context, zoneID, actor string) error {
 	decommissioning, err := s.hasDecommissionSteps(ctx, zoneID)
 	if err != nil {
 		return err
+	}
+	if !decommissioning {
+		if err := s.checkZoneVending(ctx, zone.OwnerOrgID); err != nil {
+			return err
+		}
 	}
 	switch zone.State {
 	case types.ZoneStateProvisioning, types.ZoneStateWiring:

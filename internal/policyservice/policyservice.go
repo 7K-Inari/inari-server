@@ -25,10 +25,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 
-	yaml "sigs.k8s.io/yaml"
 	"errors"
 	"fmt"
 	"log/slog"
+	yaml "sigs.k8s.io/yaml"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -41,6 +41,7 @@ import (
 	"github.com/7K-Inari/inari-server/internal/clusterregistry"
 	"github.com/7K-Inari/inari-server/internal/db"
 	"github.com/7K-Inari/inari-server/internal/fleetmanager"
+	"github.com/7K-Inari/inari-server/internal/planlimits"
 	"github.com/7K-Inari/inari-server/internal/types"
 )
 
@@ -410,14 +411,15 @@ func (s *Store) ListValidExemptions(ctx context.Context, q db.Querier, orgID, po
 // Service orchestrates the policy module: DB projection + audit + outbox in
 // one TX, OPA evaluation via the Evaluator seam, distribution via Queue.
 type Service struct {
-	db       *db.DB
-	store    *Store
-	eval     Evaluator
-	clusters ClusterLister
-	queue    Queue
-	audit    *audit.Store
-	sets     SetResolver
-	now      func() time.Time
+	db             *db.DB
+	store          *Store
+	eval           Evaluator
+	clusters       ClusterLister
+	queue          Queue
+	audit          *audit.Store
+	sets           SetResolver
+	now            func() time.Time
+	limitEvaluator planlimits.Evaluator
 }
 
 // SetResolver resolves ClusterSets and their members for pack assignment
@@ -436,6 +438,20 @@ func NewService(d *db.DB, store *Store, eval Evaluator, clusters ClusterLister, 
 		db: d, store: store, eval: eval, clusters: clusters, queue: queue,
 		audit: auditStore, now: time.Now,
 	}
+}
+
+func (s *Service) WithLimitEvaluator(evaluator planlimits.Evaluator) *Service {
+	if evaluator != nil {
+		s.limitEvaluator = evaluator
+	}
+	return s
+}
+
+func (s *Service) evaluateLimits(ctx context.Context, orgID string) (planlimits.Evaluation, error) {
+	if s.limitEvaluator != nil {
+		return s.limitEvaluator.Evaluate(ctx, orgID)
+	}
+	return planlimits.NewEvaluator(nil, "").Evaluate(ctx, orgID)
 }
 
 func (s *Service) CreatePolicy(ctx context.Context, actor, orgID, name, target, engine, source string) (*types.Policy, error) {
@@ -679,11 +695,18 @@ func (s *Service) CreatePolicyPack(ctx context.Context, actor, orgID, name, engi
 	if len(parameters) == 0 {
 		parameters = json.RawMessage(`{}`)
 	}
+	evaluation, err := s.evaluateLimits(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	if err := evaluation.CheckFeature(planlimits.GatePolicyPacks); err != nil {
+		return nil, err
+	}
 	p := &types.PolicyPack{
 		ID: "policypack:" + newUUID(), OrgID: orgID, Name: name, Engine: engine,
 		OCIRef: ociRef, Version: version, Parameters: parameters, Manifests: manifests,
 	}
-	err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
+	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		if err := s.store.CreatePolicyPack(ctx, tx, p); err != nil {
 			return err
 		}
@@ -726,6 +749,13 @@ func (s *Service) ListAssignments(ctx context.Context, orgID, packID string) ([]
 // retried by the dispatcher instead of leaving clusters unserved after a
 // committed assignment.
 func (s *Service) Assign(ctx context.Context, actor, orgID, packID, targetType, targetID string) (*types.PolicyAssignment, error) {
+	evaluation, err := s.evaluateLimits(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	if err := evaluation.CheckFeature(planlimits.GatePolicyPacks); err != nil {
+		return nil, err
+	}
 	if _, err := s.GetPolicyPack(ctx, orgID, packID); err != nil {
 		return nil, err
 	}
@@ -737,7 +767,7 @@ func (s *Service) Assign(ctx context.Context, actor, orgID, packID, targetType, 
 	a := &types.PolicyAssignment{
 		ID: "policyassignment:" + newUUID(), PackID: packID, TargetType: targetType, TargetID: targetID,
 	}
-	err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
+	err = s.db.WithTx(ctx, func(tx pgx.Tx) error {
 		if err := s.store.CreateAssignment(ctx, tx, a); err != nil {
 			return err
 		}
@@ -779,6 +809,14 @@ func (h *DistributeHandler) Handle(ctx context.Context, ev *types.OutboxEvent) e
 	var p types.PolicyPackAssignedPayload
 	if err := json.Unmarshal(ev.Payload, &p); err != nil {
 		return fmt.Errorf("policyservice: distribute: payload: %w", err)
+	}
+	evaluation, err := h.svc.evaluateLimits(ctx, p.OrgID)
+	if err != nil {
+		return fmt.Errorf("policyservice: distribute: limits: %w", err)
+	}
+	if !evaluation.FeatureEnabled(planlimits.GatePolicyPacks) {
+		h.log.Info("policyservice: distribute skipped, feature disabled", "org", p.OrgID)
+		return nil
 	}
 	pack, err := h.svc.GetPolicyPack(ctx, p.OrgID, p.PackID)
 	if errors.Is(err, ErrPackNotFound) {

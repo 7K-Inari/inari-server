@@ -780,7 +780,9 @@ func run() error {
 		}
 	}
 
-	approvalsSvc := approvals.NewService(database, approvals.NewStore(database), auditStore, svc, catalogSvc).WithPlatformChecker(authorizer)
+	approvalsSvc := approvals.NewService(database, approvals.NewStore(database), auditStore, svc, catalogSvc).
+		WithPlatformChecker(authorizer).
+		WithLimitEvaluator(limitEvaluator)
 	go leaderlease.Run(ctx, leaser, "approvals-expiry", func(lctx context.Context) {
 		approvalsSvc.RunExpiryLoop(lctx, time.Minute)
 	}, log)
@@ -909,13 +911,16 @@ func run() error {
 	}, registry, svc, invStore, invStore, repoResolver, gateway.Queue(), auditStore, log)
 	gateway.WithFeatureFlags(flagResolver)
 
-	cloudAccountsSvc := cloudaccounts.NewService(database, cloudaccounts.NewStore(), auditStore, cloudaccounts.NewSTSValidator())
+	cloudAccountsSvc := cloudaccounts.NewService(database, cloudaccounts.NewStore(), auditStore, cloudaccounts.NewSTSValidator()).
+		WithLimitEvaluator(limitEvaluator)
 
 	notificationsSvc := notifications.NewService(database, notifications.NewStore(), auditStore,
-		notifications.NewSlackSender(nil), notifications.NewWebhookSender(nil))
+		notifications.NewSlackSender(nil), notifications.NewWebhookSender(nil)).
+		WithLimitEvaluator(limitEvaluator)
 
 	policySvc := policyservice.NewService(database, policyservice.NewStore(),
-		policyservice.NewOPAEvaluator(), registry, gateway.Queue(), auditStore)
+		policyservice.NewOPAEvaluator(), registry, gateway.Queue(), auditStore).
+		WithLimitEvaluator(limitEvaluator)
 	orchestratorSvc.WithPolicyChecker(policyCheckerAdapter{policySvc})
 
 	// Scaffolding / Software Templates (M8, plan §4/§10): template browsing
@@ -969,7 +974,8 @@ func run() error {
 	// drift detection and bulk ops.
 	fleetSvc := fleetmanager.NewService(database, fleetmanager.NewStore(), auditStore, registry, gateway.Queue()).
 		WithGateRequester(approvalsSvc).
-		WithBulkSeams(approvalsSvc, policySvc, catalogSvc)
+		WithBulkSeams(approvalsSvc, policySvc, catalogSvc).
+		WithLimitEvaluator(limitEvaluator)
 	policySvc.WithSetResolver(fleetSvc)
 	go leaderlease.Run(ctx, leaser, "fleet-advance", func(lctx context.Context) {
 		fleetSvc.RunAdvanceLoop(lctx, cfg.FleetAdvanceInterval)
@@ -1055,6 +1061,10 @@ func run() error {
 		tzfEnv.Bootstrap = boot
 		log.Info("tenant zone factory using AWS SDK backends")
 	}
+	var zoneLimitsProjection planlimits.LimitsProjection
+	if cfg.PlanLimitsProvider == "keycloak" {
+		zoneLimitsProjection = planlimits.NewKeycloakProjection(idp, idp)
+	}
 	tzfEnv.Wiring = &tenantzonefactory.ModuleWiring{
 		Tenants: svc, IDP: idp, Clusters: registry, Accounts: cloudAccountsSvc,
 		Git: gitPerRepo, GitCfg: orchestratorSvc,
@@ -1062,9 +1072,12 @@ func run() error {
 		PlatformResources:  platformResourcesSvc,
 		PlatformGitOpsRepo: cfg.PlatformGitOpsRepo,
 		Agent:              agentParams,
+		LimitEvaluator:     limitEvaluator,
+		LimitsProjection:   zoneLimitsProjection,
 	}
 	tzfEnv.Clusters = tzfClusterLifecycle{registry}
-	tzfSvc := tenantzonefactory.NewService(database, tenantzonefactory.NewStore(), auditStore, tzfEnv, approvalsSvc, log)
+	tzfSvc := tenantzonefactory.NewService(database, tenantzonefactory.NewStore(), auditStore, tzfEnv, approvalsSvc, log).
+		WithLimitEvaluator(limitEvaluator)
 	go leaderlease.Run(ctx, leaser, "tzf-reconcile", func(lctx context.Context) {
 		tzfSvc.RunReconcileLoop(lctx, cfg.TZFReconcileInterval)
 	}, log)
